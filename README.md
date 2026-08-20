@@ -77,6 +77,15 @@ pip install -r silhouette-card-maker\requirements.txt
 
 > If your repos aren't named exactly `silhouette-card-maker` / `scm-extras`, or aren't siblings, just paste the real paths into **Settings** once — it remembers.
 
+> **PowerShell refuses `Activate.ps1` (“running scripts is disabled on this system”)?** That's Windows' default `Restricted` execution policy, not anything wrong with the venv. The one-time, non-admin fix:
+>
+> ```powershell
+> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+> .\venv\Scripts\Activate.ps1
+> ```
+>
+> (`RemoteSigned` just means “locally-authored scripts run, downloaded ones need a signature” — the right level for dev venvs.) Or skip activation altogether: step 3 works fine calling `.\venv\Scripts\python.exe` directly.
+
 ### Server flags
 
 ```
