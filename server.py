@@ -175,9 +175,10 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
 
     dl = scm / "game" / "decklist"
     if dl.is_dir():
+        placeholders = {"README.md", "EMPTY.md"}
         info["decklists"] = [
             {"name": p.name, "size": p.stat().st_size}
-            for p in sorted(dl.iterdir()) if p.is_file()
+            for p in sorted(dl.iterdir()) if p.is_file() and p.name not in placeholders
         ]
     outdir = scm / "game" / "output"
     if outdir.is_dir():
@@ -352,12 +353,14 @@ def build_manifest(info: dict) -> dict:
                 "title": "Decklist",
                 "options": [
                     _opt("deck_source", "Source", "segment",
-                         choices=[["file", "Existing file"], ["paste", "Paste text"]], default="file"),
+                         choices=[["file", "Existing file"], ["paste", "Paste text"], ["url", "URL"]], default="file"),
                     _opt("deck_file", "Decklist file", "select",
                          choices=[["", "— pick a file —"]] + [[d["name"], d["name"]] for d in scm["decklists"]],
                          default=""),
                     _opt("deck_name", "Save pasted decklist as", "text", placeholder="my_deck.txt", default=""),
                     _opt("deck_text", "Decklist text", "textarea", default=""),
+                    _opt("deck_url", "URL", "text", placeholder="https://archidekt.io/deck/…", default="",
+                         help="For URL-based formats (MTG “url”, any *_url) the decklist is the URL itself."),
                 ],
             },
             {
@@ -944,12 +947,13 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             errors.append("Pick a decklist format.")
         deck_source = str(a.get("deck_source") or "file")
         deck = ""
+        is_url_format = fmt == "url" or fmt.endswith("_url")
         if deck_source == "paste":
             content = str(a.get("deck_text") or "").strip()
             if not content:
                 errors.append("Paste the decklist text.")
             name = str(a.get("deck_name") or "").strip() or f"{slug}_deck.txt"
-            if not re.fullmatch(r"[\w .\-()]+", name):
+            if not re.fullmatch(r"[\w .\-(\)]+", name):
                 errors.append("Decklist file name may only contain letters, numbers, spaces and . - ( )")
             else:
                 deckdir = cwd / "game" / "decklist"
@@ -957,10 +961,18 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                     deckdir.mkdir(parents=True, exist_ok=True)
                     (deckdir / name).write_text(content + "\n", encoding="utf-8")
                 deck = f"game/decklist/{name}"
+        elif deck_source == "url":
+            deck = str(a.get("deck_url") or "").strip()
+            if not re.fullmatch(r"https?://\S+", deck):
+                errors.append("Enter a URL starting with http:// or https://.")
+            elif not is_url_format:
+                warnings.append(f"“{fmt}” reads a decklist file — a URL only works with URL-based formats (e.g. “url”, “*_url”).")
         else:
             deck = str(a.get("deck_file") or "")
             if not deck:
-                errors.append("Pick an existing decklist file (or paste one).")
+                errors.append("Pick an existing decklist file (or use paste / URL).")
+            elif is_url_format:
+                warnings.append("URL-based formats use the URL itself, not a file — switch the source to “URL”.")
         fetch_script = cwd / "plugins" / slug / "fetch.py"
         if not fetch_script.is_file():
             errors.append(f"plugins/{slug}/fetch.py is not present in your SCM checkout — the job cannot run.")

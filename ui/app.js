@@ -986,11 +986,12 @@ function patchFetchForm(kind) {
   const fileF = $$(".field", card).find(f => f.dataset.key === "deck_file");
   const nameF = $$(".field", card).find(f => f.dataset.key === "deck_name");
   const textF = $$(".field", card).find(f => f.dataset.key === "deck_text");
+  const urlF = $$(".field", card).find(f => f.dataset.key === "deck_url");
   if (fileF) {
     fileF.innerHTML = "";
-    fileF.append(el("label", {}, "Decklist file" + ' <span class="req">*</span>'));
+    fileF.append(el("label", {}, "Decklist file ", el("span", { class: "req" }, "*")));
     const list = el("div", { class: "filepick" });
-    if (!files.length) list.append(el("div", { class: "small faint" }, "No files in game/decklist/ yet — switch to “Paste text” to create one."));
+    if (!files.length) list.append(el("div", { class: "small faint" }, "No decklist files in game/decklist/ yet — use “Paste text” to create one."));
     for (const f of files) {
       list.append(el("div", {
         class: `fp-item ${args.deck_file === f.name ? "active" : ""}`,
@@ -1004,16 +1005,21 @@ function patchFetchForm(kind) {
     }
     fileF.append(list);
   }
+  // if there's nothing to pick from, start in "paste" mode — before the UI syncs
+  const seg = src ? $(".seg", src) : null;
+  if (!files.length && args.deck_source === "file") {
+    args.deck_source = "paste";
+    if (seg) $$("button", seg).forEach(b => b.classList.toggle("active", b.textContent.trim() === "Paste text"));
+  }
   const sync = () => {
-    const paste = args.deck_source === "paste";
-    if (nameF) nameF.style.display = paste ? "" : "none";
-    if (textF) textF.style.display = paste ? "" : "none";
-    if (fileF) fileF.style.display = paste ? "none" : "";
+    const mode = args.deck_source;
+    if (nameF) nameF.style.display = mode === "paste" ? "" : "none";
+    if (textF) textF.style.display = mode === "paste" ? "" : "none";
+    if (urlF) urlF.style.display = mode === "url" ? "" : "none";
+    if (fileF) fileF.style.display = mode === "file" ? "" : "none";
   };
   sync();
-  const seg = src ? $(".seg", src) : null;
   if (seg) $$("button", seg).forEach(b => b.addEventListener("click", () => setTimeout(sync, 0)));
-  if (!files.length && args.deck_source === "file") args.deck_source = "paste";
 }
 
 /* ================================ pdf page ================================ */
