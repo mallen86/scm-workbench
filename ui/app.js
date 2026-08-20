@@ -1055,8 +1055,21 @@ function patchFetchForm(kind) {
     if (urlF) urlF.style.display = mode === "url" ? "" : "none";
     if (fileF) fileF.style.display = mode === "file" ? "" : "none";
   };
+  // URL source: make sure the format is one of this game's URL-based formats,
+  // otherwise the URL would be passed to a file-reading parser (or rejected).
+  const autoFormat = () => {
+    if (args.deck_source !== "url") return;
+    const urlFormats = (S.manifest[kind] || {}).url_formats || [];
+    if (!urlFormats.length || urlFormats.includes(args.format)) return;
+    args.format = urlFormats[0];
+    const fmtF = $$(".field", card).find(f => f.dataset.key === "format");
+    const sel = fmtF && $("select", fmtF);
+    if (sel) sel.value = args.format;
+    afterFormChange(kind);
+  };
   sync();
-  if (seg) $$("button", seg).forEach(b => b.addEventListener("click", () => setTimeout(sync, 0)));
+  autoFormat();
+  if (seg) $$("button", seg).forEach(b => b.addEventListener("click", () => setTimeout(() => { sync(); autoFormat(); }, 0)));
 }
 
 /* ================================ pdf page ================================ */

@@ -609,6 +609,9 @@ def build_manifest(info: dict) -> dict:
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
             "description": f"Downloads card images for {meta['title']} from a decklist into the game/ folders.",
             "groups": fetch_groups(slug),
+            # URL-based formats (consumed by the same rule the command builder
+            # uses): the client auto-selects one of these when the source is URL.
+            "url_formats": [f for f, _ in meta["formats"] if f == "url" or f.endswith("_url")],
         }
 
     return kinds
