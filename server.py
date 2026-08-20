@@ -1669,12 +1669,13 @@ def main():
     scm, extras = effective_dirs(settings)
 
     host = args.host
-    if host is None and _in_wsl():
+    if host is None:
         # WSL2 NAT networking: bind all interfaces of the VM. The WSL
         # virtual network is only reachable from the Windows host, so this
         # is still "local only" — and now both 127.0.0.1 (from inside WSL)
-        # and the VM's own address (from a Windows browser) work.
-        host = "0.0.0.0"
+        # and the VM's own address (from a Windows browser) work. Every other
+        # platform keeps the loopback-only default.
+        host = "0.0.0.0" if _in_wsl() else "127.0.0.1"
 
     out = io.StringIO()
     w = out.write
