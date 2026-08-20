@@ -157,7 +157,15 @@ function setNav(page) {
   S.page = page;
 }
 
-function go(page, prefill) {
+// Each page has a real URL route (/pdf, /settings, …; dashboard is /) so
+// refreshing stays on the page and the browser back/forward buttons work.
+function pageFromPath() {
+  const p = location.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (p === "") return "dashboard";
+  return p in PAGES ? p : null;
+}
+
+function go(page, prefill, { push = true } = {}) {
   if (prefill) applyPrefill(page, prefill);
   setNav(page);
   const pageEl = $("#page");
@@ -170,6 +178,25 @@ function go(page, prefill) {
   iconize(pageEl);
   pageEl.firstElementChild && pageEl.firstElementChild.classList.add("page-anim");
   $(".page-scroll").scrollTop = 0;
+  if (push) {
+    const path = page === "dashboard" ? "/" : "/" + page;
+    if (location.pathname !== path) history.pushState({ page }, "", path);
+  }
+}
+
+window.addEventListener("popstate", () => {
+  const page = pageFromPath();
+  go(page || "dashboard", null, { push: false });
+});
+
+// Initial load: honor the URL we were given (refreshing /pdf must show PDF).
+// Normalizes the path (trailing slash, unknown page) without adding history
+// entries, so a hard refresh doesn't pollute the back button.
+function bootPage() {
+  const page = pageFromPath();
+  const path = page ? (page === "dashboard" ? "/" : "/" + page) : "/";
+  if (location.pathname !== path) history.replaceState({ page: page || "dashboard" }, "", path);
+  go(page || "dashboard", null, { push: false });
 }
 
 function applyPrefill(page, prefill) {
@@ -1474,7 +1501,7 @@ function showBootFailure(e) {
       try {
         bar.remove();
         await refreshInfo();
-        go("dashboard");
+        bootPage();
         startJobsPoll();
       } catch (e2) {
         showBootFailure(e2);
@@ -1503,7 +1530,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (attempt) await new Promise(r => setTimeout(r, 800 + 700 * attempt));
     try {
       await refreshInfo();
-      go("dashboard");
+      bootPage();
       startJobsPoll();
       return;
     } catch (e) {

@@ -1377,7 +1377,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._preview(q)
             if path == "/api/settings":
                 return self._json(load_settings())
-            return self._json({"error": f"no such route: {path}"}, 404)
+            if path.startswith("/api/"):
+                return self._json({"error": f"no such route: {path}"}, 404)
+            # SPA routes (/pdf, /settings, ...): serve the app shell and let
+            # the client pick the page from the URL, so a refresh stays put.
+            return self._static("index.html")
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
