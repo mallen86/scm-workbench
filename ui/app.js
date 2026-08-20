@@ -285,14 +285,23 @@ function renderOption(o, args, kind) {
     case "range": {
       const i = el("input", { class: "range", type: "range", min: o.min ?? 0, max: o.max ?? 100, step: o.step ?? 1 });
       i.value = args[o.key] ?? o.default ?? 0;
-      const val = el("span", { class: "rangeval" }, String(i.value));
-      const sync = () => {
-        val.textContent = i.value;
+      const val = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
+      const sync = v => {
+        val.value = v;
+        i.value = Math.min(i.max, Math.max(i.min, Math.round(Number(v) / i.step) * i.step));
         i.style.setProperty("--fill", `${((i.value - i.min) / (i.max - i.min)) * 100}%`);
-        args[o.key] = Number(i.value);
+        args[o.key] = Number(v);
       };
-      i.addEventListener("input", () => { sync(); afterFormChange(kind); });
-      sync();
+      i.addEventListener("input", () => { sync(i.value); afterFormChange(kind); });
+      val.addEventListener("change", () => {
+        if (val.value !== "") {
+          const n = Number(val.value);
+          if (Number.isFinite(n) && n >= 0) { sync(n); afterFormChange(kind); return; }
+        }
+        sync(args[o.key]); // blank / invalid → back to last good value
+        afterFormChange(kind);
+      });
+      sync(i.value);
       wrap.append(label, el("span", { class: "rangewrap" }, i, val));
       break;
     }
@@ -1377,16 +1386,28 @@ PAGES.settings = (root) => {
   const d = s.defaults || {};
   const csSel = el("select", { class: "input" }, ...S.info.scm.card_sizes.map(c => el("option", { value: c.name, selected: (d.card_size || "standard") === c.name ? "selected" : null }, c.name)));
   const psSel = el("select", { class: "input" }, ...S.info.scm.paper_sizes.map(p => el("option", { value: p.name, selected: (d.paper_size || "letter") === p.name ? "selected" : null }, p.name)));
-  const ppiR = el("input", { class: "range", type: "range", min: 150, max: 600, step: 10 });
+  const ppiR = el("input", { class: "range", type: "range", min: 150, max: 1200, step: 10 });
   ppiR.value = d.ppi || 300;
   const qualR = el("input", { class: "range", type: "range", min: 0, max: 100, step: 1 });
   qualR.value = d.quality || 100;
-  const ppiV = el("span", { class: "rangeval" }, ppiR.value);
-  const qualV = el("span", { class: "rangeval" }, qualR.value);
-  const syncR = (r, v) => { v.textContent = r.value; r.style.setProperty("--fill", ((r.value - r.min) / (r.max - r.min)) * 100 + "%"); };
-  ppiR.oninput = () => syncR(ppiR, ppiV);
-  qualR.oninput = () => syncR(qualR, qualV);
-  syncR(ppiR, ppiV); syncR(qualR, qualV);
+  const ppiV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
+  const qualV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
+  const setFill = r => r.style.setProperty("--fill", ((r.value - r.min) / (r.max - r.min)) * 100 + "%");
+  const commit = (r, v) => {
+    if (v.value === "") { v.value = r.value; setFill(r); return; } // blank → revert
+    const n = Number(v.value);
+    if (Number.isFinite(n) && n >= 0) {
+      v.value = n; // freeform — the box keeps the exact value…
+      r.value = Math.min(r.max, Math.max(r.min, Math.round(n / r.step) * r.step)); // …while the slider snaps
+    } else v.value = r.value; // invalid → revert to the slider position
+    setFill(r);
+  };
+  const toNum = (v, fallback) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : fallback; };
+  ppiR.oninput = () => { ppiV.value = ppiR.value; setFill(ppiR); };
+  qualR.oninput = () => { qualV.value = qualR.value; setFill(qualR); };
+  ppiV.onchange = () => commit(ppiR, ppiV);
+  qualV.onchange = () => commit(qualR, qualV);
+  ppiV.value = ppiR.value; qualV.value = qualR.value; setFill(ppiR); setFill(qualR);
   dc.append(el("div", { class: "frow" },
     el("div", { class: "field w-half" }, el("label", {}, "Card size"), csSel),
     el("div", { class: "field w-half" }, el("label", {}, "Paper size"), psSel),
@@ -1395,7 +1416,7 @@ PAGES.settings = (root) => {
   ));
   dc.append(el("div", { style: "margin-top:12px" },
     el("button", { class: "btn primary", onclick: async () => {
-      await api("/api/settings", { defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: +ppiR.value, quality: +qualR.value } });
+      await api("/api/settings", { defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
       toast("ok", "Defaults saved.");
       go("settings");
     } }, ico("check"), "Save defaults"),

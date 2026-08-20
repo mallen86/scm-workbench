@@ -432,7 +432,7 @@ def build_manifest(info: dict) -> dict:
             {
                 "title": "Quality",
                 "options": [
-                    _opt("ppi", "Resolution (PPI)", "range", default=300, min=150, max=600, step=10, width="third"),
+                    _opt("ppi", "Resolution (PPI)", "range", default=300, min=150, max=1200, step=10, width="third"),
                     _opt("quality", "Compression quality", "range", default=100, min=0, max=100, step=1, width="third"),
                     _opt("load_offset", "Apply saved offset", "toggle", default=False, width="third",
                          help="Applies the saved X / Y / angle printer offset."),
@@ -493,7 +493,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter"),
                     _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter"),
                     _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter"),
-                    _opt("ppi", "PPI", "range", default=300, min=150, max=600, step=10, width="quarter"),
+                    _opt("ppi", "PPI", "range", default=300, min=150, max=1200, step=10, width="quarter"),
                     _opt("save", "Save these as the new offset", "toggle", default=False, width="half"),
                     _opt("use_saved", "Prefill fields from the saved offset", "toggle", default=True, width="half"),
                 ],
@@ -1012,9 +1012,10 @@ def invalidate_manifest_cache() -> None:
         MANIFEST_CACHE.clear()
 
 
-def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str]]:
-    """Coerce/validate raw client values against the manifest. Returns (args, errors)."""
+def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
+    """Coerce/validate raw client values against the manifest. Returns (args, errors, warnings)."""
     errors: List[str] = []
+    warns: List[str] = []
     args: Dict[str, Any] = {}
     for g in spec.get("groups", []):
         for o in g["options"]:
@@ -1059,7 +1060,8 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str]]:
                 try:
                     f = float(v)
                     lo, hi = o.get("min", -1e9), o.get("max", 1e9)
-                    f = max(lo, min(hi, f))
+                    if not (lo <= f <= hi):
+                        warns.append(f"{o['label']} {int(round(f)) if (o.get('step') or 1) >= 1 else f} is outside the slider range ({lo:g}–{hi:g}) — the slider shows the nearest value, but the number you typed is used.")
                     args[key] = int(round(f)) if (o.get("step") or 1) >= 1 else round(f, 2)
                 except (TypeError, ValueError):
                     args[key] = o.get("default")
@@ -1076,7 +1078,7 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str]]:
                         args[key] = sv
             else:  # text / path
                 args[key] = "" if v is None else str(v).strip()
-    return args, errors
+    return args, errors, warns
 
 
 def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
@@ -1086,10 +1088,11 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
 
     # client may send hidden selections outside the manifest (e.g. dxf_single's
     # card_mode-paired select) — keep them if present
-    args, errors = normalize_args(spec, raw_args)
+    args, errors, norm_warns = normalize_args(spec, raw_args)
 
     info = get_info()
     argv, cwd, env, title, warnings, errs = build_command(kind, args, load_settings(), info)
+    warnings += norm_warns
     errors += errs
     if errors:
         return None, errors
@@ -1503,14 +1506,14 @@ class Handler(BaseHTTPRequestHandler):
         manifest = get_manifest()
         if kind not in manifest:
             return self._json({"error": "unknown kind"}, 404)
-        normalized, errors = normalize_args(manifest[kind], args)
+        normalized, errors, norm_warns = normalize_args(manifest[kind], args)
         argv, cwd, env, title, warnings, errs = build_command(kind, normalized, load_settings(), get_info(), write_deck=False)
         return self._json({
             "cmd": _fmt_argv(argv) if not errors else None,
             "cwd": str(cwd) if cwd else None,
             "env": {k: v for k, v in env.items()
                      if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
-            "warnings": warnings + errors,
+            "warnings": warnings + norm_warns + errors,
             "errors": errs,
         })
 
