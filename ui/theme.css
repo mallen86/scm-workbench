@@ -560,7 +560,8 @@ select.input option { background: var(--surface); color: var(--text); }
    Collapsible groups (advanced sections)
    ========================================================================== */
 
-.adv { border: 1px solid var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; }
+.adv { border: 1px solid var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; margin-top: 22px; }
+.adv + .adv { margin-top: 10px; }
 .adv-head {
   width: 100%;
   display: flex; align-items: center; gap: 9px;
@@ -570,11 +571,10 @@ select.input option { background: var(--surface); color: var(--text); }
   cursor: pointer;
   font-family: var(--sans);
 }
-.adv-head .arr { width: 14px; height: 14px; color: var(--faint); transition: transform 0.18s ease; display: flex; }
+.adv-head .arr { width: 14px; height: 14px; color: var(--muted); transition: transform 0.18s ease; display: flex; }
 .adv-head .arr svg { width: 100%; height: 100%; }
 .adv.open .adv-head .arr { transform: rotate(90deg); }
-.adv-head .t { font-size: 12.5px; font-weight: 700; color: var(--muted); }
-.adv-head:hover .t { color: var(--text); }
+.adv-head .t { font-size: 12.5px; font-weight: 700; color: var(--text); }
 .adv-body { display: none; padding: 16px; border-top: 1px solid var(--border-soft); }
 .adv.open .adv-body { display: block; }
 
