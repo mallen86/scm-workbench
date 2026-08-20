@@ -570,6 +570,8 @@ select.input option { background: var(--surface); color: var(--text); }
   padding: 10px 14px;
   cursor: pointer;
   font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--text); /* explicit: UA stylesheets color form controls with the system "buttontext" grey, which is unreadable in dark mode */
 }
 .adv-head .arr { width: 14px; height: 14px; color: var(--muted); transition: transform 0.18s ease; display: flex; }
 .adv-head .arr svg { width: 100%; height: 100%; }
