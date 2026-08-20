@@ -332,7 +332,8 @@ function renderOption(o, args, kind) {
         el("span", { class: "knob" }),
       );
       $("input", sw).addEventListener("change", e => { args[o.key] = e.target.checked; afterFormChange(kind); o.onChange && o.onChange(e.target.checked); });
-      wrap.append(el("span", { class: "switchrow" }, sw,
+      // a <label> row: clicking the text OR the switch toggles the checkbox
+      wrap.append(el("label", { class: "switchrow" }, sw,
         el("span", { class: "sl" }, el("div", { class: "t" }, o.label), o.help ? el("div", { class: "d" }, o.help) : null)));
       break;
     }
@@ -1353,7 +1354,7 @@ PAGES.settings = (root) => {
   ));
   const autoI = el("input", { type: "checkbox", id: "set-auto-browser", checked: s.auto_open_browser });
   pc.append(el("div", { style: "margin-top:10px" },
-    el("span", { class: "switchrow" },
+    el("label", { class: "switchrow" },
       el("span", { class: "switch" },
         autoI,
         el("span", { class: "track" }), el("span", { class: "knob" })),
