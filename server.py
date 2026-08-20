@@ -792,7 +792,17 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         if a.get("registration"): argv += ["--registration", str(a["registration"])]
         if a.get("registration_orientation"): argv += ["--registration_orientation", str(a["registration_orientation"])]
         if a.get("specialty"): argv += ["--specialty", str(a["specialty"])]
-        if a.get("only_fronts"): argv += ["--only_fronts"]
+        if a.get("only_fronts"):
+            argv += ["--only_fronts"]
+            ds = str(a.get("double_sided_dir") or "")
+            if ds:
+                ds_dir = (cwd / ds) if not Path(ds).is_absolute() else Path(ds)
+                if ds_dir.is_dir():
+                    n = sum(1 for c in ds_dir.iterdir() if c.is_file() and is_image_file(c))
+                    if n:
+                        warnings.append(
+                            f"Double-sided folder “{ds}” still has {n} image{'s' if n == 1 else 's'} — "
+                            "create_pdf.py refuses --only_fronts while those exist; remove them first or uncheck the option.")
         if a.get("fit"): argv += ["--fit", str(a["fit"])]
         if a.get("fit_backs"): argv += ["--fit_backs", str(a["fit_backs"])]
         for key in ("crop", "crop_backs", "extend_edges", "extend_edges_backs",
@@ -1243,6 +1253,41 @@ def sse_stream(job_id: str, after: int):
 # File sandbox
 # ============================================================================
 
+# Magic-byte signatures for the image formats silhouette-card-maker accepts
+# (its `valid_mimetypes` list in utilities.py). The Workbench is stdlib-only,
+# so this sniffs the file header instead of the `filetype` package — keeping
+# "is this an image?" consistent with what create_pdf.py itself counts.
+def is_image_file(p: Path) -> bool:
+    try:
+        with open(p, "rb") as f:
+            head = f.read(16)
+    except Exception:
+        return False
+    if len(head) < 4:
+        return False
+    if head[:3] == b"\xff\xd8\xff":                        # JPEG
+        return True
+    if head[:8] == b"\x89PNG\r\n\x1a\n":                # PNG / APNG
+        return True
+    if head[:4] == b"GIF8":                               # GIF
+        return True
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":    # WebP
+        return True
+    if head[:4] in (b"II\x2a\x00", b"MM\x00\x2a"):      # TIFF
+        return True
+    if head[:2] == b"BM":                                 # BMP
+        return True
+    if head[4:8] == b"ftyp" and head[8:12] in (b"av01", b"avif", b"heif", b"hevc", b"mif1"):
+        return True                                       # AVIF / HEIF
+    if head[:4] == b"qoif":                               # QOI
+        return True
+    if head[:8] == b"DDS <wal":                           # Direct3D surface
+        return True
+    if head[:12] == b"\x00\x00\x00\x0cJP\x20\x31\x31\x0a\x0d\x08":  # JP2 (JPEG 2000)
+        return True
+    return False
+
+
 def allowed_roots(settings: dict) -> List[Path]:
     roots = [DATA_DIR, UI_DIR]
     for p in effective_dirs(settings):
@@ -1453,6 +1498,33 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "errors": ["path is outside the allowed repos"]}, 403)
                 err = reveal_path(p)
                 return self._json({"ok": err is None, "errors": [err] if err else []})
+            if path == "/api/fs":
+                body = self._body()
+                raw = str(body.get("path") or "").strip()
+                if not raw:
+                    return self._json({"ok": False, "errors": ["no path"]}, 400)
+                p = Path(raw)
+                roots = allowed_roots(load_settings())
+                if not p.is_absolute():
+                    cand = next((r / p for r in roots if (r / p).exists()), None)
+                    p = cand or (roots[0] / p if roots else p)
+                if not _inside(p, roots):
+                    return self._json({"ok": False, "errors": ["path is outside the allowed repos"]}, 403)
+                if body.get("op") == "delete_images":
+                    if not p.is_dir():
+                        return self._json({"ok": True, "deleted": 0, "names": [], "dir": str(p)})
+                    names = []
+                    for f in sorted(p.iterdir()):
+                        if not f.is_file() or not is_image_file(f):
+                            continue  # non-images (READMEs, EMPTY.md, …) are left alone
+                        try:
+                            f.unlink()
+                            names.append(f.name)
+                        except Exception as e:
+                            return self._json({"ok": False, "errors": [f"could not delete {f.name}: {e}"],
+                                                "deleted": len(names)}, 400)
+                    return self._json({"ok": True, "deleted": len(names), "names": names, "dir": str(p)})
+                return self._json({"ok": False, "errors": [f"unknown op \u201c{body.get('op')}\u201d"]}, 400)
             return self._json({"error": f"no such route: {path}"}, 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -1496,6 +1568,8 @@ class Handler(BaseHTTPRequestHandler):
                 {"name": c.name, "dir": c.is_dir(), "size": 0 if c.is_dir() else c.stat().st_size, "path": str(c)}
                 for c in sorted(p.iterdir())
             ]
+            if (q.get("images_only") or [""])[0] == "1":
+                listing = [i for i in listing if not i["dir"] and is_image_file(p / i["name"])]
             return self._json({"dir": str(p), "items": listing})
         if not p.is_file():
             return self._json({"error": "not found"}, 404)

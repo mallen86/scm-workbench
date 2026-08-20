@@ -120,16 +120,16 @@ function toast(kind, msg, ms = 3800) {
 
 /* --------------------------------- modal ---------------------------------- */
 
-function confirmModal({ title, text, icon = "alert", iconCls = "warn", okLabel = "OK", okClass = "btn", danger = false }) {
+function confirmModal({ title, text, paras = [], list = [], icon = "alert", iconCls = "warn", okLabel = "OK", okClass = "btn", danger = false }) {
   return new Promise(resolve => {
     const root = $("#modal-root");
     const m = $(".modal", root);
     m.innerHTML = "";
-    m.append(
-      el("div", { class: `m-ico ${iconCls}` }, ico(icon)),
-      el("h3", {}, title),
-      el("p", {}, text),
-    );
+    m.append(el("div", { class: `m-ico ${iconCls}` }, ico(icon)));
+    m.append(el("h3", {}, title));
+    if (text) m.append(el("p", {}, text));
+    for (const p of paras) m.append(el("p", {}, p));
+    if (list.length) m.append(el("div", { class: "m-list" }, ...list.map(x => el("div", {}, x))));
     const actions = el("div", { class: "m-actions" },
       el("button", { class: "btn", onclick: () => { close(); resolve(false); } }, "Cancel"),
       el("button", { class: `btn ${danger ? "danger" : "primary"}`, onclick: () => { close(); resolve(true); } }, okLabel),
@@ -1085,8 +1085,67 @@ PAGES.pdf = (root) => {
       el("span", { class: "grow" }, `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” below when ready.`),
       el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")));
   }
+  wrap.__patch = () => patchPdfForm("create_pdf");  // must run once the card is in the document
   return wrap;
 };
+
+/* Create-PDF behavior: guard the “Front pages only” toggle against images left
+   in the double-sided folder. create_pdf.py refuses to run with --only_fronts
+   while any double-sided image exists, so when the toggle is flipped on we
+   warn that the option won't work and offer to remove the images in one click. */
+function patchPdfForm(kind) {
+  const card = $(`.form-card[data-kind="${kind}"]`);
+  const field = card && $$(".field", card).find(f => f.dataset.key === "only_fronts");
+  const input = field && $("input[type=checkbox]", field);
+  if (!input) return;
+  let scanning = false;
+
+  input.addEventListener("change", async () => {
+    if (scanning) return;
+    const dir = ((S.forms[kind] || {}).double_sided_dir || "").trim();
+    if (!dir || !input.checked) return;
+    scanning = true;
+    let items = null;
+    try {
+      const r = await fetch(`/api/file?path=${encodeURIComponent(dir)}&images_only=1`);
+      if (r.status === 404) items = [];                 // folder missing → nothing to remove
+      else if (r.status === 200) items = (await r.json().catch(() => ({}))).items || [];
+      else toast("warn", `Couldn’t check “${dir}” (HTTP ${r.status}).`);
+    } catch { items = []; }
+    scanning = false;
+    if (!items || !items.length) return;
+
+    const n = items.length;
+    const ok = await confirmModal({
+      title: "Images in the double-sided folder",
+      text: `“${dir}” contains ${n} image${n === 1 ? "" : "s"}. While any are there, “Front pages only” (--only_fronts) can’t work — create_pdf.py refuses to run.`,
+      paras: [`Remove them from the folder now? This can’t be undone.`],
+      list: items.map(i => i.name),
+      okLabel: "Yes, remove them",
+      danger: true,
+      icon: "trash",
+      iconCls: "warn",
+    });
+    if (!ok) {
+      toast("warn", `“Front pages only” stays on, but the job will fail while “${dir}” still has images — remove them, or uncheck the option.`, 7000);
+      return;
+    }
+    let j = {};
+    try {
+      const r = await fetch("/api/fs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op: "delete_images", path: dir }) });
+      j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        toast("err", (j.errors || ["Could not remove the images."]).join("; "), 7000);
+        return;
+      }
+    } catch {
+      toast("err", "Could not remove the images.", 7000);
+      return;
+    }
+    toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
+    afterFormChange(kind);   // refresh the preview so the warning clears
+  });
+}
 
 /* =============================== offset page ============================== */
 
@@ -1156,7 +1215,7 @@ PAGES.templates = (root) => {
   wrap.append(pageHead("Cutting templates", "DXF cutting templates for the repo's standard sizes, plus the prebuilt .studio3 files that Silhouette Studio opens. For MTG / Sorcery extras see the Extras page."));
   if (!S.info.scm.found) wrap.append(repoSetupCard());
   wrap.append(formCard("dxf_single", { icon: "scissors" }));
-  patchDxfForm("dxf_single");
+  wrap.__patch = () => patchDxfForm("dxf_single");  // must run once the card is in the document
   wrap.append(formCard("dxf_batch", { icon: "layers" }));
   wrap.append(el("div", { class: "section-label" }, "Existing templates"));
   wrap.append(templatesGallery("scm"));

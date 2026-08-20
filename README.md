@@ -113,6 +113,7 @@ python server.py [--port N] [--host 127.0.0.1] [--no-browser]
 ## Notes
 
 * **Offsets** — the saved X/Y/angle lives at `silhouette-card-maker/data/offset_data.json`; the Workbench's *Offset* page edits the same file the scripts read, so `--load_offset` just works.
+* **Front pages only** — `create_pdf.py` refuses `--only_fronts` while `game/double_sided/` still holds images. Flipping the toggle on with images present warns you that the option won't work and offers to remove them from the folder in one click (non-images like `README.md` are left alone).
 * **Decklists** — pasted text is saved into `game/decklist/<name>` (letters, digits, spaces, `. - ( )` only).
 * **Templates** — single-template generation defaults to the repo's own naming (`<paper>-<card>[-borderless]-v1.dxf`); tick *save* to register new sizes in `layouts.json`.
 * **Extras DXFs** are generated into `scm-extras/cutting_templates/` exactly like the upstream `generate.py` (SCM is located as a sister folder).
