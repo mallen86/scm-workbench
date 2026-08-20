@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCM Workbench</title>
+  <link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/ui/theme.css">
+</head>
+<body>
+  <div id="app">
+    <!-- ============ sidebar ============ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true">
+            <defs>
+              <linearGradient id="bg1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#ffb454"/><stop offset="1" stop-color="#ff7a59"/>
+              </linearGradient>
+            </defs>
+            <rect x="7" y="4" width="26" height="32" rx="6" fill="none" stroke="url(#bg1)" stroke-width="2.6"/>
+            <path d="M13 15h14M13 21h14M13 27h9" stroke="#e8edf7" stroke-width="2.2" stroke-linecap="round" opacity=".9"/>
+            <circle cx="31.5" cy="8.5" r="4.6" fill="var(--bg)"/>
+            <path d="M30 8.5l1.4 1.8 2.6-3.4" stroke="#ffb454" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">SCM Workbench</div>
+          <div class="brand-sub">silhouette card maker</div>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <a class="nav-item" data-page="dashboard"><span class="nav-ico" data-ico="home"></span>Dashboard</a>
+        <div class="nav-sep">Workflow</div>
+        <a class="nav-item" data-page="fetch"><span class="nav-ico" data-ico="download"></span>Fetch card art</a>
+        <a class="nav-item" data-page="pdf"><span class="nav-ico" data-ico="pdf"></span>Create PDF</a>
+        <a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>
+        <div class="nav-sep">Cutting</div>
+        <a class="nav-item" data-page="templates"><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
+        <a class="nav-item" data-page="extras"><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
+        <div class="nav-sep">Reference</div>
+        <a class="nav-item" data-page="sizes"><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
+        <a class="nav-item" data-page="utilities"><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
+        <div class="nav-sep">System</div>
+        <a class="nav-item" data-page="settings"><span class="nav-ico" data-ico="gear"></span>Settings</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="repo-pill" id="pill-scm" title="silhouette-card-maker">
+          <span class="dot" id="dot-scm"></span><span class="pill-label">SCM</span>
+        </div>
+        <div class="repo-pill" id="pill-extras" title="scm-extras">
+          <span class="dot" id="dot-extras"></span><span class="pill-label">Extras</span>
+        </div>
+        <div class="theme-switch" id="theme-switch" title="Toggle theme">
+          <button class="ts-btn" data-theme="dark" title="Dark theme"><span data-ico="moon"></span></button>
+          <button class="ts-btn" data-theme="light" title="Light theme"><span data-ico="sun"></span></button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ============ main ============ -->
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title" id="topbar-title">Dashboard</div>
+        <div class="topbar-right">
+          <span class="chip subtle" id="chip-python" title="Python used for the scripts">python 3.12</span>
+          <button class="btn btn-ghost" id="btn-console" title="Job console">
+            <span data-ico="terminal"></span>
+            <span class="btn-label">Console</span>
+            <span class="badge" id="badge-running" hidden>0</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="page-scroll">
+        <div class="page" id="page"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ============ job console (bottom drawer) ============ -->
+  <section class="console" id="console" hidden>
+    <header class="console-head">
+      <div class="console-title"><span data-ico="terminal"></span> Job console</div>
+      <div class="console-tabs" id="console-tabs"></div>
+      <div class="console-actions">
+        <button class="btn btn-ghost btn-sm" id="console-copy" title="Copy log"><span data-ico="copy"></span>Copy</button>
+        <button class="btn btn-ghost btn-sm" id="console-reveal" title="Reveal output location"><span data-ico="folder"></span>Reveal</button>
+        <button class="btn btn-ghost btn-sm" id="console-kill" title="Stop job"><span data-ico="x"></span></button>
+        <button class="btn btn-ghost btn-sm" id="console-close" title="Close (esc)"><span data-ico="x"></span>Close</button>
+      </div>
+    </header>
+    <div class="console-body">
+      <pre class="console-log" id="console-log"></pre>
+    </div>
+    <footer class="console-foot" id="console-foot"></footer>
+  </section>
+
+  <!-- toasts -->
+  <div class="toasts" id="toasts"></div>
+
+  <!-- generic modal -->
+  <div class="modal-root" id="modal-root" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

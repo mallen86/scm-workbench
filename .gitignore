@@ -1,0 +1,8 @@
+# runtime state
+data/
+__pycache__/
+*.py[cod]
+
+# local venvs
+.venv/
+venv/
