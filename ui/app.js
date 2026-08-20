@@ -1459,6 +1459,34 @@ async function refreshInfo({ keepForms = false } = {}) {
   renderConsoleTabs();
 }
 
+// Shown when the API is still unreachable after several attempts (the server
+// died, or a flaky WSL2 localhost hop) — and kept on screen, with a Retry
+// button, until the connection works. Unlike a toast, it can't be missed.
+function showBootFailure(e) {
+  const raw = (e && e.message) || "";
+  const msg = /fetch|network|failed/i.test(raw) ? "no network response from the API" : raw;
+  const bar = el("div", { class: "banner err" },
+    el("span", { class: "b-ico" }, ico("alert")),
+    el("span", { class: "grow" },
+      `Can't reach the Workbench API at ${location.origin} (${msg}). Is the server still running? ` +
+      "If you opened this tab from a Windows browser (WSL2), use the \u201CWindows host\u201D URL the server printed in its console."),
+    el("button", { class: "btn sm", onclick: async () => {
+      try {
+        bar.remove();
+        await refreshInfo();
+        go("dashboard");
+        startJobsPoll();
+      } catch (e2) {
+        showBootFailure(e2);
+      }
+    } }, "Retry"));
+  $("#page").replaceChildren(bar);
+}
+
+function startJobsPoll() {
+  setInterval(() => { if (S.jobs.some(j => j.status === "running")) refreshJobs(); }, 4000);
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   bindNav();
   bindConsole();
@@ -1469,12 +1497,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.documentElement.dataset.theme = s.theme || "dark";
   } catch { }
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (document.documentElement.dataset.theme || "dark")));
-  try {
-    await refreshInfo();
-  } catch (e) {
-    toast("err", "Could not reach the Workbench API — is the server running?");
-    return;
+  // the first API call can fail transiently (server still starting up, or
+  // WSL2's per-connection localhost proxy hiccuping) — retry a few times
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 800 + 700 * attempt));
+    try {
+      await refreshInfo();
+      go("dashboard");
+      startJobsPoll();
+      return;
+    } catch (e) {
+      if (attempt === 3) showBootFailure(e);
+    }
   }
-  go("dashboard");
-  setInterval(() => { if (S.jobs.some(j => j.status === "running")) refreshJobs(); }, 4000);
 });

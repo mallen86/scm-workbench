@@ -55,6 +55,8 @@ A browser tab opens automatically at `http://127.0.0.1:8037`.
 
 > The clones are shallow (`--depth 1`) since you only need the latest state to run things — re-clone without it, or run `git fetch --unshallow`, if you ever want the full history (e.g. to contribute upstream).
 
+> **WSL2 (Windows):** the same steps work, plus a bonus: the Workbench opens a tab in your *Windows* default browser when the server starts (it binds the WSL VM's interfaces, which only the host machine can reach). From inside WSL, the usual `http://127.0.0.1:8037` works as before.
+
 ### Windows (PowerShell)
 
 ```powershell

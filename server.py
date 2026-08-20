@@ -1535,16 +1535,137 @@ class Handler(BaseHTTPRequestHandler):
 # Entry point
 # ============================================================================
 
+def _in_wsl() -> bool:
+    import os
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_vm_ip():
+    """Best-effort IP address of this WSL2 VM as seen from the Windows host.
+
+    In the default NAT networking mode this is the 172.x address WSL hands
+    the VM; traffic from the host to it is direct (no per-connection
+    localhost proxying, which is the flaky part). Returns None when it
+    can't be determined (e.g. mirrored networking mode).
+    """
+    import ipaddress
+    import subprocess
+
+    def clean(cand):
+        try:
+            ip = ipaddress.ip_address(cand)
+            if not ip.is_loopback and not ip.is_link_local:
+                return str(ip)
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    for cmd in (["ip", "-4", "route", "get", "1.1.1.1"], ["hostname", "-I"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        tokens = []
+        if cmd[0] == "ip":
+            # "1.1.1.1 via 172.28.160.1 dev eth0 src 172.28.160.100"
+            if "src" in out:
+                tokens = [out.rsplit("src", 1)[1].strip().split()[0]]
+        else:
+            tokens = out.split()
+        for t in tokens:
+            if c := clean(t):
+                return c
+    return None
+
+
+def _open_browser(url: str) -> None:
+    """Open the Workbench URL in the user's browser, quietly.
+
+    The stdlib webbrowser hands the URL to an OS launcher (xdg-open, gio,
+    open, ...) whose child inherits this server's stderr — so a machine
+    with no web app configured (the usual WSL2 case) spits raw output
+    like “gio: <url>: Operation not supported” into the console. We run
+    the candidate launchers ourselves with output silenced instead: the
+    first one that succeeds wins, and if none does we print one friendly
+    line. On WSL2 the Windows shell is tried first, so the tab opens in
+    the Windows default browser (localhost is forwarded into WSL by the
+    WSL kernel, so the 127.0.0.1 URL just works).
+    """
+    import os
+    import shlex
+    import subprocess
+
+    # Launchers that fork the app and exit quickly — safe to wait on for a
+    # real exit code. Direct browser binaries (e.g. BROWSER=firefox) are
+    # spawned and left running, since waiting on them means waiting for
+    # the window to close.
+    quick = {"xdg-open", "gio", "gvfs-open", "x-www-browser", "kfmclient", "kfm",
+             "open", "explorer.exe", "cmd.exe"}
+
+    def candidates():
+        env_browser = (os.environ.get("BROWSER") or "").strip()
+        if env_browser:
+            try:
+                parts = shlex.split(env_browser)
+                if parts:
+                    yield [p.replace("%s", url).replace("%u", url) for p in parts]
+            except ValueError:
+                pass
+        if _in_wsl():
+            yield ["explorer.exe", url]
+            yield ["cmd.exe", "/c", "start", "", url]
+        if sys.platform == "darwin":
+            yield ["open", url]
+        elif os.name != "nt":
+            yield ["xdg-open", url]
+            yield ["gio", "open", "--", url]
+
+    for cmd in candidates():
+        try:
+            if os.path.basename(cmd[0]) in quick:
+                if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+                    return
+            else:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+
+    if os.name == "nt":
+        try:
+            if webbrowser.open(url, new=2):
+                return
+        except Exception:
+            pass
+    print(f"  (Could not open a browser automatically — visit {url} manually.)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="SCM Workbench — local UI for silhouette-card-maker + scm-extras")
     ap.add_argument("--port", type=int, default=None)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default=None,
+                    help="Address to bind (default: 127.0.0.1; on WSL all interfaces of the VM, "
+                         "so the Windows host can also reach the server)")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
     args = ap.parse_args()
 
     settings = load_settings()
     port = args.port or int(settings.get("port") or DEFAULT_PORT)
     scm, extras = effective_dirs(settings)
+
+    host = args.host
+    if host is None and _in_wsl():
+        # WSL2 NAT networking: bind all interfaces of the VM. The WSL
+        # virtual network is only reachable from the Windows host, so this
+        # is still "local only" — and now both 127.0.0.1 (from inside WSL)
+        # and the VM's own address (from a Windows browser) work.
+        host = "0.0.0.0"
 
     out = io.StringIO()
     w = out.write
@@ -1555,18 +1676,30 @@ def main():
     w("  Extras repo:   %s\n" % (extras if extras else "\x1b[33mnot found (optional)\x1b[0m"))
     w("  Python:        %s\n" % sys.version.split()[0])
     w("  ───────────────────────────────────────────────────────\n")
-    url = f"http://{args.host}:{port}"
-    w(f"  UI:  {url}\n\n")
-    w("  Local only — not exposed to your network. Ctrl+C to stop.\n")
+    url = f"http://{('127.0.0.1' if host == '0.0.0.0' else host)}:{port}"
+    w(f"  UI:  {url}\n")
+    browser_url = url
+    if _in_wsl():
+        vm_ip = _wsl_vm_ip()
+        if vm_ip:
+            browser_url = f"http://{vm_ip}:{port}"
+            w(f"  Windows host:  {browser_url}  (your default browser opens here)\n")
+        else:
+            w("  Windows host:  use the 127.0.0.1 URL above (mirrored networking mode)\n")
+    if _in_wsl():
+        w("\n  Binds the WSL VM — reachable from the Windows host "
+          "(and from your LAN only in mirrored networking mode). Ctrl+C to stop.\n")
+    else:
+        w("\n  Local only — not exposed to your network. Ctrl+C to stop.\n")
     sys.stdout.write(out.getvalue())
     sys.stdout.flush()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer((args.host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
 
     if not args.no_browser and settings.get("auto_open_browser", True):
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, _open_browser, args=(browser_url,)).start()
 
     try:
         server.serve_forever()
