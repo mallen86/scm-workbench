@@ -1593,20 +1593,15 @@ def _open_browser(url: str) -> None:
     like “gio: <url>: Operation not supported” into the console. We run
     the candidate launchers ourselves with output silenced instead: the
     first one that succeeds wins, and if none does we print one friendly
-    line. On WSL2 the Windows shell is tried first, so the tab opens in
-    the Windows default browser (localhost is forwarded into WSL by the
-    WSL kernel, so the 127.0.0.1 URL just works).
+    line.
     """
     import os
     import shlex
     import subprocess
 
-    # Launchers that fork the app and exit quickly — safe to wait on for a
-    # real exit code. Direct browser binaries (e.g. BROWSER=firefox) are
-    # spawned and left running, since waiting on them means waiting for
-    # the window to close.
-    quick = {"xdg-open", "gio", "gvfs-open", "x-www-browser", "kfmclient", "kfm",
-             "open", "explorer.exe", "cmd.exe"}
+    # Small helpers whose exit code is trustworthy: 0 = a handler was
+    # launched, non-zero = nothing was opened.
+    reliable = {"xdg-open", "gio", "gvfs-open", "x-www-browser", "kfmclient", "kfm", "open"}
 
     def candidates():
         env_browser = (os.environ.get("BROWSER") or "").strip()
@@ -1618,26 +1613,40 @@ def _open_browser(url: str) -> None:
             except ValueError:
                 pass
         if _in_wsl():
+            # Windows-side launchers only: the user's browser lives in
+            # Windows. (The Linux-side xdg-open/gio would just produce the
+            # “no default web app” noise in a WSL session.)
             yield ["explorer.exe", url]
             yield ["cmd.exe", "/c", "start", "", url]
-        if sys.platform == "darwin":
+        elif sys.platform == "darwin":
             yield ["open", url]
         elif os.name != "nt":
             yield ["xdg-open", url]
             yield ["gio", "open", "--", url]
 
     for cmd in candidates():
+        name = os.path.basename(cmd[0])
         try:
-            if os.path.basename(cmd[0]) in quick:
-                if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+            if name in reliable:
+                try:
+                    rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode
+                except subprocess.TimeoutExpired:
+                    return  # it may have forked a browser before hanging — don't fire another
+                if rc == 0:
                     return
+                # non-zero: this helper genuinely opened nothing — next candidate is safe
             else:
+                # GUI shells (explorer.exe, cmd /c start, a browser binary
+                # from $BROWSER) may open the browser and still exit
+                # non-zero or linger, so waiting on them and retrying the
+                # next candidate opens a *second* browser. A successful
+                # spawn is success: leave the process and stop.
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
-        except (OSError, subprocess.TimeoutExpired):
-            continue
+        except (FileNotFoundError, PermissionError):
+            continue  # not present on this platform
 
-    if os.name == "nt":
+    if os.name == "nt" and not _in_wsl():
         try:
             if webbrowser.open(url, new=2):
                 return
