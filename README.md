@@ -40,7 +40,7 @@ The scm-extras README asks you to export `SCM_EXTRA_LAYOUTS` by hand before you 
 cd ~/projects            # or wherever you keep things
 git clone --depth 1 https://github.com/Alan-Cha/silhouette-card-maker
 git clone --depth 1 https://github.com/Alan-Cha/scm-extras
-git clone --depth 1 https://github.com/mallen86/scm-ui
+git clone --depth 1 https://github.com/mallen86/scm-workbench
 
 # 2. one Python venv for the base repo's scripts (SCM targets 3.12+)
 python3 -m venv venv
@@ -48,7 +48,7 @@ source venv/bin/activate
 pip install -r silhouette-card-maker/requirements.txt
 
 # 3. run the Workbench with that interpreter
-./venv/bin/python scm-ui/server.py
+./venv/bin/python scm-workbench/server.py
 ```
 
 A browser tab opens automatically at `http://127.0.0.1:8037`.
@@ -62,7 +62,7 @@ A browser tab opens automatically at `http://127.0.0.1:8037`.
 cd Documents
 git clone --depth 1 https://github.com/Alan-Cha/silhouette-card-maker
 git clone --depth 1 https://github.com/Alan-Cha/scm-extras
-git clone --depth 1 https://github.com/mallen86/scm-ui
+git clone --depth 1 https://github.com/mallen86/scm-workbench
 
 # 2. venv + deps
 python -m venv venv
@@ -70,7 +70,7 @@ python -m venv venv
 pip install -r silhouette-card-maker\requirements.txt
 
 # 3. go
-.\venv\Scripts\python.exe scm-ui\server.py
+.\venv\Scripts\python.exe scm-workbench\server.py
 ```
 
 > If your repos aren't named exactly `silhouette-card-maker` / `scm-extras`, or aren't siblings, just paste the real paths into **Settings** once — it remembers.
