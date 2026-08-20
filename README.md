@@ -38,9 +38,9 @@ The scm-extras README asks you to export `SCM_EXTRA_LAYOUTS` by hand before you 
 ```sh
 # 1. put the three repos side by side (the Workbench auto-detects the sisters)
 cd ~/projects            # or wherever you keep things
-git clone https://github.com/Alan-Cha/silhouette-card-maker
-git clone https://github.com/Alan-Cha/scm-extras
-git clone <this-repo>   # scm-ui
+git clone --depth 1 https://github.com/Alan-Cha/silhouette-card-maker
+git clone --depth 1 https://github.com/Alan-Cha/scm-extras
+git clone --depth 1 https://github.com/mallen86/scm-ui
 
 # 2. one Python venv for the base repo's scripts (SCM targets 3.12+)
 python3 -m venv venv
@@ -53,14 +53,16 @@ pip install -r silhouette-card-maker/requirements.txt
 
 A browser tab opens automatically at `http://127.0.0.1:8037`.
 
+> The clones are shallow (`--depth 1`) since you only need the latest state to run things — re-clone without it, or run `git fetch --unshallow`, if you ever want the full history (e.g. to contribute upstream).
+
 ### Windows (PowerShell)
 
 ```powershell
 # 1. sister folders, e.g. in Documents
 cd Documents
-git clone https://github.com/Alan-Cha/silhouette-card-maker
-git clone https://github.com/Alan-Cha/scm-extras
-git clone <this-repo>
+git clone --depth 1 https://github.com/Alan-Cha/silhouette-card-maker
+git clone --depth 1 https://github.com/Alan-Cha/scm-extras
+git clone --depth 1 https://github.com/mallen86/scm-ui
 
 # 2. venv + deps
 python -m venv venv
