@@ -605,13 +605,20 @@ def build_manifest(info: dict) -> dict:
     # --------------------------------------------------------------- Plugins
     for slug, meta in PLUGINS.items():
         kinds[f"fetch:{slug}"] = {
-            "title": f"Fetch {meta['title']} card art",
+            "title": "Fetch Card Art",
+            "game": meta["title"],
+            # jobs (console tabs, recent jobs) run per game — keep them
+            # distinguishable even though the button/heading title is generic
+            "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
             "description": f"Downloads card images for {meta['title']} from a decklist into the game/ folders.",
             "groups": fetch_groups(slug),
             # URL-based formats (consumed by the same rule the command builder
             # uses): the client auto-selects one of these when the source is URL.
             "url_formats": [f for f, _ in meta["formats"] if f == "url" or f.endswith("_url")],
+            # XML-based formats: the client auto-selects one of these when the
+            # picked existing decklist file is an .xml (e.g. MTG's MPCFill XML).
+            "xml_formats": [f for f, _ in meta["formats"] if f.endswith("_xml")],
         }
 
     return kinds
@@ -763,7 +770,8 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             warnings.append(f"Configured python not found ({p}); using {python.name}.")
 
     manifest = get_manifest()
-    title = manifest.get(kind, {}).get("title", kind)
+    spec = manifest.get(kind) or {}
+    title = spec.get("job_title") or spec.get("title") or kind
     env = _utf8_env()
     argv = [str(python)]
 

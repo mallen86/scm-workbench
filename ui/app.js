@@ -475,7 +475,8 @@ function formCard(kind, opts = {}) {
   }
 
   if (opts.run !== false) {
-    const runBtn = el("button", { class: "btn primary", id: `run-${kind}` }, ico("play"), "Run " + spec.title.replace(/^Fetch .*card art$/, "card art fetch"));
+    const runBtn = el("button", { class: "btn primary", id: `run-${kind}` }, ico("play"), spec.title);
+    runBtn.dataset.label = spec.title; // restored by doRun() when the button is re-enabled
     runBtn.onclick = () => doRun(kind, runBtn);
     const note = el("span", { class: "rb-note" }, "Runs in the background — watch the job console below.");
     card.append(el("div", { class: "runbar" }, note, runBtn));
@@ -528,7 +529,7 @@ async function doRun(kind, btn, opts = {}) {
       }
     }
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), "Run"); }
+    if (btn) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
   }
 }
 
@@ -996,7 +997,7 @@ PAGES.fetch = (root) => {
       class: `plugin-card ${S.plugin === slug ? "active" : ""}`,
       onclick: () => { S.plugin = slug; go("fetch", { plugin: slug }); },
     },
-      el("div", { class: "pc-t" }, S.manifest[kind].title.replace(/^Fetch /, "")),
+      el("div", { class: "pc-t" }, S.manifest[kind].game),
       el("div", { class: "pc-f" }, `${(S.manifest[kind].groups.find(g => g.title === "Format")?.options[0].choices || []).length - 1} formats`),
     ));
   }
@@ -1036,6 +1037,7 @@ function patchFetchForm(kind) {
           args.deck_file = f.name;
           $$(".fp-item", list).forEach(n => n.classList.remove("active"));
           ev.currentTarget.classList.add("active");
+          autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
           afterFormChange(kind);
         },
       }, ico("file"), f.name, el("span", { class: "sz" }, fmtBytes(f.size))));
@@ -1055,13 +1057,18 @@ function patchFetchForm(kind) {
     if (urlF) urlF.style.display = mode === "url" ? "" : "none";
     if (fileF) fileF.style.display = mode === "file" ? "" : "none";
   };
-  // URL source: make sure the format is one of this game's URL-based formats,
-  // otherwise the URL would be passed to a file-reading parser (or rejected).
+  // Source-based format auto-selection (mirrors the rule the command builder
+  // enforces server-side):
+  //  - URL source: the format must be one of this game's URL-based formats,
+  //    otherwise the URL would be passed to a file-reading parser (or rejected).
+  //  - Existing-file source: picking an .xml decklist selects one of this
+  //    game's XML-based formats (MTG: MPCFill XML, Final Fantasy: OctGN XML).
   const autoFormat = () => {
-    if (args.deck_source !== "url") return;
-    const urlFormats = (S.manifest[kind] || {}).url_formats || [];
-    if (!urlFormats.length || urlFormats.includes(args.format)) return;
-    args.format = urlFormats[0];
+    const spec = S.manifest[kind] || {};
+    const allowed = args.deck_source === "url" ? spec.url_formats || []
+      : (args.deck_source === "file" && /\.xml$/i.test(args.deck_file || "") ? spec.xml_formats || [] : null);
+    if (!allowed || !allowed.length || allowed.includes(args.format)) return;
+    args.format = allowed[0];
     const fmtF = $$(".field", card).find(f => f.dataset.key === "format");
     const sel = fmtF && $("select", fmtF);
     if (sel) sel.value = args.format;
