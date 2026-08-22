@@ -2230,7 +2230,8 @@ class Handler(BaseHTTPRequestHandler):
         if kind not in manifest:
             return self._json({"error": "unknown kind"}, 404)
         normalized, errors, norm_warns = normalize_args(manifest[kind], args)
-        argv, cwd, env, title, warnings, errs = build_command(kind, normalized, load_settings(), get_info(), write_deck=False)
+        settings = load_settings()
+        argv, cwd, env, title, warnings, errs = build_command(kind, normalized, settings, get_info(), write_deck=False)
         # Create PDF needs card images to work with — the front directory
         # (SCM's own default when the form leaves it empty) empty means the
         # job would produce nothing, so the client keeps the run button
@@ -2242,9 +2243,10 @@ class Handler(BaseHTTPRequestHandler):
             n = sum(1 for c in fd.iterdir() if c.is_file() and is_image_file(c)) if fd.is_dir() else 0
             if n == 0:
                 no_front = True
-                warnings.append(
-                    f"No images in the front directory ({front}) — nothing to make pages from, so the run "
-                    "button stays disabled. Fetch a deck, or point the form at a folder that has images.")
+                # the alternate tip only exists in advanced mode — simple mode
+                # can't change the front directory, so fetching is the only way
+                tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
+                warnings.append(f"No images in the front directory ({front}). Fetch a deck first{tip or '.'}")
         return self._json({
             "cmd": _fmt_argv(argv) if not errors else None,
             "cwd": str(cwd) if cwd else None,
