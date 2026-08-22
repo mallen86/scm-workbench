@@ -417,8 +417,12 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------------ PDF
     kinds["create_pdf"] = {
         "title": "Create PDF", "page": "pdf", "needs": ["scm"], "cwd": "scm",
-        # the order of the options in the flat simple-mode section
-        "simple_order": ["card_size", "paper_size", "borderless", "load_offset", "only_fronts"],
+        # the simple-mode layout: rows of the flat section — the two
+        # dropdowns alone up top, the three toggles together below
+        "simple_rows": [
+            ["card_size", "paper_size"],
+            ["borderless", "load_offset", "only_fronts"],
+        ],
         "description": "Lays out card images into a print-ready PDF with registration marks that match the cutting templates.",
         "groups": [
             {

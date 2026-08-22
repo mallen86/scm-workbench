@@ -301,27 +301,36 @@ export function formCard(kind, opts = {}) {
   }
 
   if (opts.flat) {
-    // Flat layout: one unbroken section — no group headers, no collapsible
-    // wrappers, no card title of its own. In simple mode only the options
-    // flagged `simple` in the manifest make it in (the everyday ones);
-    // everything else keeps its default behind the scenes. A kind-level
-    // `simple_order` list, when given, is the order of that section —
-    // members not listed fall back to manifest order, after the listed.
-    let os = [];
+    // Flat layout: no group headers, no collapsible wrappers, no card title
+    // of its own. In simple mode only the options flagged `simple` in the
+    // manifest make it in (the everyday ones); everything else keeps its
+    // default behind the scenes. A kind-level `simple_rows` list, when
+    // given, is the layout of that section — one form row per entry, in
+    // the listed order (e.g. the two dropdowns alone up top, the three
+    // toggles together below); simple options not named in any row fall
+    // into a final row, manifest order.
+    const os = [];
     for (const g of spec.groups || [])
       for (const o of g.options || [])
         if (optVisible(o, spec)) os.push(o);
-    const order = uiMode() === "simple" ? spec.simple_order : null;
-    if (order) {
-      const rank = new Map(order.map((k, i) => [k, i]));
-      os.sort((a, b) => (rank.get(a.key) ?? order.length) - (rank.get(b.key) ?? order.length));
+    const rows = uiMode() === "simple" ? (spec.simple_rows || []) : [];
+    const place = keys => {
+      const row = el("div", { class: "frow" });
+      for (const k of keys) {
+        const o = os.find(x => x.key === k);
+        if (!o) continue;
+        const node = renderOption(o, args, kind);
+        if (node) row.append(node);
+      }
+      if (row.childElementCount) card.append(row);
+    };
+    if (rows.length) {
+      const listed = new Set(rows.flat());
+      rows.forEach(place);
+      place(os.filter(o => !listed.has(o.key)).map(o => o.key));
+    } else {
+      place(os.map(o => o.key));
     }
-    const row = el("div", { class: "frow frow-3col" });
-    for (const o of os) {
-      const node = renderOption(o, args, kind);
-      if (node) row.append(node);
-    }
-    card.append(row);
   } else {
     for (const g of spec.groups || []) {
       const os = g.options || [];
