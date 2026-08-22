@@ -111,24 +111,6 @@ export function uiMode() {
 }
 
 
-export function kindHasSimple(kind) {
-  const spec = S.manifest[kind];
-  return !!(spec && (spec.groups || []).some(g => (g.options || []).some(o => o.simple)));
-}
-
-
-export function optVisible(o, kind) {
-  if (uiMode() !== "simple" || !kindHasSimple(kind)) return true;
-  return !!o.simple;
-}
-
-
-export function groupVisible(g, kind) {
-  if (uiMode() !== "simple" || !kindHasSimple(kind)) return true;
-  return !g.collapsible;
-}
-
-
 /* body class + section separators + topbar switch state, all from one place */
 export function syncUiMode() {
   const simple = uiMode() === "simple";

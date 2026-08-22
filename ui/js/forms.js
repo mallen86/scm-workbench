@@ -4,7 +4,6 @@
 import { openConsole, refreshJobs } from "./console.js";
 import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";
 import { refreshInfo } from "./info.js";
-import { groupVisible, optVisible } from "./nav.js";
 import { repoReady } from "./prep.js";
 
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -284,21 +283,33 @@ export function formCard(kind, opts = {}) {
     ));
   }
 
-  for (const g of spec.groups || []) {
-    const opts = (g.options || []).filter(o => optVisible(o, kind));
-    if (!groupVisible(g, kind) || !opts.length) continue;
-    if (g.collapsible) {
-      const any = opts.some(o => o.show ? o.show(args) : true);
-      if (!any) continue;
-      const adv = el("div", { class: "adv" });
-      adv.append(
-        el("button", { class: "adv-head", type: "button", onclick: () => adv.classList.toggle("open") },
-          el("span", { class: "arr" }, ico("arrow")), g.title),
-        el("div", { class: "adv-body" }, groupInner(opts, kind, args)),
-      );
-      card.append(adv);
-    } else {
-      card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(opts, kind, args));
+  if (opts.flat) {
+    // Simple-mode layout: one flat section — every option of every group,
+    // in manifest order, with no group headers between them and no
+    // collapsible wrappers.
+    const row = el("div", { class: "frow" });
+    for (const g of spec.groups || [])
+      for (const o of g.options || []) {
+        const node = renderOption(o, args, kind);
+        if (node) row.append(node);
+      }
+    card.append(row);
+  } else {
+    for (const g of spec.groups || []) {
+      const os = g.options || [];
+      if (g.collapsible) {
+        const any = os.some(o => o.show ? o.show(args) : true);
+        if (!any) continue;
+        const adv = el("div", { class: "adv" });
+        adv.append(
+          el("button", { class: "adv-head", type: "button", onclick: () => adv.classList.toggle("open") },
+            el("span", { class: "arr" }, ico("arrow")), g.title),
+          el("div", { class: "adv-body" }, groupInner(os, kind, args)),
+        );
+        card.append(adv);
+      } else {
+        card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(os, kind, args));
+      }
     }
   }
 
@@ -341,14 +352,12 @@ export function groupInner(opts, kind, args) {
    Two sizes of Workbench in one app:
    • advanced (default) — every page, every control, exactly as documented.
    • simple — "don't overwhelm me": the side nav collapses to the essentials
-     (Fetch card art, Create PDF, Settings) and the Create PDF form keeps
-     only the basic options.
-   For a kind that has options flagged `simple` in the manifest, only those
-   render and its collapsible power sections (Fit & edge finishing, Advanced,
-   …) are hidden; kinds without any `simple` flags (Fetch, Offset, …) are
-   already as simple as they get and render unchanged. Hidden options keep
-   their defaults in S.forms, so the command preview is identical in both
-   modes. */
+     (Fetch card art, Create PDF, Settings) and the Create PDF form renders
+     as a single flat section — no group headers and no collapsible
+     wrappers, every option still right there (formCard(..., { flat: true,
+     head: false }), with the page head above keeping the page's name).
+   The other forms (Fetch, Offset, …) already are as simple as they get and
+   render unchanged in both modes. */
 
 
 /* ================================ job control ============================== */

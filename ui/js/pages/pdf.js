@@ -13,7 +13,11 @@ PAGES.pdf = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Create PDF", "Lays out the images in your game/ folders into a print-ready PDF with registration marks. Every option from create_pdf.py is available below — the command preview shows exactly what will run."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
-  wrap.append(formCard("create_pdf", { icon: "pdf" }));
+  // Simple mode: the form is one flat section — no group headers, no
+  // collapsible wrappers, and no card title of its own (the page head
+  // above carries the name). Advanced mode keeps the full grouped layout.
+  const simple = uiMode() === "simple";
+  wrap.append(formCard("create_pdf", { icon: "pdf", flat: simple, head: !simple }));
   {  // offset banner — per-size row wins over the global value for this form's paper
     const form = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
     const paper = paperForCreatePdf(form);
