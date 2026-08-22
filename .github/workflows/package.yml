@@ -89,5 +89,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: false
+          body: |
+            First release of SCM Workbench — a local, self-contained UI for
+            silhouette-card-maker and scm-extras.
+
+            * **macOS** — unzip and open “SCM Workbench.app”. The build is
+              unsigned, so the first launch needs a right-click → *Open*.
+            * **Windows** — unzip and run “SCM Workbench.exe”.
+
+            First launch provisions the app's private Python runtime and
+            fetches the newest copy of each sister repo (watch the progress
+            in the app's window). Nothing is installed on the machine —
+            everything lives in the app's data folder.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
