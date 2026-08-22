@@ -1,0 +1,92 @@
+# ============================================================================
+# SCM Workbench — project & packaging metadata.
+#
+# The Workbench itself is stdlib-only; the app bundle exists mainly to carry
+# (a) a full CPython + the sister repos' pinned dependencies, and (b) the
+# first-launch bootstrap in launcher.py.
+#
+# Building a distributable app:
+#     briefcase build macos app      # or: briefcase build windows app
+#   (on a GitHub Actions runner these run unattended; see .github/workflows)
+# ============================================================================
+
+[project]
+name = "scm-workbench"
+version = "1.1.0"
+description = "A local web UI for silhouette-card-maker and scm-extras — no terminal, no setup."
+authors = [{ name = "the SCM Workbench maintainers" }]
+license = "MIT"
+license-files = ["LICENSE.md"]
+
+[tool.briefcase]
+bundle = "local.scm-workbench"
+project_name = "scm-workbench"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.briefcase.app.scm-workbench]
+python_version = "3.13"
+formal_name = "SCM Workbench"
+version = "1.1.0"
+description = "Print, cut and play: a local console for the Silhouette Card Maker repos."
+document_home_page = "https://github.com/Alan-Cha/silhouette-card-maker"
+entry_point = "scm_workbench"
+sources = ["scm_workbench", "ui"]
+# The app's own code needs nothing beyond the standard library. The support
+# venv, however, is where the *managed repo copies* run, so it carries the
+# pinned dependencies from silhouette-card-maker's requirements.txt
+# (see the per-platform sections below).
+requires = [
+    "certifi>=2024.2.2",
+    "click==8.4.2",
+    "cloudscraper==1.2.71",
+    "filetype==1.2.0",
+    "mtg_parser==0.0.1a55",
+    "natsort==8.4.0",
+    "pydantic==2.13.4",
+    "requests==2.34.2",
+    "split-image==2.0.5",
+]
+
+[tool.briefcase.app.scm-workbench.macOS]
+requires = [
+    "click==8.4.2",
+    "cloudscraper==1.2.71",
+    "filetype==1.2.0",
+    "matplotlib==3.11.1",
+    "mtg_parser==0.0.1a55",
+    "natsort==8.4.0",
+    "numpy==2.5.2",
+    "pillow==12.3.0",
+    "pydantic==2.13.4",
+    "pypdfium2==5.9.0",
+    "requests==2.34.2",
+    "split-image==2.0.5",
+    "ezdxf==1.4.4",
+    # The app window: a native WKWebView (system framework, pip driver)
+    "pywebview==6.2.1",
+]
+# (pyautogui/pywinauto are Windows-only GUI automation — not needed on macOS)
+
+[tool.briefcase.app.scm-workbench.Windows]
+requires = [
+    "click==8.4.2",
+    "cloudscraper==1.2.71",
+    "ezdxf==1.4.4",
+    "filetype==1.2.0",
+    "matplotlib==3.11.1",
+    "mtg_parser==0.0.1a55",
+    "natsort==8.4.0",
+    "numpy==2.5.2",
+    "pillow==12.3.0",
+    "pyautogui==0.9.54",
+    "pydantic==2.13.4",
+    "pypdfium2==5.9.0",
+    "pywinauto==0.6.9",
+    "requests==2.34.2",
+    "split-image==2.0.5",
+    # The app window: WebView2 (already on Windows 10/11); pywebview drives it
+    "pywebview==6.2.1",
+]

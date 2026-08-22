@@ -1,0 +1,81 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Briefcase
+        run: python -m pip install --upgrade pip briefcase
+      - name: Build the .app
+        run: briefcase build macos app
+      - name: Allow the app's webview to load its own local server
+        run: |
+          cd build/scm-workbench/macos/app
+          # Current macOS versions block plain-HTTP loopback traffic inside
+          # WKWebView unless the app opts in (and macOS 15+ also shows a
+          # Local Network permission prompt otherwise). The Workbench's UI is
+          # served by its own bundled server, so allow *local* networking and
+          # re-sign the bundle (ad-hoc; replace with a Developer ID for release).
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "SCM Workbench.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool TRUE" "SCM Workbench.app/Contents/Info.plist"
+          codesign --force --deep -s - "SCM Workbench.app"
+      - name: Zip
+        run: |
+          cd build/scm-workbench/macos/app
+          zip -qr scm-workbench-macos.zip "SCM Workbench.app"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scm-workbench-macos
+          path: build/scm-workbench/macos/app/scm-workbench-macos.zip
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Briefcase
+        run: python -m pip install --upgrade pip briefcase
+      - name: Build the app folder
+        run: briefcase build windows app
+      - name: Zip
+        run: |
+          cd build/scm-workbench/windows/app
+          Compress-Archive -Path * -DestinationPath ../scm-workbench-windows.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scm-workbench-windows
+          path: build/scm-workbench/windows/scm-workbench-windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

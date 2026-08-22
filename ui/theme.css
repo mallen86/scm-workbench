@@ -237,7 +237,21 @@ body::before {
   box-shadow: var(--shadow-sm);
   transition: border-color 0.15s ease;
 }
-.card + .card { margin-top: 16px; }
+.card + .card { margin-top: 24px; }
+.card + .status-grid { margin-top: 24px; }
+.card + .onboard, .onboard + .card, .onboard + .status-grid { margin-top: 24px; }
+
+/* ---- Settings > Managed repo copies: row header ------------------------- */
+.rc-head { display: grid; gap: 3px; }
+.rc-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rc-name { font-weight: 700; font-size: 14.5px; }
+.rc-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint); }
+.rc-chip.ok { color: var(--ok); }
+.rc-chip.info { color: var(--info); }
+.rc-chip.warn { color: var(--warn); }
+.rc-path { color: var(--faint); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.seg button.off { opacity: 0.45; cursor: not-allowed; }
+.field > label.fp-label { display: flex; align-items: center; gap: 9px; }
 .card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .card-head .card-ico {
   width: 34px; height: 34px; flex: 0 0 34px;
@@ -413,7 +427,7 @@ select.input option { background: var(--surface); color: var(--text); }
 .rangeval::-webkit-outer-spin-button, .rangeval::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 /* toggle switch */
-.switch { position: relative; width: 38px; height: 22px; flex: 0 0 38px; cursor: pointer; display: inline-block; }
+.switch { position: relative; width: 38px; height: 22px; flex: none; cursor: pointer; display: inline-block; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
 .switch .track {
   position: absolute; inset: 0;
@@ -430,10 +444,9 @@ select.input option { background: var(--surface); color: var(--text); }
 }
 .switch input:checked ~ .track { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .switch input:checked ~ .knob { transform: translateX(16px); background: var(--accent); }
-.switchrow { display: flex; align-items: center; gap: 10px; padding: 4px 0; cursor: pointer; }
-.switchrow .sl { flex: 1; min-width: 0; }
-.switchrow .sl .t { font-size: 13px; font-weight: 600; }
-.switchrow .sl .d { font-size: 11.5px; color: var(--faint); line-height: 1.4; margin-top: 1px; }
+/* as a direct field control (below its small label) the switch sits where
+   the 33px inputs do: same top line, optically centred in the row height */
+.field > .switch { margin: 5px 0 4px; align-self: flex-start; }
 
 /* segmented control */
 .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px; gap: 2px; flex-wrap: wrap; }
@@ -937,6 +950,22 @@ select.input option { background: var(--surface); color: var(--text); }
 .fileitem .fi-name { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fileitem .fi-sub { font-size: 10.5px; color: var(--faint); margin-top: 1px; }
 
+/* per-paper-size offset rows (Offset page) */
+.pso-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.pso-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.2fr) 1fr auto;
+  gap: 12px; align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.pso-size { font-weight: 700; font-family: var(--mono); font-size: 12.5px; }
+.pso-size .faint { font-weight: 400; font-size: 11px; }
+.pso-actions { display: flex; gap: 6px; justify-content: flex-end; }
+@media (max-width: 700px) { .pso-row { grid-template-columns: 1fr; gap: 6px; } .pso-actions { justify-content: flex-start; } }
+
 /* converter */
 .convert-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: end; }
 @media (max-width: 760px) { .convert-grid { grid-template-columns: 1fr; } }
@@ -1026,3 +1055,43 @@ select.input option { background: var(--surface); color: var(--text); }
   .console { left: 64px; }
   .theme-switch { margin: 0; }
 }
+
+/* ---- first-launch preparation banner (packaged app) ---------------------- */
+.prep-phase {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--faint, #9aa3b5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prep-bar {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line, rgba(255, 255, 255, 0.08));
+  overflow: hidden;
+}
+.prep-fill {
+  height: 100%;
+  width: 42%;
+  border-radius: 3px;
+  background: var(--accent-grad, var(--accent, #ffb454));
+  animation: prep-slide 1.5s ease-in-out infinite;
+}
+@keyframes prep-slide {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+/* ---- repo prep progress (first clone / updates, in the real UI) -------- */
+.repoprog { margin-top: 12px; display: grid; gap: 12px; }
+.rp-row { display: grid; gap: 3px; }
+.rp-label { font-size: 13px; font-weight: 600; }
+.rp-meta { font-size: 11.5px; color: var(--faint, #9aa3b5); font-variant-numeric: tabular-nums; min-height: 1em; }
+.rp-bar { height: 6px; border-radius: 3px; background: var(--line, rgba(255,255,255,.08)); overflow: hidden; }
+.rp-fill { height: 100%; border-radius: 3px; background: var(--accent-grad, var(--accent, #ffb454));
+          transition: width 2.4s linear; will-change: width; }
+.rp-bar.indet .rp-fill { width: 38%; animation: prep-slide 1.5s ease-in-out infinite; }
+.prep-note { margin-top: 8px; font-size: 12px; color: var(--faint, #9aa3b5); }
+.btn.wait { opacity: .8; cursor: progress; }

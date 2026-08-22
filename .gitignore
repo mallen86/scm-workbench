@@ -9,3 +9,14 @@ venv/
 
 # mcp
 .mcp.json
+
+# mac
+.DS_Store
+
+# build/packaging artifacts
+build/
+dist/
+
+# local logs & tooling scratch
+logs/
+.playwright-mcp/

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -36,14 +37,29 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict, List, Optional, Tuple
 
-SERVER_VERSION = "1.0.0"
+from scm_workbench import repo_sync
+
+SERVER_VERSION = "1.1.0"
 DEFAULT_PORT = 8037
 
-UI_DIR = Path(__file__).resolve().parent / "ui"
-DATA_DIR = Path(__file__).resolve().parent / "data"
+# The package lives one level down from the repo root in a dev checkout, and
+# next to a `ui/` folder inside an app bundle; accept either layout.
+_HERE = Path(__file__).resolve().parent
+
+# When the app runs from a bundle (packaged with Briefcase/py2app), the
+# launcher points SCM_WORKBENCH_DATA at a writable per-user area, so settings,
+# job history, logs, and the managed repo copies survive app updates. In a dev
+# checkout (env var unset) everything stays at the repo root, as before.
+_env_data = os.environ.get("SCM_WORKBENCH_DATA")
+DATA_DIR = Path(_env_data).expanduser().resolve() if _env_data else _HERE.parent / "data"
+WB_ROOT = _HERE.parent
+
+UI_DIR = next((c for c in (_HERE / "ui", _HERE.parent / "ui") if (c / "index.html").is_file()),
+              _HERE.parent / "ui")
 SETTINGS_FILE = DATA_DIR / "settings.json"
 JOBS_FILE = DATA_DIR / "jobs.json"
 LOGS_DIR = DATA_DIR / "logs"
+PER_SIZE_OFFSETS_FILE = DATA_DIR / "offsets_by_size.json"
 
 # ============================================================================
 # Repo detection & plain-JSON readers (no imports from the base repos)
@@ -58,10 +74,14 @@ def _try_read_json(path: Path) -> Optional[dict]:
 
 
 def _sibling(name: str, marker: str) -> Optional[Path]:
-    for base in (Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent):
+    base = Path(__file__).resolve().parent
+    # walk up: the package dir, the repo root, and the folder holding the repo
+    # (dev checkouts keep the sister repos side by side with the Workbench root)
+    for _ in range(3):
         p = base / name
         if (p / marker).is_file():
             return p
+        base = base.parent
     return None
 
 
@@ -432,10 +452,10 @@ def build_manifest(info: dict) -> dict:
             {
                 "title": "Quality",
                 "options": [
-                    _opt("ppi", "Resolution (PPI)", "range", default=300, min=150, max=1200, step=10, width="third"),
+                    _opt("ppi", "Resolution (PPI)", "range", default=1200, min=150, max=1200, step=10, width="third"),
                     _opt("quality", "Compression quality", "range", default=100, min=0, max=100, step=1, width="third"),
                     _opt("load_offset", "Apply saved offset", "toggle", default=False, width="third",
-                         help="Applies the saved X / Y / angle printer offset."),
+                         help="Applies the saved X / Y / angle printer offset — the matching per-paper-size row when one is saved, else the global value."),
                 ],
             },
             {
@@ -490,10 +510,16 @@ def build_manifest(info: dict) -> dict:
             {
                 "title": "Offset values",
                 "options": [
+                    _opt("paper_size", "Paper size (per-size row)", "select",
+                         choices=[["", "— global only —"]] + [
+                             [p["name"], f"{p['name']} — {p.get('width') or '?'} × {p.get('height') or '?'}"]
+                             for p in scm["paper_sizes"]],
+                         default="", width="third",
+                         help="Which per-size row to work with: it prefills the fields below and is what “Save” records into. Blank = the single global offset."),
                     _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter"),
                     _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter"),
                     _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter"),
-                    _opt("ppi", "PPI", "range", default=300, min=150, max=1200, step=10, width="quarter"),
+                    _opt("ppi", "PPI", "range", default=1200, min=150, max=1200, step=10, width="quarter"),
                     _opt("save", "Save these as the new offset", "toggle", default=False, width="half"),
                     _opt("use_saved", "Prefill fields from the saved offset", "toggle", default=True, width="half"),
                 ],
@@ -582,6 +608,38 @@ def build_manifest(info: dict) -> dict:
         "groups": [],
     }
 
+    # ------------------------------------------------------------- Repo copies
+    kinds["repo_update"] = {
+        "title": "Update a managed repo", "page": "settings", "needs": [], "cwd": "wb",
+        "description": "Moves a Workbench-managed copy of a sister repo to the chosen ref. Forward moves fetch only the changed files; rollbacks and large jumps take a full snapshot. Your images, decklists, and local edits are preserved.",
+        "groups": [
+            {
+                "title": "Target",
+                "options": [
+                    _opt("repo", "Repo", "segment",
+                         choices=[["scm", "silhouette-card-maker"], ["extras", "scm-extras"]],
+                         default="scm", width="half"),
+                    _opt("force_full", "Force full snapshot", "toggle", default=False, width="half",
+                         help="Skip the changed-files diff and swap the whole tree (use if a diff misbehaves)."),
+                ],
+            },
+        ],
+    }
+    kinds["repo_init"] = {
+        "title": "Download a managed repo copy", "page": "settings", "needs": [], "cwd": "wb",
+        "description": "Fetches a complete copy of a sister repo into the Workbench's own data area, so the app never needs a system Python or a hand-rolled clone.",
+        "groups": [
+            {
+                "title": "Target",
+                "options": [
+                    _opt("repo", "Repo", "segment",
+                         choices=[["scm", "silhouette-card-maker"], ["extras", "scm-extras"]],
+                         default="scm", width="half"),
+                ],
+            },
+        ],
+    }
+
     # ---------------------------------------------------------------- Extras
     kinds["extras_generate"] = {
         "title": "Generate extras DXF templates", "page": "extras", "needs": ["extras"], "cwd": "extras",
@@ -639,10 +697,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "defaults": {
         "card_size": "standard",
         "paper_size": "letter",
-        "ppi": 300,
+        "ppi": 1200,
         "quality": 100,
     },
+    "repos": {
+        "scm": {"source": "latest-release", "pin": ""},
+        "extras": {"source": "main", "pin": ""},
+    },
 }
+
+
+_GIF_1PX = bytes.fromhex("474946383961010001000000000021ff0b4e65747363617065000000003b")
 
 
 def load_settings() -> dict:
@@ -650,8 +715,14 @@ def load_settings() -> dict:
     data = _try_read_json(SETTINGS_FILE)
     if data:
         for k, v in data.items():
-            if k == "defaults" and isinstance(v, dict):
-                s["defaults"].update(v)
+            if k in ("defaults", "repos") and isinstance(v, dict):
+                s.setdefault(k, {})
+                if isinstance(s.get(k), dict):
+                    for k2, v2 in v.items():
+                        if k2 in s[k] and isinstance(s[k][k2], dict) and isinstance(v2, dict):
+                            s[k][k2].update(v2)
+                        else:
+                            s[k][k2] = v2
             else:
                 s[k] = v
     return s
@@ -663,6 +734,51 @@ def save_settings(s: dict) -> None:
         json.dump(s, f, indent=2)
 
 
+# ============================================================================
+# Managed repo copies (see repo_sync.py)
+# ============================================================================
+
+_refs_cache = {}
+
+
+def repos_view(settings: dict) -> list:
+    """One display row per sister repo: where it lives, what it's at, what's asked."""
+    st = repo_sync.load_state()
+    prog = repo_sync.load_progress()
+    scm, extras = effective_dirs(settings)
+    rows = []
+    for key, meta in repo_sync.REPOS.items():
+        r = st.get(key) or {}
+        deployed = r.get("deployed")
+        managed = bool(deployed) and r.get("mode") == "bundled"
+        cfg = (settings.get("repos", {}) or {}).get(key) or {}
+        source = r.get("source") or cfg.get("source") or meta.get("default_source", "main")
+        pin = r.get("pin") or cfg.get("pin") or ""
+        if source == "pinned" and pin:
+            source = pin
+        ext = scm if key == "scm" else extras
+        if managed:
+            path, mode = DATA_DIR / meta["rel"], "managed"
+        elif ext:
+            path, mode = ext, "external"
+        else:
+            path, mode = None, "missing"
+        rows.append({
+            "key": key, "name": meta["name"], "mode": mode, "path": str(path) if path else None,
+            "source": source, "deployed": deployed, "last_check": r.get("last_check"),
+            "progress": (prog.get(key) or None),
+        })
+    return rows
+
+
+def run_repo_check(key: str, force: bool = False) -> dict:
+    """In-process 'check for updates' (small API calls only). Results cache an hour."""
+    try:
+        return repo_sync.check_repo(key, force=force)
+    except repo_sync.RepoError as e:
+        return {"repo": key, "ok": False, "error": str(e)}
+
+
 def effective_dirs(settings: dict) -> Tuple[Optional[Path], Optional[Path]]:
     def resolve(p: str) -> Optional[Path]:
         if not p:
@@ -672,9 +788,117 @@ def effective_dirs(settings: dict) -> Tuple[Optional[Path], Optional[Path]]:
             pp = Path(__file__).resolve().parent / pp
         return pp if pp.is_dir() else None
 
-    scm = resolve(settings.get("scm_dir") or "") or find_scm_repo()
-    extras = resolve(settings.get("extras_dir") or "") or find_extras_repo()
+    scm = resolve(settings.get("scm_dir") or "")
+    extras = resolve(settings.get("extras_dir") or "")
+    # A managed copy (downloaded by the Workbench itself) counts as the repo
+    # when no explicit path is set — that's what makes a packaged app fully
+    # self-contained. An explicit user path always wins; in a bare dev checkout
+    # (no managed copies) the old sibling auto-detect applies.
+    st = repo_sync.load_state()
+    if not scm:
+        r = st.get("scm") or {}
+        if r.get("deployed"):
+            p = repo_sync.repo_dir("scm")
+            if p.is_dir():
+                scm = p
+    if not extras:
+        r = st.get("extras") or {}
+        if r.get("deployed"):
+            p = repo_sync.repo_dir("extras")
+            if p.is_dir():
+                extras = p
+    if not scm:
+        scm = find_scm_repo()
+    if not extras:
+        extras = find_extras_repo()
     return scm, extras
+
+
+# ============================================================================
+# Offsets
+#
+# silhouette-card-maker keeps ONE global printer offset per repo
+# (data/offset_data.json, read by create_pdf --load_offset and offset_pdf.py).
+# The required correction, however, depends on the paper you feed — so the
+# Workbench keeps a per-paper-size table of its own and *stages* the matching
+# row into that shared file right before a run. SCM's code never changes;
+# it just reads the one file it always knew about.
+# ============================================================================
+
+OFFSET_STAGE_LOCK = threading.Lock()
+
+
+def load_per_size_offsets() -> dict:
+    data = _try_read_json(PER_SIZE_OFFSETS_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def save_per_size_offsets(table: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(PER_SIZE_OFFSETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(table, f, indent=1)
+
+
+def write_global_offset(scm: Optional[Path], x: int, y: int, angle: float) -> None:
+    """Write SCM's shared data/offset_data.json (same shape SCM's own save_offset writes)."""
+    if not scm:
+        return
+    d = scm / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "offset_data.json", "w", encoding="utf-8") as f:
+        json.dump({"x_offset": int(x), "y_offset": int(y), "angle_offset": float(angle)}, f, indent=4)
+
+
+def read_global_offset(scm: Optional[Path]) -> Optional[dict]:
+    if not scm:
+        return None
+    o = _try_read_json(scm / "data" / "offset_data.json")
+    if not o:
+        return None
+    return {"x": o.get("x_offset", 0), "y": o.get("y_offset", 0), "angle": o.get("angle_offset", 0)}
+
+
+def effective_paper(info: dict, kind: str, args: dict, settings: dict) -> Optional[str]:
+    """The paper size a job would actually print on (a specialty layout wins over the pick)."""
+    if kind == "create_pdf":
+        d = settings.get("defaults", {})
+        paper = str(args.get("paper_size") or d.get("paper_size") or "letter")
+        sp = next((s for s in info.get("scm", {}).get("specialty", []) if s.get("name") == args.get("specialty")), None)
+        if sp and sp.get("paper"):
+            paper = sp["paper"]
+        return paper or None
+    if kind == "offset_pdf":
+        return str(args.get("paper_size") or "") or None
+    return None
+
+
+def stage_per_size_offset(scm: Optional[Path], paper: Optional[str]) -> Optional[dict]:
+    """Stage the per-size row for `paper` into SCM's shared offset file. Returns the row, or None."""
+    if not paper or not scm:
+        return None
+    entry = load_per_size_offsets().get(paper)
+    if not entry:
+        return None
+    with OFFSET_STAGE_LOCK:
+        write_global_offset(scm, entry.get("x", 0), entry.get("y", 0), entry.get("angle", 0))
+    return {"size": paper, "x": entry.get("x", 0), "y": entry.get("y", 0), "angle": entry.get("angle", 0)}
+
+
+def _bootstrap_state() -> dict:
+    """Live status of the launcher's first-launch preparation (flag file in
+    the data area; absence = packaged-and-ready or dev checkout)."""
+    try:
+        f = DATA_DIR / "bootstrap.json"
+        if f.is_file():
+            d = json.loads(f.read_text(encoding="utf-8"))
+            return {"active": bool(d.get("pending")), "phase": d.get("phase") or ""}
+    except Exception:
+        pass
+    return {"active": False, "phase": ""}
+
+
+def _bootstrapping() -> bool:
+    return _bootstrap_state()["active"]
 
 
 def get_info() -> dict:
@@ -687,10 +911,15 @@ def get_info() -> dict:
             "python_path": str(Path(sys.executable).resolve()),
             "platform": sys.platform,
             "is_windows": os.name == "nt",
+            "is_packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
+            **_bootstrap_state(),
+            "runtime_ready": bool(os.environ.get("SCM_WORKBENCH_PYTHON")),
             "data_dir": str(DATA_DIR),
         },
         "scm": read_scm_info(scm, extras),
         "extras": read_extras_info(extras),
+        "per_size_offsets": load_per_size_offsets(),
+        "repos": repos_view(settings),
         "settings": settings,
     }
 
@@ -717,12 +946,20 @@ def _persist_jobs() -> None:
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j["ts"], reverse=True)[:100]
     slim = [
-        {k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "status", "exit_code", "log_file", "duration")}
+        {k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration")}
         for j in rows if j["status"] != "running" and j.get("duration") is not None
     ]
+    # Merge with rows persisted by earlier sessions: the in-memory map only
+    # knows about *this* process's jobs, and rewriting the file from it alone
+    # would silently erase the user's job history on every relaunch.
+    try:
+        old = _try_read_json(JOBS_FILE) or []
+    except Exception:
+        old = []
+    ids = {s["id"] for s in slim}
     try:
         with open(JOBS_FILE, "w", encoding="utf-8") as f:
-            json.dump(slim, f, indent=1)
+            json.dump((slim + [o for o in old if o.get("id") not in ids])[:100], f, indent=1)
     except Exception:
         pass
 
@@ -730,6 +967,39 @@ def _persist_jobs() -> None:
 def read_persisted_jobs() -> list:
     data = _try_read_json(JOBS_FILE)
     return data or []
+
+
+def job_outputs(job: dict) -> list:
+    """Artifact file(s) of a job as absolute paths — what the console's
+    “Move to my files…” button can carry out of the app's private working
+    area: the create/offset PDFs and the calibration sheets. Older persisted
+    jobs (no recorded form args) fall back to the default paths."""
+    kind = job.get("kind")
+    if kind not in ("create_pdf", "offset_pdf", "calibration"):
+        return []
+    args = job.get("args") or {}
+    try:
+        scm, _ = effective_dirs(load_settings())
+    except Exception:
+        return []
+    if not scm:
+        return []
+    if kind == "create_pdf":
+        if args.get("output_images"):
+            return []
+        p = Path(str(args.get("output_path") or "game/output/game.pdf"))
+        return [str(p if p.is_absolute() else scm / p)]
+    if kind == "offset_pdf":
+        src = Path(str(args.get("pdf_path") or "game/output/game.pdf"))
+        if not src.is_absolute():
+            src = scm / src
+        out = str(args.get("output_pdf_path") or "")
+        if not out:
+            out = str(src.with_name(src.stem + "_offset.pdf"))
+        p = Path(out)
+        return [str(p if p.is_absolute() else scm / p)]
+    cdir = scm / "calibration"
+    return [str(p) for p in sorted(cdir.glob("*.pdf"))] if cdir.is_dir() else []
 
 
 def _utf8_env() -> dict:
@@ -751,6 +1021,45 @@ def _fmt_argv(argv: List[str]) -> str:
     return " ".join(shlex.quote(p) if " " in p else p for p in argv)
 
 
+def bundled_python() -> Path:
+    """The interpreter job scripts should run with.
+
+    In a dev checkout that's simply sys.executable. Inside an app bundle,
+    however, sys.executable is the launcher *stub* (not directly executable as
+    an interpreter), so the launcher provisions a relocatable CPython in the
+    data area and tells us where it is via SCM_WORKBENCH_PYTHON.
+    """
+    env_py = os.environ.get("SCM_WORKBENCH_PYTHON")
+    if env_py:
+        p = Path(env_py)
+        if p.is_file():
+            return p
+    exe = Path(sys.executable)
+    name = exe.name.lower()
+    if "python" in name:
+        return exe
+    # Fallbacks: the in-bundle framework / a runtime beside the stub
+    app = next((p for p in exe.parents if p.suffix == ".app" or p.name.endswith(".app")), None)
+    if app is not None:
+        cand = app / "Contents" / "Frameworks" / "Python.framework" / "Versions" / "Current" / "Python"
+        if cand.is_file():
+            return cand
+    for cand in (exe.parent / "pythonw.exe", exe.parent / "python.exe"):
+        if cand.is_file():
+            return cand
+    return exe
+
+
+def app_packages_dir() -> Optional[Path]:
+    """The bundle's support site-packages (Resources/app_packages), if any."""
+    base = Path(__file__).resolve()
+    for p in base.parents:
+        if p.name.endswith(".app"):
+            d = p / "Contents" / "Resources" / "app_packages"
+            return d if d.is_dir() else None
+    return None
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -758,9 +1067,14 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
     place, which keeps command previews and real runs identical.
     """
     warnings: List[str] = []
+    if os.environ.get("SCM_WORKBENCH_PACKAGED") and not os.environ.get("SCM_WORKBENCH_PYTHON"):
+        warnings.append(
+            "First launch: the app's private Python runtime is still being prepared in the "
+            "background, so this job runs without the repo's packages and may fail on import. "
+            "Give it a minute and try again — or watch the dashboard banner.")
     errors: List[str] = []
     scm, extras = effective_dirs(settings)
-    python = Path(sys.executable)
+    python = bundled_python()
     if settings.get("python"):
         p = Path(settings["python"])
         p = p if p.is_absolute() else Path(__file__).resolve().parent / p
@@ -783,7 +1097,22 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
 
     d = settings.get("defaults", {})
 
-    if kind == "create_pdf":
+    # Packaged apps: the job's (provisioned) interpreter isn't the one that
+    # installed the support packages, so point it at them explicitly.
+    if os.environ.get("SCM_WORKBENCH_PACKAGED"):
+        pkgs = app_packages_dir()
+        if pkgs:
+            env["PYTHONPATH"] = str(pkgs)
+
+    if kind in ("repo_update", "repo_init"):
+        cwd = WB_ROOT
+        a = args
+        argv += ["-m", "scm_workbench.repo_sync", kind.split("_")[-1], "--repo", str(a.get("repo") or "scm")]
+        if kind == "repo_update" and a.get("force_full"):
+            argv += ["--force-full"]
+        env["SCM_WORKBENCH_DATA"] = str(DATA_DIR)
+
+    elif kind == "create_pdf":
         if not require_repo("SCM", scm, "e.g. the silhouette-card-maker folder."):
             return argv, None, env, title, warnings, errors
         cwd = scm
@@ -817,7 +1146,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                     "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs"):
             if a.get(key): argv += ["--" + key, str(a[key])]
         ppi = a.get("ppi")
-        ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 300))
+        ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
         quality = a.get("quality")
         quality = int(quality) if quality not in (None, "") else int(d.get("quality", 100))
         argv += ["--ppi", str(ppi), "--quality", str(quality)]
@@ -826,7 +1155,20 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         if a.get("label"): argv += ["--label", str(a["label"])]
         if a.get("show_outline"): argv += ["--show_outline"]
         if a.get("borderless"): argv += ["--borderless"]
-        if a.get("load_offset"): argv += ["--load_offset"]
+        if a.get("load_offset"):
+            argv += ["--load_offset"]
+            paper_eff = effective_paper(info, "create_pdf", a, settings)
+            entry = load_per_size_offsets().get(paper_eff or "")
+            g = info["scm"].get("saved_offset")
+            if entry:
+                warnings.append(
+                    f"Per-size offset for “{paper_eff}” (x {entry['x']}, y {entry['y']}, {entry['angle']}°) "
+                    "will be staged into data/offset_data.json before the run — SCM keeps one shared offset file, "
+                    "so this job prints with that row.")
+            elif g:
+                warnings.append(f"No per-size offset saved for “{paper_eff}” — the global saved offset (x {g['x']}, y {g['y']}, {g['angle']}°) applies.")
+            else:
+                warnings.append("No offset saved (global or per-size) — “--load_offset” has nothing to apply.")
         known_extra = extras_card_names(info)
         for v in (card, paper):
             if v and v.lower() in known_extra:
@@ -854,9 +1196,16 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 gave_any = True
         if not gave_any:
             errors.append("Provide at least one of X, Y, or angle.")
-        argv += ["--ppi", str(int(a.get("ppi") or 300))]
+        argv += ["--ppi", str(int(a.get("ppi") or 1200))]
         if a.get("save"):
             argv += ["-s"]
+        if a.get("paper_size"):
+            entry = load_per_size_offsets().get(str(a["paper_size"]))
+            if entry:
+                tail = " “Save” (−s) records the used values back into that row." if a.get("save") else ""
+                warnings.append(
+                    f"Per-size offset for “{a['paper_size']}” (x {entry['x']}, y {entry['y']}, {entry['angle']}°) is staged in "
+                    f"before the run, so any field left blank falls back to that row instead of the global value.{tail}")
 
     elif kind == "calibration":
         if not require_repo("SCM", scm):
@@ -989,10 +1338,18 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             elif not is_url_format:
                 warnings.append(f"“{fmt}” reads a decklist file — a URL only works with URL-based formats (e.g. “url”, “*_url”).")
         else:
-            deck = str(a.get("deck_file") or "")
-            if not deck:
+            name = str(a.get("deck_file") or "").strip()
+            if not name:
                 errors.append("Pick an existing decklist file (or use paste / URL).")
-            elif is_url_format:
+            elif "/" in name or "\\" in name:
+                errors.append("Decklist names come from the game/decklist/ list — they can't contain path separators.")
+            elif not (cwd / "game" / "decklist" / name).is_file():
+                errors.append(f"Decklist file “{name}” is not in game/decklist/ — reopen the form to refresh the list.")
+            else:
+                # the plugin opens its argument relative to the repo root, so the
+                # file source gets the same prefixed path as the paste source
+                deck = f"game/decklist/{name}"
+            if deck and is_url_format:
                 warnings.append("URL-based formats use the URL itself, not a file — switch the source to “URL”.")
         fetch_script = cwd / "plugins" / slug / "fetch.py"
         if not fetch_script.is_file():
@@ -1019,12 +1376,43 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
 
 MANIFEST_CACHE: Dict[str, dict] = {}
 MANIFEST_LOCK = threading.Lock()
+_REPOS_MTIME: Dict[str, float] = {}
+
+
+def _repos_changed() -> bool:
+    """True when a repo update touched files the manifest reads (layouts.json etc.)."""
+    now = None
+    for p in (repo_sync.state_file(), DATA_DIR / "repos-manifest-scm.json"):
+        try:
+            now = max(now or 0, p.stat().st_mtime)
+        except OSError:
+            pass
+    # the decklist folder feeds the deck_file choices — a file added or removed
+    # there (Finder, paste-save, import) must invalidate the cached manifest
+    try:
+        scm, _ = effective_dirs(load_settings())
+        if scm:
+            dl = scm / "game" / "decklist"
+            try:
+                now = max(now or 0, dl.stat().st_mtime)
+            except OSError:
+                pass
+    except Exception:
+        pass
+    if now is None:
+        return False
+    return now > _REPOS_MTIME.get("t", 0)
 
 
 def get_manifest() -> dict:
     with MANIFEST_LOCK:
         if not MANIFEST_CACHE:
             MANIFEST_CACHE.update(build_manifest(get_info()))
+            _REPOS_MTIME["t"] = time.time()
+        elif _repos_changed():
+            MANIFEST_CACHE.clear()
+            MANIFEST_CACHE.update(build_manifest(get_info()))
+            _REPOS_MTIME["t"] = time.time()
     return MANIFEST_CACHE
 
 
@@ -1118,6 +1506,15 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     if errors:
         return None, errors
 
+    # Stage the per-paper-size offset into SCM's shared file before the process
+    # starts: SCM reads data/offset_data.json mid-run (its only supported shape),
+    # so “per size” is realized by the Workbench picking which value goes in it.
+    staged = None
+    if kind == "create_pdf" and args.get("load_offset"):
+        staged = stage_per_size_offset(cwd, effective_paper(info, kind, args, load_settings()))
+    elif kind == "offset_pdf" and args.get("paper_size"):
+        staged = stage_per_size_offset(cwd, str(args["paper_size"]))
+
     job_id = uuid.uuid4().hex[:10]
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     job: dict = {
@@ -1126,6 +1523,7 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "kind": kind,
         "title": title,
         "cmd": _fmt_argv(argv),
+        "args": args,
         "status": "running",
         "exit_code": None,
         "log_file": str(LOGS_DIR / f"{job_id}.log"),
@@ -1137,8 +1535,14 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "duration": None,
         "proc": None,
     }
+    if kind == "offset_pdf" and args.get("save") and args.get("paper_size"):
+        # SCM's own -s writes the shared file with the values just used;
+        # _pump mirrors them back into this row once the job has finished.
+        job["offset_sync"] = str(args["paper_size"])
     log_f = open(job["log_file"], "w", encoding="utf-8")
     header = [f"$ {job['cmd']}", f"(cwd: {cwd})"]
+    if staged:
+        header.append(f"(offset: staged “{staged['size']}” — x {staged['x']}, y {staged['y']}, {staged['angle']}° → data/offset_data.json)")
     log_f.write("\n".join(header) + "\n\n")
     log_f.flush()
     job["log_lines"] = header
@@ -1173,6 +1577,10 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
     rc = proc.wait()
     if job.get("kill_requested"):
         status = "killed"
+    elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in job["log_lines"]):
+        # most fetch plugins report a missing decklist this way and still exit
+        # cleanly — a clean exit containing that line is a failed run
+        status = "fail"
     elif rc == 0:
         status = "ok"
     else:
@@ -1181,6 +1589,18 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
     job["exit_code"] = rc
     job["ended"] = time.time()
     job["duration"] = round(job["ended"] - job["started"], 2)
+    if job.get("offset_sync"):
+        # The run saved via SCM's own -s: mirror the shared file's new values
+        # into this paper size's row in the Workbench's table.
+        g = read_global_offset(effective_dirs(load_settings())[0])
+        if g:
+            table = load_per_size_offsets()
+            table[job["offset_sync"]] = {"x": g["x"], "y": g["y"], "angle": g["angle"]}
+            save_per_size_offsets(table)
+            s = f"(offset: recorded the saved values in the “{job['offset_sync']}” row — x {g['x']}, y {g['y']}, {g['angle']}°)"
+            job["log_lines"].append(s)
+            log_f.write(s + "\n")
+            log_f.flush()
     log_f.close()
     for q in list(job["subs"]):
         try:
@@ -1400,8 +1820,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path[4:])
             if path == "/favicon.svg":
                 return self._static("favicon.svg")
+            if path == "/up":
+                # Liveness probe: the app window's “starting” page polls this
+                # until the server is ready, then navigates to the real UI. The
+                # permissive CORS header keeps that fetch reliable in WKWebView.
+                return self._send(200, _GIF_1PX, ctype="image/gif",
+                                  extra=[("Access-Control-Allow-Origin", "*")])
             if path == "/api/info":
                 return self._json(get_info())
+            if path == "/api/repos":
+                return self._json({"repos": repos_view(load_settings())})
             if path == "/api/manifest":
                 return self._json(get_manifest())
             if path == "/api/jobs":
@@ -1409,11 +1837,17 @@ class Handler(BaseHTTPRequestHandler):
                     running = [
                         {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
                          "status": j["status"], "exit_code": j["exit_code"], "cmd": j["cmd"],
-                         "warnings": j.get("warnings", [])}
+                         "warnings": j.get("warnings", []), "outputs": job_outputs(j)}
                         for j in sorted(JOBS.values(), key=lambda x: x["ts"], reverse=True)[:50]
                     ]
                 ids = {r["id"] for r in running}
-                hist = [h for h in read_persisted_jobs() if h["id"] not in ids]
+                hist = []
+                for h in read_persisted_jobs():
+                    if h["id"] in ids:
+                        continue
+                    h = dict(h)
+                    h.setdefault("outputs", job_outputs(h))
+                    hist.append(h)
                 return self._json({"jobs": running + hist[:200]})
             m = re.fullmatch(r"/api/jobs/([\w-]+)/log", path)
             if m:
@@ -1474,25 +1908,162 @@ class Handler(BaseHTTPRequestHandler):
                         settings[k] = body[k]
                 if isinstance(body.get("defaults"), dict):
                     settings["defaults"].update(body["defaults"])
+                if isinstance(body.get("repos"), dict):
+                    for k, v in body["repos"].items():
+                        if k in settings["repos"] and isinstance(v, dict):
+                            settings["repos"][k].update(v)
                 save_settings(settings)
                 invalidate_manifest_cache()
                 return self._json({"ok": True, "settings": settings})
+            if path == "/api/repos/save":
+                body = self._body()
+                key = str(body.get("repo") or "")
+                if key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
+                source = str(body.get("source") or "").strip()
+                if not source:
+                    return self._json({"ok": False, "errors": ["no source given"]}, 400)
+                # validate that the ref actually resolves before persisting it
+                try:
+                    target = repo_sync.resolve_target(key, source)
+                except repo_sync.RepoError as e:
+                    return self._json({"ok": False, "errors": [str(e)]}, 400)
+                settings = load_settings()
+                settings.setdefault("repos", {}).setdefault(
+                    key, {"source": repo_sync.REPOS[key].get("default_source", "main")})
+                settings["repos"][key]["source"] = source if source in ("main", "latest-release") else "pinned"
+                settings["repos"][key]["pin"] = source if source not in ("main", "latest-release") else ""
+                save_settings(settings)
+                repo_sync.set_source(key, source)
+                # record a check immediately — we already know the target, so the UI
+                # can show “new version available” without a second round-trip
+                state = repo_sync.load_state()
+                r = state.setdefault(key, {})
+                deployed = r.get("deployed")
+                r["last_check"] = {"checked": {"repo": key, "ok": True, "cached": False, "target": target,
+                                                 "deployed": deployed,
+                                                 "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])},
+                                  "checked_at": time.time()}
+                repo_sync.save_state(state)
+                return self._json({"ok": True, "repo": key, "source": source, "target": target,
+                                  "repos": repos_view(settings)})
+            if path == "/api/repos/check":
+                body = self._body()
+                key = str(body.get("repo") or "")
+                if key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
+                res = run_repo_check(key, force=bool(body.get("force")))
+                if res.get("ok"):
+                    res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
+                return self._json({"ok": res.get("ok", False), **(res if res.get("ok") else {"errors": [res.get("error", "check failed")]}),
+                                   "repos": repos_view(load_settings())})
+            if path == "/api/repos/refs":
+                body = self._body()
+                key = str(body.get("repo") or "")
+                if key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
+                try:
+                    cached = _refs_cache.get(key)
+                    if cached and time.time() - cached[0] < 3600:
+                        refs = cached[1]
+                    else:
+                        refs = repo_sync.list_refs(key)
+                        _refs_cache[key] = (time.time(), refs)
+                except repo_sync.RepoError as e:
+                    return self._json({"ok": False, "errors": [str(e)]}, 400)
+                return self._json({"ok": True, "repo": key, "refs": refs})
+            if path == "/api/decklists/import":
+                body = self._body()
+                src = str(body.get("path") or "").strip()
+                if not src or not os.path.isfile(src):
+                    return self._json({"ok": False, "errors": [f"no such file: “{src or '(none given)'}”"]}, 400)
+                scm, _ = effective_dirs(load_settings())
+                if not scm:
+                    return self._json({"ok": False, "errors": ["no copy of silhouette-card-maker is connected yet"]}, 400)
+                dl = scm / "game" / "decklist"
+                dl.mkdir(parents=True, exist_ok=True)
+                name = os.path.basename(src)
+                target = dl / name
+                n = 2
+                while target.exists():
+                    stem, ext = os.path.splitext(name)
+                    target = dl / f"{stem} ({n}){ext}"
+                    n += 1
+                try:
+                    shutil.copy2(src, target)
+                except Exception as e:
+                    return self._json({"ok": False, "errors": [f"copy failed: {e}"]}, 400)
+                invalidate_manifest_cache()
+                placeholders = {"README.md", "EMPTY.md"}
+                decklists = [
+                    {"name": pp.name, "size": pp.stat().st_size}
+                    for pp in sorted(dl.iterdir()) if pp.is_file() and pp.name not in placeholders
+                ]
+                return self._json({"ok": True, "name": target.name, "decklists": decklists})
             if path == "/api/offset":
                 body = self._body()
+                size = str(body.get("size") or "").strip()
+                try:
+                    x = int(float(body.get("x", 0) or 0))
+                    y = int(float(body.get("y", 0) or 0))
+                    angle = float(float(body.get("angle", 0) or 0))
+                except (TypeError, ValueError):
+                    return self._json({"ok": False, "errors": ["offset values must be numbers"]}, 400)
                 settings = load_settings()
                 scm, _ = effective_dirs(settings)
                 if not scm:
                     return self._json({"ok": False, "errors": ["SCM repo not found — set it in Settings."]}, 400)
-                d = scm / "data"
-                d.mkdir(parents=True, exist_ok=True)
-                payload = {
-                    "x_offset": int(float(body.get("x", 0) or 0)),
-                    "y_offset": int(float(body.get("y", 0) or 0)),
-                    "angle_offset": float(float(body.get("angle", 0) or 0)),
-                }
-                with open(d / "offset_data.json", "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=4)
-                return self._json({"ok": True, "offset": payload})
+                if body.get("delete"):
+                    if not size:
+                        return self._json({"ok": False, "errors": ["no paper size to remove"]}, 400)
+                    table = load_per_size_offsets()
+                    if size in table:
+                        del table[size]
+                        save_per_size_offsets(table)
+                    return self._json({"ok": True, "removed": size})
+                if size:
+                    # per-paper-size row: store it in the Workbench's own table,
+                    # then stage it into SCM's shared file so plain --load_offset
+                    # / saved-offset runs pick it up without any SCM-side change.
+                    table = load_per_size_offsets()
+                    table[size] = {"x": x, "y": y, "angle": angle}
+                    save_per_size_offsets(table)
+                    write_global_offset(scm, x, y, angle)
+                    return self._json({"ok": True, "size": size, "staged": True,
+                                       "offset": {"x_offset": x, "y_offset": y, "angle_offset": angle}})
+                write_global_offset(scm, x, y, angle)
+                return self._json({"ok": True, "offset": {"x_offset": x, "y_offset": y, "angle_offset": angle}})
+            if path == "/api/files/save":
+                body = self._body()
+                src = os.path.expanduser(str(body.get("src") or "").strip())
+                dest = os.path.expanduser(str(body.get("dest") or "").strip())
+                errors = []
+                if not src or not os.path.isfile(src):
+                    errors.append("The file to move doesn't exist (yet).")
+                if not dest:
+                    errors.append("No destination chosen.")
+                if errors:
+                    return self._json({"ok": False, "errors": errors}, 400)
+                # the source must live in a workbench-managed location; the
+                # destination is anywhere the user pointed the save panel at.
+                try:
+                    if not _inside(Path(src), allowed_roots(load_settings())):
+                        return self._json({"ok": False, "errors": ["that file isn't in a workbench-managed location"]}, 403)
+                except Exception:
+                    pass
+                dest_dir = os.path.dirname(dest)
+                if dest_dir:
+                    os.makedirs(dest_dir, exist_ok=True)
+                final, n = dest, 2
+                base, ext = os.path.splitext(dest)
+                while os.path.exists(final):
+                    final = f"{base} ({n}){ext}"
+                    n += 1
+                try:
+                    shutil.copy2(src, final)
+                    return self._json({"ok": True, "dest": final, "name": os.path.basename(final)})
+                except Exception as e:
+                    return self._json({"ok": False, "errors": [f"Could not copy the file: {e}"]}, 500)
             if path == "/api/reveal":
                 body = self._body()
                 p = Path(body.get("path", ""))
@@ -1553,7 +2124,23 @@ class Handler(BaseHTTPRequestHandler):
         if not p.is_file():
             return self._json({"error": "not found"}, 404)
         data = p.read_bytes()
-        self._send(200, data, MIME.get(p.suffix.lower(), "application/octet-stream"))
+        ctype = MIME.get(p.suffix.lower(), "application/octet-stream")
+        if rel == "index.html":
+            # Version the asset URLs (?v=<mtime>): the app window's webview keeps a
+            # persistent URL cache, and bare /ui/... paths can hand a stale
+            # theme.css/app.js to a window long after a redeploy. A new mtime on
+            # deploy = a new URL = a guaranteed cache miss, so any window that
+            # (re)loads after an update is guaranteed to see the new UI.
+            def _v(name: str) -> str:
+                try:
+                    return str(int((UI_DIR / name).stat().st_mtime))
+                except Exception:
+                    return "0"
+            text = data.decode("utf-8")
+            for name in ("theme.css", "app.js", "favicon.svg"):
+                text = text.replace(f"/ui/{name}", f"/ui/{name}?v={_v(name)}")
+            data = text.encode("utf-8")
+        self._send(200, data, ctype)
 
     def _file(self, q):
         settings = load_settings()
@@ -1744,6 +2331,18 @@ def _open_browser(url: str) -> None:
     print(f"  (Could not open a browser automatically — visit {url} manually.)")
 
 
+def start_http(host: str, port: int) -> ThreadingHTTPServer:
+    """Bind the UI server (no serve_forever — the caller runs it).
+
+    Port 0 lets the OS pick a free one (window mode, where the settings
+    port may be taken by something else).
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    srv = ThreadingHTTPServer((host, port), Handler)
+    srv.daemon_threads = True
+    return srv
+
+
 def main():
     ap = argparse.ArgumentParser(description="SCM Workbench — local UI for silhouette-card-maker + scm-extras")
     ap.add_argument("--port", type=int, default=None)
@@ -1793,9 +2392,14 @@ def main():
     sys.stdout.write(out.getvalue())
     sys.stdout.flush()
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    server = start_http(host, port)
+
+    # Record this server's pid so a future launcher can spot (and stop) an
+    # orphaned UI server left over from a previous launch.
+    try:
+        (DATA_DIR / "server.pid").write_text(str(os.getpid()), encoding="ascii")
+    except Exception:
+        pass
 
     if not args.no_browser and settings.get("auto_open_browser", True):
         threading.Timer(0.4, _open_browser, args=(browser_url,)).start()

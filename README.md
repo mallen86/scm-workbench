@@ -17,15 +17,15 @@ It wraps every script in a friendly, cross-platform interface: pick options in a
 | Page | Wraps |
 | --- | --- |
 | **Dashboard** | repo status, quick actions, layout matrix, recent jobs |
-| **Fetch card art** | all 22 game plugins (`plugins/*/fetch.py`) — decklist by file *or* pasted text, per-game formats, and the MTG plugin's 10 preference flags |
-| **Create PDF** | `create_pdf.py` — all 28 options: sizes, registration, specialty layouts, fit/crop/extend, PPI, quality, skip-indexes, labels, outlines, borderless… |
-| **Offset & calibration** | `offset_pdf.py`, `generate_calibration.py`, plus a small editor for the saved X/Y/angle offset (`data/offset_data.json`) |
+| **Fetch card art** | all 22 game plugins (`plugins/*/fetch.py`) — decklist by file, a file picked from disk with the native OS file dialog, or pasted text; per-game formats; the MTG plugin's 10 preference flags |
+| **Create PDF** | `create_pdf.py` — all 28 options: sizes, registration, specialty layouts, fit/crop/extend, PPI (defaults to 1200), quality, skip-indexes, labels, outlines, borderless… |
+| **Offset & calibration** | `offset_pdf.py`, `generate_calibration.py`, plus a per-paper-size offset table and an editor for SCM's shared X/Y/angle offset (`data/offset_data.json`) |
 | **Cutting templates** | `generate_dxf.py` — a single template (named *or* fully custom card/paper dimensions), batch (missing / all / re-optimize), and a gallery of every DXF + `.studio3` in the repo |
 | **Extras: MTG & Sorcery** | `scm-extras/generate.py`, `generate_readme_tables.py`, and the extras template gallery |
 | **Sizes & layouts** | every card/paper size as scaled silhouettes, the full cards-per-page matrix, specialty layouts |
 | **Utilities** | `clean_up.py` (with confirm), a size converter using the repo's own units, a "list all sizes" dump |
 
-Everything runs as a tracked **job**: live log stream in the bottom console drawer, stop button, "reveal folder", persistent history, and a **command preview** that shows the exact argv (and any auto-added env vars) before you run.
+Everything runs as a tracked **job**: live log stream in the bottom console drawer, stop button, "reveal folder" (for your own folders) or **"Move to my files…"** (for Workbench-managed copies — the system save dialog carries the finished PDF / calibration sheets from the app's private working area out to wherever you point it), persistent history, and a **command preview** that shows the exact argv (and any auto-added env vars) before you run.
 
 ### The magic touch: extras auto-wiring
 
@@ -112,8 +112,45 @@ python server.py [--port N] [--host 127.0.0.1] [--no-browser]
 
 ## Notes
 
-* **Offsets** — the saved X/Y/angle lives at `silhouette-card-maker/data/offset_data.json`; the Workbench's *Offset* page edits the same file the scripts read, so `--load_offset` just works.
+* **Offsets** — SCM keeps one *shared* X/Y/angle at `silhouette-card-maker/data/offset_data.json`, but the correction you need depends on the paper you feed. So the Workbench keeps a **per-paper-size table of its own** (`data/offsets_by_size.json`) and, before any run that consumes an offset (Create PDF with “Apply saved offset”, or Offset PDF with a size picked), **stages the matching row into that shared file** — the job then runs with exactly the value SCM's scripts always read, and no SCM change is needed. Saving a row from the *Offset* page stages it too; running Offset PDF with “Save” records the used values back into that row. When no row matches, the global value applies as before.
 * **Front pages only** — `create_pdf.py` refuses `--only_fronts` while `game/double_sided/` still holds images. Flipping the toggle on with images present warns you that the option won't work and offers to remove them from the folder in one click (non-images like `README.md` are left alone).
-* **Decklists** — pasted text is saved into `game/decklist/<name>` (letters, digits, spaces, `. - ( )` only).
+* **Decklists** — pasted text is saved into `game/decklist/<name>` (letters, digits, spaces, `. - ( )` only). The app's window can also pick an existing decklist from anywhere on disk via the native file dialog (Settings-independent); it's copied into `game/decklist/` automatically.
 * **Templates** — single-template generation defaults to the repo's own naming (`<paper>-<card>[-borderless]-v1.dxf`); tick *save* to register new sizes in `layouts.json`.
 * **Extras DXFs** are generated into `scm-extras/cutting_templates/` exactly like the upstream `generate.py` (SCM is located as a sister folder).
+
+## Packaging (self-contained app for macOS / Windows)
+
+The repo doubles as its own packaging definition (see `pyproject.toml`):
+
+```sh
+pip install briefcase
+briefcase build macos app      # → build/scm-workbench/macos/app/SCM Workbench.app
+briefcase build windows app    # → build/scm-workbench/windows/app/ (zip it)
+```
+
+* **Entry point** is `scm_workbench.launcher`: it pins the app's data area to a
+  writable per-user directory (`~/Library/Application Support/scm-workbench` on macOS,
+  `%LOCALAPPDATA%\scm-workbench` on Windows — overridable with `SCM_WORKBENCH_DATA`),
+  then hands over to the regular server. The dev flow (`python server.py`) is unchanged.
+* **First launch** does three things automatically (transcript in `launcher.log` in the
+  data area): it provisions a relocatable CPython runtime (GHCI python-build-standalone,
+  pinned build in `launcher.py`) for *job* scripts — the bundle's own interpreter is only
+  reachable through the app stub; it pointlessly-provisions nothing else: dependency sync
+  only `pip install`s into that runtime when `SCM_WORKBENCH_PACKAGED=1`; and it fetches the
+  newest managed copy of each sister repo (Settings → “Managed repo copies” offers the same
+  on demand, per repo: track the latest release (the default for silhouette-card-maker, so
+  unreleased changes on main can’t break a released version), the latest `main`, or any
+  pinned tag/SHA; scm-extras publishes no releases and follows its main branch).
+* **TLS** works without system configuration: `certifi` ships in the support packages and
+  the launcher points `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` at it (bundled macOS Pythons
+  can't see the OS trust store).
+* **Signing** (optional, for a friction-free first launch): macOS — an Apple Developer ID
+  plus notarization (`briefcase` passes both through once an identity is configured);
+  Windows — an OV code-signing certificate. Unsigned builds run fine after the one-time
+  Gatekeeper/SmartScreen exception.
+* `.github/workflows/package.yml` builds both platforms (and, on a `v*` tag, publishes a
+  GitHub release with the two archives).
+
+The data area holds `settings.json`, job history/logs, the per-size offset table,
+`repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to
+factory-reset. The bundle itself is never written to at runtime.

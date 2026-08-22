@@ -165,7 +165,7 @@ function pageFromPath() {
   return p in PAGES ? p : null;
 }
 
-function go(page, prefill, { push = true } = {}) {
+function go(page, prefill, { push = true, anim = true } = {}) {
   if (prefill) applyPrefill(page, prefill);
   setNav(page);
   const pageEl = $("#page");
@@ -176,7 +176,9 @@ function go(page, prefill, { push = true } = {}) {
     if (typeof content.__patch === "function") content.__patch();
   }
   iconize(pageEl);
-  pageEl.firstElementChild && pageEl.firstElementChild.classList.add("page-anim");
+  // anim: false for internal re-renders (e.g. the prep watcher) — a silent
+  // state update must not pulse the whole page like a navigation would
+  if (anim && pageEl.firstElementChild) pageEl.firstElementChild.classList.add("page-anim");
   $(".page-scroll").scrollTop = 0;
   if (push) {
     const path = page === "dashboard" ? "/" : "/" + page;
@@ -221,6 +223,24 @@ function setTheme(theme) {
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === theme));
 }
 
+/* show commands the way a user would run them: a bare "python" interpreter
+   (never the app's private one by absolute path) and repo-relative script
+   paths. Real paths stay in job.cmd for the engine. */
+const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function repoRowForKind(kind) {
+  const key = kind.startsWith("extras_") ? "extras" : "scm";
+  return (S.info?.repos || []).find(r => r.key === key) || null;
+}
+function displayCmd(cmd, kind) {
+  if (!cmd) return "";
+  let out = cmd;
+  const py = S.info?.server?.python_path;
+  if (py) out = out.replace(new RegExp("^[\"']?" + escRe(py) + "[\"']?\\s+"), "python ");
+  const row = repoRowForKind(kind);
+  if (row && row.path) out = out.split(row.path + "/").join("");
+  return out;
+}
+
 /* ============================== form system =============================== */
 /* Forms are rendered from the server manifest; values live in S.forms[kind]. */
 
@@ -260,14 +280,17 @@ function renderPreview(box, d) {
   const head = el("div", { class: "cb-head" },
     el("span", { class: "t" }, ico("terminal"), "Command preview"),
   );
-  const btn = el("button", { class: "cb-copy", onclick: () => { if (d.cmd) navigator.clipboard?.writeText(d.cmd).then(() => toast("ok", "Copied to clipboard")); } }, ico("copy"), "Copy");
+  const kind = box.dataset.kind;
+  const btn = el("button", { class: "cb-copy", onclick: () => { if (d.cmd) navigator.clipboard?.writeText(displayCmd(d.cmd, kind)).then(() => toast("ok", "Copied to clipboard")); } }, ico("copy"), "Copy");
   head.append(btn);
   box.append(head);
+  const pRow = repoRowForKind(kind);
   if (!d.cmd) {
     box.append(el("pre", { class: "dim" }, "— incomplete —"));
   } else {
-    box.append(el("pre", {}, d.cmd));
-    if (d.cwd) box.append(el("pre", { class: "cb-cmt" }, el("span", { class: "p-cmt" }, `# cwd: ${d.cwd}`)));
+    box.append(el("pre", {}, displayCmd(d.cmd, kind)));
+    // a managed copy lives inside the app — no point printing where
+    if (d.cwd && !(pRow && pRow.mode === "managed")) box.append(el("pre", { class: "cb-cmt" }, el("span", { class: "p-cmt" }, `# cwd: ${d.cwd}`)));
   }
   for (const n of d.warnings || []) box.append(el("div", { class: "note warn" }, "⚠ ", n));
   for (const e of d.errors || []) box.append(el("div", { class: "note err" }, "✕ ", e));
@@ -362,15 +385,16 @@ function renderOption(o, args, kind) {
       break;
     }
     case "toggle": {
+      // same field grammar as every other control: small label on top,
+      // the switch below it. Clicking the label toggles too (via `for`).
       const sw = el("span", { class: "switch" },
-        el("input", { type: "checkbox", checked: !!args[o.key] }),
+        el("input", { type: "checkbox", id: `sw-${o.key}`, checked: !!args[o.key] }),
         el("span", { class: "track" }),
         el("span", { class: "knob" }),
       );
       $("input", sw).addEventListener("change", e => { args[o.key] = e.target.checked; afterFormChange(kind); o.onChange && o.onChange(e.target.checked); });
-      // a <label> row: clicking the text OR the switch toggles the checkbox
-      wrap.append(el("label", { class: "switchrow" }, sw,
-        el("span", { class: "sl" }, el("div", { class: "t" }, o.label), o.help ? el("div", { class: "d" }, o.help) : null)));
+      label.setAttribute("for", `sw-${o.key}`);
+      wrap.append(label, sw);
       break;
     }
     case "chips": {
@@ -425,7 +449,12 @@ function renderOption(o, args, kind) {
       wrap.append(label, i);
     }
   }
-  if (o.help && o.type !== "toggle") wrap.append(el("span", { class: "help" }, o.help));
+  if (o.type === "path" && (o.key === "output_path" || o.key === "output_pdf_path")) {
+    const row = repoRowForKind(kind);
+    if (row && row.mode === "managed") wrap.append(el("span", { class: "help" },
+      "Kept in the app's working area — after the run, use the console's “Move to my files…” to bring the result out to your own files."));
+  }
+  if (o.help) wrap.append(el("span", { class: "help" }, o.help));
   return wrap;
 }
 function strVal(v) { return v === null || v === undefined ? "" : String(v); }
@@ -480,6 +509,15 @@ function formCard(kind, opts = {}) {
     runBtn.onclick = () => doRun(kind, runBtn);
     const note = el("span", { class: "rb-note" }, "Runs in the background — watch the job console below.");
     card.append(el("div", { class: "runbar" }, note, runBtn));
+    const missing = (S.manifest[kind] ? S.manifest[kind].needs || [] : []).filter(k => !repoReady(k));
+    if (missing.length) {
+      runBtn.disabled = true;
+      runBtn.classList.add("wait");
+      runBtn.innerHTML = "";
+      runBtn.append(ico("refresh"), "Waiting for " + missing.join(" + ") + "…");
+      card.append(el("div", { class: "prep-note" },
+        "This page needs “" + missing.join("”, “") + "” — the button unlocks as soon as the preparation above finishes."));
+    }
   }
   return card;
 }
@@ -498,8 +536,16 @@ function groupInner(g, kind, args) {
 async function doRun(kind, btn, opts = {}) {
   if (!S.info || S.manifest[kind]) {
     for (const need of S.manifest[kind].needs || []) {
-      if (need === "scm" && !S.info.scm.found) return toast("err", "SCM repo not found — open Settings and point it at your silhouette-card-maker folder.");
-      if (need === "extras" && !S.info.extras.found) return toast("err", "scm-extras repo not found — open Settings and point it at your scm-extras folder.");
+      if (need === "scm" && !S.info.scm.found) {
+        return toast("err", (S.info.server.is_packaged && !repoReady("scm"))
+          ? "silhouette-card-maker is still being prepared — the button unlocks when it's done."
+          : "SCM repo not found — open Settings and point it at your silhouette-card-maker folder.");
+      }
+      if (need === "extras" && !S.info.extras.found) {
+        return toast("err", (S.info.server.is_packaged && !repoReady("extras"))
+          ? "scm-extras is still being prepared — the button unlocks when it's done."
+          : "scm-extras repo not found — open Settings and point it at your scm-extras folder.");
+      }
     }
   }
   if (opts.confirm) {
@@ -510,7 +556,7 @@ async function doRun(kind, btn, opts = {}) {
   try {
     const r = await fetch("/api/jobs", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, args: S.forms[kind] }),
+      body: JSON.stringify({ kind, args: opts.args !== undefined ? opts.args : S.forms[kind] }),
     });
     const j = await r.json();
     if (!j.ok) {
@@ -520,21 +566,31 @@ async function doRun(kind, btn, opts = {}) {
       toast("ok", `${j.job.title} — job started`);
       refreshJobs();
       openConsole(j.job.id);
-      if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up") {
+      if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
         setTimeout(() => refreshInfo(), 2500);
       }
       if (kind.startsWith("fetch:")) {
         // keep the user's form state (pasted decklists etc.) alive
         setTimeout(() => refreshInfo({ keepForms: true }), 2500);
       }
+      return j.job;
     }
+    return null;
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
   }
 }
 
+let _lastJobsSig;
+
 async function refreshJobs() {
-  S.jobs = (await api("/api/jobs")).jobs;
+  const next = (await api("/api/jobs")).jobs;
+  // Redraw only when the job set actually changed (new job, status flip) —
+  // the 4 s poll must not repaint an unchanged list (no blink).
+  const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
+  if (sig === _lastJobsSig) { S.jobs = next; setRevealButtons(); return; }
+  _lastJobsSig = sig;
+  S.jobs = next;
   updateBadge();
   renderConsoleTabs();
   if (S.page === "dashboard") {
@@ -555,7 +611,7 @@ function jobRow(j) {
     el("div", { class: "jr-ico" }, ico("terminal")),
     el("div", { class: "jr-body" },
       el("div", { class: "jr-t" }, j.title),
-      el("div", { class: "jr-cmd" }, j.cmd || ""),
+      el("div", { class: "jr-cmd" }, displayCmd(j.cmd, j.kind) || ""),
     ),
     el("div", { class: "jr-meta" },
       el("div", { class: `statusdot ${j.status}` }, j.status),
@@ -607,6 +663,7 @@ function renderConsoleTabs() {
     ));
   }
   $("#console-kill").disabled = S.activeJobId?.[0] && !(S.jobs.find(j => j.id === S.activeJobId)?.status === "running");
+  setRevealButtons();
   updateFooter();
 }
 
@@ -685,11 +742,23 @@ function updateFooter() {
     job.exit_code != null ? el("span", { class: "mono" }, `exit ${job.exit_code}`) : null,
     el("span", { class: "mono" }, fmtTs(job.ts)),
     el("span", { class: "grow" }),
-    el("span", { class: "mono", title: job.cmd }, truncate(job.cmd, 90)),
-    el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
-      const r = await api("/api/reveal", { path: cwdOf(job) });
-      if (r.ok) toast("ok", "Opened folder in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal folder");
-    } }, ico("folder"), "Reveal folder"),
+    (() => { const dc = displayCmd(job.cmd, job.kind); return el("span", { class: "mono", title: dc }, truncate(dc, 90)); })(),
+    (() => {
+      const row = repoRowForKind(job.kind);
+      const managed = row && row.mode === "managed";
+      const left = (job.outputs || []).filter(Boolean).length;
+      if (job.status === "ok" && managed && left)
+        return el("button", { class: "btn btn-ghost btn-sm", title: "Copy the output to a folder of your choice (system save dialog).",
+          onclick: () => moveJobToMyFiles(job) }, ico("folder"), left > 1 ? `Move to my files… (${left})` : "Move to my files…");
+      if (managed)
+        return el("button", { class: "btn btn-ghost btn-sm", disabled: "",
+          title: "The output stays in the app's private working area; when the run is done you can move it out." },
+          ico("folder"), "In the app area");
+      return el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
+        const r = await api("/api/reveal", { path: cwdOf(job) });
+        if (r.ok) toast("ok", "Opened folder in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal folder");
+      } }, ico("folder"), "Reveal folder");
+    })(),
     el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") api(`/api/jobs/${job.id}/kill`).then(() => toast("warn", "Stopping…")); } }, ico("stop"), "Stop"),
   );
 }
@@ -704,6 +773,58 @@ function cwdOf(job) {
   return scm || "";
 }
 function truncate(s, n) { return s && s.length > n ? "…" + s.slice(-n + 1) : s; }
+
+/* “Move to my files…” — a managed run's artifacts (the create/offset PDFs,
+   the calibration sheets) live in the app's private working area, so the
+   console offers to carry them out through the native OS save panel.
+   App window only: in a plain browser the save dialog doesn't exist. */
+function moveJobToMyFiles(job) {
+  const outs = (job.outputs || []).filter(Boolean);
+  if (!outs.length) return;
+  const bridge = window.pywebview && window.pywebview.api;
+  if (!bridge || !bridge.pick_save) {
+    toast("warn", "“Move to my files…” needs the app window — it opens the system save dialog.");
+    return;
+  }
+  const next = outs[0];
+  bridge.pick_save(next.split("/").pop()).then(dest => {
+    if (!dest) return; // cancelled
+    api("/api/files/save", { src: next, dest })
+      .then(r => {
+        if (r.ok) {
+          toast("ok", `Saved “${r.name}” to your chosen location.`);
+          job.outputs = outs.slice(1);
+          setRevealButtons();
+        } else toast("warn", (r.errors && r.errors[0]) || "Could not save the file.");
+      })
+      .catch(() => toast("warn", "Could not save the file."));
+  }).catch(() => {});
+}
+
+function setRevealButtons() {
+  const job = S.jobs.find(j => j.id === S.activeJobId);
+  const btn = $("#console-reveal");
+  if (!job || !btn) return;
+  const row = repoRowForKind(job.kind);
+  const managed = row && row.mode === "managed";
+  const left = (job.outputs || []).filter(Boolean).length;
+  const movable = job.status === "ok" && managed && left;
+  btn.innerHTML = "";
+  btn.append(ico("folder"));
+  if (movable) {
+    btn.append(left > 1 ? `Move to my files… (${left})` : "Move to my files…");
+    btn.title = "Copy this run's output to a folder of your choice (system save dialog).";
+    btn.disabled = false;
+  } else if (managed) {
+    btn.append("In the app area");
+    btn.title = "This run's files stay in the app's private working area; once the run is done, “Move to my files…” brings them out.";
+    btn.disabled = true;
+  } else {
+    btn.append("Reveal");
+    btn.title = "Reveal output location";
+    btn.disabled = false;
+  }
+}
 
 /* bind console buttons (once) */
 function bindConsole() {
@@ -721,6 +842,11 @@ function bindConsole() {
   $("#console-reveal").onclick = async () => {
     const job = S.jobs.find(j => j.id === S.activeJobId);
     if (!job) return;
+    const row = repoRowForKind(job.kind);
+    if (job.status === "ok" && row && row.mode === "managed" && (job.outputs || []).length) {
+      moveJobToMyFiles(job);
+      return;
+    }
     const r = await api("/api/reveal", { path: cwdOf(job) });
     if (r.ok) toast("ok", "Opened in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal");
   };
@@ -736,11 +862,168 @@ function bindConsole() {
 
 /* ================================ dashboard ================================ */
 
+/* ---------------- repo prep state (first clone + updates) ------------------ */
+const STAGE_NAMES = {
+  download: "downloading the newest snapshot",
+  extract: "unpacking the files",
+  fingerprint: "fingerprinting the files",
+  update: "updating the changed files",
+  apply: "applying the changes",
+};
+
+function repoPrepRow(key) {
+  return (S.info.repos || []).find(r => r.key === key) || null;
+}
+
+// A repo gates the pages that need it while it is unusable: not deployed yet
+// (first clone still going) or a clone/update currently in flight.
+function repoReady(key) {
+  const row = repoPrepRow(key);
+  if (!row) return true;
+  if (row.progress) return false;
+  if (row.deployed) return true;
+  return key === "scm" ? !!S.info.scm.found : !!S.info.extras.found;
+}
+
+function prepActive() {
+  if (!S.info || !S.info.server.is_packaged) return false;
+  if (S.info.server.active) return true;
+  return (S.info.repos || []).some(r => !r.deployed || r.progress);
+}
+
+// Structural identity: only the card's VISIBILITY is structural ("busy" =
+// something on screen, "done" = card must go). Row appearance, stage flips,
+// counters and speed are all patched in place — the bars never leave, so the
+// page never re-renders (or animates) while a download is in flight.
+function prepSignature() {
+  if (!S.info) return "boot";
+  const repos = S.info.repos || [];
+  const active = S.info.server.active ? 1 : 0;
+  const cardShown = active
+    ? repos.some(r => !r.deployed)
+    : repos.some(r => r.progress);
+  return cardShown ? "busy" : "done";
+}
+
+function fmtRate(bps) {
+  if (!bps) return "";
+  if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s";
+  return Math.round(bps / 1e3) + " KB/s";
+}
+
+function fmtEta(sec) {
+  if (!sec) return "";
+  if (sec >= 60) return "~" + Math.round(sec / 60) + " min left";
+  return "~" + sec + "s left";
+}
+
+// "412/564 MB (73%)  ·  6.4 MB/s  ·  ~24s left" — the numbers line per repo
+function prepMeta(r) {
+  const p = r.progress || {};
+  const bits = [];
+  if (p.total >= 1000) {
+    const doneMB = (p.done || 0) / 1e6, totalMB = p.total / 1e6;
+    const pct = Math.min(100, Math.round(100 * (p.done || 0) / p.total));
+    bits.push((totalMB >= 10 ? Math.round(doneMB) : doneMB.toFixed(1)) + "/" +
+               (totalMB >= 10 ? Math.round(totalMB) : totalMB.toFixed(1)) + " MB (" + pct + "%)");
+    if ((p.stage === "download" || p.stage === "apply") && p.speed) bits.push(fmtRate(p.speed));
+    if ((p.stage === "download" || p.stage === "apply") && p.eta) bits.push(fmtEta(p.eta));
+  } else if (p.total > 0) {
+    bits.push(Math.round(100 * (p.done || 0) / p.total) + "%");
+  } else if (p.done) {
+    // total unknown (chunked download): still show how much has arrived
+    bits.push(Math.round((p.done / 1e6) * 10) / 10 + " MB received");
+    if ((p.stage === "download" || p.stage === "apply") && p.speed) bits.push(fmtRate(p.speed));
+  }
+  return bits.join("  ·  ");
+}
+
+// S.prows: per-repo handles into the on-screen bar rows (in-place patching).
+function ensurePrepRows(rows, container) {
+  S.prows = S.prows || {};
+  for (const r of rows) {
+    if (S.prows[r.key] && S.prows[r.key].isConnected) continue;  // a page re-render replaced the strip — rebuild the row
+    const row = el("div", { class: "rp-row" });
+    row.append(
+      el("div", { class: "rp-label" }),
+      el("div", { class: "rp-meta mono" }),
+      el("div", { class: "rp-bar" }, el("div", { class: "rp-fill" })));
+    container.append(row);
+    S.prows[r.key] = row;
+  }
+  const keys = new Set(rows.map(r => r.key));
+  for (const k of Object.keys(S.prows)) if (!keys.has(k)) { S.prows[k].remove(); delete S.prows[k]; }
+}
+
+function updatePrepRows() {
+  const container = $("#repoprog");
+  if (!container) return;
+  const rows = (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
+  ensurePrepRows(rows, container);
+  for (const r of rows) {
+    const row = S.prows[r.key];
+    if (!row) continue;
+    const p = r.progress || {};
+    const det = p.total > 0;
+    const pct = det ? Math.min(100, Math.round(100 * (p.done || 0) / p.total)) : 0;
+    row.children[0].textContent = r.name + "  —  " + (STAGE_NAMES[p.stage] || p.stage || "working");
+    row.children[1].textContent = prepMeta(r);
+    const bar = row.children[2], fill = bar.firstElementChild;
+    bar.classList.toggle("indet", !det);
+    if (det) fill.style.width = pct + "%";
+  }
+}
+
+let _prepTimer = null;
+function stopPrepWatcher() {
+  if (_prepTimer) clearTimeout(_prepTimer);
+  _prepTimer = null;
+}
+
+// While any repo is still being prepared, poll /api/info: counters patch the
+// bars in place; only a structural change (stage flip, repo ready) re-renders
+// the page — which is what unlocks the waiting run buttons.
+function startPrepWatcher() {
+  stopPrepWatcher();
+  const tick = async () => {
+    if (!prepActive()) { _prepTimer = null; return; }
+    const before = prepSignature();
+    _prepTimer = setTimeout(tick, 2500);
+    try {
+      await refreshInfo({ keepForms: true, jobs: false });
+      const now = prepSignature();
+      if (now !== before) {
+        if (now === "done") toast("ok", "Your repos are ready — every page is live.");
+        go(S.page || "dashboard", null, { push: false, anim: false });
+      } else {
+        updatePrepRows();
+      }
+    } catch (e) { /* server briefly busy — the next tick retries */ }
+  };
+  if (prepActive()) tick();
+}
+
 PAGES.dashboard = (root) => {
   const wrap = el("div", {});
   const s = S.info.settings;
 
-  if (!S.info.scm.found) {
+    // Live repo-prep status: a bar per busy repo (first clone / update). The
+  // global watcher (startPrepWatcher) re-renders this page as the bars move
+  // and unlocks the run buttons the moment a repo is ready.
+  const busy = (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
+  if (busy.length) {
+    wrap.append(el("div", { class: "card prep-card" },
+      el("div", { class: "card-head" },
+        el("div", { class: "card-ico" }, ico("refresh")),
+        el("div", { class: "grow" },
+          el("h2", {}, "Preparing your repos"),
+          el("p", {}, "First-launch setup runs in the background. The bars below track it live — buttons that need a repo stay disabled until it's ready, then unlock by themselves.")),
+      ),
+      el("div", { class: "repoprog", id: "repoprog" })));
+    updatePrepRows();
+  }
+
+  if (connectCardNeeded()) {
     wrap.append(repoSetupCard());
   } else if (!s.onboarded) {
     wrap.append(onboardCard());
@@ -782,12 +1065,31 @@ function onboardCard() {
   );
 }
 
+// The connect card appears only when the user has to act: the repo is not
+// found AND the app isn't auto-fetching its own managed copy (packaged
+// prep). While a managed clone/update is in flight the "Preparing" card is
+// the single source of truth; a custom folder can always be pointed in via
+// Settings > Repos afterwards.
+function connectCardNeeded() {
+  if (!S.info) return true;
+  if (S.info.scm.found) return false;
+  // hidden only while the app is actively preparing (bootstrap flag set) —
+  // a failed/stopped prep must still show the card so a folder can be pointed in
+  if (S.info.server.is_packaged && S.info.server.active) return false;
+  return true;
+}
+
 function repoSetupCard() {
   const wrap = el("div", { class: "card" });
   wrap.append(
     el("div", { class: "card-head" },
       el("div", { class: "card-ico" }, ico("folder")),
-      el("div", { class: "grow" }, el("h2", {}, "Connect your repos"), el("p", {}, "The Workbench needs to find silhouette-card-maker. It was not found next to this project — paste the folder paths below.")),
+      el("div", { class: "grow" },
+        el("h2", {}, "Connect your repos"),
+        el("p", {}, S.info.server.is_packaged && prepActive()
+          ? "Your own managed copies of both repos are being downloaded — the pages connect themselves the moment each one is ready. Pasting a path below (a folder you already have) takes priority instead."
+          : "The Workbench needs to find silhouette-card-maker. It was not found next to this project — paste the folder paths below."),
+      ),
     ),
   );
   const row = el("div", { class: "frow" });
@@ -812,6 +1114,12 @@ function repoSetupCard() {
 
 function statusGrid() {
   const i = S.info, s = i.scm, ex = i.extras, sv = i.server;
+  const repos = i.repos || [];
+  const rr = k => repos.find(r => r.key === k);
+  const rS = rr("scm"), rE = rr("extras");
+  const dTag = (r, base, detail) => (r && r.mode === "managed" && r.deployed)
+    ? `managed copy · ${r.deployed.ref}${detail ? " · " + detail : ""}`
+    : (detail ? `${base} — ${detail}` : base);
   const grid = el("div", { class: "status-grid" });
   const card = (icoName, cls, title, desc, dot) => {
     const c = el("div", { class: "statuscard" },
@@ -822,14 +1130,18 @@ function statusGrid() {
       ));
     grid.append(c);
   };
-  card("terminal", "--ok", `Python ${sv.python}`, sv.python_path, "ok");
-  card("card", s.found ? "--ok" : "--err", s.found ? `silhouette-card-maker v${s.version || "?"}` : "silhouette-card-maker", s.found ? s.path : "not connected", s.found ? "ok" : "");
-  card("sparkle", ex.found ? "--info" : "--warn", ex.found ? "scm-extras" : "scm-extras (optional)", ex.found ? `${ex.path} — ${ex.card_sizes.length} extra sizes` : "not connected — MTG/Sorcery extras unavailable", ex.found ? "ok" : "");
+  card("terminal", "--ok", `Python ${sv.python}`, (i.server.is_packaged && sv.python_path) ? "private runtime inside the app" : sv.python_path, "ok");
+  const preparing = i.server.is_packaged && prepActive();
+  card("card", s.found ? "--ok" : "--err", s.found ? `silhouette-card-maker v${s.version || "?"}` : "silhouette-card-maker", s.found ? dTag(rS, s.path) : (preparing ? "preparing — managed copy in progress" : "not connected"), s.found ? "ok" : "");
+  card("sparkle", ex.found ? "--info" : "--warn", ex.found ? "scm-extras" : "scm-extras (optional)", ex.found ? dTag(rE, ex.path, `${ex.card_sizes.length} extra sizes`) : (preparing ? "preparing — managed copy in progress" : "not connected — MTG/Sorcery extras unavailable"), ex.found ? "ok" : "");
   card("scissors", "--accent", "Cutting templates",
     `${s.templates.dxf.length + s.templates.borderless_dxf.length} DXF · ${s.templates.studio3.length + s.templates.borderless_studio3.length} studio3${ex.found ? ` · extras: ${ex.templates.dxf.length + ex.templates.borderless_dxf.length} DXF, ${ex.templates.studio3.length + ex.templates.borderless_studio3.length} studio3` : ""}`, "ok");
   card("target", "--info", "Calibration sheets", `${s.calibration.length} PDF${s.calibration.length === 1 ? "" : "s"} in calibration/`, "ok");
-  card("copy", s.saved_offset ? "--accent" : "--warn", "Saved offset",
-    s.saved_offset ? `x ${s.saved_offset.x} · y ${s.saved_offset.y} · ${s.saved_offset.angle}°` : "none saved yet", s.saved_offset ? "ok" : "");
+  const nPso = Object.keys(S.info.per_size_offsets || {}).length;
+  card("copy", (s.saved_offset || nPso) ? "--accent" : "--warn", "Saved offset",
+    (s.saved_offset ? `x ${s.saved_offset.x} · y ${s.saved_offset.y} · ${s.saved_offset.angle}°` : "none saved yet")
+      + (nPso ? ` · ${nPso} per-size row${nPso === 1 ? "" : "s"}` : ""),
+    (s.saved_offset || nPso) ? "ok" : "");
   return grid;
 }
 
@@ -843,6 +1155,8 @@ function quickActions() {
   qa("scissors", "Generate DXF templates", "Create a cutting template for any card × paper size", () => go("templates"));
   qa("target", "Calibration sheets", "Print alignment sheets to measure printer drift", () => go("offset"));
   qa("trash", "Start fresh", "Clear the front / double-sided image folders", () => go("utilities"));
+  const due = (S.info.repos || []).filter(r => r.mode === "managed" && r.last_check && r.last_check.checked && r.last_check.checked.ok && !r.last_check.checked.up_to_date);
+  if (due.length) qa("refresh", "Repo updates available", due.map(r => `${r.name} → ${r.last_check.checked.target.ref}`).join(" · "), () => go("settings"));
   return g;
 }
 
@@ -982,7 +1296,7 @@ function mm(sizeStr) {
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Fetch card art", "Pick a game, give it a decklist (existing file or pasted text) and a format. The plugin downloads the card images into game/front/ (and game/double_sided/ where applicable) — ready for the PDF step."));
+  wrap.append(pageHead("Fetch card art", "Pick a game, give it a decklist (from the list, a file you browse to on disk, or pasted text) and a format. The plugin downloads the card images into game/front/ (and game/double_sided/ where applicable) — ready for the PDF step."));
   const picker = el("div", { class: "card" },
     el("div", { class: "card-head" },
       el("div", { class: "card-ico" }, ico("download")),
@@ -1027,21 +1341,68 @@ function patchFetchForm(kind) {
   const urlF = $$(".field", card).find(f => f.dataset.key === "deck_url");
   if (fileF) {
     fileF.innerHTML = "";
-    fileF.append(el("label", {}, "Decklist file ", el("span", { class: "req" }, "*")));
-    const list = el("div", { class: "filepick" });
-    if (!files.length) list.append(el("div", { class: "small faint" }, "No decklist files in game/decklist/ yet — use “Paste text” to create one."));
-    for (const f of files) {
-      list.append(el("div", {
-        class: `fp-item ${args.deck_file === f.name ? "active" : ""}`,
-        onclick: (ev) => {
-          args.deck_file = f.name;
-          $$(".fp-item", list).forEach(n => n.classList.remove("active"));
-          ev.currentTarget.classList.add("active");
-          autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
-          afterFormChange(kind);
+    const label = el("label", { class: "fp-label" }, "Decklist file ", el("span", { class: "req" }, "*"));
+    // In the app's own window we can open the native OS file chooser; in a
+    // browser (dev mode) the button doesn't exist and the folder list is it.
+    const canPick = !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file);
+    if (canPick) {
+      const browse = el("button", {
+        class: "btn btn-ghost btn-sm", type: "button",
+        title: "Pick any file on disk — it's copied into game/decklist/ and appears in the list",
+        onclick: async () => {
+          browse.disabled = true;
+          let picked = null;
+          try {
+            picked = await window.pywebview.api.pick_file();
+          } catch (e) {
+            browse.disabled = false;
+            toast("warn", "The file picker didn't open — paste the decklist text instead.");
+            return;
+          }
+          browse.disabled = false;
+          if (!picked) return; // cancelled in the panel
+          let r;
+          try {
+            r = await api("/api/decklists/import", { path: picked });
+          } catch (e) {
+            toast("err", e.message);
+            return;
+          }
+          if (r.ok) {
+            S.info.scm.decklists = r.decklists;
+            args.deck_file = r.name;
+            fillList();
+            autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
+            afterFormChange(kind);
+            toast("ok", `Imported “${r.name}” into the decklist folder`);
+          } else {
+            toast("err", (r.errors || [])[0] || "Importing the file failed.");
+          }
         },
-      }, ico("file"), f.name, el("span", { class: "sz" }, fmtBytes(f.size))));
+      }, ico("folder"), "Browse…");
+      label.append(browse);
     }
+    fileF.append(label);
+    const list = el("div", { class: "filepick" });
+    const fillList = () => {
+      const fl = S.info.scm.decklists || [];
+      list.innerHTML = "";
+      if (!fl.length) list.append(el("div", { class: "small faint" },
+        "No decklist files in game/decklist/ yet — use “Paste text” to create one" + (canPick ? ", or pick an existing file with Browse…" : "")));
+      for (const f of fl) {
+        list.append(el("div", {
+          class: `fp-item ${args.deck_file === f.name ? "active" : ""}`,
+          onclick: (ev) => {
+            args.deck_file = f.name;
+            $$(".fp-item", list).forEach(n => n.classList.remove("active"));
+            ev.currentTarget.classList.add("active");
+            autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
+            afterFormChange(kind);
+          },
+        }, ico("file"), f.name, el("span", { class: "sz" }, fmtBytes(f.size))));
+      }
+    };
+    fillList();
     fileF.append(list);
   }
   // if there's nothing to pick from, start in "paste" mode — before the UI syncs
@@ -1084,13 +1445,22 @@ function patchFetchForm(kind) {
 PAGES.pdf = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Create PDF", "Lays out the images in your game/ folders into a print-ready PDF with registration marks. Every option from create_pdf.py is available below — the command preview shows exactly what will run."));
-  if (!S.info.scm.found) wrap.append(repoSetupCard());
+  if (connectCardNeeded()) wrap.append(repoSetupCard());
   wrap.append(formCard("create_pdf", { icon: "pdf" }));
-  if (S.info.scm.saved_offset) {
-    const o = S.info.scm.saved_offset;
-    wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
-      el("span", { class: "grow" }, `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” below when ready.`),
-      el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")));
+  {  // offset banner — per-size row wins over the global value for this form's paper
+    const form = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
+    const paper = paperForCreatePdf(form);
+    const row = (S.info.per_size_offsets || {})[paper];
+    const g = S.info.scm.saved_offset;
+    if (row || g) {
+      const o = row || g;
+      const txt = row
+        ? `Per-size offset for “${paper}” is saved: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b> — applied automatically whenever “Apply saved offset” is on.`
+        : `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” below when ready.`;
+      wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
+        el("span", { class: "grow", html: txt }),
+        el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")));
+    }
   }
   wrap.__patch = () => patchPdfForm("create_pdf");  // must run once the card is in the document
   return wrap;
@@ -1158,16 +1528,16 @@ function patchPdfForm(kind) {
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Offset & calibration", "Printer misalignment is the #1 cause of cards that don't line up. Generate a calibration sheet, measure the drift, save an offset, and apply it to your PDF before cutting."));
-  if (!S.info.scm.found) wrap.append(repoSetupCard());
+  wrap.append(pageHead("Offset & calibration", "Printer misalignment is the #1 cause of cards that don't line up. The correction depends on the paper you feed, so you can store one offset per paper size — Create PDF picks the matching row automatically. Generate a calibration sheet, measure the drift, and save the values below."));
+  if (connectCardNeeded()) wrap.append(repoSetupCard());
   prefillOffsetForm();
 
-  // saved offset card
+  // global (shared) offset card — SCM's own single value
   const so = S.info.scm.saved_offset;
   const sc = el("div", { class: "card" });
   sc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("target")),
-    el("div", { class: "grow" }, el("h2", {}, "Saved printer offset"), el("p", {}, so ? "Currently stored in the repo at data/offset_data.json — used by create_pdf --load_offset and offset_pdf." : "Nothing saved yet. Measure with a calibration sheet, then store the values here."))));
+    el("div", { class: "grow" }, el("h2", {}, "Saved printer offset (global)"), el("p", {}, so ? "The single shared value in data/offset_data.json — what SCM applies when no per-size row matches. Per-paper-size rows live below; saving one of them also updates this file." : "Nothing saved yet. Measure with a calibration sheet, then store the values here or in a per-size row below."))));
   const xI = el("input", { class: "input mono", type: "number", value: so ? so.x : 0 });
   const yI = el("input", { class: "input mono", type: "number", value: so ? so.y : 0 });
   const aI = el("input", { class: "input mono", type: "number", step: 0.1, value: so ? so.angle : 0 });
@@ -1178,12 +1548,14 @@ PAGES.offset = (root) => {
     el("div", { class: "field w-quarter" }, el("label", {}, "&nbsp;"), el("div", {},
       el("button", { class: "btn primary", onclick: async () => {
         const r = await api("/api/offset", { x: xI.value, y: yI.value, angle: aI.value });
-        if (r.ok) { toast("ok", "Offset saved — create_pdf can now apply it."); await refreshInfo(); go("offset"); }
+        if (r.ok) { toast("ok", "Global offset saved — create_pdf can now apply it."); await refreshInfo(); go("offset"); }
       } }, ico("check"), "Save"),
       el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "zero"),
     )),
   ));
   wrap.append(sc);
+
+  wrap.append(offsetsBySizeCard());
 
   wrap.append(formCard("offset_pdf", { icon: "target" }));
 
@@ -1202,17 +1574,111 @@ PAGES.offset = (root) => {
   if (!S.info.scm.calibration.length) grid.append(el("div", { class: "empty" }, "No calibration PDFs found."));
   cal.append(grid);
   wrap.append(cal);
+  wrap.__patch = () => patchOffsetForm();
   return wrap;
 };
 
+/* Per-paper-size offset table: the row for the paper you feed, kept in the
+   Workbench's own data/ and staged into SCM's shared offset file on save. */
+function offsetsBySizeCard() {
+  const pso = S.info.per_size_offsets || {};
+  const sizes = S.info.scm.paper_sizes || [];
+  const c = el("div", { class: "card" });
+  c.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("ruler")),
+    el("div", { class: "grow" }, el("h2", {}, "Offsets by paper size"),
+      el("p", {}, "Printer drift depends on the paper you feed, so different sizes often need different corrections. Store one row per size — “Create PDF” with “Apply saved offset” picks the matching row automatically, and saving a row also stages it into SCM's shared offset file."))));
+  const sel = el("select", { class: "input" });
+  if (!sizes.length) sel.append(el("option", { value: "" }, "no paper sizes known"));
+  for (const p of sizes) sel.append(el("option", { value: p.name }, `${p.name} — ${p.width || "?"} × ${p.height || "?"}`));
+  const xI = el("input", { class: "input mono", type: "number", value: 0 });
+  const yI = el("input", { class: "input mono", type: "number", value: 0 });
+  const aI = el("input", { class: "input mono", type: "number", step: 0.1, value: 0 });
+  c.append(el("div", { class: "frow" },
+    el("div", { class: "field w-third" }, el("label", {}, "Paper size"), sel),
+    el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), xI),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), yI),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), aI),
+    el("div", { class: "field w-quarter" }, el("label", {}, "&nbsp;"),
+      el("div", {},
+        el("button", { class: "btn primary", onclick: async () => {
+          if (!sel.value) return toast("err", "Pick a paper size first.");
+          const r = await api("/api/offset", { size: sel.value, x: xI.value, y: yI.value, angle: aI.value });
+          if (r.ok) { toast("ok", `Saved for “${sel.value}” — staged into SCM's shared file and applied automatically to that paper.`); await refreshInfo(); go("offset"); }
+        } }, ico("check"), "Save for this size"),
+        el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "zero"),
+      )),
+  ));
+  const rows = el("div", { class: "pso-rows" });
+  const list = Object.entries(pso);
+  if (!list.length) rows.append(el("div", { class: "empty" }, ico("target"), "No per-size rows yet — measure the drift on a calibration sheet and save the first row above."));
+  for (const [size, o] of list) {
+    const p = sizes.find(s => s.name === size);
+    rows.append(el("div", { class: "pso-row" },
+      el("span", { class: "pso-size" }, size, p ? el("span", { class: "faint" }, ` ${p.width || "?"} × ${p.height || "?"}`) : null),
+      el("span", { class: "mono" }, `x ${o.x} · y ${o.y} · ${o.angle}°`),
+      el("span", { class: "pso-actions" },
+        el("button", { class: "btn sm", onclick: () => { sel.value = size; xI.value = o.x; yI.value = o.y; aI.value = o.angle; } }, "load"),
+        el("button", { class: "btn sm btn-ghost", onclick: async () => {
+          const r = await api("/api/offset", { size, delete: true });
+          if (r.ok) { toast("ok", `Removed the “${size}” row.`); await refreshInfo(); go("offset"); }
+        } }, "delete"),
+      ),
+    ));
+  }
+  c.append(rows);
+  return c;
+}
+
+/* The offset_pdf form: which row do the blank fields fall back to? */
+function offsetSourceFor(size) {
+  if (size) {
+    const e = (S.info.per_size_offsets || {})[size];
+    if (e) return e;
+  }
+  return S.info.scm.saved_offset || null;
+}
+
 function prefillOffsetForm() {
   const args = S.forms.offset_pdf || (S.forms.offset_pdf = defaultArgs("offset_pdf"));
-  const so = S.info.scm.saved_offset;
-  if (so && (args.use_saved === undefined ? true : args.use_saved)) {
-    if (args.x_offset === "" || args.x_offset === null) args.x_offset = so.x;
-    if (args.y_offset === "" || args.y_offset === null) args.y_offset = so.y;
-    if (args.angle === "" || args.angle === null) args.angle = so.angle;
+  const src = offsetSourceFor(args.paper_size);
+  if (src && (args.use_saved === undefined ? true : args.use_saved)) {
+    if (args.x_offset === "" || args.x_offset === null || args.x_offset === undefined) args.x_offset = src.x;
+    if (args.y_offset === "" || args.y_offset === null || args.y_offset === undefined) args.y_offset = src.y;
+    if (args.angle === "" || args.angle === null || args.angle === undefined) args.angle = src.angle;
   }
+}
+
+function patchOffsetForm() {
+  const card = $(`.form-card[data-kind="offset_pdf"]`);
+  const args = S.forms.offset_pdf;
+  if (!card || !args) return;
+  const set = (k, v) => {
+    args[k] = v;
+    const f = $$(".field", card).find(f => f.dataset.key === k);
+    const inp = f && $("input", f);
+    if (inp) inp.value = String(v);
+  };
+  const re = () => {
+    if (args.use_saved === false) return;   // the user explicitly opted out of prefill
+    const src = offsetSourceFor(args.paper_size);
+    if (!src) return;
+    set("x_offset", src.x); set("y_offset", src.y); set("angle", src.angle);
+    afterFormChange("offset_pdf");
+  };
+  const fPaper = $$(".field", card).find(f => f.dataset.key === "paper_size");
+  const sel = fPaper && $("select", fPaper);
+  if (sel) sel.addEventListener("change", () => { re(); });
+  const fUse = $$(".field", card).find(f => f.dataset.key === "use_saved");
+  const cb = fUse && $("input[type=checkbox]", fUse);
+  if (cb) cb.addEventListener("change", () => { re(); });
+}
+
+/* Which paper does a create_pdf form run actually print on? */
+function paperForCreatePdf(form = {}) {
+  const sp = (S.info.scm.specialty || []).find(s => s.name === form.specialty);
+  if (sp && sp.paper) return sp.paper;
+  return form.paper_size || (S.info.settings.defaults || {}).paper_size || "letter";
 }
 
 /* ============================== templates page ============================= */
@@ -1220,7 +1686,7 @@ function prefillOffsetForm() {
 PAGES.templates = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Cutting templates", "DXF cutting templates for the repo's standard sizes, plus the prebuilt .studio3 files that Silhouette Studio opens. For MTG / Sorcery extras see the Extras page."));
-  if (!S.info.scm.found) wrap.append(repoSetupCard());
+  if (connectCardNeeded()) wrap.append(repoSetupCard());
   wrap.append(formCard("dxf_single", { icon: "scissors" }));
   wrap.__patch = () => patchDxfForm("dxf_single");  // must run once the card is in the document
   wrap.append(formCard("dxf_batch", { icon: "layers" }));
@@ -1358,7 +1824,7 @@ function extrasMatrix() {
 PAGES.utilities = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Utilities", "Small tools that don't fit a single workflow step: cleaning the art folders, unit conversion, and a quick dump of every known size."));
-  if (!S.info.scm.found) wrap.append(repoSetupCard());
+  if (connectCardNeeded()) wrap.append(repoSetupCard());
 
   // clean up
   const cc = el("div", { class: "card" });
@@ -1423,12 +1889,168 @@ function converterCard() {
 
 /* ================================= settings page ========================== */
 
+/* Re-render a managed-repo row once its long job has finished. */
+function watchJobDone(jobId, cb) {
+  const t = setInterval(async () => {
+    let d;
+    try { d = await api(`/api/jobs/${jobId}/log`); } catch { return; }
+    if (d.status !== "running") {
+      clearInterval(t);
+      cb(d);
+    }
+  }, 3000);
+}
+
+/* One row of the “Managed repo copies” card: source picker, live status,
+   check / update actions. Re-renders itself in place when the source changes. */
+function repoCopyRow(row, container) {
+  const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
+  let selectingPinned = false;
+  const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";
+  const pickSource = async (v) => {
+    if (!v) return;
+    let r;
+    try {
+      r = await api("/api/repos/save", { repo: row.key, source: v });
+    } catch (e) {
+      return toast("err", e.message || "could not save the source");
+    }
+    if (!r.ok) return toast("err", (r.errors || ["could not save the source"]).join("; "));
+    await refreshInfo({ keepForms: true });
+    const fresh = (S.info.repos || []).find(x => x.key === row.key) || row;
+    if (container) container.replaceChildren(repoCopyRow(fresh, container));
+    else render();
+    toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);
+  };
+  const render = async () => {
+    box.innerHTML = "";
+    const src = row.source || "main";
+    const mode = modeOf(src);
+    const chip = { managed: ["ok", "managed copy"], external: ["info", "your own clone"], missing: ["warn", "not set up"] }[row.mode] || ["warn", row.mode];
+    // two-line header: name + state chip on line one, the (long) path on
+    // line two — one row used to wrap the chip over the monospace path
+    const head = el("div", { class: "rc-head" },
+      el("div", { class: "rc-title" },
+        el("span", { class: "rc-name" }, row.name),
+        el("span", { class: `rc-chip ${chip[0]}` }, el("span", { class: `dot ${chip[0]}` }), chip[1])
+      )
+    );
+    if (row.path && row.mode === "managed") head.append(el("div", { class: "rc-path" }, "kept privately inside the app's data folder"));
+    else if (row.path) head.append(el("div", { class: "rc-path mono" }, row.path));
+    box.append(head);
+    const seg = el("div", { class: "seg" });
+    const segBtns = {};
+    for (const [v, lab] of [["main", "Latest (main)"], ["latest-release", "Latest release"], ["pinned", "Pinned"]]) {
+      const b = el("button", { type: "button", class: (mode === v || (v === "pinned" && selectingPinned)) ? "active" : "", onclick: () => { if (v === "pinned") { selectingPinned = true; render(); } else pickSource(v); } }, lab);
+      segBtns[v] = b;
+      seg.append(b);
+    }
+    // a repo with no published releases can't be tracked by "latest release" —
+    // dim that segment instead of letting the save fail with a message
+    api("/api/repos/refs", { repo: row.key }).then(r => {
+      if (r.ok && !(r.refs.releases || []).length) {
+        segBtns["latest-release"].disabled = true;
+        segBtns["latest-release"].classList.add("off");
+        segBtns["latest-release"].title = "No releases are published for this repo yet";
+      }
+    }).catch(() => { });
+    const showPicker = mode === "pinned" || selectingPinned;
+    const pinWrap = el("div", { class: "field", style: "display:" + (showPicker ? "block" : "none") });
+    const pinSel = el("select", { class: "input" }, el("option", { value: "" }, "— pick a tag / release —"));
+    if (showPicker) {
+      box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
+        el("span", { class: "small faint" }, "track"), seg, pinWrap));
+      const r = await api("/api/repos/refs", { repo: row.key });
+      if (!r.ok) { toast("err", (r.errors || ["could not list tags — check your connection"]).join("; ")); return; }
+      const known = [...r.refs.tags.map(t => t.name), ...r.refs.releases.filter(q => !q.prerelease).map(q => q.tag)];
+      for (const name of known) pinSel.append(el("option", { value: name, selected: name === src ? "selected" : null }, name));
+      const unknown = !!src && !known.includes(src);
+      pinSel.append(el("option", { value: "__custom", selected: unknown ? "selected" : null }, "… or type a tag / branch / SHA"));
+      const customI = el("input", { class: "input mono", placeholder: "e.g. v3.0.0 or a branch name", style: "margin-top:6px; display:" + (unknown ? "block" : "none"), value: unknown ? src : "" });
+      pinSel.onchange = () => { if (pinSel.value === "__custom") { customI.style.display = "block"; customI.focus(); return; } pickSource(pinSel.value); };
+      customI.onkeydown = (e) => { if (e.key === "Enter" && customI.value.trim()) pickSource(customI.value.trim()); };
+      pinWrap.append(pinSel, customI);
+    } else {
+      box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
+        el("span", { class: "small faint" }, "track"), seg, pinWrap));
+    }
+    // status line
+    const dep = row.deployed;
+    const lc = row.last_check && row.last_check.checked ? row.last_check.checked : null;
+    let statusText, statusCls;
+    if (!dep) { statusText = "No managed copy yet — download one to start tracking updates."; statusCls = "warn"; }
+    else if (lc && lc.ok && lc.up_to_date) { statusText = `At ${dep.ref} (${dep.sha.slice(0, 7)}) — up to date.`; statusCls = "ok"; }
+    else if (lc && lc.ok && lc.target) { statusText = `New version available: ${lc.target.ref} (${lc.target.sha.slice(0, 7)}) — deployed: ${dep.ref} (${dep.sha.slice(0, 7)}).`; statusCls = "warn"; }
+    else { statusText = `Deployed at ${dep.ref} (${dep.sha.slice(0, 7)})` + (dep.date ? `, ${String(dep.date).slice(0, 10)}` : ""); statusCls = "ok"; }
+    box.append(el("div", { class: `note ${statusCls}`, style: "margin-top:10px" }, statusText));
+    // actions
+    const acts = el("div", { style: "margin-top:10px; display:flex; gap:8px; flex-wrap:wrap" });
+    if (row.mode === "managed") {
+      const checkBtn = el("button", { class: "btn sm" }, ico("search"), "Check for updates");
+      checkBtn.onclick = async () => {
+        checkBtn.disabled = true;
+        const r = await api("/api/repos/check", { repo: row.key, force: true });
+        checkBtn.disabled = false;
+        if (r.ok) { row.last_check = r.last_check; await refreshInfo({ keepForms: true }); const fresh = (S.info.repos || []).find(x => x.key === row.key); if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container)); else render(); }
+        else toast("err", (r.errors || ["check failed"]).join("; "));
+      };
+      const hasUpdate = lc && lc.ok && !lc.up_to_date;
+      const upBtn = el("button", { class: `btn sm ${hasUpdate ? "primary" : ""}` }, ico("refresh"), hasUpdate ? "Update now" : "Update");
+      upBtn.onclick = async () => {
+        const job = await doRun("repo_update", null, { args: { repo: row.key, force_full: false }, confirm: {
+        title: `Update ${row.name}`,
+        text: `Moves the managed copy to “${mode === "main" ? "the latest main" : mode === "latest-release" ? "the latest release" : src}”. Forward moves fetch only the changed files; rollbacks and big jumps take a full snapshot. Your images, decklists and local edits are preserved — if upstream also changed a file you edited, your version is kept and flagged.`,
+        okLabel: "Update", icon: "refresh" } });
+        if (!job) return;
+        watchJobDone(job.id, async () => {
+          await refreshInfo({ keepForms: true });
+          const fresh = (S.info.repos || []).find(x => x.key === row.key);
+          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+        });
+      };
+      acts.append(checkBtn, upBtn);
+    } else if (row.mode === "external") {
+      const dlBtn = el("button", { class: "btn sm" }, ico("download"), "Also keep a managed copy");
+      dlBtn.onclick = async () => {
+        const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
+        title: `Download a managed copy of ${row.name}`,
+        text: "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched). Pick the source above first if you want it to track something other than the latest main.",
+        okLabel: "Download", icon: "download" } });
+        if (!job) return;
+        watchJobDone(job.id, async () => {
+          await refreshInfo({ keepForms: true });
+          const fresh = (S.info.repos || []).find(x => x.key === row.key);
+          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+        });
+      };
+      acts.append(dlBtn, el("span", { class: "small faint" }, "Your own clone stays as it is — the managed copy is the one the Workbench updates for you."));
+    } else {
+      const dlBtn = el("button", { class: "btn sm primary" }, ico("download"), "Download latest (managed copy)");
+      dlBtn.onclick = async () => {
+        const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
+        title: `Download ${row.name}`,
+        text: `Fetches a complete copy into the Workbench's data folder. The first download can be large — silhouette-card-maker is a few hundred MB (it includes the upstream docs site and test material).`,
+        okLabel: "Download", icon: "download" } });
+        if (!job) return;
+        watchJobDone(job.id, async () => {
+          await refreshInfo({ keepForms: true });
+          const fresh = (S.info.repos || []).find(x => x.key === row.key);
+          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+        });
+      };
+      acts.append(dlBtn, el("span", { class: "small faint" }, "After that, updates are one click and incremental."));
+    }
+    box.append(acts);
+  };
+  render();
+  return box;
+}
+
 PAGES.settings = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Settings", "Everything here is stored in this project's data/settings.json. Repo paths can also be left blank — the Workbench auto-detects sister folders named silhouette-card-maker and scm-extras."));
 
   const s = S.info.settings;
-
   // repos
   const rc = el("div", { class: "card" });
   rc.append(el("div", { class: "card-head" },
@@ -1451,37 +2073,56 @@ PAGES.settings = (root) => {
   ));
   wrap.append(rc);
 
+  // managed repo copies (download/update the sister repos from inside the Workbench)
+  const mc = el("div", { class: "card" });
+  mc.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("refresh")),
+    el("div", { class: "grow" }, el("h2", {}, "Managed repo copies"), el("p", {}, "The Workbench can keep its own copy of each repo in its data folder — fetch the newest version on demand and pick exactly what to track (main, the latest release, or a pinned tag). Your images, decklists and local edits always survive an update."))));
+  for (const row of (S.info.repos || [])) {
+    const wrapRow = el("div", {});            // each row replaces itself inside its own wrapper
+    mc.append(wrapRow);
+    wrapRow.append(repoCopyRow(row, wrapRow));
+  }
+  wrap.append(mc);
+
   // python & server
+  const packaged = !!S.info.server.is_packaged;
   const pc = el("div", { class: "card" });
   pc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("terminal")),
-    el("div", { class: "grow" }, el("h2", {}, "Python & server"), el("p", {}, "Scripts run with the interpreter chosen here. Default: the one that started the Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
-  const pyI = el("input", { class: "input mono", value: s.python || "", placeholder: S.info.server.python_path + "  (default)" });
+    el("div", { class: "grow" }, el("h2", {}, "Python & server"),
+      el("p", {}, packaged
+        ? "This app runs on its own private Python (kept in the app's data folder). Job dependencies are installed into it automatically — your system Python is never touched."
+        : "Scripts run with the interpreter chosen here. Default: the one that started the Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
+  const pyI = el("input", { class: "input mono", value: s.python || (packaged ? "python  (private runtime)" : ""), placeholder: S.info.server.python_path + "  (default)", title: S.info.server.python_path || "", readonly: packaged || null });
   const portI = el("input", { class: "input mono", type: "number", value: s.port || 8037, min: 1024, max: 65535 });
   pc.append(el("div", { class: "frow" },
-    el("div", { class: "field w-half" }, el("label", {}, "Python interpreter"), pyI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Port"), portI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Theme"),
+    el("div", { class: packaged ? "field w-half" : "field w-half" }, el("label", {}, packaged ? "Private Python" : "Python interpreter"), pyI),
+    ...(packaged ? [] : [el("div", { class: "field w-quarter" }, el("label", {}, "Port"), portI)]),
+    el("div", { class: packaged ? "field w-half" : "field w-quarter" }, el("label", {}, "Theme"),
       el("div", { class: "seg" },
         el("button", { type: "button", class: s.theme === "dark" ? "active" : "", onclick: () => setTheme("dark") }, ico("moon"), " Dark"),
         el("button", { type: "button", class: s.theme === "light" ? "active" : "", onclick: () => setTheme("light") }, ico("sun"), " Light"),
       )),
   ));
-  const autoI = el("input", { type: "checkbox", id: "set-auto-browser", checked: s.auto_open_browser });
-  pc.append(el("div", { style: "margin-top:10px" },
-    el("label", { class: "switchrow" },
-      el("span", { class: "switch" },
-        autoI,
-        el("span", { class: "track" }), el("span", { class: "knob" })),
-      el("span", { class: "sl" }, el("div", { class: "t" }, "Open the browser when the server starts"))),
-  ));
-  pc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px" },
-    el("button", { class: "btn primary", onclick: async () => {
-      const r = await api("/api/settings", { python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
-      toast("ok", "Saved. Port changes apply on next server start.");
-      go("settings");
-    } }, ico("check"), "Save python & server"),
-  ));
+  if (!packaged) {
+    const autoI = el("input", { type: "checkbox", id: "set-auto-browser", checked: s.auto_open_browser });
+    const sw = el("span", { class: "switch" }, autoI, el("span", { class: "track" }), el("span", { class: "knob" }));
+    const lab = el("label", {}, "Open the browser when the server starts");
+    lab.setAttribute("for", "set-auto-browser");
+    pc.append(el("div", { class: "field", style: "margin-top:10px" }, lab, sw));
+    pc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px" },
+      el("button", { class: "btn primary", onclick: async () => {
+        const r = await api("/api/settings", { python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
+        toast("ok", "Saved. Port changes apply on next server start.");
+        go("settings");
+      } }, ico("check"), "Save python & server"),
+    ));
+  } else {
+    pc.append(el("div", { style: "margin-top:10px" },
+      el("div", { class: "small faint" },
+        "Serving the UI in its own window — no browser involved. Quitting the app window stops everything.")));
+  }
   wrap.append(pc);
 
   // defaults
@@ -1551,7 +2192,7 @@ function pageHead(title, sub) {
 
 /* ================================= bootstrap =============================== */
 
-async function refreshInfo({ keepForms = false } = {}) {
+async function refreshInfo({ keepForms = false, jobs = true } = {}) {
   S.info = await api("/api/info");
   S.manifest = await api("/api/manifest");
   document.documentElement.dataset.theme = S.info.settings.theme || "dark";
@@ -1561,8 +2202,10 @@ async function refreshInfo({ keepForms = false } = {}) {
   const dE = $("#dot-extras"); dE.classList.toggle("ok", S.info.extras.found); dE.classList.toggle("warn", !S.info.extras.found);
   $("#chip-python").textContent = "python " + S.info.server.python;
   if (!keepForms) S.forms = {};
-  refreshJobs();
-  renderConsoleTabs();
+  if (jobs) refreshJobs();
+  // if preparation started *after* this page booted (an update job, a
+  // re-clone), start watching for it — the bar must appear without reload
+  if (prepActive() && !_prepTimer) startPrepWatcher();
 }
 
 // Shown when the API is still unreachable after several attempts (the server
@@ -1611,6 +2254,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       await refreshInfo();
       bootPage();
       startJobsPoll();
+      startPrepWatcher();
       return;
     } catch (e) {
       if (attempt === 3) showBootFailure(e);
