@@ -1012,6 +1012,10 @@ select.input option { background: var(--surface); color: var(--text); }
 .frow .w-third { flex: 1 1 calc(33.33% - 10px); min-width: 170px; }
 .frow .w-quarter { flex: 1 1 calc(25% - 11px); min-width: 140px; }
 @media (max-width: 900px) { .frow .w-half, .frow .w-third, .frow .w-quarter { flex-basis: 100%; } }
+/* The flat simple-mode section keeps its 3-up packing in the narrow windows
+   where the regular forms stack to one field per row — the toggles belong on
+   the same row as the selects. (Specificity wins over the rule above.) */
+.frow.frow-3col .w-third { flex: 1 1 calc(33.33% - 10px); min-width: 170px; }
 .gap10 { margin-top: 10px; }
 .mt0 { margin-top: 0 !important; }
 

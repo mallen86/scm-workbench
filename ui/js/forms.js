@@ -316,7 +316,7 @@ export function formCard(kind, opts = {}) {
       const rank = new Map(order.map((k, i) => [k, i]));
       os.sort((a, b) => (rank.get(a.key) ?? order.length) - (rank.get(b.key) ?? order.length));
     }
-    const row = el("div", { class: "frow" });
+    const row = el("div", { class: "frow frow-3col" });
     for (const o of os) {
       const node = renderOption(o, args, kind);
       if (node) row.append(node);

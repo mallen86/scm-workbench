@@ -34,7 +34,8 @@ PAGES.pdf = (root) => {
         ...(uiMode() === "advanced" ? [el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")] : [])));
     }
   }
-  wrap.__patch = () => patchPdfForm("create_pdf");  // must run once the card is in the document
+  // both must run once the card is in the document
+  wrap.__patch = () => { patchPdfForm("create_pdf"); patchOffsetToggle("create_pdf"); };
   return wrap;
 };
 
@@ -96,4 +97,43 @@ export function patchPdfForm(kind) {
     toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
     afterFormChange(kind);   // refresh the preview so the warning clears
   });
+}
+
+/* “Apply saved offset” only makes sense when something is saved for the paper
+   this form prints — a per-size row for that paper, or the global value.
+   With neither, the switch is disabled and its help line points to the
+   Offset & calibration page; if the paper changes to one with no row the
+   switch is turned back off, so a run can never ask for an offset that
+   doesn't exist. Works in both the flat (simple) and grouped (advanced)
+   form. */
+export function patchOffsetToggle(kind) {
+  const card = $(`.form-card[data-kind="${kind}"]`);
+  const field = card && $$(".field", card).find(f => f.dataset.key === "load_offset");
+  const input = field && $("input[type=checkbox]", field);
+  if (!input) return;
+
+  const refresh = () => {
+    const a = S.forms[kind] || (S.forms[kind] = defaultArgs(kind));
+    const paper = paperForCreatePdf(a);
+    const row = (S.info.per_size_offsets || {})[paper];
+    const g = S.info.scm?.saved_offset;
+    let note = field.querySelector(":scope > .help");
+    if (!note) { note = el("span", { class: "help" }); field.append(note); }
+    if (!row && !g) {
+      if (input.checked) {
+        a.load_offset = false;
+        input.checked = false;
+        afterFormChange(kind);   // the preview follows the switch
+      }
+      input.disabled = true;
+      note.textContent = `No offset is saved for “${paper}” yet — record one on the Offset & calibration page and this switch enables itself.`;
+    } else {
+      input.disabled = false;
+      note.textContent = row
+        ? `Applies the “${paper}” row (x ${row.x}, y ${row.y}, angle ${row.angle}°) recorded on the Offset & calibration page.`
+        : `No per-size row for “${paper}” — the saved global offset (x ${g.x}, y ${g.y}, angle ${g.angle}°) will be applied.`;
+    }
+  };
+  refresh();
+  card.addEventListener("change", refresh);
 }
