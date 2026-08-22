@@ -558,6 +558,9 @@ select.input option { background: var(--surface); color: var(--text); }
   padding: 13px 15px;
   position: relative;
 }
+/* the command preview should never sit flush against the field (or help
+   line) above it — the same break the section labels give the regular forms */
+.frow + .cmdbox, .adv + .cmdbox { margin-top: 22px; }
 .cmdbox .cb-head {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 8px;
