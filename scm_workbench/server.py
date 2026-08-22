@@ -2152,7 +2152,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     return "0"
             text = data.decode("utf-8")
-            for name in ("theme.css", "app.js", "favicon.svg"):
+            for name in ("theme.css", "js/app.js", "favicon.svg"):
                 text = text.replace(f"/ui/{name}", f"/ui/{name}?v={_v(name)}")
             data = text.encode("utf-8")
         self._send(200, data, ctype)

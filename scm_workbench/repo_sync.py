@@ -32,6 +32,7 @@ Exit codes: 0 ok, 1 failure (message on stdout, or {"error": ...} with --json).
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -103,9 +104,48 @@ def load_state() -> dict:
 
 
 def save_state(st: dict) -> None:
-    state_file().parent.mkdir(parents=True, exist_ok=True)
-    with open(state_file(), "w", encoding="utf-8") as f:
-        json.dump(st, f, indent=1)
+    # atomic: write a sibling temp file and rename over the real one, so a
+    # crash (or a second process) can never leave a half-written state file
+    f = state_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=1)
+    os.replace(tmp, f)
+
+
+@contextlib.contextmanager
+def _state_lock():
+    """Process-wide (and cross-process) mutex around state read-modify-write
+    sections. The launcher and the UI server are separate processes that both
+    write repos-state.json; without this, two writers can interleave and one
+    loses the other's changes — which is exactly how a copy could lose its
+    'deployed' record and get silently re-inited next launch."""
+    lock_path = data_dir() / ".repos-lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            fh.seek(0, 2)
+            if fh.tell() == 0:
+                fh.write(" ")
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 # ----------------------------------------------------------------------------
@@ -224,10 +264,11 @@ def load_source(key: str) -> str:
 
 
 def set_source(key: str, source: str) -> None:
-    st = load_state()
-    r = st.setdefault(key, {})
-    r["source"] = source
-    save_state(st)
+    with _state_lock():
+        st = load_state()
+        r = st.setdefault(key, {})
+        r["source"] = source
+        save_state(st)
 
 
 # ----------------------------------------------------------------------------
@@ -631,21 +672,92 @@ def _sync_deps(key: str, log=print) -> None:
         log(f"  ! dependency sync: some pinned requirements could not be installed (continuing){hint}")
 
 
-def cmd_init(key: str, tarball: str = None, log=print):
+# User data lives in these repo subfolders (decklists, fetched card images,
+# generated output, calibration data). A full re-deploy must never lose it:
+# copies are staged before the tree is replaced and put back afterwards.
+# Upstream placeholder files (README/EMPTY) are not user data.
+USER_DATA_PATHS = ("data", "game/front", "game/back", "game/double_sided",
+                   "game/decklist", "game/output")
+_PRISTINE_NAMES = {"README.md", "EMPTY.md"}
+
+
+def stash_user_data(repo: Path, dest: Path, log=print) -> list:
+    """Copy user files out of a tree that is about to be replaced.
+    Returns [(relpath, staged_path), …]."""
+    saved = []
+    for rel in USER_DATA_PATHS:
+        d = repo / rel
+        if not d.is_dir():
+            continue
+        for f in sorted(d.rglob("*")):
+            if not f.is_file() or f.name in _PRISTINE_NAMES:
+                continue
+            sp = dest / str(f.relative_to(repo))
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, sp)
+            saved.append((str(f.relative_to(repo)), sp))
+    if saved:
+        log(f"[repos] staged {len(saved)} user file(s) from the old tree "
+            f"(decklists/images/output/offsets) — they will be restored after the re-deploy")
+    return saved
+
+
+def restore_user_data(saved: list, repo: Path, log=print) -> None:
+    """Put staged user files back into (a freshly replaced) tree. User data
+    wins over any same-named upstream file."""
+    for rel, sp in saved:
+        rp = repo / rel
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sp, rp)
+    if saved:
+        log(f"[repos] restored {len(saved)} user file(s) into the new tree")
+
+
+def verify_deployed(key: str) -> bool:
+    """Cheap offline spot check: does the deployed tree still match the
+    recorded state (same sha in state/manifest, probed file hashes intact)?
+    The launcher uses this to decide when a managed copy needs a safe
+    re-deploy; the update flow itself repairs drift, so this mostly catches
+    interrupted work."""
+    st = load_state().get(key) or {}
+    deployed = st.get("deployed") or {}
+    if not deployed.get("sha"):
+        return False
+    man = load_manifest(key)
+    files = man.get("files") or {}
+    if not files:
+        return False
+    if man.get("sha") and man["sha"] != deployed["sha"]:
+        return False
+    repo = repo_dir(key)
+    probe = sorted(files)[0]
+    p = repo / probe
+    if not p.is_file():
+        return False
+    try:
+        return sha256_file(p) == files[probe]
+    except Exception:
+        return False
+
+
+def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
     meta = REPOS[key]
     st = load_state()
     rstate = st.get(key) or {}
     source = load_source(key)
-    if rstate.get("deployed") and not tarball:
+    if rstate.get("deployed") and not tarball and not force_redeploy:
         log(f"[init {key}] already deployed at {rstate['deployed']['ref']} — nothing to do.")
         return {"ok": True, "noop": True}
     log(f"[init {key}] resolving target “{source}” …")
     target = resolve_target(key, source)
     log(f"[init {key}] target: {target['ref']} @ {target['sha'][:7]}")
     repo = repo_dir(key)
+    stash_dir = data_dir() / f".repos-stash-{key}-{int(time.time())}"
+    saved = []
     try:
         if repo.exists():
             log(f"[init {key}] replacing existing copy at {repo}")
+            saved = stash_user_data(repo, stash_dir, log)
             shutil.rmtree(repo, ignore_errors=True)
         if tarball:
             tp = Path(tarball)
@@ -663,15 +775,21 @@ def cmd_init(key: str, tarball: str = None, log=print):
             extract_tarball(tmp, repo, log)
             tmp.unlink(missing_ok=True)
             set_progress(key, stage="fingerprint", done=0, total=0)
+        restore_user_data(saved, repo, log)
         man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
         for p in tracked_paths(repo):
             man["files"][p] = sha256_file(repo / p)
         save_manifest(key, man)
-        rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
-        rstate["mode"] = "bundled"
-        rstate["source"] = source
-        st[key] = rstate
-        save_state(st)
+        with _state_lock():
+            # reload inside the lock: another process (the UI server) may have
+            # written state while we were downloading
+            st = load_state()
+            rstate = st.get(key) or {}
+            rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
+            rstate["mode"] = "bundled"
+            rstate["source"] = source
+            st[key] = rstate
+            save_state(st)
         log(f"[init {key}] {REPOS[key]['name']} deployed at {target['ref']} ({target['sha'][:7]}) — "
             f"{len(man['files'])} tracked files fingerprinted")
         try:
@@ -679,6 +797,11 @@ def cmd_init(key: str, tarball: str = None, log=print):
         except Exception as e:
             log(f"  ! dependency sync failed: {e}")
     finally:
+        try:
+            if stash_dir.exists():
+                shutil.rmtree(stash_dir, ignore_errors=True)
+        except Exception:
+            pass
         clear_progress(key)
     return {"ok": True, "files": len(man["files"])}
 
@@ -773,17 +896,23 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
             shutil.rmtree(staging, ignore_errors=True)
             tmp.unlink(missing_ok=True)
 
-        rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
-        rstate["last_update"] = time.time()
-        rstate["last_update_secs"] = round(time.time() - t0, 1)
-        # re-record the check against the *new* deployed commit — we just moved, so by
-        # construction the target is current (avoids a stale “update available” line)
-        rstate["last_check"] = {"checked": {"repo": key, "ok": True, "cached": False, "target": target,
-                                             "deployed": rstate["deployed"], "up_to_date": True},
-                                "checked_at": time.time()}
-        st[key] = rstate
-        save_state(st)
-        save_manifest(key, res["manifest"])
+        # state write under the lock, with a fresh reload (the UI server's
+        # check/update handlers and the launcher both write this file)
+        new_manifest = res["manifest"]
+        with _state_lock():
+            st = load_state()
+            rstate = st.get(key) or {}
+            rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
+            rstate["last_update"] = time.time()
+            rstate["last_update_secs"] = round(time.time() - t0, 1)
+            # re-record the check against the *new* deployed commit — we just moved, so
+            # by construction the target is current (avoids a stale “update available” line)
+            rstate["last_check"] = {"checked": {"repo": key, "ok": True, "cached": False, "target": target,
+                                                "deployed": rstate["deployed"], "up_to_date": True},
+                                   "checked_at": time.time()}
+            st[key] = rstate
+            save_state(st)
+        save_manifest(key, new_manifest)
 
         for p in res["conflicts"][:10]:
             log(f"  ! kept your local version of {p} (upstream also changed it — merge manually if needed)")

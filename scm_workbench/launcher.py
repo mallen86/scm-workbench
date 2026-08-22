@@ -76,6 +76,22 @@ def bootstrap_managed_repos(repo_sync, log=None) -> None:
     for key, meta in repo_sync.REPOS.items():
         r = state.get(key) or {}
         if r.get("deployed"):
+            # The state says “deployed” — but the state file and the tree can
+            # drift (an interrupted update, a pre-lock era write). A cheap
+            # offline probe decides; a mismatch triggers a *safe* re-deploy,
+            # which stages the user's files before touching the tree, so this
+            # path can never be a data-loss path again.
+            try:
+                if repo_sync.verify_deployed(key):
+                    continue
+                log(f"\n[launcher] the managed {meta['name']} copy no longer matches its recorded "
+                    f"state — re-deploying it now (your decklists, images and output are "
+                    f"staged and restored around the swap, so nothing is lost) …")
+                repo_sync.cmd_init(key, log=log, force_redeploy=True)
+                log(f"[launcher] {meta['name']} re-synced — continuing.")
+                continue
+            except Exception as e:
+                log(f"[launcher] {meta['name']} state check failed ({e}) — leaving the copy as-is.")
             continue
         log(f"\n[launcher] first launch — fetching the newest {meta['name']} "
            f"({meta['owner']}/{meta['repo']}) into the Workbench data area …")
