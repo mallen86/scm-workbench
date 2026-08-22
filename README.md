@@ -27,6 +27,8 @@ It wraps every script in a friendly, cross-platform interface: pick options in a
 
 Everything runs as a tracked **job**: live log stream in the bottom console drawer, stop button, "reveal folder" (for your own folders) or **"Move to my files…"** (for Workbench-managed copies — the system save dialog carries the finished PDF / calibration sheets from the app's private working area out to wherever you point it), persistent history, and a **command preview** that shows the exact argv (and any auto-added env vars) before you run.
 
+**Interface: Simple or Advanced** (Settings → Interface). Advanced is the full layout above. Simple trims the Create PDF page to the basics — card & paper size, registration marks, borderless, front-only and the saved-offset switch; directory fields, resolution/quality and the power sections stay one click away. The Fetch pages are already as simple as they get, so they're untouched; hidden options simply keep their defaults, so the command that runs is identical in both modes.
+
 ### The magic touch: extras auto-wiring
 
 The scm-extras README asks you to export `SCM_EXTRA_LAYOUTS` by hand before you can use `standard_mtg` / `standard_sorcery` in SCM. The Workbench does it for you: the moment you pick an extra size (in Create PDF or template generation), it detects the size belongs to `scm-extras` and injects the env var for that job — with a note in the preview.

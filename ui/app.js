@@ -223,6 +223,20 @@ function setTheme(theme) {
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === theme));
 }
 
+function setUiMode(mode) {
+  const cur = (S.info?.settings?.ui_mode || "advanced") === "simple" ? "simple" : "advanced";
+  if (mode === cur) return;
+  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui_mode: mode }) })
+    .then(async () => {
+      await refreshInfo();
+      toast("ok", mode === "simple"
+        ? "Simple interface — the Create PDF page now shows the basic settings only."
+        : "Advanced interface — the full layout is back.");
+      go("settings");
+    })
+    .catch(() => toast("err", "could not save the interface mode"));
+}
+
 /* show commands the way a user would run them: a bare "python" interpreter
    (never the app's private one by absolute path) and repo-relative script
    paths. Real paths stay in job.cmd for the engine. */
@@ -483,17 +497,20 @@ function formCard(kind, opts = {}) {
   }
 
   for (const g of spec.groups || []) {
+    const opts = (g.options || []).filter(o => optVisible(o, kind));
+    if (!groupVisible(g, kind) || !opts.length) continue;
     if (g.collapsible) {
-      const any = (g.options || []).some(o => o.show ? o.show(args) : true);
+      const any = opts.some(o => o.show ? o.show(args) : true);
+      if (!any) continue;
       const adv = el("div", { class: "adv" });
       adv.append(
         el("button", { class: "adv-head", type: "button", onclick: () => adv.classList.toggle("open") },
           el("span", { class: "arr" }, ico("arrow")), g.title),
-        el("div", { class: "adv-body" }, groupInner(g, kind, args)),
+        el("div", { class: "adv-body" }, groupInner(opts, kind, args)),
       );
       card.append(adv);
     } else {
-      card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(g, kind, args));
+      card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(opts, kind, args));
     }
   }
 
@@ -522,13 +539,38 @@ function formCard(kind, opts = {}) {
   return card;
 }
 
-function groupInner(g, kind, args) {
+function groupInner(opts, kind, args) {
   const row = el("div", { class: "frow" });
-  for (const o of g.options || []) {
+  for (const o of opts) {
     const node = renderOption(o, args, kind);
     if (node) row.append(node);
   }
   return row;
+}
+
+/* ---- Simple / Advanced interface mode ------------------------------------
+   "advanced" (the default) renders every manifest option — the full layout.
+   "simple" keeps only the basics of a page: for a kind that has options
+   flagged `simple` in the manifest, only those render, and its collapsible
+   power sections (Fit & edge finishing, Advanced, …) are hidden. Kinds
+   without any `simple` flags (Fetch, Offset, Calibration, …) are already as
+   simple as they get and render unchanged. Hidden options keep their defaults
+   in S.forms, so the command preview is identical in both modes. */
+function uiMode() {
+  const s = S.info && S.info.settings;
+  return (s && (s.ui_mode || "advanced")) === "simple" ? "simple" : "advanced";
+}
+function kindHasSimple(kind) {
+  const spec = S.manifest[kind];
+  return !!(spec && (spec.groups || []).some(g => (g.options || []).some(o => o.simple)));
+}
+function optVisible(o, kind) {
+  if (uiMode() !== "simple" || !kindHasSimple(kind)) return true;
+  return !!o.simple;
+}
+function groupVisible(g, kind) {
+  if (uiMode() !== "simple" || !kindHasSimple(kind)) return true;
+  return !g.collapsible;
 }
 
 /* ================================ job control ============================== */
@@ -2051,6 +2093,24 @@ PAGES.settings = (root) => {
   wrap.append(pageHead("Settings", "Everything here is stored in this project's data/settings.json. Repo paths can also be left blank — the Workbench auto-detects sister folders named silhouette-card-maker and scm-extras."));
 
   const s = S.info.settings;
+
+  // interface (simple / advanced)
+  const ic = el("div", { class: "card" });
+  ic.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("eye")),
+    el("div", { class: "grow" }, el("h2", {}, "Interface"),
+      el("p", {}, "How much of the controls to show. Simple trims the Create PDF page to the basics — card & paper size, registration marks, borderless and the front-only switch. The Fetch pages are already as simple as they get, and the other pages are unaffected."))));
+  const modeNow = (s.ui_mode || "advanced") === "simple" ? "simple" : "advanced";
+  const segM = el("div", { class: "seg" });
+  for (const [v, lab] of [["simple", "Simple"], ["advanced", "Advanced"]]) {
+    segM.append(el("button", { type: "button", class: modeNow === v ? "active" : "", onclick: () => setUiMode(v) }, lab));
+  }
+  ic.append(el("div", { style: "margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
+    el("span", { class: "small faint" }, "show"), segM,
+    el("span", { class: "small faint" }, modeNow === "simple"
+      ? "basic settings only — Advanced brings back the full layout"
+      : "the full layout — everything the PDF builder offers")));
+  wrap.append(ic);
   // repos
   const rc = el("div", { class: "card" });
   rc.append(el("div", { class: "card-head" },
