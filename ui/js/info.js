@@ -17,7 +17,6 @@ export async function refreshInfo({ keepForms = false, jobs = true } = {}) {
   // pills
   const dS = $("#dot-scm"); dS.classList.toggle("ok", S.info.scm.found);
   const dE = $("#dot-extras"); dE.classList.toggle("ok", S.info.extras.found); dE.classList.toggle("warn", !S.info.extras.found);
-  $("#chip-python").textContent = "python " + S.info.server.python;
   if (!keepForms) S.forms = {};
   if (jobs) refreshJobs();
   // if preparation started *after* this page booted (an update job, a

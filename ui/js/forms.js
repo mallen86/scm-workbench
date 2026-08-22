@@ -106,7 +106,11 @@ export function renderPreview(box, d) {
   }
   for (const n of d.warnings || []) box.append(el("div", { class: "note warn" }, "⚠ ", n));
   for (const e of d.errors || []) box.append(el("div", { class: "note err" }, "✕ ", e));
-  if (!d.errors?.length && d.cmd) box.append(el("div", { class: "note ok" }, "✓ ready to run"));
+  const blocked = !!(d.errors?.length || d.no_front_images);
+  (S.previewBlock ||= {})[kind] = blocked;
+  if (!blocked && d.cmd) box.append(el("div", { class: "note ok" }, "✓ ready to run"));
+  const runBtn = document.getElementById("run-" + kind);
+  if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = blocked;
 }
 
 
@@ -443,6 +447,8 @@ export async function doRun(kind, btn, opts = {}) {
     }
     return null;
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
+    // don't silently re-enable a button the latest preview has since blocked
+    // (e.g. the front directory is still empty)
+    if (btn && !S.previewBlock?.[kind]) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
   }
 }

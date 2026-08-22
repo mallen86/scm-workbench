@@ -2231,6 +2231,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "unknown kind"}, 404)
         normalized, errors, norm_warns = normalize_args(manifest[kind], args)
         argv, cwd, env, title, warnings, errs = build_command(kind, normalized, load_settings(), get_info(), write_deck=False)
+        # Create PDF needs card images to work with — the front directory
+        # (SCM's own default when the form leaves it empty) empty means the
+        # job would produce nothing, so the client keeps the run button
+        # disabled until it has images.
+        no_front = False
+        if kind == "create_pdf" and not errs and cwd:
+            front = normalized.get("front_dir") or "game/front"
+            fd = Path(front) if os.path.isabs(front) else (Path(cwd) / front)
+            n = sum(1 for c in fd.iterdir() if c.is_file() and is_image_file(c)) if fd.is_dir() else 0
+            if n == 0:
+                no_front = True
+                warnings.append(
+                    f"No images in the front directory ({front}) — nothing to make pages from, so the run "
+                    "button stays disabled. Fetch a deck, or point the form at a folder that has images.")
         return self._json({
             "cmd": _fmt_argv(argv) if not errors else None,
             "cwd": str(cwd) if cwd else None,
@@ -2238,6 +2252,7 @@ class Handler(BaseHTTPRequestHandler):
                      if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
             "warnings": warnings + norm_warns + errors,
             "errors": errs,
+            "no_front_images": no_front,
         })
 
     def _sse(self, jid: str, after: int):

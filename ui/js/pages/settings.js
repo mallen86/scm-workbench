@@ -202,7 +202,7 @@ PAGES.settings = (root) => {
       el("p", {}, packaged
         ? "This app runs on its own private Python (kept in the app's data folder). Job dependencies are installed into it automatically — your system Python is never touched."
         : "Scripts run with the interpreter chosen here. Default: the one that started the Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
-  const pyI = el("input", { class: "input mono", value: s.python || (packaged ? "python  (private runtime)" : ""), placeholder: S.info.server.python_path + "  (default)", title: S.info.server.python_path || "", readonly: packaged || null });
+  const pyI = el("input", { class: "input mono", value: s.python || (packaged && S.info.server.python ? `python ${S.info.server.python}  (private runtime)` : ""), placeholder: S.info.server.python_path + "  (default)", title: S.info.server.python_path || "", readonly: packaged || null });
   const portI = el("input", { class: "input mono", type: "number", value: s.port || 8037, min: 1024, max: 65535 });
   pc.append(el("div", { class: "frow" },
     el("div", { class: packaged ? "field w-half" : "field w-half" }, el("label", {}, packaged ? "Private Python" : "Python interpreter"), pyI),
@@ -226,10 +226,6 @@ PAGES.settings = (root) => {
         go("settings");
       } }, ico("check"), "Save python & server"),
     ));
-  } else {
-    pc.append(el("div", { style: "margin-top:10px" },
-      el("div", { class: "small faint" },
-        "Serving the UI in its own window — no browser involved. Quitting the app window stops everything.")));
   }
   wrap.append(pc);
 
