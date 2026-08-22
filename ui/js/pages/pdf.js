@@ -23,11 +23,13 @@ PAGES.pdf = (root) => {
     const paper = paperForCreatePdf(form);
     const row = (S.info.per_size_offsets || {})[paper];
     const g = S.info.scm.saved_offset;
-    if (row || g) {
+    // advanced only — in simple mode this sits below the (flat) form the
+    // toggle lives in, so the note would point “below” at nothing
+    if (uiMode() === "advanced" && (row || g)) {
       const o = row || g;
       const txt = row
         ? `Per-size offset for “${paper}” is saved: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b> — applied automatically whenever “Apply saved offset” is on.`
-        : `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” below when ready.`;
+        : `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” above when ready.`;
       wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
         el("span", { class: "grow", html: txt }),
         // the Offset & calibration page is hidden in simple mode — no link to it
