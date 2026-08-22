@@ -23,7 +23,7 @@ It wraps every script in a friendly, cross-platform interface: pick options in a
 | **Cutting templates** | `generate_dxf.py` — a single template (named *or* fully custom card/paper dimensions), batch (missing / all / re-optimize), and a gallery of every DXF + `.studio3` in the repo |
 | **Extras: MTG & Sorcery** | `scm-extras/generate.py`, `generate_readme_tables.py`, and the extras template gallery |
 | **Sizes & layouts** | every card/paper size as scaled silhouettes, the full cards-per-page matrix, specialty layouts |
-| **Utilities** | `clean_up.py` (with confirm), a size converter using the repo's own units, a "list all sizes" dump |
+| **Utilities** | clear the card-image folders (with confirm — the folder README placeholders are kept), a size converter using the repo's own units, a “list all sizes” dump |
 
 Everything runs as a tracked **job**: live log stream in the bottom console drawer, stop button, "reveal folder" (for your own folders) or **"Move to my files…"** (for Workbench-managed copies — the system save dialog carries the finished PDF / calibration sheets from the app's private working area out to wherever you point it), persistent history, and a **command preview** that shows the exact argv (and any auto-added env vars) before you run.
 

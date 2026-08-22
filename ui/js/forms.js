@@ -23,6 +23,10 @@ export function displayCmd(cmd, kind) {
   if (py) out = out.replace(new RegExp("^[\"']?" + escRe(py) + "[\"']?\\s+"), "python ");
   const row = repoRowForKind(kind);
   if (row && row.path) out = out.split(row.path + "/").join("");
+  // the Workbench's own scripts live outside the repo — show them by name,
+  // not as a path into the app's private files (the app path can contain
+  // spaces, so the sweep class must match them too)
+  out = out.replace(/["']?[\w./: -]*clear_images\.py["']?/, "clear_images.py (workbench)");
   return out;
 }
 

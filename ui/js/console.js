@@ -10,17 +10,22 @@ import { startPrepWatcher } from "./prep.js";
 export let _lastJobsSig;
 
 
-export async function refreshJobs() {
+export async function refreshJobs(forceRender = false) {
   const next = (await api("/api/jobs")).jobs;
   // Redraw only when the job set actually changed (new job, status flip) —
-  // the 4 s poll must not repaint an unchanged list (no blink).
+  // the 4 s poll must not repaint an unchanged list (no blink). An explicit
+  // forceRender (used when the dashboard is (re)entered) repaints once even
+  // though nothing changed — a freshly rendered page needs its list filled.
   const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
-  if (sig === _lastJobsSig) { S.jobs = next; setRevealButtons(); return; }
-  _lastJobsSig = sig;
+  const changed = sig !== _lastJobsSig;
+  if (changed) {
+    _lastJobsSig = sig;
+    updateBadge();
+    renderConsoleTabs();
+  }
   S.jobs = next;
-  updateBadge();
-  renderConsoleTabs();
-  if (S.page === "dashboard") {
+  setRevealButtons();
+  if (S.page === "dashboard" && (changed || forceRender)) {
     const slot = $("#recent-jobs");
     if (slot) {
       slot.innerHTML = "";

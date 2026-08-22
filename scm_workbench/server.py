@@ -604,7 +604,7 @@ def build_manifest(info: dict) -> dict:
 
     kinds["clean_up"] = {
         "title": "Clear card image folders", "page": "utilities", "needs": ["scm"], "cwd": "scm",
-        "description": "Deletes every image in game/front/ and game/double_sided/ so you can start a new game fresh. The card back folder is left untouched.",
+        "description": "Deletes every image in game/front/ and game/double_sided/ so you can start a new game fresh. The folder README placeholders are kept, and the card back folder is left untouched.",
         "groups": [],
     }
 
@@ -1300,7 +1300,10 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         if not require_repo("SCM", scm):
             return argv, None, env, title, warnings, errors
         cwd = scm
-        argv += ["clean_up.py"]
+        # the Workbench's own variant of SCM's clean_up.py (which would also
+        # delete the README.md placeholders the current repo versions ship):
+        # same clears, placeholders survive
+        argv += [str(Path(__file__).resolve().parent / "clear_images.py")]
 
     elif kind == "extras_generate":
         if not require_repo("scm-extras", extras):

@@ -1,7 +1,8 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole } from "./console.js";
+import { toggleConsole, refreshJobs } from "./console.js";
+import { refreshInfo } from "./info.js";
 import { $, $$, PAGES, S, iconize, toast } from "./core.js";
 import { defaultArgs } from "./forms.js";
 
@@ -44,6 +45,9 @@ export function go(page, prefill, { push = true, anim = true } = {}) {
     const path = page === "dashboard" ? "/" : "/" + page;
     if (location.pathname !== path) history.pushState({ page }, "", path);
   }
+  // the dashboard's job list is rebuilt by the page render — fill it now so
+  // arriving there always shows the current jobs (the poll only repaints on change)
+  if (page === "dashboard") refreshJobs(true);
 }
 
 window.addEventListener("popstate", () => {
@@ -146,6 +150,7 @@ export function setUiMode(mode) {
   if (!mode || mode === cur) return;
   S.info.settings.ui_mode = mode;
   syncUiMode();
+  refreshInfo().catch(() => {});   // keep jobs/status/prep fresh for the re-render
   const page = S.page || "dashboard";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
