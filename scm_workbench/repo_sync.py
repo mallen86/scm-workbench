@@ -20,13 +20,13 @@ created and updated:
       - user-only change       -> local content kept
       - changed on both sides  -> local content KEPT, with a warning
 
-Run as a module from server.py (fast actions: check / refs / save) or as a CLI
-(long actions, streamed into a Workbench job console: update / init):
+Run as a module from the Workbench server (fast actions: check / refs / save)
+or as a CLI (long actions, streamed into a Workbench job console: update / init):
 
-    python repo_sync.py init    --repo scm   [--tarball path/to/local.tar.gz]
-    python repo_sync.py update  --repo scm   [--force-full]
-    python repo_sync.py check   --repo scm   [--json]
-    python repo_sync.py refs    --repo scm
+    python -m scm_workbench.repo_sync init   --repo scm   [--tarball path/to/local.tar.gz]
+    python -m scm_workbench.repo_sync update --repo scm   [--force-full]
+    python -m scm_workbench.repo_sync check  --repo scm   [--json]
+    python -m scm_workbench.repo_sync refs   --repo scm
 
 Exit codes: 0 ok, 1 failure (message on stdout, or {"error": ...} with --json).
 """

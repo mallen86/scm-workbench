@@ -2,8 +2,8 @@
 """
 launcher.py — entry point for the *packaged* SCM Workbench app.
 
-In a normal dev checkout you run ``python server.py`` directly; this module is
-only used by the Briefcase/py2app bundle, where it:
+In a normal dev checkout you run ``python -m scm_workbench.server`` directly;
+this module is the *app's* entry point (the bundle's stub calls it), where it:
 
   1. pins the app's data area to a per-user, writable location that survives
      app updates (settings, job history, logs, and the managed repo copies),

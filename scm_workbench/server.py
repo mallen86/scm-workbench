@@ -4,9 +4,9 @@ SCM Workbench — a local web UI for silhouette-card-maker and scm-extras.
 
 Zero dependencies beyond the Python standard library. Run:
 
-    python server.py                  # starts on http://127.0.0.1:8037
-    python server.py --port 9000     # different port
-    python server.py --no-browser    # don't auto-open a browser tab
+    python -m scm_workbench.server             # starts on http://127.0.0.1:8037
+    python -m scm_workbench.server --port 9000  # different port
+    python -m scm_workbench.server --no-browser  # don't auto-open a browser tab
 
 The UI shells out to the Python scripts in the two sister repos (auto-detected
 next to this folder, overridable in Settings) and streams their output live in

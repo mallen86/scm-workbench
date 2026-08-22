@@ -1,16 +1,33 @@
 # SCM Workbench
 
-A local web UI for **[silhouette-card-maker](https://github.com/Alan-Cha/silhouette-card-maker)** and **[scm-extras](https://github.com/Alan-Cha/scm-extras)** — the two Python repos that make card games for Silhouette cutting machines.
+A local UI for **[silhouette-card-maker](https://github.com/Alan-Cha/silhouette-card-maker)** and **[scm-extras](https://github.com/Alan-Cha/scm-extras)** — the two Python repos that make card games for Silhouette cutting machines.
 
 It wraps every script in a friendly, cross-platform interface: pick options in a form, watch a live console, open your results. No terminal, no memorized flags, no manual environment variable wiring.
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  SCM Workbench (this repo)                                  │
-│  └─ shells out to →  ../silhouette-card-maker   (SCM)      │
-│                     ../scm-extras            (extras)       │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  SCM Workbench (this repo — the UI and the engine behind it)     │
+│  └─ drives →  silhouette-card-maker   (SCM)                       │
+│                scm-extras                                               │
+│      from its own managed copies (latest release / latest main)      │
+│      in the app's data folder — or from your own clones, which it    │
+│      detects when they sit next to it                                │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+## Getting the app (macOS / Windows)
+
+Download the latest release from the [GitHub releases page](https://github.com/mallen86/scm-workbench/releases) — one archive per platform, both built by the repo's CI whenever a `v*` tag is pushed.
+
+* **macOS** — open `SCM Workbench.app` (double-click; if it's unsigned, right-click → *Open* once).
+* **Windows** — unzip and run the app (one-time SmartScreen prompt).
+
+That's the whole install. **Nothing is put on your machine** — no Python, no packages, no terminal:
+
+* The app keeps everything in its own per-user data folder (`~/Library/Application Support/scm-workbench` on macOS, `%LOCALAPPDATA%\scm-workbench` on Windows): a **private Python runtime** it provisions itself, the pinned job dependencies, settings, job history, and the managed repo copies.
+* On **first launch** a native window opens at once — no waiting, no installer — while the background work proceeds with live progress in the UI: the runtime is provisioned, dependencies installed into it, and the newest copy of each sister repo is fetched (SCM tracks its **latest release**, scm-extras its **main** branch, since it publishes no releases).
+* **Settings → “Managed repo copies”** does the same on demand: download latest, re-check, or pin to any tag/SHA — so a future upstream release can never drag a broken `main` state into a working version.
+* Prefer your own clones? Point **Settings → repos** at them once (sibling folders next to the app are auto-detected) — the managed copies simply stay unused.
 
 ## What you get
 
@@ -33,7 +50,17 @@ Everything runs as a tracked **job**: live log stream in the bottom console draw
 
 The scm-extras README asks you to export `SCM_EXTRA_LAYOUTS` by hand before you can use `standard_mtg` / `standard_sorcery` in SCM. The Workbench does it for you: the moment you pick an extra size (in Create PDF or template generation), it detects the size belongs to `scm-extras` and injects the env var for that job — with a note in the preview.
 
-## Quick start
+## How it works
+
+* **One manifest, two users.** The server holds a single option manifest for every job (each option: type, choices, default, help). The UI renders forms *from it* and the server assembles argv *from it* — so the on-screen command preview is byte-identical to what runs.
+* **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on both platforms.
+* **Live logs** flow over a per-job SSE stream (`/api/jobs/<id>/stream`); history is persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when packaged).
+* Delete that data area to factory-reset the Workbench.
+* The Workbench never imports code from the base repos — it reads their JSON (`assets/layouts.json`, `assets/extra_layouts/`) and shells out, so it stays compatible with whatever version the repos are on.
+
+## Running from source (developers & contributors)
+
+The app is the intended way to *use* the Workbench; this is the way to *work on* it — a plain venv and a browser tab, same engine as the bundle.
 
 ### macOS / Linux
 
@@ -44,20 +71,21 @@ git clone --depth 1 https://github.com/Alan-Cha/silhouette-card-maker
 git clone --depth 1 https://github.com/Alan-Cha/scm-extras
 git clone --depth 1 https://github.com/mallen86/scm-workbench
 
-# 2. one Python venv for the base repo's scripts (SCM targets 3.12+)
+# 2. one venv carrying the base repo's script dependencies (SCM targets 3.12+)
 python3 -m venv venv
 source venv/bin/activate
 pip install -r silhouette-card-maker/requirements.txt
 
-# 3. run the Workbench with that interpreter
-./venv/bin/python scm-workbench/server.py
+# 3. run the Workbench from its own checkout
+cd scm-workbench
+./../venv/bin/python -m scm_workbench.server
 ```
 
 A browser tab opens automatically at `http://127.0.0.1:8037`.
 
 > The clones are shallow (`--depth 1`) since you only need the latest state to run things — re-clone without it, or run `git fetch --unshallow`, if you ever want the full history (e.g. to contribute upstream).
 
-> **WSL2 (Windows):** the same steps work, plus a bonus: the Workbench opens a tab in your *Windows* default browser when the server starts (it binds the WSL VM's interfaces, which only the host machine can reach). From inside WSL, the usual `http://127.0.0.1:8037` works as before.
+> **WSL2 (Windows):** the same steps work, plus a bonus: the server binds the WSL VM's interfaces, so the Workbench also opens a tab in your *Windows* default browser. From inside WSL, the usual `http://127.0.0.1:8037` works as before.
 
 ### Windows (PowerShell)
 
@@ -73,8 +101,9 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r silhouette-card-maker\requirements.txt
 
-# 3. go
-.\venv\Scripts\python.exe scm-workbench\server.py
+# 3. go (from inside the scm-workbench folder)
+cd scm-workbench
+.\..\venv\Scripts\python.exe -m scm_workbench.server
 ```
 
 > If your repos aren't named exactly `silhouette-card-maker` / `scm-extras`, or aren't siblings, just paste the real paths into **Settings** once — it remembers.
@@ -86,43 +115,38 @@ pip install -r silhouette-card-maker\requirements.txt
 > .\venv\Scripts\Activate.ps1
 > ```
 >
-> (`RemoteSigned` just means “locally-authored scripts run, downloaded ones need a signature” — the right level for dev venvs.) Or skip activation altogether: step 3 works fine calling `.\venv\Scripts\python.exe` directly.
+> (`RemoteSigned` just means “locally-authored scripts run, downloaded ones need a signature” — the right level for dev venvs.) Or skip activation altogether: step 3 works fine calling `.\..\venv\Scripts\python.exe` directly.
 
 ### Server flags
 
 ```
-python server.py [--port N] [--host 127.0.0.1] [--no-browser]
+python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 ```
 
 * `--port` — listen port (default 8037, or whatever you saved in Settings).
 * `--no-browser` — don't auto-open a tab.
-* The server always binds to **loopback only** — it is local tooling, never a network service. File access is sandboxed to the two repos + the Workbench's own data dir.
+* The server always binds to **loopback only** (except on WSL2, where it binds the VM's interfaces so the Windows host can reach it) — it is local tooling, never a network service. File access is sandboxed to the two repos + the Workbench's own data dir.
 
-## No extra dependencies
+**No extra dependencies** on the Workbench itself: it's pure Python standard library (3.10+). The *base repos'* `requirements.txt` is what does the heavy lifting (Pillow, ezdxf, pypdfium2, the plugins' fetchers, …) — install it once into the interpreter you run the Workbench with, and both the scripts and the UI work.
 
-`server.py` is pure Python standard library (3.10+, works under 3.12). The *base repos'* `requirements.txt` is what does the heavy lifting (Pillow, ezdxf, pypdfium2, the plugins' fetchers, …) — install it once into the interpreter you run the Workbench with, and both the scripts and the UI work.
+Two other entry points, for completeness:
+
+* `python -m scm_workbench` — the app's own entry point (the one the bundle's stub binary calls): native window, private runtime, managed-copy bootstrap. In a plain dev checkout it behaves like the app, not like the classic dev server above.
+* `python -m scm_workbench.repo_sync {check|refs|update|init} --repo scm|extras` — the repo-sync CLI behind the “Managed repo copies” page, if you like terminals.
 
 > Silhouette Studio automation (`dxf_to_studio3.py`) is intentionally **not** wrapped: it drives a Windows-only GUI and lives in its own repo workflow. Use the `.studio3` files the Workbench generates/opens, or run that script in a terminal if you need the conversion itself.
 
-## How it works
-
-* **One manifest, two users.** `server.py` holds a single option manifest for every job (each option: type, choices, default, help). The browser renders forms *from it* and the server assembles argv *from it* — so the on-screen command preview is byte-identical to what runs.
-* **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on both platforms.
-* **Live logs** flow over a per-job SSE stream (`/api/jobs/<id>/stream`); history is persisted to `data/jobs.json` + `data/logs/`.
-* **`data/`** (gitignored) holds `settings.json`, job history and logs. Delete it to factory-reset the Workbench.
-* The Workbench never imports code from the base repos — it reads their JSON (`assets/layouts.json`, `assets/extra_layouts/`) and shells out, so it stays compatible with whatever version the repos are on.
-
 ## Notes
 
-* **Offsets** — SCM keeps one *shared* X/Y/angle at `silhouette-card-maker/data/offset_data.json`, but the correction you need depends on the paper you feed. So the Workbench keeps a **per-paper-size table of its own** (`data/offsets_by_size.json`) and, before any run that consumes an offset (Create PDF with “Apply saved offset”, or Offset PDF with a size picked), **stages the matching row into that shared file** — the job then runs with exactly the value SCM's scripts always read, and no SCM change is needed. Saving a row from the *Offset* page stages it too; running Offset PDF with “Save” records the used values back into that row. When no row matches, the global value applies as before.
+* **Offsets** — SCM keeps one *shared* X/Y/angle at `silhouette-card-maker/data/offset_data.json`, but the correction you need depends on the paper you feed. So the Workbench keeps a **per-paper-size table of its own** and, before any run that consumes an offset (Create PDF with “Apply saved offset”, or Offset PDF with a size picked), **stages the matching row into that shared file** — the job then runs with exactly the value SCM's scripts always read, and no SCM change is needed. Saving a row from the *Offset* page stages it too; running Offset PDF with “Save” records the used values back into that row. When no row matches, the global value applies as before.
 * **Front pages only** — `create_pdf.py` refuses `--only_fronts` while `game/double_sided/` still holds images. Flipping the toggle on with images present warns you that the option won't work and offers to remove them from the folder in one click (non-images like `README.md` are left alone).
-* **Decklists** — pasted text is saved into `game/decklist/<name>` (letters, digits, spaces, `. - ( )` only). The app's window can also pick an existing decklist from anywhere on disk via the native file dialog (Settings-independent); it's copied into `game/decklist/` automatically.
+* **Decklists** — pasted text is saved into `game/decklist/<name>` (letters, digits, spaces, `. - ( )` only). The UI can also pick an existing decklist from anywhere on disk via the native file dialog (Settings-independent); it's copied into `game/decklist/` automatically.
 * **Templates** — single-template generation defaults to the repo's own naming (`<paper>-<card>[-borderless]-v1.dxf`); tick *save* to register new sizes in `layouts.json`.
 * **Extras DXFs** are generated into `scm-extras/cutting_templates/` exactly like the upstream `generate.py` (SCM is located as a sister folder).
 
-## Packaging (self-contained app for macOS / Windows)
+## Packaging the app
 
-The repo doubles as its own packaging definition (see `pyproject.toml`):
+The repo doubles as its own [briefcase](https://briefcase.readthedocs.io) definition (see `pyproject.toml`):
 
 ```sh
 pip install briefcase
@@ -130,29 +154,10 @@ briefcase build macos app      # → build/scm-workbench/macos/app/SCM Workbench
 briefcase build windows app    # → build/scm-workbench/windows/app/ (zip it)
 ```
 
-* **Entry point** is `scm_workbench.launcher`: it pins the app's data area to a
-  writable per-user directory (`~/Library/Application Support/scm-workbench` on macOS,
-  `%LOCALAPPDATA%\scm-workbench` on Windows — overridable with `SCM_WORKBENCH_DATA`),
-  then hands over to the regular server. The dev flow (`python server.py`) is unchanged.
-* **First launch** does three things automatically (transcript in `launcher.log` in the
-  data area): it provisions a relocatable CPython runtime (GHCI python-build-standalone,
-  pinned build in `launcher.py`) for *job* scripts — the bundle's own interpreter is only
-  reachable through the app stub; it pointlessly-provisions nothing else: dependency sync
-  only `pip install`s into that runtime when `SCM_WORKBENCH_PACKAGED=1`; and it fetches the
-  newest managed copy of each sister repo (Settings → “Managed repo copies” offers the same
-  on demand, per repo: track the latest release (the default for silhouette-card-maker, so
-  unreleased changes on main can’t break a released version), the latest `main`, or any
-  pinned tag/SHA; scm-extras publishes no releases and follows its main branch).
-* **TLS** works without system configuration: `certifi` ships in the support packages and
-  the launcher points `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` at it (bundled macOS Pythons
-  can't see the OS trust store).
-* **Signing** (optional, for a friction-free first launch): macOS — an Apple Developer ID
-  plus notarization (`briefcase` passes both through once an identity is configured);
-  Windows — an OV code-signing certificate. Unsigned builds run fine after the one-time
-  Gatekeeper/SmartScreen exception.
-* `.github/workflows/package.yml` builds both platforms (and, on a `v*` tag, publishes a
-  GitHub release with the two archives).
+* **Entry point** is `scm_workbench.launcher`: it pins the app's data area to the writable per-user directory, marks the run as packaged (dependency sync may then `pip` into the app's own private runtime — never anything of the user's), bootstraps first launch, and hands over to the server, which the launcher runs as a **separate child process** with its own log (`server.log`) so the window can never take it down with it.
+* **First launch** provisions the relocatable CPython runtime (GHCI python-build-standalone, pinned build in `launcher.py`) into the data area, then fetches the newest managed copy of each sister repo. The transcript goes to `launcher.log` in the data area; if a fetch can't finish (offline first run), the app still works and **Settings → “Managed repo copies”** retries on demand.
+* **TLS** works without system configuration: `certifi` ships in the support packages and the launcher points `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` at it (bundled macOS Pythons can't see the OS trust store).
+* **Signing** (optional, for a friction-free first launch): macOS — an Apple Developer ID plus notarization (`briefcase` passes both through once an identity is configured); Windows — an OV code-signing certificate. Unsigned builds run fine after the one-time Gatekeeper/SmartScreen exception.
+* `.github/workflows/package.yml` builds both platforms, and on a `v*` tag publishes a GitHub release with the two archives.
 
-The data area holds `settings.json`, job history/logs, the per-size offset table,
-`repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to
-factory-reset. The bundle itself is never written to at runtime.
+The data area holds `settings.json`, job history/logs, the per-size offset table, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
