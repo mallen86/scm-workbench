@@ -1012,6 +1012,10 @@ select.input option { background: var(--surface); color: var(--text); }
 .frow .w-third { flex: 1 1 calc(33.33% - 10px); min-width: 170px; }
 .frow .w-quarter { flex: 1 1 calc(25% - 11px); min-width: 140px; }
 @media (max-width: 900px) { .frow .w-half, .frow .w-third, .frow .w-quarter { flex-basis: 100%; } }
+/* consecutive rows (the flat simple section) need real breathing room between
+   them — the regular forms get that from their section labels, which sit
+   22px below the previous row */
+.frow + .frow { margin-top: 24px; }
 .gap10 { margin-top: 10px; }
 .mt0 { margin-top: 0 !important; }
 
