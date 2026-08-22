@@ -20,6 +20,13 @@ jobs:
       - name: Install Briefcase
         run: python -m pip install --upgrade pip briefcase
       - name: Build the .app
+        env:
+          # pywebview unconditionally depends on proxy_tools, whose only
+          # PyPI release is a ~2015 sdist that pip's resolver intermittently
+          # refuses (no versions found) on macOS runners. A prebuilt
+          # py3-none-any wheel of it is vendored in ciwheels/ and pip finds
+          # it via this find-links path instead of the flaky index entry.
+          PIP_FIND_LINKS: file://${{ github.workspace }}/ciwheels
         run: briefcase build macos app
       - name: Allow the app's webview to load its own local server
         run: |
@@ -52,7 +59,12 @@ jobs:
       - name: Install Briefcase
         run: python -m pip install --upgrade pip briefcase
       - name: Build the app folder
-        run: briefcase build windows app
+        run: |
+          # same vendored-wheel story as the macOS job (PIP_FIND_LINKS must
+          # be a file:// URL with forward slashes on Windows)
+          $ws = (Resolve-Path .).Path.Replace('\', '/')
+          $env:PIP_FIND_LINKS = "file:///$ws/ciwheels"
+          briefcase build windows app
       - name: Zip
         run: |
           cd build/scm-workbench/windows/app

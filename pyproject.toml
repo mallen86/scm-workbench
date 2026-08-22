@@ -26,6 +26,11 @@ project_name = "scm-workbench"
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+# The repo root also holds UI assets and local dev folders; name the
+# package explicitly so generic tools (pip/uv/setuptools) never guess.
+[tool.setuptools]
+packages = ["scm_workbench"]
+
 [tool.briefcase.app.scm-workbench]
 python_version = "3.13"
 formal_name = "SCM Workbench"
