@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from scm_workbench import repo_sync
 
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "0.1.0"
 DEFAULT_PORT = 8037
 
 # The package lives one level down from the repo root in a dev checkout, and

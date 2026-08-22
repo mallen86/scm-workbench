@@ -12,7 +12,7 @@
 
 [project]
 name = "scm-workbench"
-version = "1.1.0"
+version = "0.1.0"
 description = "A local web UI for silhouette-card-maker and scm-extras — no terminal, no setup."
 authors = [{ name = "the SCM Workbench maintainers" }]
 license = "MIT"
@@ -29,7 +29,7 @@ build-backend = "setuptools.build_meta"
 [tool.briefcase.app.scm-workbench]
 python_version = "3.13"
 formal_name = "SCM Workbench"
-version = "1.1.0"
+version = "0.1.0"
 description = "Print, cut and play: a local console for the Silhouette Card Maker repos."
 document_home_page = "https://github.com/Alan-Cha/silhouette-card-maker"
 entry_point = "scm_workbench"
