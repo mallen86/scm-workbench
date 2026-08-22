@@ -2246,7 +2246,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the alternate tip only exists in advanced mode — simple mode
                 # can't change the front directory, so fetching is the only way
                 tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
-                warnings.append(f"No images in the front directory ({front}). Fetch a deck first{tip or '.'}")
+                warnings.append(f"No images in the front directory ({front}). Use the fetch card art workflow first{tip or '.'}")
         return self._json({
             "cmd": _fmt_argv(argv) if not errors else None,
             "cwd": str(cwd) if cwd else None,
