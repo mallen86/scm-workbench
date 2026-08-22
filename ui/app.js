@@ -188,14 +188,19 @@ function go(page, prefill, { push = true, anim = true } = {}) {
 
 window.addEventListener("popstate", () => {
   const page = pageFromPath();
-  go(page || "dashboard", null, { push: false });
+  // simple mode: a history entry for a page that is hidden there lands on fetch
+  if (uiMode() === "simple" && page && !SIMPLE_PAGES.includes(page)) return go("fetch", null, { push: false });
+  go(page || (uiMode() === "simple" ? "fetch" : "dashboard"), null, { push: false });
 });
 
 // Initial load: honor the URL we were given (refreshing /pdf must show PDF).
 // Normalizes the path (trailing slash, unknown page) without adding history
 // entries, so a hard refresh doesn't pollute the back button.
 function bootPage() {
-  const page = pageFromPath();
+  let page = pageFromPath();
+  if (uiMode() === "simple" && !SIMPLE_PAGES.includes(page)) {
+    page = "fetch"; // in simple mode the app opens on the first workflow step
+  }
   const path = page ? (page === "dashboard" ? "/" : "/" + page) : "/";
   if (location.pathname !== path) history.replaceState({ page: page || "dashboard" }, "", path);
   go(page || "dashboard", null, { push: false });
@@ -211,6 +216,7 @@ function applyPrefill(page, prefill) {
 
 function bindNav() {
   $$("#nav .nav-item").forEach(a => a.onclick = () => go(a.dataset.page));
+  $$("#mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
   $("#btn-console").onclick = toggleConsole;
   $$("#theme-switch .ts-btn").forEach(b => b.onclick = () => setTheme(b.dataset.theme));
 }
@@ -221,20 +227,6 @@ function setTheme(theme) {
   fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ theme }) });
   document.documentElement.dataset.theme = theme;
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === theme));
-}
-
-function setUiMode(mode) {
-  const cur = (S.info?.settings?.ui_mode || "advanced") === "simple" ? "simple" : "advanced";
-  if (mode === cur) return;
-  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui_mode: mode }) })
-    .then(async () => {
-      await refreshInfo();
-      toast("ok", mode === "simple"
-        ? "Simple interface — the Create PDF page now shows the basic settings only."
-        : "Advanced interface — the full layout is back.");
-      go("settings");
-    })
-    .catch(() => toast("err", "could not save the interface mode"));
 }
 
 /* show commands the way a user would run them: a bare "python" interpreter
@@ -549,13 +541,18 @@ function groupInner(opts, kind, args) {
 }
 
 /* ---- Simple / Advanced interface mode ------------------------------------
-   "advanced" (the default) renders every manifest option — the full layout.
-   "simple" keeps only the basics of a page: for a kind that has options
-   flagged `simple` in the manifest, only those render, and its collapsible
-   power sections (Fit & edge finishing, Advanced, …) are hidden. Kinds
-   without any `simple` flags (Fetch, Offset, Calibration, …) are already as
-   simple as they get and render unchanged. Hidden options keep their defaults
-   in S.forms, so the command preview is identical in both modes. */
+   Two sizes of Workbench in one app:
+   • advanced (default) — every page, every control, exactly as documented.
+   • simple — "don't overwhelm me": the side nav collapses to the essentials
+     (Fetch card art, Create PDF, Settings) and the Create PDF form keeps
+     only the basic options.
+   For a kind that has options flagged `simple` in the manifest, only those
+   render and its collapsible power sections (Fit & edge finishing, Advanced,
+   …) are hidden; kinds without any `simple` flags (Fetch, Offset, …) are
+   already as simple as they get and render unchanged. Hidden options keep
+   their defaults in S.forms, so the command preview is identical in both
+   modes. */
+const SIMPLE_PAGES = ["fetch", "pdf", "settings"];   // what the nav keeps in simple mode
 function uiMode() {
   const s = S.info && S.info.settings;
   return (s && (s.ui_mode || "advanced")) === "simple" ? "simple" : "advanced";
@@ -571,6 +568,36 @@ function optVisible(o, kind) {
 function groupVisible(g, kind) {
   if (uiMode() !== "simple" || !kindHasSimple(kind)) return true;
   return !g.collapsible;
+}
+/* body class + section separators + topbar switch state, all from one place */
+function syncUiMode() {
+  const simple = uiMode() === "simple";
+  document.body.classList.toggle("mode-simple", simple);
+  $$("#nav .nav-sep").forEach(sep => {
+    let n = sep.nextElementSibling, any = false;
+    while (n && !n.classList.contains("nav-sep")) {
+      if (n.classList.contains("nav-item") && !(simple && n.hasAttribute("data-simple-hide"))) { any = true; break; }
+      n = n.nextElementSibling;
+    }
+    sep.classList.toggle("hide", !any);
+  });
+  $$("#mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
+}
+function setUiMode(mode) {
+  const cur = uiMode();
+  if (!mode || mode === cur) return;
+  S.info.settings.ui_mode = mode;
+  syncUiMode();
+  const page = S.page || "dashboard";
+  if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
+    go("fetch");
+    toast("ok", "Simple — just the essentials: fetch the art, make the PDF.");
+  } else {
+    if (page === "pdf") go(page, null, { push: false }); // re-render with the new form size
+    toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
+  }
+  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui_mode: mode }) })
+    .catch(() => {});
 }
 
 /* ================================ job control ============================== */
@@ -1501,7 +1528,8 @@ PAGES.pdf = (root) => {
         : `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” below when ready.`;
       wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
         el("span", { class: "grow", html: txt }),
-        el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")));
+        // the Offset & calibration page is hidden in simple mode — no link to it
+        ...(uiMode() === "advanced" ? [el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")] : [])));
     }
   }
   wrap.__patch = () => patchPdfForm("create_pdf");  // must run once the card is in the document
@@ -2094,23 +2122,8 @@ PAGES.settings = (root) => {
 
   const s = S.info.settings;
 
-  // interface (simple / advanced)
-  const ic = el("div", { class: "card" });
-  ic.append(el("div", { class: "card-head" },
-    el("div", { class: "card-ico" }, ico("eye")),
-    el("div", { class: "grow" }, el("h2", {}, "Interface"),
-      el("p", {}, "How much of the controls to show. Simple trims the Create PDF page to the basics — card & paper size, registration marks, borderless and the front-only switch. The Fetch pages are already as simple as they get, and the other pages are unaffected."))));
-  const modeNow = (s.ui_mode || "advanced") === "simple" ? "simple" : "advanced";
-  const segM = el("div", { class: "seg" });
-  for (const [v, lab] of [["simple", "Simple"], ["advanced", "Advanced"]]) {
-    segM.append(el("button", { type: "button", class: modeNow === v ? "active" : "", onclick: () => setUiMode(v) }, lab));
-  }
-  ic.append(el("div", { style: "margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
-    el("span", { class: "small faint" }, "show"), segM,
-    el("span", { class: "small faint" }, modeNow === "simple"
-      ? "basic settings only — Advanced brings back the full layout"
-      : "the full layout — everything the PDF builder offers")));
-  wrap.append(ic);
+  // (the Simple / Advanced switch lives in the top bar on every page —
+  //  #mode-switch — not as a settings card)
   // repos
   const rc = el("div", { class: "card" });
   rc.append(el("div", { class: "card-head" },
@@ -2257,6 +2270,7 @@ async function refreshInfo({ keepForms = false, jobs = true } = {}) {
   S.manifest = await api("/api/manifest");
   document.documentElement.dataset.theme = S.info.settings.theme || "dark";
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (S.info.settings.theme || "dark")));
+  syncUiMode();
   // pills
   const dS = $("#dot-scm"); dS.classList.toggle("ok", S.info.scm.found);
   const dE = $("#dot-extras"); dE.classList.toggle("ok", S.info.extras.found); dE.classList.toggle("warn", !S.info.extras.found);
@@ -2300,10 +2314,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindNav();
   bindConsole();
   iconize(document);
-  // initial theme before info loads (avoid flash)
+  // initial theme before info loads (avoid flash) — and the simple-mode nav
+  // collapse, from the same early settings read, so the first paint is already
+  // in the right shape
   try {
     const r = await fetch("/api/settings"); const s = await r.json();
     document.documentElement.dataset.theme = s.theme || "dark";
+    const simple = (s.ui_mode || "advanced") === "simple";
+    document.body.classList.toggle("mode-simple", simple);
+    $$("#mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
+    if (simple) $$("#nav .nav-sep").forEach(sep => {
+      let n = sep.nextElementSibling, any = false;
+      while (n && !n.classList.contains("nav-sep")) {
+        if (n.classList.contains("nav-item") && !n.hasAttribute("data-simple-hide")) { any = true; break; }
+        n = n.nextElementSibling;
+      }
+      sep.classList.toggle("hide", !any);
+    });
   } catch { }
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (document.documentElement.dataset.theme || "dark")));
   // the first API call can fail transiently (server still starting up, or

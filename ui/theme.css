@@ -123,6 +123,10 @@ body::before {
   font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
   color: var(--faint); margin: 14px 10px 6px;
 }
+.nav-sep.hide { display: none; }
+
+/* simple mode: the side nav collapses to the essentials */
+body.mode-simple .nav-item[data-simple-hide] { display: none; }
 
 .nav-item {
   display: flex; align-items: center; gap: 10px;
@@ -198,6 +202,20 @@ body::before {
 }
 .topbar-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
 .topbar-right { display: flex; align-items: center; gap: 10px; }
+
+/* simple / advanced switch — top right of every page, next to the python
+   chip and the console button */
+.mode-switch {
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 8px;
+}
+.mode-switch .ms-btn {
+  font: 600 11.5px var(--sans); color: var(--muted); background: none; border: 0;
+  padding: 3px 9px; border-radius: 6px; cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.mode-switch .ms-btn:hover { color: var(--text); }
+.mode-switch .ms-btn.active { background: var(--accent-soft); color: var(--accent); }
 
 .chip {
   display: inline-flex; align-items: center; gap: 6px;

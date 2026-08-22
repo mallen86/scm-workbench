@@ -730,9 +730,18 @@ def load_settings() -> dict:
 
 
 def save_settings(s: dict) -> None:
+    # atomic: write to a sibling temp file and rename over the real one, so a
+    # crash (or a second writer) can never leave a half-written settings.json
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+    tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
+    os.replace(tmp, SETTINGS_FILE)
+
+
+# The server is threaded; two /api/settings POSTs in flight would otherwise
+# interleave their read-modify-write and one change would be lost.
+_SETTINGS_LOCK = threading.Lock()
 
 
 # ============================================================================
@@ -1903,21 +1912,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": kill_job(m.group(1))})
             if path == "/api/settings":
                 body = self._body()
-                settings = load_settings()
-                for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded"):
-                    if k in body:
-                        settings[k] = body[k]
-                if "ui_mode" in body:
-                    m = str(body["ui_mode"]).strip()
-                    if m in ("simple", "advanced"):
-                        settings["ui_mode"] = m
-                if isinstance(body.get("defaults"), dict):
-                    settings["defaults"].update(body["defaults"])
-                if isinstance(body.get("repos"), dict):
-                    for k, v in body["repos"].items():
-                        if k in settings["repos"] and isinstance(v, dict):
-                            settings["repos"][k].update(v)
-                save_settings(settings)
+                with _SETTINGS_LOCK:
+                    settings = load_settings()
+                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded"):
+                        if k in body:
+                            settings[k] = body[k]
+                    if "ui_mode" in body:
+                        m = str(body["ui_mode"]).strip()
+                        if m in ("simple", "advanced"):
+                            settings["ui_mode"] = m
+                    if isinstance(body.get("defaults"), dict):
+                        settings["defaults"].update(body["defaults"])
+                    if isinstance(body.get("repos"), dict):
+                        for k, v in body["repos"].items():
+                            if k in settings["repos"] and isinstance(v, dict):
+                                settings["repos"][k].update(v)
+                    save_settings(settings)
                 invalidate_manifest_cache()
                 return self._json({"ok": True, "settings": settings})
             if path == "/api/repos/save":

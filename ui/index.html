@@ -32,17 +32,17 @@
       </div>
 
       <nav class="nav" id="nav">
-        <a class="nav-item" data-page="dashboard"><span class="nav-ico" data-ico="home"></span>Dashboard</a>
+        <a class="nav-item" data-page="dashboard" data-simple-hide><span class="nav-ico" data-ico="home"></span>Dashboard</a>
         <div class="nav-sep">Workflow</div>
         <a class="nav-item" data-page="fetch"><span class="nav-ico" data-ico="download"></span>Fetch card art</a>
         <a class="nav-item" data-page="pdf"><span class="nav-ico" data-ico="pdf"></span>Create PDF</a>
-        <a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>
+        <a class="nav-item" data-page="offset" data-simple-hide><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>
         <div class="nav-sep">Cutting</div>
-        <a class="nav-item" data-page="templates"><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
-        <a class="nav-item" data-page="extras"><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
+        <a class="nav-item" data-page="templates" data-simple-hide><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
+        <a class="nav-item" data-page="extras" data-simple-hide><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
         <div class="nav-sep">Reference</div>
-        <a class="nav-item" data-page="sizes"><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
-        <a class="nav-item" data-page="utilities"><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
+        <a class="nav-item" data-page="sizes" data-simple-hide><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
+        <a class="nav-item" data-page="utilities" data-simple-hide><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
         <div class="nav-sep">System</div>
         <a class="nav-item" data-page="settings"><span class="nav-ico" data-ico="gear"></span>Settings</a>
       </nav>
@@ -66,6 +66,10 @@
       <header class="topbar">
         <div class="topbar-title" id="topbar-title">Dashboard</div>
         <div class="topbar-right">
+          <div class="mode-switch" id="mode-switch" title="How much of the Workbench to show — Simple keeps just the essentials (fetch the art, make the PDF)">
+            <button type="button" class="ms-btn" data-mode="simple">Simple</button>
+            <button type="button" class="ms-btn" data-mode="advanced">Advanced</button>
+          </div>
           <span class="chip subtle" id="chip-python" title="Python used for the scripts">python 3.12</span>
           <button class="btn btn-ghost" id="btn-console" title="Job console">
             <span data-ico="terminal"></span>
