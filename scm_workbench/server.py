@@ -417,6 +417,8 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------------ PDF
     kinds["create_pdf"] = {
         "title": "Create PDF", "page": "pdf", "needs": ["scm"], "cwd": "scm",
+        # the order of the options in the flat simple-mode section
+        "simple_order": ["card_size", "paper_size", "borderless", "load_offset", "only_fronts"],
         "description": "Lays out card images into a print-ready PDF with registration marks that match the cutting templates.",
         "groups": [
             {
@@ -439,7 +441,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("card_size", "Card size", "select", choices=card_choices, default="standard", width="third", simple=True),
                     _opt("paper_size", "Paper size", "select", choices=paper_choices, default="letter", width="third", simple=True),
                     _opt("registration", "Registration marks", "segment",
-                         choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third", simple=True),
+                         choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third"),
                     _opt("specialty", "Specialty layout", "select", choices=specialty_choices, default="", width="third",
                          help="Overrides card size, paper size, and registration."),
                     _opt("registration_orientation", "Registration orientation", "select",

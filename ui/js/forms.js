@@ -304,14 +304,23 @@ export function formCard(kind, opts = {}) {
     // Flat layout: one unbroken section — no group headers, no collapsible
     // wrappers, no card title of its own. In simple mode only the options
     // flagged `simple` in the manifest make it in (the everyday ones);
-    // everything else keeps its default behind the scenes.
-    const row = el("div", { class: "frow" });
+    // everything else keeps its default behind the scenes. A kind-level
+    // `simple_order` list, when given, is the order of that section —
+    // members not listed fall back to manifest order, after the listed.
+    let os = [];
     for (const g of spec.groups || [])
-      for (const o of g.options || []) {
-        if (!optVisible(o, spec)) continue;
-        const node = renderOption(o, args, kind);
-        if (node) row.append(node);
-      }
+      for (const o of g.options || [])
+        if (optVisible(o, spec)) os.push(o);
+    const order = uiMode() === "simple" ? spec.simple_order : null;
+    if (order) {
+      const rank = new Map(order.map((k, i) => [k, i]));
+      os.sort((a, b) => (rank.get(a.key) ?? order.length) - (rank.get(b.key) ?? order.length));
+    }
+    const row = el("div", { class: "frow" });
+    for (const o of os) {
+      const node = renderOption(o, args, kind);
+      if (node) row.append(node);
+    }
     card.append(row);
   } else {
     for (const g of spec.groups || []) {
