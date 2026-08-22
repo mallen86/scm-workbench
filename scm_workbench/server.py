@@ -1133,16 +1133,33 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             return argv, None, env, title, warnings, errors
         cwd = scm
         a = args
+        # In simple mode the command shows only what deviates from the
+        # defaults: SCM's own defaults (the folder paths, 3-mark
+        # registration, stretch fit) never need to appear in the command a
+        # user reads — unless the value actually deviates (edited in
+        # advanced mode, say) or, for quality, the global quality setting
+        # is other than 100.
+        simple = str(settings.get("ui_mode", "advanced")) == "simple"
+
+        def emit(key, *flag, default=None):
+            nonlocal argv
+            v = a.get(key)
+            if v in (None, ""):
+                return
+            if simple and default is not None and str(v) == default:
+                return
+            argv += list(flag) + [str(v)]
+
         argv += ["create_pdf.py"]
-        if a.get("front_dir"): argv += ["--front_dir_path", str(a["front_dir"])]
-        if a.get("back_dir"): argv += ["--back_dir_path", str(a["back_dir"])]
-        if a.get("double_sided_dir"): argv += ["--double_sided_dir_path", str(a["double_sided_dir"])]
+        emit("front_dir", "--front_dir_path", default="game/front")
+        emit("back_dir", "--back_dir_path", default="game/back")
+        emit("double_sided_dir", "--double_sided_dir_path", default="game/double_sided")
         argv += ["--output_path", str(a.get("output_path") or "game/output/game.pdf")]
         if a.get("output_images"): argv += ["--output_images"]
         card = str(a.get("card_size") or d.get("card_size") or "standard")
         paper = str(a.get("paper_size") or d.get("paper_size") or "letter")
         argv += ["--card_size", card, "--paper_size", paper]
-        if a.get("registration"): argv += ["--registration", str(a["registration"])]
+        emit("registration", "--registration", default="3")
         if a.get("registration_orientation"): argv += ["--registration_orientation", str(a["registration_orientation"])]
         if a.get("specialty"): argv += ["--specialty", str(a["specialty"])]
         if a.get("only_fronts"):
@@ -1156,7 +1173,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                         warnings.append(
                             f"Double-sided folder “{ds}” still has {n} image{'s' if n == 1 else 's'} — "
                             "create_pdf.py refuses --only_fronts while those exist; remove them first or uncheck the option.")
-        if a.get("fit"): argv += ["--fit", str(a["fit"])]
+        emit("fit", "--fit", default="stretch")
         if a.get("fit_backs"): argv += ["--fit_backs", str(a["fit_backs"])]
         for key in ("crop", "crop_backs", "extend_edges", "extend_edges_backs",
                     "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs"):
@@ -1165,7 +1182,13 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
         quality = a.get("quality")
         quality = int(quality) if quality not in (None, "") else int(d.get("quality", 100))
-        argv += ["--ppi", str(ppi), "--quality", str(quality)]
+        if simple and quality == 100:
+            # the form sat at the manifest default — the global quality
+            # setting is the preference that governs
+            quality = int(d.get("quality", 100))
+        argv += ["--ppi", str(ppi)]
+        if not (simple and quality == 100):
+            argv += ["--quality", str(quality)]
         for idx in a.get("skip") or []:
             argv += ["--skip", str(idx)]
         if a.get("label"): argv += ["--label", str(a["label"])]
