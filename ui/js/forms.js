@@ -5,8 +5,25 @@ import { openConsole, refreshJobs } from "./console.js";
 import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";
 import { refreshInfo } from "./info.js";
 import { repoReady } from "./prep.js";
+import { uiMode } from "./nav.js";
 
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+
+/* A kind is "simple-flagged" when any of its options carries `simple: true`
+   in the manifest: in simple mode its flat rendering (formCard's `flat:`
+   option) shows only those options; kinds without any flag (Fetch, Offset,
+   …) have no simple version and render unchanged. Hidden options keep their
+   defaults in S.forms, so the command preview is identical in both modes. */
+export function kindHasSimple(spec) {
+  return !!(spec && (spec.groups || []).some(g => (g.options || []).some(o => o.simple)));
+}
+
+
+export function optVisible(o, spec) {
+  if (uiMode() !== "simple" || !kindHasSimple(spec)) return true;
+  return !!o.simple;
+}
 
 
 export function repoRowForKind(kind) {
@@ -284,12 +301,14 @@ export function formCard(kind, opts = {}) {
   }
 
   if (opts.flat) {
-    // Simple-mode layout: one flat section — every option of every group,
-    // in manifest order, with no group headers between them and no
-    // collapsible wrappers.
+    // Flat layout: one unbroken section — no group headers, no collapsible
+    // wrappers, no card title of its own. In simple mode only the options
+    // flagged `simple` in the manifest make it in (the everyday ones);
+    // everything else keeps its default behind the scenes.
     const row = el("div", { class: "frow" });
     for (const g of spec.groups || [])
       for (const o of g.options || []) {
+        if (!optVisible(o, spec)) continue;
         const node = renderOption(o, args, kind);
         if (node) row.append(node);
       }
@@ -352,12 +371,12 @@ export function groupInner(opts, kind, args) {
    Two sizes of Workbench in one app:
    • advanced (default) — every page, every control, exactly as documented.
    • simple — "don't overwhelm me": the side nav collapses to the essentials
-     (Fetch card art, Create PDF, Settings) and the Create PDF form renders
-     as a single flat section — no group headers and no collapsible
-     wrappers, every option still right there (formCard(..., { flat: true,
-     head: false }), with the page head above keeping the page's name).
-   The other forms (Fetch, Offset, …) already are as simple as they get and
-   render unchanged in both modes. */
+     (Fetch card art, Create PDF, Settings) and the Create PDF form becomes
+     one flat section (formCard(..., { flat: true, head: false }): no group
+     headers, no collapsible wrappers, no card title — the page head above
+     keeps the name) holding just the everyday options flagged `simple` in
+     the manifest. The other forms (Fetch, Offset, …) have no simple version
+     and render unchanged in both modes. */
 
 
 /* ================================ job control ============================== */

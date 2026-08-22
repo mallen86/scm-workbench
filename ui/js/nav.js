@@ -127,12 +127,25 @@ export function syncUiMode() {
 }
 
 
-export function setUiMode(mode) {
+export async function setUiMode(mode) {
   const cur = uiMode();
   if (!mode || mode === cur) return;
+  // Save first, commit locally only once the server has confirmed — a
+  // settings GET landing before the commit (or the one fired just below)
+  // returning the previous value must not roll the switch back, or the
+  // user would have to click twice.
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ui_mode: mode }),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+  } catch {
+    toast("err", "Couldn't save the interface setting — still in " + cur + " mode.");
+    return;
+  }
   S.info.settings.ui_mode = mode;
   syncUiMode();
-  refreshInfo().catch(() => {});   // keep jobs/status/prep fresh for the re-render
   const page = S.page || "dashboard";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
@@ -141,6 +154,5 @@ export function setUiMode(mode) {
     if (page === "pdf") go(page, null, { push: false }); // re-render with the new form size
     toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
   }
-  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ui_mode: mode }) })
-    .catch(() => {});
+  refreshInfo().catch(() => {});   // keep jobs/status/prep fresh for the re-render
 }
