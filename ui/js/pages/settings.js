@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast } from "../core.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc } from "../core.js";
 import { doRun } from "../forms.js";
 import { refreshInfo } from "../info.js";
 import { go, setTheme } from "../nav.js";
@@ -273,6 +273,145 @@ PAGES.settings = (root) => {
     } }, ico("check"), "Save defaults"),
   ));
   wrap.append(dc);
+
+  // app updates (the packaged app checks GitHub for itself, at start and daily)
+  const uc = el("div", { class: "card" });
+  uc.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("arrow")),
+    el("div", { class: "grow" }, el("h2", {}, "App updates"),
+      el("p", {}, packaged
+        ? "Checks the newest release of this app on GitHub (at start-up, and once a day while it's open). Installing a new version swaps the app folder only — your data folder is never touched."
+        : "Running from a source checkout — there's nothing to self-update here; pull the Workbench repo itself instead."))));
+  if (packaged) {
+    const uRow = el("div", { class: "frow", style: "align-items:center; gap:14px" });
+    const uBtn = el("button", { class: "btn primary" });
+    const uLast = el("span", { class: "small faint" });
+    uRow.append(uBtn, uLast);
+    const uStatus = el("div", { class: "small", style: "margin-top:10px; line-height:1.55" });
+    uc.append(uRow, uStatus);
+
+    const humanize = ts => {
+      if (!ts) return "never";
+      const d = new Date(ts * 1000), now = new Date();
+      const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      if (d.toDateString() === now.toDateString()) return `today at ${hm}`;
+      const days = (now - d) / 864e5;
+      if (days < 2) return `yesterday at ${hm}`;
+      if (days < 7) return `${Math.floor(days)} days ago`;
+      return d.toLocaleDateString();
+    };
+
+    const tokI = el("input", { class: "input mono", type: "password", value: s.github_token || "",
+      placeholder: "GitHub token — the release repo is private, so checks need one (any token with read access)" });
+    const tokWrap = el("div", { class: "frow", style: "margin-top:14px; align-items:center" });
+    tokWrap.append(
+      el("div", { class: "field", style: "flex:1" }, el("label", {}, "GitHub token"), tokI),
+      el("button", { class: "btn", onclick: async () => {
+        const r = await api("/api/settings", { github_token: tokI.value.trim() });
+        await refreshInfo();
+        toast(r.ok ? "ok" : "warn", r.ok ? "Token saved." : String(r.errors?.[0] || "Not saved."));
+        if (r.ok) doCheck();   // a fresh token may change the answer at once
+      } }, ico("check"), "Save token"),
+    );
+    uc.append(tokWrap);
+
+    let busy = false;
+    const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
+
+    const render = async () => {
+      let r;
+      try { r = await api("/api/updates"); } catch { return; }
+      const st = r.state || {};
+      uLast.textContent = "Last checked: " + humanize(st.checked_at);
+      if (st.checking) {   // a check is in flight (the daily daemon or another click)
+        setBtn("Checking…", null, true);
+        uStatus.textContent = "Asking GitHub for the newest release…";
+        return;
+      }
+      const stale = st.checked_at != null && (Date.now() / 1000 - st.checked_at) > 86400;
+      const setBtn = (label, onClick, disabled = false, title = "") => {
+        uBtn.textContent = "";
+        uBtn.append(ico(disabled ? "clock" : "arrow"), el("span", {}, " " + label));
+        uBtn.disabled = disabled;
+        uBtn.onclick = disabled ? null : onClick;
+        uBtn.title = title;
+      };
+      switch (st.status) {
+        case "never":
+          setBtn("Check for updates", doCheck);
+          uStatus.textContent = "Not checked yet — the first automatic check runs at start-up, and once a day while the app is open.";
+          break;
+        case "auth-required":
+          setBtn("Check for updates", doCheck);
+          uStatus.textContent = "Can't see the release repo without credentials (" + (st.reason || "no GitHub token is set") + "). Paste a token below, save it, then check again.";
+          break;
+        case "error":
+          setBtn("Check again", doCheck);
+          uStatus.textContent = "The last check failed: " + (st.reason || "unknown error");
+          break;
+        case "up-to-date":
+          if (!stale) {
+            setBtn("Up to date", null, true, "Rechecked at start-up and once a day while the app is open");
+            uStatus.innerHTML = `You're on the latest version — <b>${vv(st.latest || r.current)}</b> is the newest release.`;
+          } else {
+            setBtn("Check for updates", doCheck);
+            uStatus.innerHTML = `Last checked ${humanize(st.checked_at)} — you were on the latest (${vv(st.latest || r.current)}). The automatic recheck is due; press to check now.`;
+          }
+          break;
+        case "update-available":
+          setBtn(`Download & install ${vv(st.latest)}`, startUpdate);
+          uStatus.innerHTML = `A newer version is out — <b>${vv(st.latest)}</b>` +
+            (st.published ? ` (released ${esc(new Date(st.published).toLocaleDateString())})` : "") +
+            ". The install replaces the app folder and reopens it; your decklists, images and settings stay put." +
+            (st.release_url ? ` <a href="${esc(st.release_url)}" target="_blank" rel="noopener">What's new</a>` : "");
+          break;
+        default:
+          setBtn("Check for updates", doCheck);
+          uStatus.textContent = "";
+      }
+    };
+
+    async function doCheck() {
+      if (busy) return;
+      busy = true;
+      const st0 = (await api("/api/updates").catch(() => null))?.state || {};
+      const fresh = st0.checked_at != null && (Date.now() / 1000 - st0.checked_at) < 86400
+        && ["up-to-date", "update-available"].includes(st0.status);
+      if (!fresh) {
+        uStatus.textContent = "Asking GitHub for the newest release…";
+        uBtn.disabled = true;
+      }
+      let r;
+      try {
+        r = await api("/api/updates/check", { force: !fresh });
+      } catch (e) {
+        uStatus.textContent = "The check didn't get through — try again in a moment.";
+      } finally {
+        busy = false;
+      }
+      await render();
+      if (r?.state?.status === "up-to-date") toast("ok", `No update — ${vv(r.state.latest)} is the newest.`);
+      else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)} — press the button above to install it.`);
+      else if (r?.state?.status === "auth-required") toast("warn", "A GitHub token is needed — add one below and check again.");
+    }
+
+    const startUpdate = async () => {
+      const r = await api("/api/updates/start", {});
+      if (!r.ok) { toast("warn", r.errors?.[0] || "The update could not start."); return; }
+      toast("ok", "Update started — the app will close itself and reopen as the new version.");
+      uStatus.textContent = "Working: downloading, installing, then reopening the new version. Watch it live in the console (it lands there automatically).";
+      go("console");
+    };
+
+    uBtn.onclick = null;   // render() owns the button from here
+    render();               // first paint; while the card is up it stays current on its own
+    clearInterval(S.timers?.appUpdates);   // a re-render must never stack polls
+    S.timers.appUpdates = setInterval(render, 5000);   // stay honest while the card is up
+  } else {
+    uc.append(el("div", { class: "small", style: "margin-top:10px" },
+      `Version v${S.info.server.version}. In a packaged app this card would check GitHub for itself and offer to install the newest release in place.`));
+  }
+  wrap.append(uc);
 
   // data & about
   const ac = el("div", { class: "card" });

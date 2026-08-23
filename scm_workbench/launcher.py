@@ -112,6 +112,18 @@ def main() -> None:
     os.environ["SCM_WORKBENCH_DATA"] = str(data)
     os.environ["SCM_WORKBENCH_PACKAGED"] = "1"
 
+    # an in-place update keeps one backup of the previous app folder beside
+    # the new one (`.old-<stamp>`); by the time a new instance reaches this
+    # point it is provably alive, so the backup can go now
+    bundle = _app_bundle()
+    if bundle is not None:
+        import shutil as _sh
+        for old in bundle.parent.glob(bundle.name + ".old-*"):
+            try:
+                _sh.rmtree(old, ignore_errors=True)
+            except Exception:
+                pass
+
     # Packaged macOS/Windows Pythons sometimes can't see the OS trust store
     # ("unable to get local issuer certificate"). Bundle certifi and point the
     # default SSL context at it so every HTTPS call in the app works offline
@@ -175,6 +187,25 @@ def _server_up(port: int) -> bool:
         return False
 
 
+def _app_bundle():
+    """The app's own folder, when running inside one (the updater swaps it in
+    place). The launcher is the only process that can see it: inside a macOS
+    bundle the interpreter lives under `…/SCM Workbench.app/…`; on Windows the
+    bundle root is the exe's own folder (the exe is a renamed Python)."""
+    try:
+        exe = Path(sys.executable).resolve()
+        if sys.platform == "darwin":
+            for p in exe.parents:
+                if p.name.endswith(".app"):
+                    return p
+        elif os.name == "nt":
+            if exe.suffix.lower() == ".exe" and (exe.parent / "src").is_dir():
+                return exe.parent
+    except Exception:
+        pass
+    return None
+
+
 def _stop_leftover_server(data: Path, log) -> None:
     """Stop a UI server orphaned by an earlier launch (its window died but
     the child kept running, and keeps the configured port) — it would answer
@@ -222,6 +253,8 @@ def _ensure_server(data: Path, log, url: str, port: int, server) -> None:
     root = Path(__file__).resolve().parent.parent
     env = dict(os.environ)
     env["SCM_WORKBENCH_DATA"] = str(data)
+    if bundle := _app_bundle():
+        env["SCM_WORKBENCH_BUNDLE"] = str(bundle)
     try:
         logf = open(data / "server.log", "a", buffering=1)
         logf.write("\n===== UI server start %s =====\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -370,6 +403,15 @@ def _run_window(data: Path, log, server) -> None:
             "it will show the UI as soon as the server starts.")
 
     try:
+        # On macOS the bundled stub's Python sees sys.argv[0] as a *relative*
+        # build path, and pywebview's app-root heuristic resolves it against the
+        # current working directory — so from most launch paths (double-click,
+        # `open`) that path doesn't exist and the embedded window dies into the
+        # browser fallback. Pinning RESOURCEPATH gives pywebview a stable absolute
+        # app root no matter how (or where) this process was started.
+        if sys.platform == "darwin":
+            if bundle := _app_bundle():
+                os.environ["RESOURCEPATH"] = str(bundle / "Contents" / "Resources")
         import webview
         window = webview.create_window("SCM Workbench", url, width=1280, height=860, text_select=True)
 

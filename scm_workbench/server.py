@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict, List, Optional, Tuple
 
-from scm_workbench import repo_sync
+from scm_workbench import repo_sync, updater
 
 SERVER_VERSION = "0.1.0"
 DEFAULT_PORT = 8037
@@ -60,6 +60,8 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 JOBS_FILE = DATA_DIR / "jobs.json"
 LOGS_DIR = DATA_DIR / "logs"
 PER_SIZE_OFFSETS_FILE = DATA_DIR / "offsets_by_size.json"
+UPDATE_STATE_FILE = DATA_DIR / "update-state.json"
+UPDATE_CHECK_INTERVAL = 86400          # re-check for a newer release at most once a day
 
 # ============================================================================
 # Repo detection & plain-JSON readers (no imports from the base repos)
@@ -701,6 +703,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ui_mode": "advanced",
     "auto_open_browser": True,
     "onboarded": False,
+    "github_token": "",
     "defaults": {
         "card_size": "standard",
         "paper_size": "letter",
@@ -748,6 +751,162 @@ def save_settings(s: dict) -> None:
 # The server is threaded; two /api/settings POSTs in flight would otherwise
 # interleave their read-modify-write and one change would be lost.
 _SETTINGS_LOCK = threading.Lock()
+
+# ============================================================================
+# App updates (see updater.py)
+# ============================================================================
+
+# one in-flight release check at a time (the daily daemon and a manual button
+# press must not double-fire network calls against the same token)
+_UPDATE_CHECK_IN_FLIGHT = False
+_UPDATE_STATE_LOCK = threading.Lock()
+
+
+def load_update_state() -> dict:
+    st = _try_read_json(UPDATE_STATE_FILE)
+    return st or {"status": "never", "current": SERVER_VERSION, "checked_at": None,
+                  "latest": None, "asset": None, "reason": None, "release_url": None,
+                  "published": None}
+
+
+def save_update_state(st: dict) -> None:
+    # atomic, like settings — a torn state file must never read as “checked”
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = UPDATE_STATE_FILE.with_name(UPDATE_STATE_FILE.name + ".tmp")
+    with _UPDATE_STATE_LOCK:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f, indent=2)
+        os.replace(tmp, UPDATE_STATE_FILE)
+
+
+def run_update_check() -> dict:
+    """One network check of the newest release of the Workbench repo.
+
+    The state it produces (and persists) drives the Settings card: when it is
+    fresh (< UPDATE_CHECK_INTERVAL) and says up-to-date, a check is a no-op.
+    """
+    global _UPDATE_CHECK_IN_FLIGHT
+    token = load_settings().get("github_token") or None
+    st = {"status": "never", "current": SERVER_VERSION, "checked_at": None,
+           "latest": None, "asset": None, "reason": None, "release_url": None,
+           "published": None}
+    if _UPDATE_CHECK_IN_FLIGHT:
+        st = load_update_state()
+        st["checking"] = True
+        return st
+    _UPDATE_CHECK_IN_FLIGHT = True
+    try:
+        try:
+            rel = updater.latest_release(token)
+        except updater.AuthRequiredError as e:
+            st.update(status="auth-required", reason=str(e), checked_at=time.time())
+        except updater.UpdateError as e:
+            st.update(status="error", reason=str(e), checked_at=time.time())
+        else:
+            if rel.get("tag") and updater.is_newer(rel["tag"], SERVER_VERSION):
+                try:
+                    asset = updater.pick_asset(rel)
+                except updater.UpdateError as e:
+                    st.update(status="error", checked_at=time.time(),
+                              reason=f"{rel['tag']} is out, but: {e}")
+                else:
+                    st.update(status="update-available", latest=rel["tag"], asset=asset,
+                              release_url=rel.get("url"), published=rel.get("published"),
+                              checked_at=time.time())
+            else:
+                st.update(status="up-to-date", latest=rel.get("tag") or None,
+                          checked_at=time.time())
+    finally:
+        _UPDATE_CHECK_IN_FLIGHT = False
+    save_update_state(st)
+    return st
+
+
+def _update_daemon() -> None:
+    """Check at server start, then once a day while the app is open."""
+    time.sleep(5)  # let the window and its first paint land first
+    while True:
+        try:
+            st = load_update_state()
+            age = None if st.get("checked_at") is None else time.time() - float(st["checked_at"])
+            if st.get("status") == "never" or age is None or age > UPDATE_CHECK_INTERVAL:
+                out = run_update_check()
+                tag = out.get("latest") or ""
+                print(f"[updater] release check: {out.get('status')}" + (f" → {tag}" if tag else ""))
+        except Exception as e:
+            print(f"[updater] check failed: {e}")
+        time.sleep(1800)
+
+
+def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict], List[str]]:
+    """The in-process install job (download → swap → relaunch → quit)."""
+    st = load_update_state()
+    if st.get("status") != "update-available" and not force:
+        return None, ["No update is known to be available — press “Check for updates” first."]
+    latest = st.get("latest") or requested_latest or "the newest release"
+    job_id = uuid.uuid4().hex[:10]
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    job: dict = {
+        "id": job_id,
+        "ts": time.time(),
+        "kind": "update",
+        "title": f"Update the app to {latest}",
+        "cmd": f"workbench: self-update → {latest}",
+        "args": {},
+        "status": "running",
+        "exit_code": None,
+        "log_file": str(LOGS_DIR / f"{job_id}.log"),
+        "log_lines": [],
+        "subs": [],
+        "warnings": [],
+        "started": time.time(),
+        "ended": None,
+        "duration": None,
+        "proc": None,
+        "progress": None,
+    }
+    log_f = open(job["log_file"], "w", encoding="utf-8")
+    header = f"$ {job['cmd']}"
+    log_f.write(header + "\n\n")
+    log_f.flush()
+    job["log_lines"] = [header]
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+
+    def worker():
+        plan = {
+            "repo": updater.UPDATE_REPO,
+            "current": SERVER_VERSION,
+            "latest": st.get("latest"),
+            "asset": st.get("asset"),
+            "token": load_settings().get("github_token") or None,
+            "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or None,
+            "work": DATA_DIR / "update",
+            "force": bool(force),
+        }
+        try:
+            updater.run_job(job, plan, log_f)
+        except Exception as e:
+            import traceback
+            job["log_lines"].append("    " + traceback.format_exc(limit=3).replace("\n", "\n    "))
+            job["status"] = "fail"
+            job["exit_code"] = 1
+            job["ended"] = time.time()
+            for q in list(job["subs"]):
+                try:
+                    q.put(("done", "fail", 1))
+                except Exception:
+                    pass
+        finally:
+            try:
+                log_f.close()
+            except Exception:
+                pass
+            _persist_jobs()
+
+    threading.Thread(target=worker, daemon=True, name="update-install").start()
+    return job, []
+
 
 
 # ============================================================================
@@ -1909,6 +2068,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._preview(q)
             if path == "/api/settings":
                 return self._json(load_settings())
+            if path == "/api/updates":
+                return self._json({
+                    "current": SERVER_VERSION,
+                    "repo": updater.UPDATE_REPO,
+                    "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
+                    "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or "",
+                    "state": load_update_state(),
+                })
             if path.startswith("/api/"):
                 return self._json({"error": f"no such route: {path}"}, 404)
             # SPA routes (/pdf, /settings, ...): serve the app shell and let
@@ -1942,11 +2109,35 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/jobs/([\w-]+)/kill", path)
             if m:
                 return self._json({"ok": kill_job(m.group(1))})
+            if path == "/api/updates/check":
+                body = self._body()
+                force = bool(body.get("force"))
+                if not force:
+                    st = load_update_state()
+                    # recently checked and nothing pending → the check is a no-op
+                    if st.get("status") in ("up-to-date", "update-available") and st.get("checked_at") is not None:
+                        try:
+                            age = time.time() - float(st["checked_at"])
+                        except Exception:
+                            age = None
+                        if age is not None and age < UPDATE_CHECK_INTERVAL:
+                            st["cached"] = True
+                            return self._json({"ok": True, "state": st})
+                return self._json({"ok": True, "state": run_update_check()})
+            if path == "/api/updates/start":
+                body = self._body()
+                job, errors = start_update_job(str(body.get("latest") or ""), bool(body.get("force")))
+                if errors:
+                    return self._json({"ok": False, "errors": errors}, 400)
+                return self._json({"ok": True, "job": {
+                    "id": job["id"], "title": job["title"], "status": job["status"],
+                    "cmd": job["cmd"],
+                }})
             if path == "/api/settings":
                 body = self._body()
                 with _SETTINGS_LOCK:
                     settings = load_settings()
-                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded"):
+                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded", "github_token"):
                         if k in body:
                             settings[k] = body[k]
                     if "ui_mode" in body:
@@ -2464,6 +2655,9 @@ def main():
         (DATA_DIR / "server.pid").write_text(str(os.getpid()), encoding="ascii")
     except Exception:
         pass
+
+    # at start-up (and then once a day) — quietly check for a newer release
+    threading.Thread(target=_update_daemon, daemon=True, name="updater").start()
 
     if not args.no_browser and settings.get("auto_open_browser", True):
         threading.Timer(0.4, _open_browser, args=(browser_url,)).start()
