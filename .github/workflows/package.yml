@@ -38,6 +38,11 @@ jobs:
           # re-sign the bundle (ad-hoc; replace with a Developer ID for release).
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "SCM Workbench.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool TRUE" "SCM Workbench.app/Contents/Info.plist"
+          # About-panel hygiene: the template's CFBundleVersion would show as a
+          # second number next to the real one ("Version 0.1.0 (1)") - drop it,
+          # and put a proper one-liner in the copyright slot.
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "SCM Workbench.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist"
           codesign --force --deep -s - "SCM Workbench.app"
       - name: Zip
         run: |
