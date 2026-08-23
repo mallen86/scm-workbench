@@ -1606,6 +1606,20 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             if a.get("ignore_ub"): argv += ["--ignore_ub"]
             if a.get("tokens"): argv += ["--tokens"]
 
+        # The plugins never delete what they find in game/front/: re-fetching a
+        # *different* deck silently leaves the old images behind, and the next
+        # Create PDF would mix them into the layout. Say so before the run.
+        front = cwd / "game" / "front"
+        if front.is_dir():
+            n = sum(1 for c in front.iterdir() if c.is_file() and is_image_file(c))
+            if n:
+                warnings.append(
+                    f"The front folder already holds {n} image{'s' if n != 1 else ''} from a previous fetch. "
+                    "Fetching overwrites matching files but never deletes anything — if this is a different deck, "
+                    "clear the folder first (the “Clear card images” button on this page) or the old art ends up "
+                    "in your next PDF."
+                )
+
     else:
         errors.append(f"Unknown job kind: {kind}")
         return argv, None, env, title, warnings, errors

@@ -1,10 +1,11 @@
 /* pages/fetch — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";
-import { afterFormChange, defaultArgs, formCard } from "../forms.js";
+import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
+import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";
 import { go } from "../nav.js";
 import { jobStrip } from "../jobstrip.js";
+import { watchJobDone } from "./utilities.js";
 
 /* ================================ fetch page =============================== */
 
@@ -39,6 +40,24 @@ PAGES.fetch = (root) => {
   }
   wrap.append(formCard(kind, { icon: "download" }));
   wrap.__patch = () => patchFetchForm(kind);
+
+  // The plugins never delete existing images: fetching a *different* deck
+  // leaves the old art in game/front/ and the next PDF mixes it in. Keep a
+  // one-click clear on this page (Simple mode has no Utilities page).
+  const cc = el("div", { class: "card" });
+  cc.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("trash")),
+    el("div", { class: "grow" }, el("h2", {}, "Starting a different deck?"),
+      el("p", {}, "Fetching never deletes existing images — clearing the folders first keeps old art out of the new PDF."))));
+  cc.append(el("div", { class: "runbar" },
+    el("span", { class: "rb-note" }, "Deletes every image in game/front/ and game/double_sided/ (card backs are kept). No undo."),
+    el("button", { class: "btn danger", onclick: async () => {
+      const ok = await confirmModal({ title: "Delete card images?", text: "Every image in game/front/ and game/double_sided/ will be permanently deleted. Card backs are kept.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
+      if (!ok) return;
+      const job = await doRun("clean_up", null);
+      if (job) watchJobDone(job.id, () => afterFormChange(kind));   // the preview re-queries, so the stale-images warning clears
+    } }, ico("trash"), "Clear card images")));
+  wrap.append(cc);
   // simple mode: the console is hidden, so the page shows its own compact
   // status for the job — a progress bar while it runs, then the result with
   // the next step (create the PDF) one click away.
