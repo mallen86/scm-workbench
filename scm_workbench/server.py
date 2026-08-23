@@ -1104,12 +1104,6 @@ def get_info() -> dict:
     }
 
 
-# The preview endpoint fires on every form change (debounced) and would
-# otherwise re-scan both repos on each keystroke; the result stays warm for
-# 30 s and invalidates early on the same repo signals as the manifest cache.
-_PREVIEW_INFO: Dict[str, Any] = {}
-
-
 def _repos_signal_mtime() -> float:
     now = 0.0
     for p in (repo_sync.state_file(), DATA_DIR / "repos-manifest-scm.json"):
@@ -1128,18 +1122,6 @@ def _repos_signal_mtime() -> float:
     except Exception:
         pass
     return now
-
-
-def get_info_cached() -> dict:
-    """get_info() for the preview path (see _PREVIEW_INFO)."""
-    now = time.time()
-    c = _PREVIEW_INFO
-    if c.get("v") and now - c.get("t", 0) < 30 and _repos_signal_mtime() <= c.get("t", 0):
-        return c["v"]
-    v = get_info()
-    c.clear()
-    c.update(t=now, v=v)
-    return v
 
 
 def extras_card_names(info: dict) -> set:
@@ -1661,14 +1643,44 @@ def _repos_changed() -> bool:
     return now > _REPOS_MTIME.get("t", 0)
 
 
+# The manifest and the preview share ONE repo snapshot: boot pays for the one
+# full get_info() scan, and every keystroke-driven preview after that reads the
+# same cached dict (30 s TTL, invalidating early on the same repo-change
+# signals as the manifest) instead of re-walking both repos. The lock makes a
+# burst of concurrent previews wait for one build rather than each scanning.
+_INFO_SNAP: Dict[str, Any] = {}
+
+
+def _repos_changed_since(t: float) -> bool:
+    return _repos_signal_mtime() > t
+
+
+def _get_info_locked() -> dict:
+    """Build or return the shared repo snapshot (caller holds MANIFEST_LOCK)."""
+    now = time.time()
+    c = _INFO_SNAP
+    if c.get("v") and now - c.get("t", 0) < 30 and not _repos_changed_since(c.get("t", 0)):
+        return c["v"]
+    v = get_info()
+    c.clear()
+    c.update(t=now, v=v)
+    return v
+
+
+def get_info_cached() -> dict:
+    """The snapshot the preview endpoint runs against (see _INFO_SNAP)."""
+    with MANIFEST_LOCK:
+        return _get_info_locked()
+
+
 def get_manifest() -> dict:
     with MANIFEST_LOCK:
         if not MANIFEST_CACHE:
-            MANIFEST_CACHE.update(build_manifest(get_info()))
+            MANIFEST_CACHE.update(build_manifest(_get_info_locked()))
             _REPOS_MTIME["t"] = time.time()
         elif _repos_changed():
             MANIFEST_CACHE.clear()
-            MANIFEST_CACHE.update(build_manifest(get_info()))
+            MANIFEST_CACHE.update(build_manifest(_get_info_locked()))
             _REPOS_MTIME["t"] = time.time()
     return MANIFEST_CACHE
 
@@ -2545,6 +2557,12 @@ class Handler(BaseHTTPRequestHandler):
     def _preview(self, q):
         kind = (q.get("kind") or [""])[0]
         args_json = (q.get("args") or ["{}"])[0]
+        # a wiped form slot serializes as the literal string "undefined" from a
+        # stale client - treat that as defaults instead of 400ing (a 400 puts
+        # the client into its retry ladder and the box sits on the stale
+        # command); the client's re-own fix prevents the wipe itself
+        if args_json in ("undefined", "null"):
+            args_json = "{}"
         try:
             args = json.loads(args_json)
         except Exception:

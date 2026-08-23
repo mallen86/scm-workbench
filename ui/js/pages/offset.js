@@ -152,7 +152,7 @@ export function patchOffsetForm() {
     const src = offsetSourceFor(args.paper_size);
     if (!src) return;
     set("x_offset", src.x); set("y_offset", src.y); set("angle", src.angle);
-    afterFormChange("offset_pdf");
+    afterFormChange("offset_pdf", args);
   };
   const fPaper = $$(".field", card).find(f => f.dataset.key === "paper_size");
   const sel = fPaper && $("select", fPaper);

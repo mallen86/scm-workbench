@@ -165,7 +165,7 @@ export function patchPdfForm(kind) {
       return;
     }
     toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
-    afterFormChange(kind);   // refresh the preview so the warning clears
+    afterFormChange(kind, S.forms[kind]);   // refresh the preview so the warning clears
   });
 }
 
@@ -193,7 +193,7 @@ export function patchOffsetToggle(kind) {
       if (input.checked) {
         a.load_offset = false;
         input.checked = false;
-        afterFormChange(kind);   // the preview follows the switch
+        afterFormChange(kind, a);   // the preview follows the switch
       }
       input.disabled = true;
       note.textContent = `No offset is saved for “${paper}” yet — record one on the Offset & calibration page and this switch enables itself.`;

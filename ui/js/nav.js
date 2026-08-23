@@ -154,5 +154,9 @@ export async function setUiMode(mode) {
     if (page === "pdf" || page === "settings") go(page, null, { push: false }); // re-render with the new form size / settings cards
     toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
   }
-  refreshInfo().catch(() => {});   // keep jobs/status/prep fresh for the re-render
+  // keepForms: a mode switch is a layout change, not a content change — the
+  // values sitting in the visible form must survive, and if anything else did
+  // clear S.forms[kind] in the meantime, the form card's afterFormChange
+  // re-owns the slot on the next edit (so the preview can't wedge dead).
+  refreshInfo({ keepForms: true }).catch(() => {});   // keep jobs/status/prep fresh for the re-render
 }

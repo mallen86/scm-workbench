@@ -68,7 +68,13 @@ export function formArgs(kind) {
 }
 
 
-export function afterFormChange(kind) {
+export function afterFormChange(kind, args) {
+  // The S.forms slot can be wiped out from under a live form at any time
+  // (refreshInfo on mode switches / repo updates / boot retries). The form
+  // card's args object is the source of truth for what the user is editing -
+  // if the slot no longer points at it, re-own it, or the next preview would
+  // serialize a missing/stale form and the page would sit "not updating".
+  if (args && S.forms[kind] !== args) S.forms[kind] = args;
   clearTimer(kind);
   S.timers[kind] = setTimeout(() => updatePreview(kind), 250);
 }
@@ -159,21 +165,21 @@ export function renderOption(o, args, kind) {
     case "text":
     case "path": {
       const i = el("input", { class: `input ${o.type === "path" ? "mono" : ""}`, placeholder: o.placeholder || "", value: strVal(args[o.key]) });
-      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind); });
+      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind, args); });
       wrap.append(label, i);
       break;
     }
     case "textarea": {
       const t = el("textarea", { class: "input", rows: 5 });
       t.value = strVal(args[o.key]);
-      t.addEventListener("input", () => { args[o.key] = t.value; afterFormChange(kind); });
+      t.addEventListener("input", () => { args[o.key] = t.value; afterFormChange(kind, args); });
       wrap.append(label, t);
       break;
     }
     case "number": {
       const i = el("input", { class: "input mono", type: "number", step: o.step || 1, value: strVal(args[o.key]) });
       const w = el("span", { class: "numwrap" }, i, numSteppers(i, o.step || 1));
-      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind); });
+      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind, args); });
       wrap.append(label, w);
       break;
     }
@@ -187,14 +193,14 @@ export function renderOption(o, args, kind) {
         i.style.setProperty("--fill", `${((i.value - i.min) / (i.max - i.min)) * 100}%`);
         args[o.key] = Number(v);
       };
-      i.addEventListener("input", () => { sync(i.value); afterFormChange(kind); });
+      i.addEventListener("input", () => { sync(i.value); afterFormChange(kind, args); });
       val.addEventListener("change", () => {
         if (val.value !== "") {
           const n = Number(val.value);
-          if (Number.isFinite(n) && n >= 0) { sync(n); afterFormChange(kind); return; }
+          if (Number.isFinite(n) && n >= 0) { sync(n); afterFormChange(kind, args); return; }
         }
         sync(args[o.key]); // blank / invalid → back to last good value
-        afterFormChange(kind);
+        afterFormChange(kind, args);
       });
       sync(i.value);
       wrap.append(label, el("span", { class: "rangewrap" }, i, val));
@@ -207,7 +213,7 @@ export function renderOption(o, args, kind) {
         if (String(args[o.key]) === String(v)) opt.selected = true;
         sel.append(opt);
       }
-      sel.addEventListener("change", () => { args[o.key] = sel.value; afterFormChange(kind); });
+      sel.addEventListener("change", () => { args[o.key] = sel.value; afterFormChange(kind, args); });
       wrap.append(label, sel);
       break;
     }
@@ -221,7 +227,7 @@ export function renderOption(o, args, kind) {
             args[o.key] = v;
             $$("button", seg).forEach(b => b.classList.remove("active"));
             e.currentTarget.classList.add("active");
-            afterFormChange(kind);
+            afterFormChange(kind, args);
             o.onChange && o.onChange(v);
           },
         }, lab));
@@ -237,7 +243,7 @@ export function renderOption(o, args, kind) {
         el("span", { class: "track" }),
         el("span", { class: "knob" }),
       );
-      $("input", sw).addEventListener("change", e => { args[o.key] = e.target.checked; afterFormChange(kind); o.onChange && o.onChange(e.target.checked); });
+      $("input", sw).addEventListener("change", e => { args[o.key] = e.target.checked; afterFormChange(kind, args); o.onChange && o.onChange(e.target.checked); });
       label.setAttribute("for", `sw-${o.key}`);
       wrap.append(label, sw);
       break;
@@ -249,7 +255,7 @@ export function renderOption(o, args, kind) {
         $$(".chipx", box).forEach(c => c.remove());
         for (const c of args[o.key] || []) {
           box.prepend(el("span", { class: "chipx" }, c,
-            el("button", { type: "button", onclick: e => { (args[o.key] = args[o.key].filter(x => x !== c)).length; e.stopPropagation(); redraw(); afterFormChange(kind); } }, "×")));
+            el("button", { type: "button", onclick: e => { (args[o.key] = args[o.key].filter(x => x !== c)).length; e.stopPropagation(); redraw(); afterFormChange(kind, args); } }, "×")));
         }
         box.append(inp);
       };
@@ -260,9 +266,9 @@ export function renderOption(o, args, kind) {
           if (v && !(args[o.key] || []).includes(v)) (args[o.key] = args[o.key] || []).push(v);
           inp.value = "";
           redraw();
-          afterFormChange(kind);
+          afterFormChange(kind, args);
         } else if (e.key === "Backspace" && !inp.value && (args[o.key] || []).length) {
-          args[o.key].pop(); redraw(); afterFormChange(kind);
+          args[o.key].pop(); redraw(); afterFormChange(kind, args);
         }
       });
       box.onclick = () => inp.focus();
@@ -281,7 +287,7 @@ export function renderOption(o, args, kind) {
             const i = cur.indexOf(v);
             if (i >= 0) cur.splice(i, 1); else cur.push(v);
             e.currentTarget.classList.toggle("active");
-            afterFormChange(kind);
+            afterFormChange(kind, args);
           },
         }, lab));
       }
@@ -290,7 +296,7 @@ export function renderOption(o, args, kind) {
     }
     default: {
       const i = el("input", { class: "input", value: strVal(args[o.key]) });
-      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind); });
+      i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind, args); });
       wrap.append(label, i);
     }
   }
@@ -353,7 +359,7 @@ export function formCard(kind, opts = {}) {
       } else if (cur !== undefined && cur !== null && String(cur).trim() !== "") {
         if (!vals.includes(String(cur).trim())) {
           args[o.key] = o.default !== undefined ? o.default : "";
-          afterFormChange(kind);
+          afterFormChange(kind, args);
         }
       }
     }

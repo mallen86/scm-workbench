@@ -101,7 +101,7 @@ export function patchFetchForm(kind) {
             args.deck_file = r.name;
             fillList();
             autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
-            afterFormChange(kind);
+            afterFormChange(kind, args);
             toast("ok", `Imported “${r.name}” into the decklist folder`);
           } else {
             toast("err", (r.errors || [])[0] || "Importing the file failed.");
@@ -125,7 +125,7 @@ export function patchFetchForm(kind) {
             $$(".fp-item", list).forEach(n => n.classList.remove("active"));
             ev.currentTarget.classList.add("active");
             autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
-            afterFormChange(kind);
+            afterFormChange(kind, args);
           },
         }, ico("file"), f.name, el("span", { class: "sz" }, fmtBytes(f.size))));
       }
@@ -161,7 +161,7 @@ export function patchFetchForm(kind) {
     const fmtF = $$(".field", card).find(f => f.dataset.key === "format");
     const sel = fmtF && $("select", fmtF);
     if (sel) sel.value = args.format;
-    afterFormChange(kind);
+    afterFormChange(kind, args);
   };
   sync();
   autoFormat();
