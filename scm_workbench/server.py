@@ -39,7 +39,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from scm_workbench import repo_sync, updater
 
-SERVER_VERSION = "0.1.0"
+# The one version constant the whole app reports (About-card line, banner,
+# and the updater's notion of "what am I running"). It is pinned per build
+# by scripts/inject_version.py from the release tag, so a build from v0.1.1
+# says 0.1.1 everywhere and can never offer to install itself.
+from scm_workbench._version import __version__
+
+SERVER_VERSION = __version__
 DEFAULT_PORT = 8037
 
 # The package lives one level down from the repo root in a dev checkout, and

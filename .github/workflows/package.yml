@@ -19,6 +19,13 @@ jobs:
           python-version: "3.13"
       - name: Install Briefcase
         run: python -m pip install --upgrade pip briefcase
+      - name: Pin the version from the release tag
+        # On a tag push GITHUB_REF_NAME is the tag (v0.1.1) - that single
+        # string becomes the bundle's Info.plist version, the dist-info and
+        # the app's own __version__/SERVER_VERSION, so the About box, the
+        # in-UI version and the updater's "current" can never disagree.
+        # Dispatch/test runs keep the [project] version declared in the repo.
+        run: python scripts/inject_version.py
       - name: Build the .app
         env:
           # pywebview unconditionally depends on proxy_tools, whose only
@@ -63,6 +70,8 @@ jobs:
           python-version: "3.13"
       - name: Install Briefcase
         run: python -m pip install --upgrade pip briefcase
+      - name: Pin the version from the release tag
+        run: python scripts/inject_version.py
       - name: Build the app folder
         run: |
           # same vendored-wheel story as the macOS job (PIP_FIND_LINKS must

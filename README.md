@@ -162,4 +162,23 @@ briefcase build windows app    # → build/scm-workbench/windows/app/ (zip it)
 * **Signing** (optional, for a friction-free first launch): macOS — an Apple Developer ID plus notarization (`briefcase` passes both through once an identity is configured); Windows — an OV code-signing certificate. Unsigned builds run fine after the one-time Gatekeeper/SmartScreen exception.
 * `.github/workflows/package.yml` builds both platforms, and on a `v*` tag publishes a GitHub release with the two archives.
 
+### Releasing a new version
+
+**The tag is the only version input.** On a `v*` tag push the workflow runs
+`scripts/inject_version.py`, which pins the tag (minus its `v`) into the two
+places a build consumes it: `scm_workbench/_version.py` (what the running app
+reports — the “Data & about” line and the version the update checker compares
+against the newest release) and the `[project]` version in `pyproject.toml`
+(what briefcase stamps into the bundle — the macOS About box, the dist-info
+record, the Windows executable’s version metadata). The briefcase app section
+has no version of its own by design, so there is nothing left to keep in sync:
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1        # CI builds both archives and publishes the release
+```
+
+(For a local build, run `python scripts/inject_version.py v0.1.1` before
+`briefcase build`; with no tag in sight it keeps the version the repo declares.)
+
 The data area holds `settings.json`, job history/logs, the per-size offset table, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
