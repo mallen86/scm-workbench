@@ -2096,6 +2096,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._sse(m.group(1), after)
             if path == "/api/file":
                 return self._file(q)
+            if path == "/api/template":
+                return self._template(q)
             if path == "/api/preview":
                 return self._preview(q)
             if path == "/api/settings":
@@ -2445,6 +2447,55 @@ class Handler(BaseHTTPRequestHandler):
         data = p.read_bytes()
         self._send(200, data, MIME.get(p.suffix.lower(), "application/octet-stream"),
                    [("Content-Disposition", f'inline; filename="{p.name}"')])
+
+    def _template(self, q):
+        """Resolve the cutting template for a create_pdf form state.
+
+        Templates are named {paper}-{card}-v{N}.studio3; borderless layouts use
+        {paper}-{card}-borderless-v{N}.studio3 and live in a borderless/ sub-
+        directory (scm-extras only — the SCM repo has no borderless family). The
+        card's own repo is probed first (extras cards in scm-extras, SCM cards in
+        silhouette-card-maker), then the other, and the newest version wins.
+        """
+        settings = load_settings()
+        paper = (q.get("paper") or [""])[0].strip().lower()
+        card = (q.get("card") or [""])[0].strip().lower()
+        borderless = (q.get("borderless") or ["0"])[0] == "1"
+        if not (paper and card):
+            return self._json({"ok": False, "errors": ["needs both a card size and a paper size"]})
+        info = get_info()
+        scm_root, extras_root = effective_dirs(settings)
+        cards = {}
+        for c in info.get("scm", {}).get("card_sizes", []):
+            cards.setdefault(c["name"].lower(), c)
+        for c in info.get("extras", {}).get("card_sizes", []):
+            cards[c["name"].lower()] = c
+        c = cards.get(card)
+        if c is None:
+            return self._json({"ok": False, "errors": [f"no card size named “{card}” in either repo"]})
+        sub = "borderless" if borderless else ""
+        if c.get("source") == "extras":
+            probes = [("scm-extras", extras_root and extras_root / "cutting_templates" / sub),
+                      ("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub)]
+        else:
+            probes = [("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub),
+                      ("scm-extras", extras_root and extras_root / "cutting_templates" / sub)]
+        fam = " (borderless)" if borderless else ""
+        infix = "-borderless" if borderless else ""
+        for repo, d in probes:
+            if not d or not d.is_dir():
+                continue
+            best, best_v = None, -1
+            pat = re.compile(rf"^{re.escape(paper)}-{re.escape(card)}{re.escape(infix)}-v(\d+)\.studio3$")
+            for f in d.iterdir():
+                m = pat.fullmatch(f.name)
+                if m and int(m.group(1)) > best_v:
+                    best, best_v = f, int(m.group(1))
+            if best is not None:
+                return self._json({"ok": True, "name": best.name, "path": str(best), "repo": repo})
+        return self._json({"ok": False, "errors": [
+            f"no cutting template for {paper} + {card}{fam} in either repo "
+            f"(looked for {paper}-{card}{'-borderless' if borderless else ''}-v*.studio3)"]})
 
     def _preview(self, q):
         kind = (q.get("kind") or [""])[0]

@@ -47,9 +47,15 @@ PAGES.pdf = (root) => {
       const out = (done.outputs || [])[0];
       body.append(el("div", { class: "js-msg ok" },
         ico("check"), el("span", {}, "Your PDF is ready.")));
-      if (!out) return;
-      body.append(el("div", { class: "js-actions" },
-        el("button", { class: "btn primary", title: "Opens in your default PDF app",
+      // one shared action row: the PDF button and the cutting-template button
+      // sit side by side (the template resolves async and joins the same row)
+      let actions = null;
+      const ensureActions = () => {
+        if (!actions) { actions = el("div", { class: "js-actions" }); body.append(actions); }
+        return actions;
+      };
+      if (out) {
+        ensureActions().append(el("button", { class: "btn primary", title: "Opens in your default PDF app",
           onclick: async (e) => {
             const b = e.currentTarget;
             b.disabled = true;
@@ -65,7 +71,37 @@ PAGES.pdf = (root) => {
             } finally {
               b.disabled = false;
             }
-          } }, ico("file"), "Open PDF")));
+          } }, ico("file"), "Open PDF"));
+      }
+      // the cutting template that matches this exact PDF (paper + card size,
+      // borderless family when the form is borderless) - resolved server-side
+      // so the answer is the same in both modes
+      const f = S.forms.create_pdf || {};
+      if (f.card_size && f.paper_size) {
+        api(`/api/template?paper=${encodeURIComponent(f.paper_size)}&card=${encodeURIComponent(f.card_size)}&borderless=${f.borderless ? 1 : 0}`)
+          .then(t => {
+            if (!body.isConnected) return;
+            if (t?.ok) {
+              ensureActions().append(el("button", { class: "btn", title: `Opens ${t.name} (from ${t.repo}) in its default app`,
+                onclick: async (e) => {
+                  const b = e.currentTarget;
+                  b.disabled = true;
+                  try {
+                    const r = await api(`/api/file?path=${encodeURIComponent(t.path)}&open=1`);
+                    if (r?.ok) toast("ok", `Opening ${t.name} — it should appear in its cutting app shortly.`);
+                    else toast("warn", r?.errors?.[0] || "Couldn't open the cutting template.");
+                  } catch (err) {
+                    toast("warn", err?.message || "Couldn't open the cutting template.");
+                  } finally {
+                    b.disabled = false;
+                  }
+                } }, ico("scissors"), "Open cutting template"));
+            } else {
+              body.append(el("div", { class: "js-hint" }, t?.errors?.[0] || "No matching cutting template found."));
+            }
+          })
+          .catch(() => {});
+      }
     },
   }));
   // both must run once the card is in the document

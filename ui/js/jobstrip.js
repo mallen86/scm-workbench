@@ -84,6 +84,7 @@ export function jobStrip(kind, opts = {}) {
       const jobs = (S.jobs || []).filter(j => j.kind === kind);
       const run = jobs.find(j => j.status === "running");
       if (run) {
+        strip.dataset.painted = "";               // a new run may re-render onOk later
         attachProgress(run);
         strip.hidden = false;
         strip.className = strip.classList.contains("prog") ? "jobstrip running prog" : "jobstrip running";
@@ -96,6 +97,11 @@ export function jobStrip(kind, opts = {}) {
       closeEs();
       const done = jobs.find(j => j.ts >= t0);
       if (!done) { strip.hidden = true; strip.className = "jobstrip"; return; }
+      // same job already painted? don't tear the body down and re-run onOk
+      // every 2 s (it re-appends buttons and would restart any async work).
+      const key = done.id + ":" + done.status;
+      if (strip.dataset.painted === key) { strip.hidden = false; return; }
+      strip.dataset.painted = key;
       strip.hidden = false;
       body.innerHTML = "";
       if (done.status === "ok") {
