@@ -151,7 +151,7 @@ export async function setUiMode(mode) {
     go("fetch");
     toast("ok", "Simple — just the essentials: fetch the art, make the PDF.");
   } else {
-    if (page === "pdf") go(page, null, { push: false }); // re-render with the new form size
+    if (page === "pdf" || page === "settings") go(page, null, { push: false }); // re-render with the new form size / settings cards
     toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
   }
   refreshInfo().catch(() => {});   // keep jobs/status/prep fresh for the re-render

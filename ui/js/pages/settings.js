@@ -4,10 +4,10 @@
 import { PAGES, S, api, el, ico, pageHead, toast, esc } from "../core.js";
 import { doRun } from "../forms.js";
 import { refreshInfo } from "../info.js";
-import { go, setTheme } from "../nav.js";
+import { go, setTheme, uiMode } from "../nav.js";
 import { watchJobDone } from "./utilities.js";
 
-export function repoCopyRow(row, container) {
+export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";
@@ -50,33 +50,38 @@ export function repoCopyRow(row, container) {
       seg.append(b);
     }
     // a repo with no published releases can't be tracked by "latest release" —
-    // dim that segment instead of letting the save fail with a message
-    api("/api/repos/refs", { repo: row.key }).then(r => {
-      if (r.ok && !(r.refs.releases || []).length) {
-        segBtns["latest-release"].disabled = true;
-        segBtns["latest-release"].classList.add("off");
-        segBtns["latest-release"].title = "No releases are published for this repo yet";
+    // dim that segment instead of letting the save fail with a message. The
+    // whole selector is advanced-mode only: in simple mode the row shows the
+    // deployed version plus Check/Update, and the saved source keeps working
+    // behind the scenes.
+    if (!simple) {
+      api("/api/repos/refs", { repo: row.key }).then(r => {
+        if (r.ok && !(r.refs.releases || []).length) {
+          segBtns["latest-release"].disabled = true;
+          segBtns["latest-release"].classList.add("off");
+          segBtns["latest-release"].title = "No releases are published for this repo yet";
+        }
+      }).catch(() => { });
+      const showPicker = mode === "pinned" || selectingPinned;
+      const pinWrap = el("div", { class: "field", style: "display:" + (showPicker ? "block" : "none") });
+      const pinSel = el("select", { class: "input" }, el("option", { value: "" }, "— pick a tag / release —"));
+      if (showPicker) {
+        box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
+          el("span", { class: "small faint" }, "track"), seg, pinWrap));
+        const r = await api("/api/repos/refs", { repo: row.key });
+        if (!r.ok) { toast("err", (r.errors || ["could not list tags — check your connection"]).join("; ")); return; }
+        const known = [...r.refs.tags.map(t => t.name), ...r.refs.releases.filter(q => !q.prerelease).map(q => q.tag)];
+        for (const name of known) pinSel.append(el("option", { value: name, selected: name === src ? "selected" : null }, name));
+        const unknown = !!src && !known.includes(src);
+        pinSel.append(el("option", { value: "__custom", selected: unknown ? "selected" : null }, "… or type a tag / branch / SHA"));
+        const customI = el("input", { class: "input mono", placeholder: "e.g. v3.0.0 or a branch name", style: "margin-top:6px; display:" + (unknown ? "block" : "none"), value: unknown ? src : "" });
+        pinSel.onchange = () => { if (pinSel.value === "__custom") { customI.style.display = "block"; customI.focus(); return; } pickSource(pinSel.value); };
+        customI.onkeydown = (e) => { if (e.key === "Enter" && customI.value.trim()) pickSource(customI.value.trim()); };
+        pinWrap.append(pinSel, customI);
+      } else {
+        box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
+          el("span", { class: "small faint" }, "track"), seg, pinWrap));
       }
-    }).catch(() => { });
-    const showPicker = mode === "pinned" || selectingPinned;
-    const pinWrap = el("div", { class: "field", style: "display:" + (showPicker ? "block" : "none") });
-    const pinSel = el("select", { class: "input" }, el("option", { value: "" }, "— pick a tag / release —"));
-    if (showPicker) {
-      box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
-        el("span", { class: "small faint" }, "track"), seg, pinWrap));
-      const r = await api("/api/repos/refs", { repo: row.key });
-      if (!r.ok) { toast("err", (r.errors || ["could not list tags — check your connection"]).join("; ")); return; }
-      const known = [...r.refs.tags.map(t => t.name), ...r.refs.releases.filter(q => !q.prerelease).map(q => q.tag)];
-      for (const name of known) pinSel.append(el("option", { value: name, selected: name === src ? "selected" : null }, name));
-      const unknown = !!src && !known.includes(src);
-      pinSel.append(el("option", { value: "__custom", selected: unknown ? "selected" : null }, "… or type a tag / branch / SHA"));
-      const customI = el("input", { class: "input mono", placeholder: "e.g. v3.0.0 or a branch name", style: "margin-top:6px; display:" + (unknown ? "block" : "none"), value: unknown ? src : "" });
-      pinSel.onchange = () => { if (pinSel.value === "__custom") { customI.style.display = "block"; customI.focus(); return; } pickSource(pinSel.value); };
-      customI.onkeydown = (e) => { if (e.key === "Enter" && customI.value.trim()) pickSource(customI.value.trim()); };
-      pinWrap.append(pinSel, customI);
-    } else {
-      box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
-        el("span", { class: "small faint" }, "track"), seg, pinWrap));
     }
     // status line
     const dep = row.deployed;
@@ -118,7 +123,9 @@ export function repoCopyRow(row, container) {
       dlBtn.onclick = async () => {
         const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
         title: `Download a managed copy of ${row.name}`,
-        text: "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched). Pick the source above first if you want it to track something other than the latest main.",
+        text: simple
+          ? "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched); it will follow the latest main."
+          : "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched). Pick the source above first if you want it to track something other than the latest main.",
         okLabel: "Download", icon: "download" } });
         if (!job) return;
         watchJobDone(job.id, async () => {
@@ -153,7 +160,10 @@ export function repoCopyRow(row, container) {
 
 PAGES.settings = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Settings", "Everything here is stored in this project's data/settings.json. Repo paths can also be left blank — the Workbench auto-detects sister folders named silhouette-card-maker and scm-extras."));
+  const simple = uiMode() === "simple";
+  wrap.append(pageHead("Settings", simple
+    ? "Everything here is stored in this project's data folder, out of the way of your repos."
+    : "Everything here is stored in this project's data/settings.json. Repo paths can also be left blank — the Workbench auto-detects sister folders named silhouette-card-maker and scm-extras."));
 
   const s = S.info.settings;
 
@@ -179,17 +189,19 @@ PAGES.settings = (root) => {
     } }, ico("check"), "Save repo paths"),
     el("span", { class: "small faint" }, "You may need to restart the server after changing the Python interpreter."),
   ));
-  wrap.append(rc);
+  if (!simple) wrap.append(rc);
 
   // managed repo copies (download/update the sister repos from inside the Workbench)
   const mc = el("div", { class: "card" });
   mc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("refresh")),
-    el("div", { class: "grow" }, el("h2", {}, "Managed repo copies"), el("p", {}, "The Workbench can keep its own copy of each repo in its data folder — fetch the newest version on demand and pick exactly what to track (main, the latest release, or a pinned tag). Your images, decklists and local edits always survive an update."))));
+    el("div", { class: "grow" }, el("h2", {}, "Managed repo copies"), el("p", {}, simple
+      ? "The Workbench keeps its own copy of each repo in its data folder — check for newer versions and install them from here. Your images, decklists and local edits always survive an update."
+      : "The Workbench can keep its own copy of each repo in its data folder — fetch the newest version on demand and pick exactly what to track (main, the latest release, or a pinned tag). Your images, decklists and local edits always survive an update."))));
   for (const row of (S.info.repos || [])) {
     const wrapRow = el("div", {});            // each row replaces itself inside its own wrapper
     mc.append(wrapRow);
-    wrapRow.append(repoCopyRow(row, wrapRow));
+    wrapRow.append(repoCopyRow(row, wrapRow, simple));
   }
   wrap.append(mc);
 
@@ -227,7 +239,7 @@ PAGES.settings = (root) => {
       } }, ico("check"), "Save python & server"),
     ));
   }
-  wrap.append(pc);
+  if (!simple) wrap.append(pc);
 
   // defaults
   const dc = el("div", { class: "card" });
