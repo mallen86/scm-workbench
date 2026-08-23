@@ -28,7 +28,7 @@ PAGES.offset = (root) => {
     el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), xI),
     el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), yI),
     el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), aI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "&nbsp;"), el("div", {},
+    el("div", { class: "field w-quarter" }, el("label", {}, "\u00A0"), el("div", {},
       el("button", { class: "btn primary", onclick: async () => {
         const r = await api("/api/offset", { x: xI.value, y: yI.value, angle: aI.value });
         if (r.ok) { toast("ok", "Global offset saved — create_pdf can now apply it."); await refreshInfo(); go("offset"); }
@@ -84,7 +84,7 @@ export function offsetsBySizeCard() {
     el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), xI),
     el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), yI),
     el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), aI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "&nbsp;"),
+    el("div", { class: "field w-quarter" }, el("label", {}, "\u00A0"),
       el("div", {},
         el("button", { class: "btn primary", onclick: async () => {
           if (!sel.value) return toast("err", "Pick a paper size first.");
