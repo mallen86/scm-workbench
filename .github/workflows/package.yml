@@ -49,7 +49,10 @@ jobs:
           # second number next to the real one ("Version 0.1.0 (1)") - drop it,
           # and put a proper one-liner in the copyright slot.
           /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "SCM Workbench.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist"
+          # the template ships no copyright key - Add creates it (Set would fail);
+          # the Set fallback covers any template that ever does ship one
+          /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist" \
+            || /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist"
           codesign --force --deep -s - "SCM Workbench.app"
       - name: Zip
         run: |
