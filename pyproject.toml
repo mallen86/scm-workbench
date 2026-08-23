@@ -56,6 +56,8 @@ requires = [
 ]
 
 [tool.briefcase.app.scm-workbench.macOS]
+resources = ["Credits.rtf"]
+info_plist = { NSHumanReadableCopyright = "A local, self-contained UI for silhouette-card-maker and scm-extras. Everything stays in your data folder." }
 requires = [
     "click==8.4.2",
     "cloudscraper==1.2.71",

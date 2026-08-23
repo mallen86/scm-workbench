@@ -113,7 +113,6 @@ body::before {
 }
 .brand-text { line-height: 1.25; }
 .brand-name { font-weight: 700; font-size: 14.5px; letter-spacing: -0.01em; }
-.brand-sub { font-size: 11px; color: var(--faint); }
 
 .nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
 .nav::-webkit-scrollbar { width: 8px; }
