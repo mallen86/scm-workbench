@@ -80,10 +80,35 @@ export function clearTimer(kind) { if (S.timers[kind]) { clearTimeout(S.timers[k
 export function updatePreview(kind) {
   const box = document.querySelector(`.cmdbox[data-kind="${kind}"]`);
   if (!box) return;
-  fetch(`/api/preview?kind=${encodeURIComponent(kind)}&args=${encodeURIComponent(JSON.stringify(S.forms[kind]))}`)
-    .then(r => r.json())
-    .then(d => renderPreview(box, d))
-    .catch(() => {});
+  // The box must never be able to sit frozen in a stale state: on a failed
+  // round-trip (server mid-restart, a dropped connection) we retry briefly and
+  // then say so, instead of swallowing the error and keeping whatever the box
+  // showed before.
+  const run = (attempt = 0) => {
+    fetch(`/api/preview?kind=${encodeURIComponent(kind)}&args=${encodeURIComponent(JSON.stringify(S.forms[kind]))}`)
+      .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
+      .then(({ ok, status, d }) => {
+        if (!ok) throw new Error(d?.error || `the server answered ${status}`);
+        renderPreview(box, d);
+      })
+      .catch(err => {
+        if (box.isConnected && attempt < 5) {
+          if (attempt === 0) showPreviewPending(box, "Waiting for the server to answer…");
+          setTimeout(() => run(attempt + 1), 2000);
+        } else if (box.isConnected) {
+          showPreviewPending(box, `Couldn't build the preview (${(err && err.message) || "error"}) — it refreshes as soon as you change a field.`);
+        }
+      });
+  };
+  run();
+}
+
+
+function showPreviewPending(box, msg) {
+  box.innerHTML = "";
+  box.append(el("div", { class: "cb-head" },
+    el("span", { class: "t" }, ico("terminal"), "Command preview")));
+  box.append(el("pre", { class: "dim" }, msg));
 }
 
 
