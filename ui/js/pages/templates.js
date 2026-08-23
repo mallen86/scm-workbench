@@ -1,7 +1,7 @@
 /* pages/templates — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, el, ico, pageHead } from "../core.js";
+import { $, $$, PAGES, S, el, ico, pageHead, toast } from "../core.js";
 import { formCard } from "../forms.js";
 import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
 
@@ -64,7 +64,13 @@ export function templatesGallery(which) {
     card.append(el("div", { class: "section-label" }, title));
     const g = el("div", { class: "filegrid" });
     for (const n of items) {
-      g.append(el("button", { class: "fileitem", onclick: () => window.open(`/api/file?path=${encodeURIComponent(base + dir + n)}`) },
+      g.append(el("button", { class: "fileitem",
+        title: "Open in its default app (e.g. Silhouette Studio)",
+        onclick: async () => {
+          const r = await fetch(`/api/file?path=${encodeURIComponent(base + dir + n)}&open=1`).then(x => x.json());
+          if (r.ok) toast("ok", `Opening ${n} in its default app…`);
+          else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${n}.`);
+        } },
         el("span", { class: "fi-ico" }, ico(ext === "dxf" ? "scissors" : "card")),
         el("span", { class: "fi-name" }, n),
       ));

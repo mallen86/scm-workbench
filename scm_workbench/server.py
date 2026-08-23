@@ -1959,6 +1959,26 @@ def reveal_path(path: Path) -> Optional[str]:
         return str(e)
 
 
+def open_path(path: Path) -> Optional[str]:
+    """Open a file in the platform's default application (double-click semantics).
+
+    Unlike reveal_path this launches the file itself — e.g. a .studio3 cutting
+    template opens in Silhouette Studio if it is installed. Returns an error
+    string or None."""
+    if not path.exists():
+        return "path does not exist"
+    try:
+        if os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)], **_proc_kwargs())
+        else:
+            subprocess.Popen(["xdg-open", str(path)], **_proc_kwargs())
+        return None
+    except Exception as e:
+        return str(e)
+
+
 # ============================================================================
 # HTTP layer
 # ============================================================================
@@ -2390,6 +2410,7 @@ class Handler(BaseHTTPRequestHandler):
         settings = load_settings()
         rel = (q.get("path") or [""])[0]
         reveal = (q.get("reveal") or ["0"])[0] == "1"
+        do_open = (q.get("open") or ["0"])[0] == "1"
         if not rel:
             return self._json({"error": "no path"}, 400)
         roots = allowed_roots(settings)
@@ -2399,6 +2420,9 @@ class Handler(BaseHTTPRequestHandler):
             p = cand or (roots[0] / rel if roots else rel)
         if not _inside(p, roots):
             return self._json({"error": "path outside sandbox"}, 403)
+        if do_open:
+            err = open_path(p)
+            return self._json({"ok": err is None, "errors": [err] if err else []})
         if reveal:
             err = reveal_path(p)
             return self._json({"ok": err is None, "errors": [err] if err else []})
@@ -2445,7 +2469,12 @@ class Handler(BaseHTTPRequestHandler):
                 tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
                 warnings.append(f"No images in the front directory ({front}). Use the fetch card art workflow first{tip or '.'}")
         return self._json({
-            "cmd": _fmt_argv(argv) if not errors else None,
+            # always show the command that was built: validation problems are
+            # already visible in the notes below, and a (partial or
+            # default-substituted) command is the most useful thing on screen.
+            # Hiding it turned any single rejected value into a blank
+            # “— incomplete —” that looked like the whole form was broken.
+            "cmd": _fmt_argv(argv),
             "cwd": str(cwd) if cwd else None,
             "env": {k: v for k, v in env.items()
                      if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},

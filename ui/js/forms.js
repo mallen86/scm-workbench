@@ -293,6 +293,31 @@ export function formCard(kind, opts = {}) {
   if (!spec) return el("div", { class: "empty" }, "unknown job kind");
   const args = formArgs(kind);
 
+  // If a saved choice no longer exists in the option's current choices list
+  // (the repo was re-synced and the decklist/format lists changed, or the user
+  // is on an older manifest than their saved form), reset it to the default.
+  // One stale value in the form state otherwise poisons every preview after
+  // it — the server silently re-defaults it and the box just reads
+  // “— incomplete —” no matter which other option you then touch.
+  for (const g of spec.groups || []) {
+    for (const o of g.options || []) {
+      if (!o.choices) continue;
+      const vals = o.choices.map(c => String(c[0]));
+      const cur = args[o.key];
+      if (o.type === "chips" || o.type === "choice_chips") {
+        if (Array.isArray(cur)) {
+          const kept = cur.filter(v => vals.includes(String(v)));
+          if (kept.length !== cur.length) args[o.key] = kept;
+        }
+      } else if (cur !== undefined && cur !== null && String(cur).trim() !== "") {
+        if (!vals.includes(String(cur).trim())) {
+          args[o.key] = o.default !== undefined ? o.default : "";
+          afterFormChange(kind);
+        }
+      }
+    }
+  }
+
   const card = el("div", { class: "card form-card", "data-kind": kind });
   if (opts.head !== false) {
     card.append(el("div", { class: "card-head" },
