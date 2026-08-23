@@ -2,7 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { PAGES, S, api, el, ico, pageHead, toast, esc } from "../core.js";
-import { doRun } from "../forms.js";
+import { doRun, numSteppers } from "../forms.js";
 import { refreshInfo } from "../info.js";
 import { go, setTheme, uiMode } from "../nav.js";
 import { watchJobDone } from "./utilities.js";
@@ -216,9 +216,10 @@ PAGES.settings = (root) => {
         : "Scripts run with the interpreter chosen here. Default: the one that started the Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
   const pyI = el("input", { class: "input mono", value: s.python || (packaged && S.info.server.python ? `python ${S.info.server.python}  (private runtime)` : ""), placeholder: S.info.server.python_path + "  (default)", title: S.info.server.python_path || "", readonly: packaged || null });
   const portI = el("input", { class: "input mono", type: "number", value: s.port || 8037, min: 1024, max: 65535 });
+  const portW = el("span", { class: "numwrap" }, portI, numSteppers(portI, 1));
   pc.append(el("div", { class: "frow" },
     el("div", { class: packaged ? "field w-half" : "field w-half" }, el("label", {}, packaged ? "Private Python" : "Python interpreter"), pyI),
-    ...(packaged ? [] : [el("div", { class: "field w-quarter" }, el("label", {}, "Port"), portI)]),
+    ...(packaged ? [] : [el("div", { class: "field w-quarter" }, el("label", {}, "Port"), portW)]),
     el("div", { class: packaged ? "field w-half" : "field w-quarter" }, el("label", {}, "Theme"),
       el("div", { class: "seg" },
         el("button", { type: "button", class: s.theme === "dark" ? "active" : "", onclick: () => setTheme("dark") }, ico("moon"), " Dark"),

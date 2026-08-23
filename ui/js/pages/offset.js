@@ -2,7 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";
-import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";
+import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";
 import { refreshInfo } from "../info.js";
 import { go } from "../nav.js";
 import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
@@ -25,9 +25,9 @@ PAGES.offset = (root) => {
   const yI = el("input", { class: "input mono", type: "number", value: so ? so.y : 0 });
   const aI = el("input", { class: "input mono", type: "number", step: 0.1, value: so ? so.angle : 0 });
   sc.append(el("div", { class: "frow" },
-    el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), xI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), yI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), aI),
+    el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), el("span", { class: "numwrap" }, xI, numSteppers(xI, 1))),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), el("span", { class: "numwrap" }, yI, numSteppers(yI, 1))),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), el("span", { class: "numwrap" }, aI, numSteppers(aI, 0.1))),
     el("div", { class: "field w-quarter" }, el("label", {}, "\u00A0"), el("div", {},
       el("button", { class: "btn primary", onclick: async () => {
         const r = await api("/api/offset", { x: xI.value, y: yI.value, angle: aI.value });
@@ -81,9 +81,9 @@ export function offsetsBySizeCard() {
   const aI = el("input", { class: "input mono", type: "number", step: 0.1, value: 0 });
   c.append(el("div", { class: "frow" },
     el("div", { class: "field w-third" }, el("label", {}, "Paper size"), sel),
-    el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), xI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), yI),
-    el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), aI),
+    el("div", { class: "field w-quarter" }, el("label", {}, "X (px, right +)"), el("span", { class: "numwrap" }, xI, numSteppers(xI, 1))),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Y (px, up +)"), el("span", { class: "numwrap" }, yI, numSteppers(yI, 1))),
+    el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), el("span", { class: "numwrap" }, aI, numSteppers(aI, 0.1))),
     el("div", { class: "field w-quarter" }, el("label", {}, "\u00A0"),
       el("div", {},
         el("button", { class: "btn primary", onclick: async () => {

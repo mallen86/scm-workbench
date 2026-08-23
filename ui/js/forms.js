@@ -165,11 +165,7 @@ export function renderOption(o, args, kind) {
     }
     case "number": {
       const i = el("input", { class: "input mono", type: "number", step: o.step || 1, value: strVal(args[o.key]) });
-      const steppers = el("span", { class: "steppers" },
-        el("button", { type: "button", onclick: () => stepNum(i, -(o.step || 1)) }, "−"),
-        el("button", { type: "button", onclick: () => stepNum(i, (o.step || 1)) }, "+"),
-      );
-      const w = el("span", { class: "numwrap" }, i, steppers);
+      const w = el("span", { class: "numwrap" }, i, numSteppers(i, o.step || 1));
       i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind); });
       wrap.append(label, w);
       break;
@@ -306,8 +302,21 @@ export function strVal(v) { return v === null || v === undefined ? "" : String(v
 
 export function stepNum(input, d) {
   const v = parseFloat(input.value);
-  input.value = (isNaN(v) ? 0 : v) + d;
+  // round to the step's decimal places, or repeated 0.1 steps leave 0.30000000000000004
+  const frac = Math.abs(d) < 1 ? String(Math.abs(d)).split(".")[1] || "" : "";
+  input.value = +((isNaN(v) ? 0 : v) + d).toFixed(frac.length);
   input.dispatchEvent(new Event("input"));
+}
+
+
+/* the clean −/+ stepper pair, as a span to place inside a .numwrap next to a
+   number input (the form's number options use it; so do the hand-rolled
+   X/Y/Angle boxes on the offset cards and the Settings port box) */
+export function numSteppers(input, step = 1) {
+  return el("span", { class: "steppers" },
+    el("button", { type: "button", onclick: () => stepNum(input, -step) }, "−"),
+    el("button", { type: "button", onclick: () => stepNum(input, step) }, "+"),
+  );
 }
 
 
