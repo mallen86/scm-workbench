@@ -89,6 +89,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: false
+          files: |
+            scm-workbench-macos.zip
+            scm-workbench-windows.zip
           body: |
             First release of SCM Workbench — a local, self-contained UI for
             silhouette-card-maker and scm-extras.
