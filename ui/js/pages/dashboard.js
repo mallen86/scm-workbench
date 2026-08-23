@@ -49,9 +49,9 @@ PAGES.dashboard = (root) => {
 
 export function onboardCard() {
   const steps = [
-    ["1", "Fetch card art", "Pick a game (MTG, Pokémon, …) and a decklist. Art lands in game/front."],
-    ["2", "Create the PDF", "Cards are laid out on your paper size with registration marks. Print double-sided."],
-    ["3", "Calibrate & offset", "Print a calibration sheet, measure drift, apply X/Y/angle offsets to the PDF."],
+    ["1", "Calibrate & offset", "Print a calibration sheet and measure the drift — the saved X/Y/angle is then applied when the PDF is created. Optional: only needed if you're printing backs or double-sided cards."],
+    ["2", "Fetch card art", "Pick a game (MTG, Pokémon, …) and a decklist. Art lands in game/front."],
+    ["3", "Create the PDF", "Cards are laid out on your paper size with registration marks. Print double-sided."],
     ["4", "Cut with a template", "Open the matching .studio3 template in Silhouette Studio and cut."],
   ];
   return el("div", { class: "onboard" },
