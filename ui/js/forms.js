@@ -80,6 +80,11 @@ export function clearTimer(kind) { if (S.timers[kind]) { clearTimeout(S.timers[k
 export function updatePreview(kind) {
   const box = document.querySelector(`.cmdbox[data-kind="${kind}"]`);
   if (!box) return;
+  // Requests are sequenced: a slow answer to an older form state must never
+  // repaint the box over the newer one (this is how the preview could sit
+  // "stale" for seconds while the user kept editing).
+  const seq = (S.previewSeq = S.previewSeq || {})[kind] = ((S.previewSeq || {})[kind] || 0) + 1;
+  const isCurrent = () => (S.previewSeq || {})[kind] === seq;
   // The box must never be able to sit frozen in a stale state: on a failed
   // round-trip (server mid-restart, a dropped connection) we retry briefly and
   // then say so, instead of swallowing the error and keeping whatever the box
@@ -88,10 +93,12 @@ export function updatePreview(kind) {
     fetch(`/api/preview?kind=${encodeURIComponent(kind)}&args=${encodeURIComponent(JSON.stringify(S.forms[kind]))}`)
       .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
       .then(({ ok, status, d }) => {
+        if (!isCurrent()) return;
         if (!ok) throw new Error(d?.error || `the server answered ${status}`);
         renderPreview(box, d);
       })
       .catch(err => {
+        if (!isCurrent()) return;
         if (box.isConnected && attempt < 5) {
           if (attempt === 0) showPreviewPending(box, "Waiting for the server to answer…");
           setTimeout(() => run(attempt + 1), 2000);
@@ -407,7 +414,7 @@ export function formCard(kind, opts = {}) {
     }
   } else {
     for (const g of spec.groups || []) {
-      const os = g.options || [];
+      const os = (g.options || []).filter(o => !o.simple_only);   // simple-only options never appear in the advanced form
       if (g.collapsible) {
         const any = os.some(o => o.show ? o.show(args) : true);
         if (!any) continue;

@@ -482,7 +482,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("fit_backs", "Fit back images", "segment",
                          choices=[["", "Auto (like fronts)"], ["stretch", "Stretch"], ["crop", "Center crop"]],
                          default="", width="third"),
-                    _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True,
+                    _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
                          help="Applies a 3mm crop to the front images to fix MPCFill's padding — the art it fetches ships with its own print-bleed margin. A value typed in “Crop edges (fronts)” wins over this toggle."),
                     _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third"),
                     _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third"),
@@ -1104,6 +1104,44 @@ def get_info() -> dict:
     }
 
 
+# The preview endpoint fires on every form change (debounced) and would
+# otherwise re-scan both repos on each keystroke; the result stays warm for
+# 30 s and invalidates early on the same repo signals as the manifest cache.
+_PREVIEW_INFO: Dict[str, Any] = {}
+
+
+def _repos_signal_mtime() -> float:
+    now = 0.0
+    for p in (repo_sync.state_file(), DATA_DIR / "repos-manifest-scm.json"):
+        try:
+            now = max(now, p.stat().st_mtime)
+        except OSError:
+            pass
+    try:
+        scm, _ = effective_dirs(load_settings())
+        if scm:
+            dl = scm / "game" / "decklist"
+            try:
+                now = max(now, dl.stat().st_mtime)
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return now
+
+
+def get_info_cached() -> dict:
+    """get_info() for the preview path (see _PREVIEW_INFO)."""
+    now = time.time()
+    c = _PREVIEW_INFO
+    if c.get("v") and now - c.get("t", 0) < 30 and _repos_signal_mtime() <= c.get("t", 0):
+        return c["v"]
+    v = get_info()
+    c.clear()
+    c.update(t=now, v=v)
+    return v
+
+
 def extras_card_names(info: dict) -> set:
     names = set()
     for c in info.get("extras", {}).get("card_sizes", []):
@@ -1347,10 +1385,12 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         for key in ("crop", "crop_backs", "extend_edges", "extend_edges_backs",
                     "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs"):
             v = a.get(key)
-            if key == "crop" and not v and a.get("mpcfill_crop"):
+            if key == "crop" and not v and a.get("mpcfill_crop") and simple:
                 # the simple-mode “MPCFill Crop” toggle is shorthand for a 3mm
                 # crop: MPCFill's fetched art carries its own print-bleed
-                # padding. An explicit “Crop edges (fronts)” value wins.
+                # padding. In advanced mode the toggle is not offered at all -
+                # the Crop boxes are the direct control - so a leftover value
+                # can't silently crop a PDF, and a typed value always wins.
                 v = "3mm"
             if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
@@ -2514,7 +2554,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "unknown kind"}, 404)
         normalized, errors, norm_warns = normalize_args(manifest[kind], args)
         settings = load_settings()
-        argv, cwd, env, title, warnings, errs = build_command(kind, normalized, settings, get_info(), write_deck=False)
+        argv, cwd, env, title, warnings, errs = build_command(kind, normalized, settings, get_info_cached(), write_deck=False)
         # Create PDF needs card images to work with — the front directory
         # (SCM's own default when the form leaves it empty) empty means the
         # job would produce nothing, so the client keeps the run button
