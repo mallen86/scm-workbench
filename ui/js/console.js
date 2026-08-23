@@ -4,7 +4,7 @@
 import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";
 import { displayCmd, repoRowForKind } from "./forms.js";
 import { refreshInfo, showBootFailure } from "./info.js";
-import { bindNav, bootPage } from "./nav.js";
+import { bindNav, bootPage, uiMode } from "./nav.js";
 import { startPrepWatcher } from "./prep.js";
 
 export let _lastJobsSig;
@@ -66,6 +66,7 @@ export function updateBadge() {
 /* ================================ console ================================= */
 
 export function toggleConsole() {
+  if (uiMode() === "simple") return;   // simple mode has no console — pages show their own status strip
   const c = $("#console");
   c.hidden = !c.hidden;
   if (!c.hidden) {
@@ -76,6 +77,7 @@ export function toggleConsole() {
 
 
 export function openConsole(id) {
+  if (uiMode() === "simple") return;   // simple mode has no console — pages show their own status strip
   const c = $("#console");
   c.hidden = false;
   requestAnimationFrame(() => c.classList.remove("closed"));
@@ -95,8 +97,9 @@ export function renderConsoleTabs() {
       class: `ctab ${S.activeJobId === j.id ? "active" : ""}`,
       onclick: () => { S.activeJobId = j.id; renderConsoleTabs(); attachStream(j.id, true); },
     },
-      el("span", { class: `dot ${j.status === "running" ? "warn" : j.status === "ok" ? "ok" : j.status === "fail" ? "" : ""}`, style: `background:var(--${j.status === "running" ? "accent" : j.status === "ok" ? "ok" : j.status === "fail" ? "err" : "warn"})` }),
+      el("span", { class: `dot ${j.status === "running" ? "running" : j.status === "ok" ? "ok" : j.status === "fail" ? "" : ""}`, style: `background:var(--${j.status === "running" ? "accent" : j.status === "ok" ? "ok" : j.status === "fail" ? "err" : "warn"})` }),
       j.title.length > 26 ? j.title.slice(0, 26) + "…" : j.title,
+      j.ts ? el("span", { class: "ctab-t" }, fmtTs(j.ts)) : null,
     ));
   }
   $("#console-kill").disabled = S.activeJobId?.[0] && !(S.jobs.find(j => j.id === S.activeJobId)?.status === "running");
@@ -123,6 +126,9 @@ export function attachStream(id, resume) {
     return;
   }
   S.esIdx = 0;
+  // a running job whose output hasn't started flowing yet looks dead in an
+  // empty pane - seed it with the running state and the start time
+  if (isRunning) appendLogLine("▸ running — started " + new Date((job.ts || Date.now() / 1000) * 1000).toLocaleTimeString() + " (output streams in below as it happens)", "dim");
   const es = new EventSource(`/api/jobs/${id}/stream?after=${S.esIdx}`);
   S.es = es;
   es.addEventListener("line", e => {

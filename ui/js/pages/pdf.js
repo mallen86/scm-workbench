@@ -1,11 +1,12 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, confirmModal, el, ico, pageHead, toast } from "../core.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";
 import { afterFormChange, defaultArgs, formCard } from "../forms.js";
 import { go, uiMode } from "../nav.js";
 import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
 import { paperForCreatePdf } from "./offset.js";
+import { jobStrip } from "../jobstrip.js";
 
 /* ================================ pdf page ================================ */
 
@@ -36,6 +37,29 @@ PAGES.pdf = (root) => {
         ...(uiMode() === "advanced" ? [el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")] : [])));
     }
   }
+  // simple mode: the console is hidden, so the page shows its own compact
+  // status for the job — a progress bar while it runs, then a button that
+  // opens the finished PDF in the system's default viewer.
+  wrap.append(jobStrip("create_pdf", {
+    icon: "pdf",
+    runningLabel: "Creating your PDF",
+    onOk: (done, body) => {
+      const out = (done.outputs || [])[0];
+      body.append(el("div", { class: "js-msg ok" },
+        ico("check"), el("span", {}, "Your PDF is ready.")));
+      if (!out) return;
+      body.append(el("div", { class: "js-actions" },
+        el("button", { class: "btn primary", title: "Opens in your default PDF app",
+          onclick: async (e) => {
+            const b = e.currentTarget;
+            b.disabled = true;
+            const r = await api(`/api/file?path=${encodeURIComponent(out)}&open=1`).then(x => x.json()).catch(() => null);
+            b.disabled = false;
+            if (r?.ok) toast("ok", "Opening the PDF in its default app…");
+            else toast("warn", r?.errors?.[0] || "Couldn't open the PDF.");
+          } }, ico("file"), "Open PDF")));
+    },
+  }));
   // both must run once the card is in the document
   wrap.__patch = () => { patchPdfForm("create_pdf"); patchOffsetToggle("create_pdf"); };
   return wrap;

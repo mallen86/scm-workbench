@@ -4,6 +4,7 @@
 import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";
 import { afterFormChange, defaultArgs, formCard } from "../forms.js";
 import { go } from "../nav.js";
+import { jobStrip } from "../jobstrip.js";
 
 /* ================================ fetch page =============================== */
 
@@ -38,6 +39,19 @@ PAGES.fetch = (root) => {
   }
   wrap.append(formCard(kind, { icon: "download" }));
   wrap.__patch = () => patchFetchForm(kind);
+  // simple mode: the console is hidden, so the page shows its own compact
+  // status for the job — a progress bar while it runs, then the result with
+  // the next step (create the PDF) one click away.
+  wrap.append(jobStrip(kind, {
+    icon: "download",
+    runningLabel: `Fetching ${S.manifest[kind].game} card art`,
+    onOk: (done, body) => {
+      body.append(el("div", { class: "js-msg ok" },
+        ico("check"), el("span", {}, "Card art is ready — the images are in place for the PDF.")));
+      body.append(el("div", { class: "js-actions" },
+        el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF")));
+    },
+  }));
   return wrap;
 };
 

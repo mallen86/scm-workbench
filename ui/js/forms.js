@@ -459,8 +459,17 @@ export async function doRun(kind, btn, opts = {}) {
     } else {
       for (const w of j.warnings || []) toast("warn", w, 5200);
       toast("ok", `${j.job.title} — job started`);
+      // register the job locally right away: the console tab (advanced mode)
+      // and the page's status strip (simple mode) must not wait for the next
+      // /api/jobs poll to learn something is running.
+      const j0 = { id: j.job.id, ts: Date.now() / 1000, kind, title: j.job.title,
+                   status: "running", exit_code: null, cmd: j.job.cmd,
+                   warnings: j.warnings || [], outputs: [] };
+      const i = (S.jobs || []).findIndex(x => x.id === j0.id);
+      if (i >= 0) S.jobs[i] = { ...S.jobs[i], ...j0 };
+      else S.jobs = [j0, ...(S.jobs || [])];
       refreshJobs();
-      openConsole(j.job.id);
+      if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over
       if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
         setTimeout(() => refreshInfo(), 2500);
       }

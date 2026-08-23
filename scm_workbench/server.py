@@ -1187,6 +1187,11 @@ def _utf8_env() -> dict:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # scripts that print progress in a loop (the fetch plugins print a line
+    # per batch of cards) otherwise sit in Python's 8 KB pipe buffer until the
+    # process exits, so the UI sees the whole transcript as one chunk at the
+    # end. Line-buffered stdout makes each line reach the console as it's made.
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -1747,7 +1752,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         # _pump mirrors them back into this row once the job has finished.
         job["offset_sync"] = str(args["paper_size"])
     log_f = open(job["log_file"], "w", encoding="utf-8")
-    header = [f"$ {job['cmd']}", f"(cwd: {cwd})"]
+    header = [f"$ {job['cmd']}", f"(cwd: {cwd})",
+              f"(started {time.strftime('%Y-%m-%d %H:%M:%S')})"]
     if staged:
         header.append(f"(offset: staged “{staged['size']}” — x {staged['x']}, y {staged['y']}, {staged['angle']}° → data/offset_data.json)")
     log_f.write("\n".join(header) + "\n\n")
