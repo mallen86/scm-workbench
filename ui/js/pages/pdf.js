@@ -53,10 +53,18 @@ PAGES.pdf = (root) => {
           onclick: async (e) => {
             const b = e.currentTarget;
             b.disabled = true;
-            const r = await api(`/api/file?path=${encodeURIComponent(out)}&open=1`).then(x => x.json()).catch(() => null);
-            b.disabled = false;
-            if (r?.ok) toast("ok", "Opening the PDF in its default app…");
-            else toast("warn", r?.errors?.[0] || "Couldn't open the PDF.");
+            // api() already parses the JSON body (and throws on real server
+            // errors) - calling .json() on its result is what made every click
+            // look like a failure even while “open” was doing its job.
+            try {
+              const r = await api(`/api/file?path=${encodeURIComponent(out)}&open=1`);
+              if (r?.ok) toast("ok", "Opening the PDF — big files can take a moment to appear in the viewer.", 6000);
+              else toast("warn", r?.errors?.[0] || "Couldn't open the PDF.");
+            } catch (err) {
+              toast("warn", err?.message || "Couldn't open the PDF.");
+            } finally {
+              b.disabled = false;
+            }
           } }, ico("file"), "Open PDF")));
     },
   }));
