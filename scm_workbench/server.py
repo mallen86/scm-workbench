@@ -426,10 +426,10 @@ def build_manifest(info: dict) -> dict:
     kinds["create_pdf"] = {
         "title": "Create PDF", "page": "pdf", "needs": ["scm"], "cwd": "scm",
         # the simple-mode layout: rows of the flat section — the two
-        # dropdowns alone up top, the three toggles together below
+        # dropdowns alone up top, the four toggles together below
         "simple_rows": [
             ["card_size", "paper_size"],
-            ["borderless", "load_offset", "only_fronts"],
+            ["borderless", "load_offset", "only_fronts", "mpcfill_crop"],
         ],
         "description": "Lays out card images into a print-ready PDF with registration marks that match the cutting templates.",
         "groups": [
@@ -482,6 +482,8 @@ def build_manifest(info: dict) -> dict:
                     _opt("fit_backs", "Fit back images", "segment",
                          choices=[["", "Auto (like fronts)"], ["stretch", "Stretch"], ["crop", "Center crop"]],
                          default="", width="third"),
+                    _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True,
+                         help="Applies a 3mm crop to the front images to fix MPCFill's padding — the art it fetches ships with its own print-bleed margin. A value typed in “Crop edges (fronts)” wins over this toggle."),
                     _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third"),
                     _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third"),
                     _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="3mm", width="third"),
@@ -1344,7 +1346,13 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         if a.get("fit_backs"): argv += ["--fit_backs", str(a["fit_backs"])]
         for key in ("crop", "crop_backs", "extend_edges", "extend_edges_backs",
                     "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs"):
-            if a.get(key): argv += ["--" + key, str(a[key])]
+            v = a.get(key)
+            if key == "crop" and not v and a.get("mpcfill_crop"):
+                # the simple-mode “MPCFill Crop” toggle is shorthand for a 3mm
+                # crop: MPCFill's fetched art carries its own print-bleed
+                # padding. An explicit “Crop edges (fronts)” value wins.
+                v = "3mm"
+            if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
         quality = a.get("quality")

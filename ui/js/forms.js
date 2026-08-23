@@ -369,9 +369,9 @@ export function formCard(kind, opts = {}) {
     // manifest make it in (the everyday ones); everything else keeps its
     // default behind the scenes. A kind-level `simple_rows` list, when
     // given, is the layout of that section — one form row per entry, in
-    // the listed order (e.g. the two dropdowns alone up top, the three
-    // toggles together below); simple options not named in any row fall
-    // into a final row, manifest order.
+    // the listed order (e.g. the two dropdowns alone up top, the four
+    // toggles together below, each field of a row taking an even share);
+    // simple options not named in any row fall into a final row, manifest order.
     const os = [];
     for (const g of spec.groups || [])
       for (const o of g.options || [])
@@ -385,7 +385,18 @@ export function formCard(kind, opts = {}) {
         const node = renderOption(o, args, kind);
         if (node) row.append(node);
       }
-      if (row.childElementCount) card.append(row);
+      if (!row.childElementCount) return;
+      // flat rows split evenly, whatever the manifest widths say: the four-
+      // toggle row needs 25% apiece to fit, and a two-dropdown row reads
+      // better at half width than two one-thirds with dead space at the end
+      const n = row.childElementCount;
+      if (n > 1) {
+        for (const f of row.children) {
+          f.classList.remove("w-half", "w-third", "w-quarter", "w-full");
+          f.style.flex = `1 1 calc(${100 / n}% - ${14 * (n - 1) / n}px)`;
+        }
+      }
+      card.append(row);
     };
     if (rows.length) {
       const listed = new Set(rows.flat());
