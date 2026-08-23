@@ -313,20 +313,6 @@ PAGES.settings = (root) => {
       return d.toLocaleDateString();
     };
 
-    const tokI = el("input", { class: "input mono", type: "password", value: s.github_token || "",
-      placeholder: "GitHub token — the release repo is private, so checks need one (any token with read access)" });
-    const tokWrap = el("div", { class: "frow", style: "margin-top:14px; align-items:center" });
-    tokWrap.append(
-      el("div", { class: "field", style: "flex:1" }, el("label", {}, "GitHub token"), tokI),
-      el("button", { class: "btn", onclick: async () => {
-        const r = await api("/api/settings", { github_token: tokI.value.trim() });
-        await refreshInfo();
-        toast(r.ok ? "ok" : "warn", r.ok ? "Token saved." : String(r.errors?.[0] || "Not saved."));
-        if (r.ok) doCheck();   // a fresh token may change the answer at once
-      } }, ico("check"), "Save token"),
-    );
-    uc.append(tokWrap);
-
     let busy = false;
     const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
 
@@ -355,7 +341,7 @@ PAGES.settings = (root) => {
           break;
         case "auth-required":
           setBtn("Check for updates", doCheck);
-          uStatus.textContent = "Can't see the release repo without credentials (" + (st.reason || "no GitHub token is set") + "). Paste a token below, save it, then check again.";
+          uStatus.textContent = "The release repo is still private, so this check can't see its releases. Once it's made public, this works with no setup at all — press the button again any time to check.";
           break;
         case "error":
           setBtn("Check again", doCheck);
@@ -404,7 +390,7 @@ PAGES.settings = (root) => {
       await render();
       if (r?.state?.status === "up-to-date") toast("ok", `No update — ${vv(r.state.latest)} is the newest.`);
       else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)} — press the button above to install it.`);
-      else if (r?.state?.status === "auth-required") toast("warn", "A GitHub token is needed — add one below and check again.");
+      else if (r?.state?.status === "auth-required") toast("warn", "The release repo is still private — this check will work once it's made public.");
     }
 
     const startUpdate = async () => {

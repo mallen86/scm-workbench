@@ -709,7 +709,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ui_mode": "advanced",
     "auto_open_browser": True,
     "onboarded": False,
-    "github_token": "",
     "defaults": {
         "card_size": "standard",
         "paper_size": "letter",
@@ -763,7 +762,7 @@ _SETTINGS_LOCK = threading.Lock()
 # ============================================================================
 
 # one in-flight release check at a time (the daily daemon and a manual button
-# press must not double-fire network calls against the same token)
+# press must not double-fire network calls)
 _UPDATE_CHECK_IN_FLIGHT = False
 _UPDATE_STATE_LOCK = threading.Lock()
 
@@ -792,7 +791,6 @@ def run_update_check() -> dict:
     fresh (< UPDATE_CHECK_INTERVAL) and says up-to-date, a check is a no-op.
     """
     global _UPDATE_CHECK_IN_FLIGHT
-    token = load_settings().get("github_token") or None
     st = {"status": "never", "current": SERVER_VERSION, "checked_at": None,
            "latest": None, "asset": None, "reason": None, "release_url": None,
            "published": None}
@@ -803,7 +801,7 @@ def run_update_check() -> dict:
     _UPDATE_CHECK_IN_FLIGHT = True
     try:
         try:
-            rel = updater.latest_release(token)
+            rel = updater.latest_release()
         except updater.AuthRequiredError as e:
             st.update(status="auth-required", reason=str(e), checked_at=time.time())
         except updater.UpdateError as e:
@@ -885,7 +883,6 @@ def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict]
             "current": SERVER_VERSION,
             "latest": st.get("latest"),
             "asset": st.get("asset"),
-            "token": load_settings().get("github_token") or None,
             "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or None,
             "work": DATA_DIR / "update",
             "force": bool(force),
@@ -2171,7 +2168,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._body()
                 with _SETTINGS_LOCK:
                     settings = load_settings()
-                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded", "github_token"):
+                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded"):
                         if k in body:
                             settings[k] = body[k]
                     if "ui_mode" in body:

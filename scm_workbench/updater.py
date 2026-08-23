@@ -6,9 +6,9 @@ The app is packaged with Briefcase and shipped as a GitHub *release* zip
 (macOS: "SCM Workbench.app", Windows: "SCM Workbench.exe" + src/). This
 module talks to the releases of the Workbench's own repository:
 
-  * fetch the newest release (the repo is private, so a check only succeeds
-    with a GitHub token that can read it — an anonymous attempt 404s and the
-    UI asks for a token),
+  * fetch the newest release (the release repo is private, so the check
+    can't see it until the repo is made public - no credentials anywhere
+    in the meantime),
   * compare it with the running version,
   * on "update available" an in-process job downloads the right platform's
     zip, extracts it, swaps it over the current app folder, relaunches the
@@ -50,7 +50,8 @@ class UpdateError(Exception):
 
 
 class AuthRequiredError(UpdateError):
-    """The release repo is private and no (usable) token was available."""
+    """The release repo can't be seen anonymously (it is still private -
+    making it public is all that's needed)."""
 
 
 # ----------------------------------------------------------------------------
@@ -86,8 +87,8 @@ def is_newer(latest, current) -> bool:
 # GitHub over plain HTTPS
 # ----------------------------------------------------------------------------
 
-def gh_request(path: str, token=None, method: str = "GET", timeout: int = 30,
-               stream_to=None, progress=None):
+def gh_request(path: str, method: str = "GET", timeout: int = 30,
+              stream_to=None, progress=None):
     """One API/download request. Returns (status, headers, body_bytes).
 
     stream_to: write the response body to this file instead of reading it
@@ -99,8 +100,6 @@ def gh_request(path: str, token=None, method: str = "GET", timeout: int = 30,
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    if token:
-        headers["Authorization"] = "Bearer " + str(token).strip()
     req = urllib.request.Request(url, headers=headers, method=method)
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
@@ -139,14 +138,13 @@ def gh_request(path: str, token=None, method: str = "GET", timeout: int = 30,
         r.close()
 
 
-def latest_release(token=None, timeout: int = 25) -> dict:
+def latest_release(timeout: int = 25) -> dict:
     """The newest release of the Workbench repo, as a plain dict.
 
-    Raises AuthRequiredError when the repo cannot be seen (private + no token
-    / token without access) — the one case the UI can act on by asking for
-    a token."""
-    status, headers, body = gh_request(f"/repos/{UPDATE_REPO}/releases/latest", token,
-                                       timeout=timeout)
+    Raises AuthRequiredError when the release repo can't be seen anonymously
+    (it is still private) - once it is made public, the same call just works.
+    """
+    status, headers, body = gh_request(f"/repos/{UPDATE_REPO}/releases/latest", timeout=timeout)
     if status == 200:
         rel = json.loads(body.decode("utf-8"))
         if not rel.get("tag_name"):
@@ -166,11 +164,8 @@ def latest_release(token=None, timeout: int = 25) -> dict:
         }
     if status == 404:
         raise AuthRequiredError(
-            "the release repo can't be seen without credentials"
-            + ("" if token else " — no GitHub token is set in Settings")
-            + " — a token with read access to it is needed to check for updates")
-    if status in (401,):
-        raise AuthRequiredError("GitHub rejected the token (401) — check that it is valid")
+            "the release repo can't be seen — it is still private; "
+            "making it public is all that's needed for checks to work")
     if status in (403, 429):
         raise UpdateError("GitHub rate-limited the check — try again in a few minutes")
     raise UpdateError(f"GitHub API error {status} on the releases lookup")
@@ -194,21 +189,19 @@ def pick_asset(release: dict, platform: str = None) -> dict:
 # Installing
 # ----------------------------------------------------------------------------
 
-def download(url: str, dest: Path, token=None, progress=None, timeout: int = 60) -> int:
+def download(url: str, dest: Path, progress=None, timeout: int = 60) -> int:
     """Stream a release asset to dest (via dest.part), returning its size."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     headers = {"User-Agent": USER_AGENT}
-    if token:
-        headers["Authorization"] = "Bearer " + str(token).strip()
     req = urllib.request.Request(url, headers=headers)
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404):
-            raise UpdateError("the download needs the GitHub token too — the asset "
-                               "lives in the private release repo; add/refresh it in "
-                               "Settings, then try again")
+            raise UpdateError("the download can't see the asset — the release "
+                               "repo is still private; once it is made public "
+                               "this works")
         raise UpdateError(f"download failed with HTTP {e.code}")
     except Exception as e:
         raise UpdateError(f"download failed: {e}")
@@ -362,7 +355,7 @@ def clean_old_bundles(bundle: Path, log=print) -> None:
 def run_job(job: dict, plan: dict, log_f) -> None:
     """Download + install a newer release, then hand over to the new app.
 
-    plan keys: repo, current, latest, asset {name,url,size}, token,
+    plan keys: repo, current, latest, asset {name,url,size},
     bundle (the app folder to replace, None when not packaged), work (the
     scratch dir), force (allow same-version reinstalls).
     """
@@ -403,7 +396,7 @@ def run_job(job: dict, plan: dict, log_f) -> None:
     try:
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
         # 1) re-verify (the state that started the job can be a few minutes old)
-        rel = latest_release(plan.get("token"))
+        rel = latest_release()
         if not is_newer(rel["tag"], plan.get("current")) and not plan.get("force"):
             finish(True, f"Nothing to do — v{plan.get('current')} is still the latest release ({rel['tag']}).")
             return
@@ -427,7 +420,7 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 last["t"] = time.time()
                 job["progress"] = {"stage": "download", "done": done, "total": total}
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
-        download(asset["url"], dest, token=plan.get("token"), progress=progress)
+        download(asset["url"], dest, progress=progress)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")
         # 4) extract + verify
         job["progress"] = {"stage": "extract", "done": 1, "total": 1}
