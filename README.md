@@ -1,5 +1,9 @@
 # SCM Workbench
 
+<p align="center">
+  <img src="screenshot.png" alt="The Fetch card art page: pick a game, choose where the decklist comes from, and run" width="800">
+</p>
+
 A local interface for [silhouette-card-maker](https://github.com/Alan-Cha/silhouette-card-maker) and [scm-extras](https://github.com/Alan-Cha/scm-extras), the two Python repos for making card games on Silhouette cutting machines.
 
 It wraps those repos' scripts in a normal app: pick options in a form, see the exact command that will run, press run, and watch the job in a live log. No terminal, no memorized flags, nothing to install.
