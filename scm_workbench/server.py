@@ -533,7 +533,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter"),
                     _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter"),
                     _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter"),
-                    _opt("ppi", "PPI", "range", default=1200, min=150, max=1200, step=10, width="quarter"),
+                    _opt("ppi", "PPI", "range", default=1200, min=150, max=1200, step=10, width="half"),
                     _opt("save", "Save these as the new offset", "toggle", default=False, width="half"),
                     _opt("use_saved", "Prefill fields from the saved offset", "toggle", default=True, width="half"),
                 ],

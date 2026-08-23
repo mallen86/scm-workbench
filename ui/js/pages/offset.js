@@ -33,7 +33,7 @@ PAGES.offset = (root) => {
         const r = await api("/api/offset", { x: xI.value, y: yI.value, angle: aI.value });
         if (r.ok) { toast("ok", "Global offset saved — create_pdf can now apply it."); await refreshInfo(); go("offset"); }
       } }, ico("check"), "Save"),
-      el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "zero"),
+      el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "Zero"),
     )),
   ));
   wrap.append(sc);
@@ -91,7 +91,7 @@ export function offsetsBySizeCard() {
           const r = await api("/api/offset", { size: sel.value, x: xI.value, y: yI.value, angle: aI.value });
           if (r.ok) { toast("ok", `Saved for “${sel.value}” — staged into SCM's shared file and applied automatically to that paper.`); await refreshInfo(); go("offset"); }
         } }, ico("check"), "Save for this size"),
-        el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "zero"),
+        el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "Zero"),
       )),
   ));
   const rows = el("div", { class: "pso-rows" });

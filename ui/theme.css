@@ -442,6 +442,13 @@ select.input option { background: var(--surface); color: var(--text); }
 }
 .rangeval:focus { outline: none; border-color: var(--accent); }
 .rangeval::-webkit-outer-spin-button, .rangeval::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* same for every plain number input: the custom .numwrap steppers (and typing)
+   are the only controls — native spin buttons were stacking on top of them */
+.input[type="number"] { -moz-appearance: textfield; }
+.input[type="number"]::-webkit-outer-spin-button,
+.input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* a slider inside a narrow column must shrink, not overflow onto its neighbor */
+.range { min-width: 0; }
 
 /* toggle switch */
 .switch { position: relative; width: 38px; height: 22px; flex: none; cursor: pointer; display: inline-block; }
