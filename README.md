@@ -1,7 +1,7 @@
 # SCM Workbench
 
 <p align="center">
-  <img src="screenshot.png" alt="The Fetch card art page: pick a game, choose where the decklist comes from, and run" width="800">
+  <img src="screenshot.gif" alt="The Fetch card art page, Simple mode first, then Advanced - the switch is at the bottom of the sidebar" width="800">
 </p>
 
 A local interface for [silhouette-card-maker](https://github.com/Alan-Cha/silhouette-card-maker) and [scm-extras](https://github.com/Alan-Cha/scm-extras), the two Python repos for making card games on Silhouette cutting machines.
@@ -36,7 +36,7 @@ On first launch a window opens immediately, and the setup work (fetching the new
 
 Everything runs as a tracked job: a live log, a stop button, a persistent history, and — before you run — a **command preview** of the exact command that will run. The preview doubles as a sanity check: the Create PDF button stays disabled, with a reason, while the front-images folder is empty.
 
-**Simple or Advanced** (the switch in the top bar, on every page). Advanced is the full set of options above. Simple is the essentials only: the navigation keeps Fetch card art, Create PDF and Settings, and the Create PDF form shrinks to the choices you actually use — card size and paper size on one row, the borderless / apply-saved-offset / front-only toggles on the next — with everything else at its defaults, so a simple run and an advanced run with the same visible settings produce the same command. The “Apply saved offset” switch is enabled only when an offset is saved for that paper size.
+**Simple or Advanced** (the switch at the bottom of the sidebar, on every page). Advanced is the full set of options above. Simple is the essentials only: the navigation keeps Fetch card art, Create PDF and Settings, and the Create PDF form shrinks to the choices you actually use — card size and paper size on one row, the borderless / apply-saved-offset / front-only toggles on the next — with everything else at its defaults, so a simple run and an advanced run with the same visible settings produce the same command. The “Apply saved offset” switch is enabled only when an offset is saved for that paper size.
 
 **Extras auto-wiring.** Using an scm-extras size such as `standard_mtg` normally requires exporting `SCM_EXTRA_LAYOUTS` by hand. The Workbench does it for you the moment you pick such a size, and the preview says so.
 

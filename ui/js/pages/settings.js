@@ -167,7 +167,7 @@ PAGES.settings = (root) => {
 
   const s = S.info.settings;
 
-  // (the Simple / Advanced switch lives in the top bar on every page —
+  // (the Simple / Advanced switch lives in the sidebar on every page —
   //  #mode-switch — not as a settings card)
   // repos
   const rc = el("div", { class: "card" });

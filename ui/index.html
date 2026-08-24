@@ -37,11 +37,9 @@
       </nav>
 
       <div class="sidebar-foot">
-        <div class="repo-pill" id="pill-scm" title="silhouette-card-maker">
-          <span class="dot" id="dot-scm"></span><span class="pill-label">SCM</span>
-        </div>
-        <div class="repo-pill" id="pill-extras" title="scm-extras">
-          <span class="dot" id="dot-extras"></span><span class="pill-label">Extras</span>
+        <div class="mode-switch" id="mode-switch" title="How much of the Workbench to show — Simple keeps just the essentials (fetch the art, make the PDF)">
+          <button type="button" class="ms-btn" data-mode="simple">Simple</button>
+          <button type="button" class="ms-btn" data-mode="advanced">Advanced</button>
         </div>
         <div class="theme-switch" id="theme-switch" title="Toggle theme">
           <button class="ts-btn" data-theme="dark" title="Dark theme"><span data-ico="moon"></span></button>
@@ -55,18 +53,11 @@
       <header class="topbar">
         <div class="topbar-title" id="topbar-title">Dashboard</div>
         <div class="topbar-right">
-          <div class="mode-switch" id="mode-switch" title="How much of the Workbench to show — Simple keeps just the essentials (fetch the art, make the PDF)">
-            <button type="button" class="ms-btn" data-mode="simple">Simple</button>
-            <button type="button" class="ms-btn" data-mode="advanced">Advanced</button>
-          </div>
           <button class="btn btn-ghost" id="btn-console" title="Job console">
             <span data-ico="terminal"></span>
             <span class="btn-label">Console</span>
             <span class="badge" id="badge-running" hidden>0</span>
           </button>
-          <div class="topbar-logo" title="SCM Workbench">
-            <img src="/ui/logo.svg" alt="SCM Workbench">
-          </div>
         </div>
       </header>
 

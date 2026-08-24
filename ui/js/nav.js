@@ -83,7 +83,7 @@ export function applyPrefill(page, prefill) {
 
 export function bindNav() {
   $$("#nav .nav-item").forEach(a => a.onclick = () => go(a.dataset.page));
-  $$("#mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
+  $$(".mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
   $("#btn-console").onclick = toggleConsole;
   $$("#theme-switch .ts-btn").forEach(b => b.onclick = () => setTheme(b.dataset.theme));
 }
@@ -123,7 +123,7 @@ export function syncUiMode() {
     }
     sep.classList.toggle("hide", !any);
   });
-  $$("#mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
+  $$(".mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
 }
 
 

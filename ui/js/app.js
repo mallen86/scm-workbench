@@ -41,7 +41,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.documentElement.dataset.theme = s.theme || "dark";
     const simple = (s.ui_mode || "advanced") === "simple";
     document.body.classList.toggle("mode-simple", simple);
-    $$("#mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
+    $$(".mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
     if (simple) $$("#nav .nav-sep").forEach(sep => {
       let n = sep.nextElementSibling, any = false;
       while (n && !n.classList.contains("nav-sep")) {

@@ -14,9 +14,6 @@ export async function refreshInfo({ keepForms = false, jobs = true } = {}) {
   document.documentElement.dataset.theme = S.info.settings.theme || "dark";
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (S.info.settings.theme || "dark")));
   syncUiMode();
-  // pills
-  const dS = $("#dot-scm"); dS.classList.toggle("ok", S.info.scm.found);
-  const dE = $("#dot-extras"); dE.classList.toggle("ok", S.info.extras.found); dE.classList.toggle("warn", !S.info.extras.found);
   if (!keepForms) S.forms = {};
   if (jobs) refreshJobs();
   // if preparation started *after* this page booted (an update job, a

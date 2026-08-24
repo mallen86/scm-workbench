@@ -156,14 +156,6 @@ body.mode-simple .nav-item[data-simple-hide] { display: none; }
   margin-top: 12px; padding-top: 12px;
   border-top: 1px solid var(--border-soft);
 }
-.repo-pill {
-  display: flex; align-items: center; gap: 6px;
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 99px;
-  padding: 4px 9px 4px 7px;
-  font-size: 11px; font-weight: 600; color: var(--muted);
-}
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--err); box-shadow: 0 0 6px var(--err); }
 .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
@@ -202,11 +194,9 @@ body.mode-simple .nav-item[data-simple-hide] { display: none; }
 }
 .topbar-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
 .topbar-right { display: flex; align-items: center; gap: 10px; }
-.topbar-logo { flex: 0 0 26px; width: 26px; height: 26px; }
-.topbar-logo img { width: 100%; height: 100%; display: block; }
 
-/* simple / advanced switch — top right of every page, next to the python
-   chip and the console button */
+/* simple / advanced switch — bottom of the sidebar, where the repo pills
+   used to sit */
 .mode-switch {
   display: flex; gap: 2px; padding: 2px;
   background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 8px;
@@ -1130,7 +1120,7 @@ body.mode-simple .console { display: none; }
 
 @media (max-width: 860px) {
   .sidebar { width: 64px; flex-basis: 64px; padding: 14px 8px; }
-  .brand-text, .nav-item span:not(.nav-ico), .nav-sep, .pill-label { display: none; }
+  .brand-text, .nav-item span:not(.nav-ico), .nav-sep { display: none; }
   .nav-item { justify-content: center; padding: 10px; }
   .brand { justify-content: center; padding-bottom: 10px; }
   .sidebar-foot { flex-direction: column; }

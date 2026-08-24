@@ -413,7 +413,13 @@ def _run_window(data: Path, log, server) -> None:
             if bundle := _app_bundle():
                 os.environ["RESOURCEPATH"] = str(bundle / "Contents" / "Resources")
         import webview
-        window = webview.create_window("SCM Workbench", url, width=1280, height=860, text_select=True)
+        # min_size: the UI's sidebar collapses to an icon rail below 860px
+        # (a layout we don't care about), so keep the window out of it - and
+        # give the page area a usable floor. Applied to the NSWindow on macOS
+        # (pywebview 6.x); note the Windows driver ignores min_size.
+        window = webview.create_window(
+            "SCM Workbench", url,
+            width=1280, height=860, min_size=(900, 640), text_select=True)
 
         def pick_file():
             """Native OS file chooser (single file) for the UI's "Browse…"
