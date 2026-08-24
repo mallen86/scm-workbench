@@ -169,6 +169,54 @@ PAGES.settings = (root) => {
 
   // (the Simple / Advanced switch lives in the sidebar on every page —
   //  #mode-switch — not as a settings card)
+  // create-PDF defaults — first card in both modes; it is the most-used
+  // of all the options on this page
+
+  // defaults
+  const dc = el("div", { class: "card" });
+  dc.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("gear")),
+    el("div", { class: "grow" }, el("h2", {}, "Create PDF defaults"), el("p", {}, "Pre-selected values for the Create PDF page (still overridable there)." ))));
+  const d = s.defaults || {};
+  const csSel = el("select", { class: "input" }, ...S.info.scm.card_sizes.map(c => el("option", { value: c.name, selected: (d.card_size || "standard") === c.name ? "selected" : null }, c.name)));
+  const psSel = el("select", { class: "input" }, ...S.info.scm.paper_sizes.map(p => el("option", { value: p.name, selected: (d.paper_size || "letter") === p.name ? "selected" : null }, p.name)));
+  const ppiR = el("input", { class: "range", type: "range", min: 150, max: 1200, step: 10 });
+  ppiR.value = d.ppi || 300;
+  const qualR = el("input", { class: "range", type: "range", min: 0, max: 100, step: 1 });
+  qualR.value = d.quality || 100;
+  const ppiV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
+  const qualV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
+  const setFill = r => r.style.setProperty("--fill", ((r.value - r.min) / (r.max - r.min)) * 100 + "%");
+  const commit = (r, v) => {
+    if (v.value === "") { v.value = r.value; setFill(r); return; } // blank → revert
+    const n = Number(v.value);
+    if (Number.isFinite(n) && n >= 0) {
+      v.value = n; // freeform — the box keeps the exact value…
+      r.value = Math.min(r.max, Math.max(r.min, Math.round(n / r.step) * r.step)); // …while the slider snaps
+    } else v.value = r.value; // invalid → revert to the slider position
+    setFill(r);
+  };
+  const toNum = (v, fallback) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : fallback; };
+  ppiR.oninput = () => { ppiV.value = ppiR.value; setFill(ppiR); };
+  qualR.oninput = () => { qualV.value = qualR.value; setFill(qualR); };
+  ppiV.onchange = () => commit(ppiR, ppiV);
+  qualV.onchange = () => commit(qualR, qualV);
+  ppiV.value = ppiR.value; qualV.value = qualR.value; setFill(ppiR); setFill(qualR);
+  dc.append(el("div", { class: "frow" },
+    el("div", { class: "field w-half" }, el("label", {}, "Card size"), csSel),
+    el("div", { class: "field w-half" }, el("label", {}, "Paper size"), psSel),
+    el("div", { class: "field w-half" }, el("label", {}, "PPI"), el("span", { class: "rangewrap" }, ppiR, ppiV)),
+    el("div", { class: "field w-half" }, el("label", {}, "Quality"), el("span", { class: "rangewrap" }, qualR, qualV)),
+  ));
+  dc.append(el("div", { style: "margin-top:12px" },
+    el("button", { class: "btn primary", onclick: async () => {
+      await api("/api/settings", { defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
+      toast("ok", "Defaults saved.");
+      go("settings");
+    } }, ico("check"), "Save defaults"),
+  ));
+  wrap.append(dc);
+
   // repos
   const rc = el("div", { class: "card" });
   rc.append(el("div", { class: "card-head" },
@@ -242,50 +290,6 @@ PAGES.settings = (root) => {
   }
   if (!simple) wrap.append(pc);
 
-  // defaults
-  const dc = el("div", { class: "card" });
-  dc.append(el("div", { class: "card-head" },
-    el("div", { class: "card-ico" }, ico("gear")),
-    el("div", { class: "grow" }, el("h2", {}, "Create PDF defaults"), el("p", {}, "Pre-selected values for the Create PDF page (still overridable there)." ))));
-  const d = s.defaults || {};
-  const csSel = el("select", { class: "input" }, ...S.info.scm.card_sizes.map(c => el("option", { value: c.name, selected: (d.card_size || "standard") === c.name ? "selected" : null }, c.name)));
-  const psSel = el("select", { class: "input" }, ...S.info.scm.paper_sizes.map(p => el("option", { value: p.name, selected: (d.paper_size || "letter") === p.name ? "selected" : null }, p.name)));
-  const ppiR = el("input", { class: "range", type: "range", min: 150, max: 1200, step: 10 });
-  ppiR.value = d.ppi || 300;
-  const qualR = el("input", { class: "range", type: "range", min: 0, max: 100, step: 1 });
-  qualR.value = d.quality || 100;
-  const ppiV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
-  const qualV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
-  const setFill = r => r.style.setProperty("--fill", ((r.value - r.min) / (r.max - r.min)) * 100 + "%");
-  const commit = (r, v) => {
-    if (v.value === "") { v.value = r.value; setFill(r); return; } // blank → revert
-    const n = Number(v.value);
-    if (Number.isFinite(n) && n >= 0) {
-      v.value = n; // freeform — the box keeps the exact value…
-      r.value = Math.min(r.max, Math.max(r.min, Math.round(n / r.step) * r.step)); // …while the slider snaps
-    } else v.value = r.value; // invalid → revert to the slider position
-    setFill(r);
-  };
-  const toNum = (v, fallback) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : fallback; };
-  ppiR.oninput = () => { ppiV.value = ppiR.value; setFill(ppiR); };
-  qualR.oninput = () => { qualV.value = qualR.value; setFill(qualR); };
-  ppiV.onchange = () => commit(ppiR, ppiV);
-  qualV.onchange = () => commit(qualR, qualV);
-  ppiV.value = ppiR.value; qualV.value = qualR.value; setFill(ppiR); setFill(qualR);
-  dc.append(el("div", { class: "frow" },
-    el("div", { class: "field w-half" }, el("label", {}, "Card size"), csSel),
-    el("div", { class: "field w-half" }, el("label", {}, "Paper size"), psSel),
-    el("div", { class: "field w-half" }, el("label", {}, "PPI"), el("span", { class: "rangewrap" }, ppiR, ppiV)),
-    el("div", { class: "field w-half" }, el("label", {}, "Quality"), el("span", { class: "rangewrap" }, qualR, qualV)),
-  ));
-  dc.append(el("div", { style: "margin-top:12px" },
-    el("button", { class: "btn primary", onclick: async () => {
-      await api("/api/settings", { defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
-      toast("ok", "Defaults saved.");
-      go("settings");
-    } }, ico("check"), "Save defaults"),
-  ));
-  wrap.append(dc);
 
   // app updates (the packaged app checks GitHub for itself, at start and daily)
   const uc = el("div", { class: "card" });
