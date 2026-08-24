@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc } from "../core.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl } from "../core.js";
 import { doRun, numSteppers } from "../forms.js";
 import { refreshInfo } from "../info.js";
 import { go, setTheme, uiMode } from "../nav.js";
@@ -423,8 +423,9 @@ PAGES.settings = (root) => {
     el("div", { class: "grow" }, el("h2", {}, "Data & about"), el("p", {}, `Workbench v${S.info.server.version} · server python ${S.info.server.python} · data dir ${S.info.server.data_dir}`))));
   ac.append(el("div", { style: "display:flex; gap:9px; flex-wrap:wrap" },
     el("button", { class: "btn", onclick: async () => { const r = await api("/api/reveal", { path: S.info.server.data_dir }); r.ok ? toast("ok", "Opening data folder…") : toast("warn", r.errors?.[0]); } }, ico("folder"), "Open data folder"),
-    el("button", { class: "btn", onclick: () => window.open("https://github.com/Alan-Cha/silhouette-card-maker") }, ico("external"), "silhouette-card-maker on GitHub"),
-    el("button", { class: "btn", onclick: () => window.open("https://github.com/Alan-Cha/scm-extras") }, ico("external"), "scm-extras on GitHub"),
+    el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/silhouette-card-maker", "silhouette-card-maker on GitHub") }, ico("external"), "silhouette-card-maker on GitHub"),
+    el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/scm-extras", "scm-extras on GitHub") }, ico("external"), "scm-extras on GitHub"),
+    el("button", { class: "btn", onclick: () => openUrl("https://github.com/mallen86/scm-workbench", "scm-workbench on GitHub") }, ico("external"), "scm-workbench on GitHub"),
   ));
   wrap.append(ac);
   return wrap;

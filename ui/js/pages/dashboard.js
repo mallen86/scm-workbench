@@ -1,7 +1,7 @@
 /* pages/dashboard — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, ico, iconize, toast } from "../core.js";
+import { $, $$, PAGES, S, api, el, ico, iconize, toast, openUrl } from "../core.js";
 import { refreshInfo } from "../info.js";
 import { go } from "../nav.js";
 import { prepActive, updatePrepRows } from "../prep.js";
@@ -41,7 +41,7 @@ PAGES.dashboard = (root) => {
   wrap.append(el("div", { class: "card" }, el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("book")),
     el("div", { class: "grow" }, el("h2", {}, "Documentation"), el("p", {}, "The docs site walks through every step with photos: supplies, printing, cutting, troubleshooting.")),
-    el("button", { class: "btn", onclick: () => window.open("https://alan-cha.github.io/silhouette-card-maker/") }, ico("external"), "Open docs"),
+    el("button", { class: "btn", onclick: () => openUrl("https://alan-cha.github.io/silhouette-card-maker/", "the silhouette-card-maker docs") }, ico("external"), "Open docs"),
   )));
   return wrap;
 };

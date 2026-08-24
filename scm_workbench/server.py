@@ -2056,6 +2056,22 @@ def open_path(path: Path) -> Optional[str]:
         return str(e)
 
 
+def open_url(url: str) -> Optional[str]:
+    """Open a URL in the platform's default browser (the link twin of
+    open_path). The UI's webview can't window.open, so its link buttons go
+    through here instead. Returns an error string or None."""
+    try:
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", url], **_proc_kwargs())
+        else:
+            subprocess.Popen(["xdg-open", url], **_proc_kwargs())
+        return None
+    except Exception as e:
+        return str(e)
+
+
 # ============================================================================
 # HTTP layer
 # ============================================================================
@@ -2486,6 +2502,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, ctype)
 
     def _file(self, q):
+        url = (q.get("url") or [""])[0]
+        if url:
+            # Same open semantics as open=1, aimed at a link: the server
+            # opens it in the default browser. http(s) only — this is not a
+            # way out of the sandbox, it's how the UI's link buttons work.
+            if not (url.startswith("https://") or url.startswith("http://")):
+                return self._json({"ok": False, "errors": ["only http(s) URLs can be opened"]}, 400)
+            err = open_url(url)
+            return self._json({"ok": err is None, "errors": [err] if err else []})
         settings = load_settings()
         rel = (q.get("path") or [""])[0]
         reveal = (q.get("reveal") or ["0"])[0] == "1"

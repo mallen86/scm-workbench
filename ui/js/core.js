@@ -134,6 +134,16 @@ export function toast(kind, msg, ms = 3800) {
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 280); }, ms);
 }
 
+/* Links (and "open this file" actions) can't window.open in the app's
+   embedded webview — WebKit won't spawn a new window there — so they go
+   through the UI server instead: it opens the target in the OS (default
+   app for files, default browser for URLs) and this toasts the result. */
+export async function openUrl(url, what) {
+  const r = await fetch(`/api/file?url=${encodeURIComponent(url)}`).then(x => x.json().catch(() => ({})));
+  if (r.ok) toast("ok", `Opening ${what}…`);
+  else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${what}.`);
+}
+
 
 /* --------------------------------- modal ---------------------------------- */
 

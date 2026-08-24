@@ -50,7 +50,15 @@ PAGES.offset = (root) => {
   ));
   const grid = el("div", { class: "filegrid" });
   for (const c of S.info.scm.calibration) {
-    grid.append(el("button", { class: "fileitem", onclick: () => window.open(`/api/file?path=${encodeURIComponent(c.path)}&_t=${Date.now()}`) },
+    // Same mechanism as the cutting-template buttons: the server opens the
+    // file in its default app (the webview can't window.open or render PDFs).
+    grid.append(el("button", { class: "fileitem",
+      title: "Open in its default app (e.g. Preview)",
+      onclick: async () => {
+        const r = await fetch(`/api/file?path=${encodeURIComponent(c.path)}&open=1`).then(x => x.json());
+        if (r.ok) toast("ok", `Opening ${c.name} in its default app…`);
+        else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
+      } },
       el("span", { class: "fi-ico" }, ico("file")),
       el("span", { class: "fi-name" }, c.name, el("span", { class: "fi-sub", style: "display:block" }, `${fmtBytes(c.size)} · click to open`))));
   }
