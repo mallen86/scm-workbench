@@ -101,6 +101,29 @@ jobs:
           $rc = Get-ChildItem "$ws\.briefcase-tools\tools" -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir ($ws\.briefcase-tools\tools)" }
           & $rc.FullName --set-icon "icon.ico" "SCM Workbench.exe"
+      - name: Flatten the app root (the executable belongs at the top level)
+        run: |
+          $app = Join-Path (Resolve-Path .).Path "build/scm-workbench/windows/app"
+          # The template nests everything under src/ (briefcase's packaging_root),
+          # but the stub exe locates everything *relative to its own directory*
+          # (app/, app_packages/, python313.zip, the .pyd runtime - see its strings
+          # "Adding app_packages as site dir" / "Running app module:"), so the
+          # src/ container carries no runtime meaning. Move src/* to the app root,
+          # point briefcase.toml's [paths] at the new layout, and zip the flat tree
+          # next: unzip and run "SCM Workbench.exe" from the top level.
+          $src = Join-Path $app "src"
+          Get-ChildItem $src | ForEach-Object {
+            $dst = Join-Path $app $_.Name
+            if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+            Move-Item $_.FullName $dst
+          }
+          Remove-Item $src
+          $toml = Join-Path $app "briefcase.toml"
+          (Get-Content $toml -Raw) `
+            -replace 'app_path = "src/app"', 'app_path = "app"' `
+            -replace 'app_packages_path = "src/app_packages"', 'app_packages_path = "app_packages"' `
+            -replace 'support_path = "src"', 'support_path = "."' `
+            | Set-Content $toml
       - name: Zip
         run: |
           cd build/scm-workbench/windows/app
