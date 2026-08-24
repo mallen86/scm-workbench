@@ -79,19 +79,27 @@ jobs:
         run: |
           # same vendored-wheel story as the macOS job (PIP_FIND_LINKS must
           # be a file:// URL with forward slashes on Windows)
-          $ws = (Resolve-Path .).Path.Replace('\', '/')
-          $env:PIP_FIND_LINKS = "file:///$ws/ciwheels"
+          $ws = (Resolve-Path .).Path
+          $env:PIP_FIND_LINKS = "file:///$($ws.Replace('\', '/'))/ciwheels"
+          # Pin briefcase's tool cache (rcedit, template, support package) to
+          # a known folder in the checkout - the icon step below needs to find
+          # rcedit, and it can't rely on where this briefcase version picks
+          # its PlatformDirs cache to be (briefcase supports BRIEFCASE_HOME
+          # exactly for this; the dir must exist before the run starts).
+          New-Item -ItemType Directory -Force (Join-Path $ws ".briefcase-tools") | Out-Null
+          $env:BRIEFCASE_HOME = Join-Path $ws ".briefcase-tools"
           briefcase build windows app
       - name: Stamp the app icon into the exe
         run: |
           # briefcase's own rcedit pass stamps the version strings but uses the
           # template's generic icon.ico - swap in the real one and re-stamp.
-          # The exe lives in the template's src/ subfolder; GITHUB_WORKSPACE
-          # points at the checkout root, so no ..-counting from here.
+          # The exe lives in the template's src/ subfolder; everything below is
+          # rooted at the checkout dir, so no ..-counting anywhere.
+          $ws = (Resolve-Path .).Path
           cd build/scm-workbench/windows/app/src
-          Copy-Item "$env:GITHUB_WORKSPACE\assets\AppIcon.ico" .\icon.ico
-          $rc = (Get-ChildItem $HOME\.briefcase -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)
-          if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir" }
+          Copy-Item "$ws\assets\AppIcon.ico" .\icon.ico
+          $rc = Get-ChildItem "$ws\.briefcase-tools\tools" -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir ($ws\.briefcase-tools\tools)" }
           & $rc.FullName --set-icon "icon.ico" "SCM Workbench.exe"
       - name: Zip
         run: |
