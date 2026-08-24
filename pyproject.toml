@@ -17,6 +17,13 @@ description = "A local web UI for silhouette-card-maker and scm-extras — no te
 authors = [{ name = "the SCM Workbench maintainers" }]
 license = "MIT"
 license-files = ["LICENSE.md"]
+# Pin the dev venv to the interpreter the bundle actually ships (the
+# `python_version` in the briefcase config below, 3.13 — same as CI).
+# Unpinned, a fresh `uv sync` lands on the newest installed Python, and a
+# from-scratch `briefcase build` then resolves the bundled app_packages
+# wheels for that wrong version (or dies on the sdist-only proxy_tools —
+# see the PIP_FIND_LINKS note in CONTRIBUTING.md).
+requires-python = ">=3.13,<3.14"
 
 [tool.briefcase]
 bundle = "local.scm-workbench"
@@ -55,11 +62,15 @@ requires = [
 ]
 
 [tool.briefcase.app.scm-workbench.macOS]
-# the real app icon: briefcase 0.4.x copies resources into the bundle's
-# Resources/; the CI step also points CFBundleIconFile at it (the template
-# plist ships its own placeholder icon)
-resources = ["assets/AppIcon.icns"]
-icon = "assets/AppIcon.icns"
+# The app icon: briefcase's create step installs this over the template's
+# placeholder icon (Resources/<app-name>.icns — the exact file the template's
+# Info.plist points CFBundleIconFile at), so a *completed* build shows the
+# real mark in Dock/Finder/About with no plist surgery. Note the config
+# takes the path *without* the extension - briefcase appends the target's
+# own suffix (.icns on macOS, .ico on Windows). If a fresh bundle still
+# shows the template's generic icon, create didn't finish - check the build
+# log for the pip failure (CONTRIBUTING.md, "Packaging the app").
+icon = "assets/AppIcon"
 info_plist = { NSHumanReadableCopyright = "Thanks to Alan Cha for silhouette-card-maker and scm-extras." }
 requires = [
     "click==8.4.2",
@@ -81,7 +92,8 @@ requires = [
 # (pyautogui/pywinauto are Windows-only GUI automation — not needed on macOS)
 
 [tool.briefcase.app.scm-workbench.Windows]
-icon = "assets/AppIcon.ico"
+# no extension here either - briefcase appends the target's own suffix
+icon = "assets/AppIcon"
 requires = [
     "click==8.4.2",
     "cloudscraper==1.2.71",

@@ -90,13 +90,31 @@ The data area holds `settings.json`, job history/logs, the per-size offset table
 
 ## Packaging the app
 
-The repo doubles as its own [briefcase](https://briefcase.readthedocs.io) definition (see `pyproject.toml`):
+The repo doubles as its own [briefcase](https://briefcase.readthedocs.io) definition (see `pyproject.toml`). A **from-scratch** build (i.e. after deleting `build/`) has two local requirements — CI enforces both as well — and missing either breaks the pip step that installs the bundle's `app_packages`:
+
+* **Run briefcase from a Python 3.13 venv.** That interpreter is the one pip resolves the bundled wheels (pyobjc, numpy, …) for, and the bundle ships CPython 3.13 — the `python_version` in the briefcase config, matching CI's `setup-python`. A newer venv (3.14, …) fails the install below, or worse, silently bundles cp3xx wheels the 3.13 runtime can't import. `pyproject.toml` pins `requires-python` to 3.13 so `uv` lands on it automatically.
+* **Export `PIP_FIND_LINKS` at the vendored wheels.** `pywebview` depends on `proxy_tools`, whose only PyPI release is a ~2014 *sdist* — uninstallable under briefcase's `--only-binary :all:`. A prebuilt `py3-none-any` wheel is vendored in `ciwheels/` (CI sets this same env var for exactly this reason; it's commented there), and the pip subprocess inherits it.
 
 ```sh
-pip install briefcase
-briefcase build macos app      # → build/scm-workbench/macos/app/SCM Workbench.app
-briefcase build windows app    # → build/scm-workbench/windows/app/ (zip it)
+uv venv && uv sync          # 3.13, per the requires-python pin
+uv pip install briefcase    # (or: pip install briefcase)
+export PIP_FIND_LINKS=file://$(pwd)/ciwheels
+briefcase build macos app   # → build/scm-workbench/macos/app/SCM Workbench.app
+briefcase build windows app # → build/scm-workbench/windows/app/ (zip it)
 ```
+
+…or skip the ceremony: `scripts/build.sh macos app` (sets the find-links export, checks the venv is the pinned 3.13, runs the same briefcase build).
+
+The signature failure without the find-links export is a resolution error, not a network one:
+
+```
+ERROR: Could not find a version that satisfies the requirement proxy_tools (from pywebview) (from versions: none)
+ERROR: No matching distribution found for proxy_tools
+```
+
+An *existing* `build/` tree dodges all of this: briefcase asks “already exists; overwrite?” **before** the create step, and declining it just re-packages the old bundle — which is why a stale tree “works” while a clean one doesn't.
+
+* **The app icon needs no surgery.** Briefcase's create step installs the `icon` from the briefcase config (`assets/AppIcon.icns`) over the template's placeholder icon — the exact file the template's `Info.plist` points `CFBundleIconFile` at — so a *completed* create leaves the real mark in the Dock/Finder/About box. If a fresh bundle still shows the template's generic icon, create didn't finish: icon install is one of its last steps, after the pip step above. Grep the build log for `No matching distribution found for proxy_tools` / `Installing app requirements... errored`, fix the two requirements above, and rebuild.
 
 * **Entry point** is `scm_workbench.launcher`: it pins the app's data area to the writable per-user directory, marks the run as packaged (dependency sync may then `pip` into the app's own private runtime — never anything of the user's), bootstraps first launch, and hands over to the server, which the launcher runs as a **separate child process** with its own log (`server.log`) so the window can never take it down with it.
 * **First launch** provisions the relocatable CPython runtime (GHCI python-build-standalone, pinned build in `launcher.py`) into the data area, then fetches the newest managed copy of each sister repo. The transcript goes to `launcher.log` in the data area; if a fetch can't finish (offline first run), the app still works and **Settings → "Managed repo copies"** retries on demand.
