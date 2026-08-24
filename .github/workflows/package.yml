@@ -86,8 +86,10 @@ jobs:
         run: |
           # briefcase's own rcedit pass stamps the version strings but uses the
           # template's generic icon.ico - swap in the real one and re-stamp.
-          cd build/scm-workbench/windows/app
-          Copy-Item ..\..\..\assets\AppIcon.ico .\icon.ico
+          # The exe lives in the template's src/ subfolder; GITHUB_WORKSPACE
+          # points at the checkout root, so no ..-counting from here.
+          cd build/scm-workbench/windows/app/src
+          Copy-Item "$env:GITHUB_WORKSPACE\assets\AppIcon.ico" .\icon.ico
           $rc = (Get-ChildItem $HOME\.briefcase -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)
           if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir" }
           & $rc.FullName --set-icon "icon.ico" "SCM Workbench.exe"
