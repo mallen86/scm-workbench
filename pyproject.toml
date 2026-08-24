@@ -91,7 +91,12 @@ requires = [
 ]
 # (pyautogui/pywinauto are Windows-only GUI automation — not needed on macOS)
 
-[tool.briefcase.app.scm-workbench.Windows]
+# The header's case matters: briefcase matches these section names against its
+# platform registry *case-sensitively* ("macOS" above is the registry's exact
+# key; this one is lowercase "windows"). A misspelled header is skipped
+# silently - the build succeeds with only the base requires (which is how a
+# "Windows" here once shipped an app without pywebview or the PDF stack).
+[tool.briefcase.app.scm-workbench.windows]
 # no extension here either - briefcase appends the target's own suffix
 icon = "assets/AppIcon"
 requires = [
