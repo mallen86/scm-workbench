@@ -18,6 +18,7 @@ Nothing in here imports the sister repos — same rule as the Workbench itself.
 
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -32,6 +33,16 @@ def default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "scm-workbench"
 
 
+# The private CPython the job scripts run on (macOS only; on Windows the
+# bundle's own Python serves). Its minor version must match the bundle's
+# runtime — `python_version` in the briefcase config — because job scripts
+# also import the bundle's own Resources/app_packages (cp3xx wheels), and a
+# mismatched interpreter can't load their compiled extensions (PIL dies with
+# "cannot import name '_imaging' from 'PIL'" in that case). A data area that
+# still holds a mismatched runtime is re-provisioned automatically below.
+RUNTIME_VERSION = "3.13.15"
+
+
 def provision_runtime(data: Path, log) -> str:
     """Ensure a real, relocatable CPython lives in the data area and jobs can use it.
 
@@ -43,29 +54,49 @@ def provision_runtime(data: Path, log) -> str:
     import platform as _plat
     rt = data / "runtime"
     marker = rt / ".ready"
+    minor = ".".join(RUNTIME_VERSION.split(".")[:2])
+    expected = rt / "python" / "install" / "bin" / f"python{minor}"
     if marker.is_file():
-        return str(marker.read_text(encoding="utf-8").strip())
+        have = str(marker.read_text(encoding="utf-8").strip())
+        if have == str(expected) and Path(have).is_file():
+            return have
+        log(f"\n[launcher] the private runtime in the data area is out of date "
+            f"({Path(have).name or '?'}, needs python{minor}) — re-provisioning …")
+        shutil.rmtree(rt, ignore_errors=True)
     arch = "aarch64" if _plat.machine() == "arm64" else "x86_64"
-    release = "20260814"  # pinned build; bump deliberately (see README → Packaging)
-    name = f"cpython-3.14.7+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
+    release = "20260814"  # pinned pbs build carrying RUNTIME_VERSION; bump both deliberately
+    name = f"cpython-{RUNTIME_VERSION}+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
     url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{name}"
-    log(f"\n[launcher] provisioning a private CPython runtime (~60 MB download, one-time) …")
+    log(f"\n[launcher] provisioning a private CPython {RUNTIME_VERSION} runtime (~60 MB download, one-time) …")
     t0 = time.time()
     import urllib.request
     tgz = data / ".runtime-download.tar.zst"
     urllib.request.urlretrieve(url, str(tgz))
     log(f"[launcher] {tgz.stat().st_size / 1e6:.0f} MB received — extracting …")
-    import tarfile
-    with tarfile.open(tgz, "r:*") as tf:
-        tf.extractall(rt, filter="data")
-    tgz.unlink(missing_ok=True)
-    install = rt / "python" / "install"
-    if not (install / "bin" / "python3.14").is_file():
+    rt.mkdir(parents=True, exist_ok=True)  # the re-provision path wipes it
+    # The stdlib tarfile learned zstd only in Python 3.14 — on an older
+    # interpreter that attempt raises, so fall back to the system tar
+    # (macOS bsdtar reads zstd via libarchive).
+    ok = False
+    try:
+        import tarfile
+        with tarfile.open(tgz, "r:*") as tf:
+            tf.extractall(rt, filter="data")
+        ok = expected.is_file()
+    except Exception:
+        ok = False
+    if not ok:
+        import subprocess as _sp
+        r = _sp.run(["tar", "-xf", str(tgz), "-C", str(rt)], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"extracting the runtime failed: {(r.stderr or '').strip()[-200:]}")
+        ok = expected.is_file()
+    if not ok:
         raise RuntimeError("the runtime archive did not unpack as expected — check the download URL")
-    py = install / "bin" / "python3.14"
-    marker.write_text(str(py), encoding="utf-8")
-    log(f"[launcher] runtime ready in {time.time() - t0:.0f}s → {py}")
-    return str(py)
+    tgz.unlink(missing_ok=True)
+    marker.write_text(str(expected), encoding="utf-8")
+    log(f"[launcher] runtime ready in {time.time() - t0:.0f}s → {expected}")
+    return str(expected)
 
 
 def bootstrap_managed_repos(repo_sync, log=None) -> None:
