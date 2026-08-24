@@ -43,19 +43,39 @@ def default_data_dir() -> Path:
 RUNTIME_VERSION = "3.13.15"
 
 
+def _runtime_download_name() -> str:
+    """The pinned python-build-standalone archive for this machine."""
+    import platform as _plat
+    release = "20260814"  # pinned pbs build carrying RUNTIME_VERSION; bump deliberately
+    if sys.platform == "win32":
+        arch = "aarch64" if _plat.machine() == "ARM64" else "x86_64"
+        return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-pc-windows-msvc-pgo-full.tar.zst"
+    arch = "aarch64" if _plat.machine() == "arm64" else "x86_64"
+    return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
+
+
+def _runtime_python_path(rt: Path) -> Path:
+    """Where the provisioned interpreter ends up, per platform."""
+    if sys.platform == "win32":
+        return rt / "python" / "install" / "python.exe"
+    minor = ".".join(RUNTIME_VERSION.split(".")[:2])
+    return rt / "python" / "install" / "bin" / f"python{minor}"
+
+
 def provision_runtime(data: Path, log) -> str:
     """Ensure a real, relocatable CPython lives in the data area and jobs can use it.
 
-    The bundle's own interpreter is only reachable through the app stub, so job
-    scripts (create_pdf.py & friends) need their own. We provision GHCI's
-    python-build-standalone: a relocatable, pip-included CPython that runs from
-    the data area with zero system prerequisites.
+    The bundle's own interpreter is only reachable through the app stub - and
+    on Windows that stub is a fixed "run the app" binary that ignores its
+    arguments, so it can't even be re-run as a server - which is why job
+    scripts (create_pdf.py & friends) and the UI-server child need their own
+    real interpreter. We provision GHCI's python-build-standalone: a
+    relocatable, pip-included CPython that runs from the data area with zero
+    system prerequisites.
     """
-    import platform as _plat
     rt = data / "runtime"
     marker = rt / ".ready"
-    minor = ".".join(RUNTIME_VERSION.split(".")[:2])
-    expected = rt / "python" / "install" / "bin" / f"python{minor}"
+    expected = _runtime_python_path(rt)
     if marker.is_file():
         have = str(marker.read_text(encoding="utf-8").strip())
         if have == str(expected) and Path(have).is_file():
@@ -63,9 +83,8 @@ def provision_runtime(data: Path, log) -> str:
         log(f"\n[launcher] the private runtime in the data area is out of date "
             f"({Path(have).name or '?'}, needs python{minor}) — re-provisioning …")
         shutil.rmtree(rt, ignore_errors=True)
-    arch = "aarch64" if _plat.machine() == "arm64" else "x86_64"
-    release = "20260814"  # pinned pbs build carrying RUNTIME_VERSION; bump both deliberately
-    name = f"cpython-{RUNTIME_VERSION}+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
+    name = _runtime_download_name()
+    release = "20260814"  # keep in sync with _runtime_download_name
     url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{name}"
     log(f"\n[launcher] provisioning a private CPython {RUNTIME_VERSION} runtime (~60 MB download, one-time) …")
     t0 = time.time()
@@ -281,6 +300,18 @@ def _ensure_server(data: Path, log, url: str, port: int, server) -> None:
     _stop_leftover_server(data, log)
 
     py = os.environ.get("SCM_WORKBENCH_PYTHON") or str(server.bundled_python())
+    # Never Popen the app's own entry stub. On Windows it is a fixed
+    # "run the app" binary that ignores its arguments, so re-launching it as
+    # the "server child" would start a brand-new copy of this app - which
+    # starts another, and so on (a fork bomb of identical processes). While
+    # the private runtime isn't ready, the UI simply waits: the server starts
+    # on the next launch, once provisioning has written SCM_WORKBENCH_PYTHON.
+    if (os.name == "nt" and not os.environ.get("SCM_WORKBENCH_PYTHON")
+            and Path(py).resolve() == Path(sys.executable).resolve()):
+        log("[launcher] the private runtime isn't ready yet, so the UI server will not run as its "
+            "own process (the app stub can only re-launch the app, not serve). It starts on the next "
+            "launch - the UI's prep banner tracks the provisioning.")
+        return
     root = Path(__file__).resolve().parent.parent
     env = dict(os.environ)
     env["SCM_WORKBENCH_DATA"] = str(data)
@@ -352,12 +383,13 @@ def _background_bootstrap(data: Path, log, url: str, port: int, server) -> None:
 
     set_flag(["scm", "extras"], [])
     try:
-        # 1) the private runtime for job scripts (macOS; one-time)
-        if sys.platform == "darwin" and not os.environ.get("SCM_WORKBENCH_PYTHON"):
+        # 1) the private runtime for job scripts and the UI-server child
+        #    (macOS + Windows; one-time per machine)
+        if sys.platform in ("darwin", "win32") and not os.environ.get("SCM_WORKBENCH_PYTHON"):
             try:
                 os.environ["SCM_WORKBENCH_PYTHON"] = provision_runtime(data, blog)
             except Exception as e:
-                blog(f"[launcher] runtime provisioning failed ({e}) — the in-bundle Python will serve the UI instead.")
+                blog(f"[launcher] runtime provisioning failed ({e}) - the UI server and jobs will wait for the next launch.")
         # 2) the UI server itself (child process — see _ensure_server)
         _ensure_server(data, blog, url, port, server)
         # 3) the managed repo copies (idempotent: a repo already at the wanted

@@ -1230,9 +1230,10 @@ def bundled_python() -> Path:
     """The interpreter job scripts should run with.
 
     In a dev checkout that's simply sys.executable. Inside an app bundle,
-    however, sys.executable is the launcher *stub* (not directly executable as
-    an interpreter), so the launcher provisions a relocatable CPython in the
-    data area and tells us where it is via SCM_WORKBENCH_PYTHON.
+    however, sys.executable is the launcher *stub* (on macOS a dylib that
+    can't be exec'd; on Windows an executable that only re-launches the app,
+    ignoring its arguments), so the launcher provisions a relocatable CPython
+    in the data area and tells us where it is via SCM_WORKBENCH_PYTHON.
     """
     env_py = os.environ.get("SCM_WORKBENCH_PYTHON")
     if env_py:
@@ -1287,6 +1288,16 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             python = p
         else:
             warnings.append(f"Configured python not found ({p}); using {python.name}.")
+    # A job can never run on the app's own stub: on Windows the stub is a
+    # fixed "run the app" binary, so Popen'ing it would launch another copy
+    # of this app (which launches another, …). Until the private runtime is
+    # provisioned, jobs decline to start and say why.
+    if (os.environ.get("SCM_WORKBENCH_PACKAGED") and not os.environ.get("SCM_WORKBENCH_PYTHON")
+            and os.name == "nt" and Path(str(python)).resolve() == Path(sys.executable).resolve()):
+        errors.append(
+            "the app's private Python runtime isn't ready yet (first launch) — and a job can't "
+            "run on the app's own stub, because that would just launch another copy of the app. "
+            "Try again in a minute; the dashboard banner tracks provisioning.")
 
     manifest = get_manifest()
     spec = manifest.get(kind) or {}
