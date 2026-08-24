@@ -16,6 +16,7 @@ venv/
 # build/packaging artifacts
 build/
 dist/
+*.egg-info/
 
 # local logs & tooling scratch
 logs/
