@@ -121,24 +121,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          fail_on_unmatched_files: false
-          files: |
-            scm-workbench-macos.zip
-            scm-workbench-windows.zip
-          body: |
-            First release of SCM Workbench — a local, self-contained UI for
-            silhouette-card-maker and scm-extras.
-
-            * **macOS** — unzip and open “SCM Workbench.app”. The build is
-              unsigned, so the first launch needs a right-click → *Open*.
-            * **Windows** — unzip and run “SCM Workbench.exe”.
-
-            First launch provisions the app's private Python runtime and
-            fetches the newest copy of each sister repo (watch the progress
-            in the app's window). Nothing is installed on the machine —
-            everything lives in the app's data folder.
+      - name: Attach the built artifacts to the release
+        # The release itself (title + notes) is created *outside* this
+        # workflow - `gh release create vX.Y.Z --notes-file ...` right before
+        # the tag push, or from the GitHub UI. This job only adds the two
+        # build artifacts to it. If no release exists for the tag, a bare one
+        # is created as a fallback so the artifacts are never lost.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --title "SCM Workbench $GITHUB_REF_NAME - add release notes in the release editor"
+          gh release upload "$GITHUB_REF_NAME" scm-workbench-macos.zip scm-workbench-windows.zip --clobber
