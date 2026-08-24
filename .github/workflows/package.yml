@@ -54,6 +54,16 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist" \
             || /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Thanks to Alan Cha for silhouette-card-maker and scm-extras." "SCM Workbench.app/Contents/Info.plist"
           codesign --force --deep -s - "SCM Workbench.app"
+      - name: Install the app icon
+        run: |
+          cd build/scm-workbench/macos/app
+          # the template ships a generic placeholder icon (scm-workbench.icns);
+          # the real one lives in the repo - install it, point CFBundleIconFile
+          # at it (Add || Set, like the copyright step above), and re-sign.
+          cp ../../../assets/AppIcon.icns "SCM Workbench.app/Contents/Resources/AppIcon.icns"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "SCM Workbench.app/Contents/Info.plist" \
+            || /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "SCM Workbench.app/Contents/Info.plist"
+          codesign --force --deep -s - "SCM Workbench.app"
       - name: Zip
         run: |
           cd build/scm-workbench/macos/app
@@ -82,6 +92,15 @@ jobs:
           $ws = (Resolve-Path .).Path.Replace('\', '/')
           $env:PIP_FIND_LINKS = "file:///$ws/ciwheels"
           briefcase build windows app
+      - name: Stamp the app icon into the exe
+        run: |
+          # briefcase's own rcedit pass stamps the version strings but uses the
+          # template's generic icon.ico - swap in the real one and re-stamp.
+          cd build/scm-workbench/windows/app
+          Copy-Item ..\..\..\assets\AppIcon.ico .\icon.ico
+          $rc = (Get-ChildItem $HOME\.briefcase -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1)
+          if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir" }
+          & $rc.FullName --set-icon "icon.ico" "SCM Workbench.exe"
       - name: Zip
         run: |
           cd build/scm-workbench/windows/app

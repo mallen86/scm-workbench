@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- SCM Workbench mark: the silhouette-card-maker spade card (dashed cut
+       line and all) standing on a workbench — the logo's machine body, given
+       legs. Palette sampled from the SCM docs-site icon. -->
+  <defs>
+    <g id="spade">
+      <path d="M50 27C46.5 30.5 42.5 33.8 42.5 38.2C42.5 41.4 44.9 43.4 47.7 43.4C46.3 45.8 45.5 47.6 45.5 49.6L54.5 49.6C54.5 47.6 53.7 45.8 52.3 43.4C55.1 43.4 57.5 41.4 57.5 38.2C57.5 33.8 53.5 30.5 50 27Z" fill="#3A3E44"/>
+    </g>
+  </defs>
+  <!-- workbench: the logo's machine body, turned bench-top with a knob -->
+  <rect x="20" y="57" width="60" height="11" rx="3.5" fill="#F7F9FB" stroke="#3A3E44" stroke-width="2.6"/>
+  <rect x="25" y="68" width="8" height="19" rx="2" fill="#F7F9FB" stroke="#3A3E44" stroke-width="2.2"/>
+  <rect x="67" y="68" width="8" height="19" rx="2" fill="#F7F9FB" stroke="#3A3E44" stroke-width="2.2"/>
+  <path d="M33 78h34" stroke="#3A3E44" stroke-width="2.2"/>
+  <circle cx="50" cy="62.5" r="3.4" fill="#29BBE4" stroke="#3A3E44" stroke-width="1.6"/>
+  <!-- the card, standing in front of the bench -->
+  <rect x="33" y="14" width="34" height="46" rx="4.5" fill="#FFFFFF" stroke="#3A3E44" stroke-width="2.6"/>
+  <rect x="37.5" y="18.5" width="25" height="37" rx="2.5" stroke="#18A8D8" stroke-width="1.7" stroke-dasharray="3 2.6"/>
+  <use href="#spade"/>
+  <use href="#spade" transform="translate(42.6 27.6) scale(0.42) translate(-50 -38.5)"/>
+  <use href="#spade" transform="translate(57.4 49.4) rotate(180) scale(0.42) translate(-50 -38.5)"/>
+</svg>

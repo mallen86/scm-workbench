@@ -415,7 +415,7 @@ PAGES.settings = (root) => {
   // data & about
   const ac = el("div", { class: "card" });
   ac.append(el("div", { class: "card-head" },
-    el("div", { class: "card-ico" }, ico("info")),
+    el("div", { class: "card-ico" }, el("img", { src: "/ui/logo.svg", alt: "SCM Workbench", style: "width:26px; height:26px; display:block" })),
     el("div", { class: "grow" }, el("h2", {}, "Data & about"), el("p", {}, `Workbench v${S.info.server.version} · server python ${S.info.server.python} · data dir ${S.info.server.data_dir}`))));
   ac.append(el("div", { style: "display:flex; gap:9px; flex-wrap:wrap" },
     el("button", { class: "btn", onclick: async () => { const r = await api("/api/reveal", { path: S.info.server.data_dir }); r.ok ? toast("ok", "Opening data folder…") : toast("warn", r.errors?.[0]); } }, ico("folder"), "Open data folder"),

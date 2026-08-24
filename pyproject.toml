@@ -55,7 +55,11 @@ requires = [
 ]
 
 [tool.briefcase.app.scm-workbench.macOS]
-resources = []
+# the real app icon: briefcase 0.4.x copies resources into the bundle's
+# Resources/; the CI step also points CFBundleIconFile at it (the template
+# plist ships its own placeholder icon)
+resources = ["assets/AppIcon.icns"]
+icon = "assets/AppIcon.icns"
 info_plist = { NSHumanReadableCopyright = "Thanks to Alan Cha for silhouette-card-maker and scm-extras." }
 requires = [
     "click==8.4.2",
@@ -77,6 +81,7 @@ requires = [
 # (pyautogui/pywinauto are Windows-only GUI automation — not needed on macOS)
 
 [tool.briefcase.app.scm-workbench.Windows]
+icon = "assets/AppIcon.ico"
 requires = [
     "click==8.4.2",
     "cloudscraper==1.2.71",
