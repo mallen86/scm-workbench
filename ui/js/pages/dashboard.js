@@ -141,10 +141,16 @@ export function statusGrid() {
   if (i.server.is_windows && i.server.is_packaged) {
     const wf = i.window || {};
     const inBrowser = wf.mode === "browser";
+    // the specific failure beats the generic one: dig the real error line out
+    // of the recorded traceback when there is one
+    const diag = wf.detail
+      ? String(wf.detail).split("\n").map(s => s.trim())
+          .filter(l => /error|exception|fail|0x[0-9a-f]{8}/i.test(l)).pop()
+      : null;
     card("window", inBrowser ? "--warn" : "--ok", "App window",
       inBrowser
         ? "the native window couldn't start on this machine — the UI is running in your browser" +
-          (wf.reason ? ` (${String(wf.reason).slice(0, 140)})` : "")
+          ((diag || wf.reason) ? ` (${String(diag || wf.reason).slice(0, 160)})` : "")
         : "native window in use (WinForms + WebView2)",
       inBrowser ? "" : "ok");
   }

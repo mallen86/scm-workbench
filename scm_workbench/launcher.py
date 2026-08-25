@@ -472,7 +472,10 @@ def _configure_dotnet(data: Path, log) -> str:
     net.mkdir(parents=True, exist_ok=True)
     cfg = net / "scm-workbench.runtimeconfig.json"
     opts = {
-        "tfm": f"net{major}.{minor}.0",
+        # canonical TFM is major.minor only ("net10.0") - the host rejects
+        # three-part forms, and clr_loader's own generated configs use this
+        # exact shape.
+        "tfm": f"net{major}.{minor}",
         "frameworks": [
             {"name": "Microsoft.NETCore.App", "version": v},
             {"name": "Microsoft.WindowsDesktop.App", "version": v},
@@ -567,6 +570,27 @@ def _run_window(data: Path, log, server) -> None:
     dotnet_note = _configure_dotnet(data, log) if os.name == "nt" else None
 
     try:
+        # Route every pywebview log record (including the full traceback of a
+        # failing platform import - the logger.exception of its try_import)
+        # into launcher.log, so a fallback is always diagnosable afterwards.
+        import logging as _logging
+        import traceback as _tb
+
+        class _LogSink:
+            def emit(self, record):
+                try:
+                    msg = record.getMessage()
+                    if record.exc_info:
+                        msg += "\n" + "".join(_tb.format_exception(*record.exc_info))
+                    log("[launcher] webview: %s" % msg)
+                except Exception:
+                    pass
+
+        _pv = _logging.getLogger("pywebview")
+        _pv.setLevel(_logging.DEBUG)
+        _pv.handlers = [_LogSink()]
+        _pv.propagate = False
+
         # On macOS the bundled stub's Python sees sys.argv[0] as a *relative*
         # build path, and pywebview's app-root heuristic resolves it against the
         # current working directory — so from most launch paths (double-click,
@@ -611,16 +635,23 @@ def _run_window(data: Path, log, server) -> None:
         _stop_server(log, data)
         return
     except Exception as e:
+        import traceback as _tb
+        detail = "".join(_tb.format_exception(type(e), e, e.__traceback__)).strip()
         reason = f"embedded window unavailable ({e})"
         if dotnet_note and dotnet_note != "ok":
             reason += f"; {dotnet_note}"
         try:
+            # the full traceback (with the .NET hresult, e.g. 0x80008093) is
+            # what actually diagnoses the failure - keep it, never truncate it
+            (data / "window-error.log").write_text(detail, encoding="utf-8")
             # the UI (in the browser) explains itself on the dashboard card
             (data / "window.json").write_text(
-                json.dumps({"mode": "browser", "reason": str(e)}, indent=2), encoding="utf-8")
+                json.dumps({"mode": "browser", "reason": str(e), "detail": detail[:2000]}, indent=2),
+                encoding="utf-8")
         except Exception:
             pass
-        log(f"[launcher] {reason} — opening your browser instead.")
+        log(f"[launcher] {reason} — opening your browser instead "
+            f"(full error in {data / 'window-error.log'}).")
     try:
         if settings.get("auto_open_browser", True):
             webbrowser.open(url, new=2)
