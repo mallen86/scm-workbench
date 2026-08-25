@@ -73,7 +73,10 @@ export function fmtEta(sec) {
 export function prepMeta(r) {
   const p = r.progress || {};
   const bits = [];
-  if (p.total >= 1000) {
+  if (p.unit === "files" && p.total > 0) {
+    // fingerprint/apply heartbeats count files, not bytes
+    bits.push((p.done || 0) + "/" + p.total + " files (" + Math.min(100, Math.round(100 * (p.done || 0) / p.total)) + "%)");
+  } else if (p.total >= 1000) {
     const doneMB = (p.done || 0) / 1e6, totalMB = p.total / 1e6;
     const pct = Math.min(100, Math.round(100 * (p.done || 0) / p.total));
     bits.push((totalMB >= 10 ? Math.round(doneMB) : doneMB.toFixed(1)) + "/" +

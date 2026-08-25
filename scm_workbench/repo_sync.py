@@ -199,24 +199,29 @@ def _rate_for(key: str, done: int, total: int, stage):
 def set_progress(key: str, **kw) -> None:
     """Record progress for one repo. Writes are throttled: while a download
     streams, a cb tick per 1 MB chunk only rewrites the file every ~2% of
-    progress (or on a stage change), so the UI stays smooth, not chatty."""
+    progress (or on a stage change), so the UI stays smooth, not chatty.
+    Every accepted write stamps ts: the info view drops rows whose stamp is
+    old, so a row whose final clear never landed (a crash mid-bootstrap) can
+    never present itself as a live stage again."""
     try:
-        d = _read_progress()
-        cur = d.get(key) or {}
-        stage = kw.get("stage", cur.get("stage"))
-        row = {**cur, **kw}
-        if kw.get("done") is not None:
-            speed, eta = _rate_for(key, int(kw["done"]), int(row.get("total") or 0), kw.get("stage"))
-            if speed:
-                row["speed"] = speed
-            if eta is not None:
-                row["eta"] = eta
-        if kw.get("done") is not None and cur.get("total") and stage == cur.get("stage"):
-            span = max(1, int(cur["total"] * 0.02))
-            if abs(int(kw["done"]) - int(cur.get("done") or 0)) < span:
-                return
-        d[key] = row
-        progress_file().write_text(json.dumps(d), encoding="utf-8")
+        with _state_lock():
+            d = _read_progress()
+            cur = d.get(key) or {}
+            stage = kw.get("stage", cur.get("stage"))
+            row = {**cur, **kw}
+            if kw.get("done") is not None:
+                speed, eta = _rate_for(key, int(kw["done"]), int(row.get("total") or 0), kw.get("stage"))
+                if speed:
+                    row["speed"] = speed
+                if eta is not None:
+                    row["eta"] = eta
+            if kw.get("done") is not None and cur.get("total") and stage == cur.get("stage"):
+                span = max(1, int(cur["total"] * 0.02))
+                if abs(int(kw["done"]) - int(cur.get("done") or 0)) < span:
+                    return
+            row["ts"] = time.time()
+            d[key] = row
+            progress_file().write_text(json.dumps(d), encoding="utf-8")
     except Exception:
         pass
 
@@ -224,10 +229,11 @@ def set_progress(key: str, **kw) -> None:
 def clear_progress(key: str) -> None:
     try:
         _prog_rate.pop(key, None)
-        d = _read_progress()
-        if key in d:
-            del d[key]
-            progress_file().write_text(json.dumps(d), encoding="utf-8")
+        with _state_lock():
+            d = _read_progress()
+            if key in d:
+                del d[key]
+                progress_file().write_text(json.dumps(d), encoding="utf-8")
     except Exception:
         pass
 
@@ -789,11 +795,16 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
             set_progress(key, stage="extract", done=0, total=0)
             extract_tarball(tmp, repo, log)
             tmp.unlink(missing_ok=True)
-            set_progress(key, stage="fingerprint", done=0, total=0)
+            set_progress(key, stage="fingerprint", done=0, total=0, unit="files")
         restore_user_data(saved, repo, log)
         man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
-        for p in tracked_paths(repo):
+        paths = tracked_paths(repo)
+        for i, p in enumerate(paths, 1):
             man["files"][p] = sha256_file(repo / p)
+            # one heartbeat per file: the stage now shows a real count instead
+            # of sitting on “fingerprinting the files” for minutes (writes are
+            # throttled to ~2% of the file count by set_progress)
+            set_progress(key, stage="fingerprint", done=i, total=len(paths), unit="files")
         save_manifest(key, man)
         with _state_lock():
             # reload inside the lock: another process (the UI server) may have

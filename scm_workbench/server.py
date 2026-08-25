@@ -925,6 +925,17 @@ def repos_view(settings: dict) -> list:
     """One display row per sister repo: where it lives, what it's at, what's asked."""
     st = repo_sync.load_state()
     prog = repo_sync.load_progress()
+    # A row is only “live” while its writer is: accepted writes stamp ts (a
+    # download tick every ~2% of transfer, a fingerprint heartbeat every ~2%
+    # of files). A row older than 300 s is a leftover from a pass that never
+    # reached its clear — a first boot that died mid-clone, for example — and
+    # it must not masquerade as in-flight work on an already-deployed repo.
+    # Rows without a stamp (written before stamps existed) are stale by the
+    # same rule, which is what heals a first boot stuck on the old race.
+    now = time.time()
+    for k, v in list(prog.items()):
+        if float(v.get("ts") or 0) <= 0 or now - float(v["ts"]) > 300:
+            prog.pop(k, None)
     scm, extras = effective_dirs(settings)
     rows = []
     for key, meta in repo_sync.REPOS.items():
@@ -1703,13 +1714,18 @@ def get_info_cached() -> dict:
 
 def get_manifest() -> dict:
     with MANIFEST_LOCK:
-        if not MANIFEST_CACHE:
-            MANIFEST_CACHE.update(build_manifest(_get_info_locked()))
-            _REPOS_MTIME["t"] = time.time()
-        elif _repos_changed():
+        # The mtime signal alone can never fire again once the first build
+        # happens after the last state write (exactly what a first boot looks
+        # like: the cache is built empty at startup, the bootstrap then writes
+        # state, and no file ever changes again) — so the cache also carries
+        # the same 30 s TTL as the shared repo snapshot. Worst case a stale
+        # manifest is visible for half a minute; rebuilding is cheap because it
+        # rides on the snapshot.
+        now = time.time()
+        if (not MANIFEST_CACHE or now - _REPOS_MTIME.get("t", 0) > 30 or _repos_changed()):
             MANIFEST_CACHE.clear()
             MANIFEST_CACHE.update(build_manifest(_get_info_locked()))
-            _REPOS_MTIME["t"] = time.time()
+            _REPOS_MTIME["t"] = now
     return MANIFEST_CACHE
 
 
@@ -2898,9 +2914,17 @@ def main():
     # the classic behavior: no automatic cloning, Settings drives it.
     if os.environ.get("SCM_WORKBENCH_PACKAGED") == "1" and not os.environ.get("SCM_WORKBENCH_NO_BOOTSTRAP"):
         from scm_workbench import bootstrap as _first_boot
+
+        def _first_boot_then() -> None:
+            _first_boot.run_first_boot(DATA_DIR)
+            # The manifest cache was built at startup from whatever the repos
+            # held then (nothing, on a true first boot), and the mtime signal
+            # it uses can be older than every write the bootstrap just made —
+            # so rebuild it explicitly now the clones are in place.
+            invalidate_manifest_cache()
+
         threading.Thread(
-            target=_first_boot.run_first_boot, args=(DATA_DIR,),
-            daemon=True, name="first-boot",
+            target=_first_boot_then, daemon=True, name="first-boot",
         ).start()
 
     if not args.no_browser and settings.get("auto_open_browser", True):
