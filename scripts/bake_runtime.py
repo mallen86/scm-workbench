@@ -124,7 +124,15 @@ def bake_deps(py: Path, bundle: Path) -> None:
             tail = " ".join((r.stderr or r.stdout or "").strip().split())[-400:]
             raise SystemExit(f"bake_runtime: dependency install for {meta['name']} failed:\n{tail}")
         print(f"bake_runtime: {meta['name']} dependencies baked")
-    shutil.rmtree(work, ignore_errors=True)
+    # Windows occasionally holds a handle in the scratch dir a moment after
+    # the clone dies, so retry the cleanup instead of trusting one shot:
+    for _ in range(3):
+        shutil.rmtree(work, ignore_errors=True)
+        if not work.exists():
+            break
+    if work.exists():
+        print("bake_runtime: warning - could not fully remove the .bake scratch dir; "
+              "the release pipeline removes it before zipping too")
 
 
 def main() -> None:

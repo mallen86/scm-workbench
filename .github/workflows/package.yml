@@ -105,6 +105,9 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $bundle "app") | Out-Null
           Copy-Item (Join-Path $ws "scm_workbench") (Join-Path $bundle "app\scm_workbench") -Recurse
           Copy-Item (Join-Path $ws "ui") (Join-Path $bundle "app\ui") -Recurse
+          # The bake's scratch dir (the requirements clones live there briefly)
+          # must not ship inside the bundle:
+          Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
       - name: Smoke test - the bundle's window must serve the UI
         # The whole point of the new architecture, verified in CI: the exe
