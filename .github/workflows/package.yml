@@ -100,8 +100,11 @@ jobs:
           # ship unsigned) and the bundle itself. A Developer ID +
           # notarization is the upgrade path when one is available; until
           # then a downloaded (quarantined) copy can't pass Gatekeeper at
-          # all, and the Zip step below ships the "First run on Mac" helper
-          # that is the one-keystroke workaround.
+          # all - the first launch needs one "allow" in System Settings →
+          # Privacy & Security, for the app itself or for the "First run
+          # on Mac" helper the Zip step ships beside it. Tested on macOS
+          # 26: ad-hoc signing either one changes nothing; only a
+          # Developer ID signature + notarization removes the step.
           find "$app/Contents/runtime" -type f | while IFS= read -r f; do
             case "$(file -b "$f")" in
               *Mach-O*) codesign --force --sign - "$f" 2>/dev/null || true ;;
@@ -173,9 +176,12 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
           # A quarantined, ad-hoc-signed bundle can't pass Gatekeeper on a
-          # modern macOS ("damaged", and no right-click bypass for it).
-          # Until a Developer ID + notarization exists, this helper is the
-          # one-keystroke fix: strip the quarantine and open the app.
+          # modern macOS, and - tested on macOS 26 - this helper file is
+          # gated the same way: quarantined, it needs one "allow" in
+          # System Settings → Privacy & Security before it runs (ad-hoc
+          # signing it makes no difference). Once it runs, it strips the
+          # app's quarantine and opens the app, which then starts with no
+          # further prompts on that machine.
           cat > "First run on Mac.command" <<'EOF'
           #!/bin/bash
           # First run on a fresh Mac - run me once.
@@ -184,8 +190,15 @@ jobs:
           # ad-hoc-signed app (no Developer ID, no notarization) can't pass
           # the check that flag triggers: you get "the app is damaged".
           # This helper removes the flag from the app next to it and opens
-          # the app for you. If the app is somewhere else, move this script
-          # into the folder that contains the app, or run from a Terminal:
+          # the app for you.
+          #
+          # The quarantine sticks to this script too: if macOS asks you to
+          # allow it in System Settings → Privacy & Security, that one click
+          # is all it takes - afterwards it strips the flag and opens the
+          # app, with no further prompts on this machine.
+          #
+          # If the app is somewhere else, move this script into the folder
+          # that contains the app, or run from a Terminal:
           #   xattr -cr "/path/to/SCM Workbench.app"
           set -e
           cd "$(cd "$(dirname "$0")" && pwd)"
