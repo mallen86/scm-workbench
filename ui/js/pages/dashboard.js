@@ -138,6 +138,16 @@ export function statusGrid() {
     grid.append(c);
   };
   card("terminal", "--ok", `Python ${sv.python}`, (i.server.is_packaged && sv.python_path) ? "private runtime inside the app" : sv.python_path, "ok");
+  if (i.server.is_windows && i.server.is_packaged) {
+    const wf = i.window || {};
+    const inBrowser = wf.mode === "browser";
+    card("window", inBrowser ? "--warn" : "--ok", "App window",
+      inBrowser
+        ? "the native window couldn't start on this machine — the UI is running in your browser" +
+          (wf.reason ? ` (${String(wf.reason).slice(0, 140)})` : "")
+        : "native window in use (WinForms + WebView2)",
+      inBrowser ? "" : "ok");
+  }
   const preparing = i.server.is_packaged && prepActive();
   card("card", s.found ? "--ok" : "--err", s.found ? `silhouette-card-maker v${s.version || "?"}` : "silhouette-card-maker", s.found ? dTag(rS, s.path) : (preparing ? "preparing — managed copy in progress" : "not connected"), s.found ? "ok" : "");
   card("sparkle", ex.found ? "--info" : "--warn", ex.found ? "scm-extras" : "scm-extras (optional)", ex.found ? dTag(rE, ex.path, `${ex.card_sizes.length} extra sizes`) : (preparing ? "preparing — managed copy in progress" : "not connected — MTG/Sorcery extras unavailable"), ex.found ? "ok" : "");

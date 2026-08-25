@@ -18,6 +18,7 @@ Nothing in here imports the sister repos — same rule as the Workbench itself.
 
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -425,15 +426,85 @@ def _background_bootstrap(data: Path, log, url: str, port: int, server) -> None:
         log("[launcher] first-launch preparation finished — the UI now sees the managed copies.")
 
 
+def _configure_dotnet(data: Path, log) -> str:
+    """Windows: make the *window* work, when this machine lets it.
+
+    pywebview's Windows platform hosts the UI in a WinForms window, which
+    needs a machine .NET (Core) runtime; the bundled pythonnet ships only a
+    netstandard 2.0 (Core) build of Python.Runtime, so pythonnet's "default on
+    Windows" (.NET Framework) loader cannot run it - the winforms import dies
+    with "Failed to resolve Python.Runtime.Loader.Initialize", and pywebview's
+    own coreclr retry is defeated by pythonnet's sticky runtime global. In
+    v0.2.3 that sent every Windows launch into the plain-browser fallback.
+
+    If a .NET runtime with the Windows Desktop (WinForms) component is
+    installed, we select coreclr *before* the first `import clr` and pin a
+    runtimeconfig that also pulls in the Windows Desktop framework, so
+    System.Windows.Forms and the WebView2 host resolve. The config lives in
+    the data area: it must be writable, and the updater swaps the app folder,
+    never the data. Returns "ok" or a short reason the UI can show.
+    """
+    def versions(frame: str) -> list:
+        d = dotnet_root / "shared" / frame
+        out = []
+        if d.is_dir():
+            for p in d.iterdir():
+                m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", p.name)
+                if p.is_dir() and m:
+                    out.append((int(m.group(1)), int(m.group(2))))
+        return out
+
+    root = os.environ.get("DOTNET_ROOT")
+    if not root:
+        pf = os.environ.get("ProgramFiles") or r"C:\Program Files"
+        root = str(Path(pf) / "dotnet")
+    dotnet_root = Path(root)
+    if not (dotnet_root / "shared").is_dir():
+        return ("no .NET runtime found (looked for %s) — install the .NET 8 Desktop "
+                "Runtime for the native window; the UI runs in your browser meanwhile" % dotnet_root)
+    common = sorted(set(versions("Microsoft.NETCore.App")) & set(versions("Microsoft.WindowsDesktop.App")), reverse=True)
+    if not common:
+        return ("no .NET *Windows Desktop* (WinForms) runtime is installed — install the .NET 8 "
+                "Desktop Runtime for the native window; the UI runs in your browser meanwhile")
+    major, minor = common[0]
+    v = f"{major}.{minor}.0"
+    net = data / ".net"
+    net.mkdir(parents=True, exist_ok=True)
+    cfg = net / "scm-workbench.runtimeconfig.json"
+    opts = {
+        "tfm": f"net{major}.{minor}.0",
+        "frameworks": [
+            {"name": "Microsoft.NETCore.App", "version": v},
+            {"name": "Microsoft.WindowsDesktop.App", "version": v},
+        ],
+    }
+    # The bundled Python.Runtime (netstandard 2.0) resolves its facade
+    # assemblies from pythonnet's own runtime folder; offer it as a flat
+    # probing path (harmless if the frameworks already provide them).
+    if bundle := _app_bundle():
+        rt = bundle / "app_packages" / "pythonnet" / "runtime"
+        if rt.is_dir():
+            opts["additionalProbingPaths"] = [str(rt)]
+    cfg.write_text(json.dumps({"runtimeOptions": opts}, indent=2), encoding="utf-8")
+    os.environ["PYTHONNET_RUNTIME"] = "coreclr"
+    os.environ["PYTHONNET_CORECLR_RUNTIME_CONFIG"] = str(cfg)
+    os.environ["PYTHONNET_CORECLR_DOTNET_ROOT"] = str(dotnet_root)
+    log(f"[launcher] .NET {major}.{minor} desktop runtime found — the app window will run on it "
+        f"(WinForms + WebView2); config: {cfg}")
+    return "ok"
+
+
 def _run_window(data: Path, log, server) -> None:
     """Packaged mode: the app's own window is the interface.
 
-    A native webview (system WKWebView on macOS, WebView2 on Windows) shows
-    the UI. The UI server runs as a separate child process (logged to
-    <data>/server.log), so the window process can never drag it down with it.
-    Closing the window stops the server and quits the app. If no webview is
-    available (e.g. a Windows install without the WebView2 runtime) we fall
-    back to the system browser, the way the dev flow works.
+    A native webview (system WKWebView on macOS, WinForms + WebView2 on
+    Windows — the latter needs a machine .NET (Core) runtime, which
+    _configure_dotnet points the CLR loader at) shows the UI. The UI server
+    runs as a separate child process (logged to <data>/server.log), so the
+    window process can never drag it down with it. Closing the window stops
+    the server and quits the app. If no webview is available we fall back to
+    the system browser, the way the dev flow works — with the reason in
+    <data>/window.json, which the dashboard shows.
     """
     import socket as _sock
     import threading
@@ -489,6 +560,12 @@ def _run_window(data: Path, log, server) -> None:
         log(f"[launcher] the UI server is not up after {waited:.0f}s — opening the window anyway; "
             "it will show the UI as soon as the server starts.")
 
+    # Windows: the WinForms host of the webview needs a machine .NET (Core)
+    # runtime — select it before the first `import clr` below, or the
+    # bundled netstandard 2.0 Python.Runtime cannot be loaded by the
+    # .NET-Framework loader and the window silently dies into the browser.
+    dotnet_note = _configure_dotnet(data, log) if os.name == "nt" else None
+
     try:
         # On macOS the bundled stub's Python sees sys.argv[0] as a *relative*
         # build path, and pywebview's app-root heuristic resolves it against the
@@ -534,7 +611,16 @@ def _run_window(data: Path, log, server) -> None:
         _stop_server(log, data)
         return
     except Exception as e:
-        log(f"[launcher] embedded window unavailable ({e}) — opening your browser instead.")
+        reason = f"embedded window unavailable ({e})"
+        if dotnet_note and dotnet_note != "ok":
+            reason += f"; {dotnet_note}"
+        try:
+            # the UI (in the browser) explains itself on the dashboard card
+            (data / "window.json").write_text(
+                json.dumps({"mode": "browser", "reason": str(e)}, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        log(f"[launcher] {reason} — opening your browser instead.")
     try:
         if settings.get("auto_open_browser", True):
             webbrowser.open(url, new=2)

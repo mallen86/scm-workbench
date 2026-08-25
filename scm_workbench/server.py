@@ -1096,6 +1096,9 @@ def get_info() -> dict:
             "runtime_ready": bool(os.environ.get("SCM_WORKBENCH_PYTHON")),
             "data_dir": str(DATA_DIR),
         },
+        # the window host's state, when it is not the app's own window
+        # (browser fallback): <data>/window.json, written by the launcher
+        "window": _try_read_json(DATA_DIR / "window.json") or {},
         "scm": read_scm_info(scm, extras),
         "extras": read_extras_info(extras),
         "per_size_offsets": load_per_size_offsets(),
