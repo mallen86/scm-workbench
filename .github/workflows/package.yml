@@ -99,7 +99,9 @@ jobs:
           # plus the pip-installed extension modules - some PyPI mac wheels
           # ship unsigned) and the bundle itself. A Developer ID +
           # notarization is the upgrade path when one is available; until
-          # then the user right-clicks the app and chooses Open once.
+          # then a downloaded (quarantined) copy can't pass Gatekeeper at
+          # all, and the Zip step below ships the "First run on Mac" helper
+          # that is the one-keystroke workaround.
           find "$app/Contents/runtime" -type f | while IFS= read -r f; do
             case "$(file -b "$f")" in
               *Mach-O*) codesign --force --sign - "$f" 2>/dev/null || true ;;
@@ -114,10 +116,19 @@ jobs:
         # launch, the bundled runtime must import the core job dependencies -
         # that is what "self-contained" means, and on arm64 it also proves
         # the ad-hoc signing made the extension modules loadable.
+        #
+        # The payload (app/, runtime/) lives under Contents/ - inside the
+        # code-signature seal the Sign step made. Any python running from
+        # there compiles __pycache__ pyc's back into that sealed tree, and
+        # the next seal check (the Verify step below) - and every machine
+        # that downloads the zip - sees the bundle as damaged. So this run
+        # is kept write-free: the env var stops all of it, the precheck and
+        # the spawned worker included.
         run: |
           set -uo pipefail
           ws="$GITHUB_WORKSPACE"
           app="$ws/build/macos/SCM Workbench.app"
+          export PYTHONDONTWRITEBYTECODE=1
           "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
           data="$(mktemp -d)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
@@ -142,10 +153,56 @@ jobs:
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
             exit 1
           fi
+      - name: Verify the seal survived the smoke test
+        # The smoke run above executes the app from the bundle; if anything
+        # it writes lands inside the signed Contents/ tree, the code
+        # signature's resource seal breaks and every downloaded copy shows
+        # up as "damaged" - the very failure the flat layout exists to
+        # prevent. A future layout change that puts writeable state back
+        # inside the seal fails the build here instead of shipping a brick.
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/build/macos/SCM Workbench.app"
+          if ! codesign --verify --verbose=2 "$app" > "$GITHUB_WORKSPACE/build/macos/codesign-verify.log" 2>&1; then
+            cat "$GITHUB_WORKSPACE/build/macos/codesign-verify.log"
+            exit 1
+          fi
+          echo "seal intact: the bundle the zip will carry verifies clean"
       - name: Zip
         run: |
+          set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
-          zip -qr scm-workbench-macos.zip "SCM Workbench.app"
+          # A quarantined, ad-hoc-signed bundle can't pass Gatekeeper on a
+          # modern macOS ("damaged", and no right-click bypass for it).
+          # Until a Developer ID + notarization exists, this helper is the
+          # one-keystroke fix: strip the quarantine and open the app.
+          cat > "First run on Mac.command" <<'EOF'
+          #!/bin/bash
+          # First run on a fresh Mac - run me once.
+          #
+          # macOS stamps every download with a quarantine flag, and an
+          # ad-hoc-signed app (no Developer ID, no notarization) can't pass
+          # the check that flag triggers: you get "the app is damaged".
+          # This helper removes the flag from the app next to it and opens
+          # the app for you. If the app is somewhere else, move this script
+          # into the folder that contains the app, or run from a Terminal:
+          #   xattr -cr "/path/to/SCM Workbench.app"
+          set -e
+          cd "$(cd "$(dirname "$0")" && pwd)"
+          if [ ! -d "SCM Workbench.app" ]; then
+            echo "The 'SCM Workbench.app' is not next to this script:"
+            echo "  $PWD/SCM Workbench.app"
+            echo "Move this script into the folder that contains the app and run it again."
+            exit 1
+          fi
+          echo "Removing the quarantine flag from the app ..."
+          xattr -cr "SCM Workbench.app"
+          echo "Opening the app ..."
+          open "SCM Workbench.app"
+          echo "Done. If macOS asks for permission for the app's files, allow them."
+          EOF
+          chmod +x "First run on Mac.command"
+          zip -qr scm-workbench-macos.zip "SCM Workbench.app" "First run on Mac.command"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
