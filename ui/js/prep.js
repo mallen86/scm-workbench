@@ -115,11 +115,14 @@ export function ensurePrepRows(rows, container) {
 // small fixed strip, so first-launch progress is never invisible.
 function globalStrip() {
   let s = $("#repoprog-global");
-  if (!s) {
-    s = el("div", { class: "repoprog", id: "repoprog-global" },
-      el("div", { class: "rp-head" }, "Preparing your managed copies — this happens once, on first launch."));
-    document.body.append(s);
-  }
+  if (s) return s;
+  const foot = $(".sidebar-foot");
+  if (!foot) return null; // no chrome to host it (never, in practice)
+  s = el("div", { class: "repoprog", id: "repoprog-global" },
+    el("div", { class: "rp-head" }, "Preparing your managed copies …"));
+  // Directly above the footer's divider: the divider (and the toggles under
+  // it) never moves — the nav above is the flexible, scrolling part.
+  foot.before(s);
   return s;
 }
 
@@ -138,6 +141,7 @@ function retargetProws(container) {
 export function updatePrepRows() {
   const native = $("#repoprog");
   const container = native || globalStrip();
+  if (!container) return;
   retargetProws(container);
   const rows = (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
   ensurePrepRows(rows, container);

@@ -86,6 +86,14 @@ fn main() {
             let slot: WorkerSlot = app.state::<WorkerSlot>().inner().clone();
             let app_handle = app.handle().clone();
 
+            // We own the port: if a previous (hard-killed) instance left its
+            // worker listening, stop it; if a foreign program has the port, we
+            // decline to start rather than evict it.
+            if let Err(e) = claim_worker_port(WORKER_PORT, &log_path) {
+                fail_window(&window, &data, "This app's port is held by another program.", &e);
+                return Ok(());
+            }
+
             match spawn_worker(&data, &root, &log_path, &py, &slot) {
                 Ok(()) => {
                     let w = window.clone();
@@ -330,6 +338,83 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
             }
             _ => continue,
         }
+    }
+}
+
+/// Make this instance the sole owner of the worker port.
+///
+/// A previous instance whose window was killed hard (End Task, a crash) can
+/// leave its python worker behind, still listening — the window is what
+/// normally reaps it. If our port is held by one of our own process kinds
+/// (a python worker or this app's exe) we stop it and take the port. If it
+/// belongs to anything else we refuse to start: we do not displace an
+/// unrelated program's port.
+fn claim_worker_port(port: u16, log_file: &Path) -> Result<(), String> {
+    if !port_open(port) {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        let out = Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .map_err(|e| format!("could not inspect port {port}: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let want = format!(":{port}");
+        let pids: Vec<u32> = text
+            .lines()
+            .filter(|l| l.contains(&want) && l.contains("LISTENING"))
+            .filter_map(|l| l.split_whitespace().last())
+            .filter_map(|p| p.parse::<u32>().ok())
+            .collect();
+        for pid in pids {
+            let line = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
+                .unwrap_or_default();
+            let name = line.split(',').next().unwrap_or("").trim_matches('"').to_string();
+            let ours = name == "python.exe" || name == "scm workbench.exe";
+            record(
+                log_file,
+                &format!(
+                    "[shell] port {port} is held by pid {pid} ({name}) — {}",
+                    if ours { "a leftover from a previous instance; stopping it" } else { "not one of our process kinds" }
+                ),
+            );
+            if !ours {
+                return Err(format!(
+                    "port {port} is in use by another program (pid {pid}, {name}) — close that program and try again"
+                ));
+            }
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .status();
+        }
+        for _ in 0..20 {
+            if !port_open(port) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        Err(format!(
+            "port {port} is still in use after stopping the previous instance — try again in a moment"
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = log_file;
+        Err(format!(
+            "port {port} is in use — another instance (or program) is holding it; close it and try again"
+        ))
+    }
+}
+
+/// Append one line to the app log (best effort — logging must never panic the shell).
+fn record(path: &Path, line: &str) {
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 

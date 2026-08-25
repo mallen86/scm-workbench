@@ -13,3 +13,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The same flag `cargo tauri build` passes: with it, Tauri serves the
+# window's initial page from its embedded asset protocol instead of the
+# devUrl — i.e. the splash shows instantly, before the local worker's port
+# exists. Without it, Tauri treats this binary as a DEV build, the initial
+# navigation resolves against 127.0.0.1:8038, and the user sees a momentary
+# "can't reach this page" flash on every cold start.
+[features]
+custom-protocol = ["tauri/custom-protocol"]

@@ -15,47 +15,61 @@ where its effects belong:
 """
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
 
+def _bootstrap_one(repo_sync, key, log) -> None:
+    """One repo of a bootstrap pass: the deployed check, a *safe* re-deploy
+    if the tree drifted, or the first-ever fetch. Never raises — a failure
+    just means the app keeps working with what it has, and the user can
+    retry it from Settings later."""
+    meta = repo_sync.REPOS[key]
+    r = (repo_sync.load_state().get(key) or {})
+    if r.get("deployed"):
+        # The state says “deployed” — but the state file and the tree can
+        # drift (an interrupted update, a pre-lock era write). A cheap
+        # offline probe decides; a mismatch triggers a *safe* re-deploy,
+        # which stages the user's files before touching the tree, so this
+        # path can never be a data-loss path again.
+        try:
+            if repo_sync.verify_deployed(key):
+                return
+            log(f"\n[bootstrap] the managed {meta['name']} copy no longer matches its recorded "
+                f"state — re-deploying it now (your decklists, images and output are "
+                f"staged and restored around the swap, so nothing is lost) …")
+            repo_sync.cmd_init(key, log=log, force_redeploy=True)
+            log(f"[bootstrap] {meta['name']} re-synced — continuing.")
+            return
+        except Exception as e:
+            log(f"[bootstrap] {meta['name']} state check failed ({e}) — leaving the copy as-is.")
+        return
+    log(f"\n[bootstrap] first launch — fetching the newest {meta['name']} "
+        f"({meta['owner']}/{meta['repo']}) into the Workbench data area …")
+    t0 = time.time()
+    try:
+        repo_sync.cmd_init(key, log=log)
+        log(f"[bootstrap] {meta['name']} done in {time.time() - t0:.0f}s.")
+    except Exception as e:
+        log(f"[bootstrap] could not fetch {meta['name']} yet ({e}).")
+        log("[bootstrap] no problem — the app still works; open Settings → "
+            "“Managed repo copies” and press “Download latest” when you're online.")
+        log("[bootstrap] (existing sister folders next to this app are still detected normally)")
+
+
 def bootstrap_managed_repos(repo_sync, log: Optional[Callable[[str], None]] = None) -> None:
-    """Fetch newest managed copies on first launch; never fatal."""
+    """Fetch newest managed copies on first launch; never fatal.
+
+    The sequential pass — the legacy stub launcher's behaviour, unchanged."""
     if log is None:
         log = print
-    state = repo_sync.load_state()
-    for key, meta in repo_sync.REPOS.items():
-        r = state.get(key) or {}
-        if r.get("deployed"):
-            # The state says “deployed” — but the state file and the tree can
-            # drift (an interrupted update, a pre-lock era write). A cheap
-            # offline probe decides; a mismatch triggers a *safe* re-deploy,
-            # which stages the user's files before touching the tree, so this
-            # path can never be a data-loss path again.
-            try:
-                if repo_sync.verify_deployed(key):
-                    continue
-                log(f"\n[bootstrap] the managed {meta['name']} copy no longer matches its recorded "
-                    f"state — re-deploying it now (your decklists, images and output are "
-                    f"staged and restored around the swap, so nothing is lost) …")
-                repo_sync.cmd_init(key, log=log, force_redeploy=True)
-                log(f"[bootstrap] {meta['name']} re-synced — continuing.")
-                continue
-            except Exception as e:
-                log(f"[bootstrap] {meta['name']} state check failed ({e}) — leaving the copy as-is.")
-            continue
-        log(f"\n[bootstrap] first launch — fetching the newest {meta['name']} "
-            f"({meta['owner']}/{meta['repo']}) into the Workbench data area …")
-        t0 = time.time()
-        try:
-            repo_sync.cmd_init(key, log=log)
-            log(f"[bootstrap] done in {time.time() - t0:.0f}s — dashboard is ready.")
-        except Exception as e:
-            log(f"[bootstrap] could not fetch {meta['name']} yet ({e}).")
-            log("[bootstrap] no problem — the app still works; open Settings → "
-                "“Managed repo copies” and press “Download latest” when you're online.")
-            log("[bootstrap] (existing sister folders next to this app are still detected normally)")
+    for key in repo_sync.REPOS:
+        _bootstrap_one(repo_sync, key, log)
+
+
+_flag_lock = threading.Lock()
 
 
 def _write_flag(data: Path, pending: List[str], done: List[str], phase: str) -> None:
@@ -72,8 +86,10 @@ def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> N
     """The whole first-boot sequence, run by the app itself (packaged mode).
 
     Call this from a daemon thread once the UI is up: it writes the
-    bootstrap flag the UI polls, fetches the managed repo copies (with the
-    transcript feeding the banner's live phase), then clears the flag.
+    bootstrap flag the UI polls, fetches the managed repo copies *in
+    parallel* (one thread per repo — each clone is independent, and the
+    state file is mutex-locked per read-modify-write), with the transcript
+    feeding the banner's live phase, then clears the flag.
     """
     if log is None:
         log = print
@@ -84,12 +100,24 @@ def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> N
         # banner polls /api/info, which reads this flag)
         line = str(s).strip()
         if line:
-            _write_flag(data, ["scm", "extras"], [], line[:140])
+            with _flag_lock:
+                _write_flag(data, keys, [], line[:140])
         log(s)
 
-    _write_flag(data, ["scm", "extras"], [], "getting ready …")
-    try:
-        bootstrap_managed_repos(repo_sync, log=blog)
-    finally:
-        _write_flag(data, [], ["scm", "extras"], "done")
-        log("[bootstrap] first-launch preparation finished — the UI now sees the managed copies.")
+    keys = list(repo_sync.REPOS.keys())
+    with _flag_lock:
+        _write_flag(data, keys, [], "getting ready …")
+    threads = [
+        threading.Thread(
+            target=_bootstrap_one, args=(repo_sync, key, blog),
+            daemon=True, name=f"first-boot-{key}",
+        )
+        for key in keys
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with _flag_lock:
+        _write_flag(data, [], keys, "done")
+    log("[bootstrap] first-launch preparation finished — the UI now sees the managed copies.")

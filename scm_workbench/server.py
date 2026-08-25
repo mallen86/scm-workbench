@@ -2801,7 +2801,18 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
     port may be taken by something else).
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    srv = ThreadingHTTPServer((host, port), Handler)
+    try:
+        srv = ThreadingHTTPServer((host, port), Handler)
+    except OSError as e:
+        # The one bind failure that matters, stated plainly: another process
+        # already owns the port — usually a previous app instance whose window
+        # was killed without a clean close (the app tries to reclaim such
+        # ports itself at start; this is the last line of defence).
+        print(
+            f"\n  [server] could not bind {host}:{port} — another process already holds that port ({e}).\n"
+            f"         Close the other SCM Workbench (or whatever else uses port {port}) and try again.\n"
+        )
+        sys.exit(1)
     srv.daemon_threads = True
     return srv
 

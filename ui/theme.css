@@ -1162,15 +1162,19 @@ body.mode-simple .console { display: none; }
 .rp-label { font-size: 13px; font-weight: 600; }
 .rp-meta { font-size: 11.5px; color: var(--faint, #9aa3b5); font-variant-numeric: tabular-nums; min-height: 1em; }
 .rp-bar { height: 6px; border-radius: 3px; background: var(--line, rgba(255,255,255,.08)); overflow: hidden; }
+/* The first-boot strip seats itself directly above the sidebar footer's
+   divider line (prep.js). The nav above is the flexible part (flex:1, its
+   own scrollbar), so the divider, the toggles and the rest of the chrome
+   never move when the strip comes and goes. The dashboard's own #repoprog
+   card still hosts the rows natively on the advanced dashboard page. */
 #repoprog-global {
-  position: fixed; left: 16px; bottom: 16px; z-index: 95;
-  width: min(440px, calc(100vw - 32px));
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: 10px; padding: 12px 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .4);
-  display: grid; gap: 12px;
+  margin-bottom: 10px;
+  display: grid; gap: 6px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: 8px; padding: 9px 10px;
 }
-#repoprog-global .rp-head { font-size: 12px; color: var(--faint); }
+#repoprog-global .rp-head { font-size: 11.5px; color: var(--faint); }
+#repoprog-global .rp-label { font-size: 12.5px; }
 .rp-fill { height: 100%; border-radius: 3px; background: var(--accent-grad, var(--accent, #ffb454));
           transition: width 2.4s linear; will-change: width; }
 .rp-bar.indet .rp-fill { width: 38%; animation: prep-slide 1.5s ease-in-out infinite; }
