@@ -100,11 +100,12 @@ jobs:
           # ship unsigned) and the bundle itself. A Developer ID +
           # notarization is the upgrade path when one is available; until
           # then a downloaded (quarantined) copy can't pass Gatekeeper at
-          # all - the first launch needs one "allow" in System Settings →
-          # Privacy & Security, for the app itself or for the "First run
-          # on Mac" helper the Zip step ships beside it. Tested on macOS
-          # 26: ad-hoc signing either one changes nothing; only a
-          # Developer ID signature + notarization removes the step.
+          # all - the first launch is one "Open Anyway" for the app itself
+          # in System Settings → Privacy & Security, remembered by the
+          # machine. (Tested on macOS 26: a companion script gets gated the
+          # same way even ad-hoc signed, so no helper is shipped - the
+          # app's own allow is the whole flow.) Only a Developer ID
+          # signature + notarization removes the step.
           find "$app/Contents/runtime" -type f | while IFS= read -r f; do
             case "$(file -b "$f")" in
               *Mach-O*) codesign --force --sign - "$f" 2>/dev/null || true ;;
@@ -175,47 +176,15 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
-          # A quarantined, ad-hoc-signed bundle can't pass Gatekeeper on a
-          # modern macOS, and - tested on macOS 26 - this helper file is
-          # gated the same way: quarantined, it needs one "allow" in
-          # System Settings → Privacy & Security before it runs (ad-hoc
-          # signing it makes no difference). Once it runs, it strips the
-          # app's quarantine and opens the app, which then starts with no
-          # further prompts on that machine.
-          cat > "First run on Mac.command" <<'EOF'
-          #!/bin/bash
-          # First run on a fresh Mac - run me once.
-          #
-          # macOS stamps every download with a quarantine flag, and an
-          # ad-hoc-signed app (no Developer ID, no notarization) can't pass
-          # the check that flag triggers: you get "the app is damaged".
-          # This helper removes the flag from the app next to it and opens
-          # the app for you.
-          #
-          # The quarantine sticks to this script too: if macOS asks you to
-          # allow it in System Settings → Privacy & Security, that one click
-          # is all it takes - afterwards it strips the flag and opens the
-          # app, with no further prompts on this machine.
-          #
-          # If the app is somewhere else, move this script into the folder
-          # that contains the app, or run from a Terminal:
-          #   xattr -cr "/path/to/SCM Workbench.app"
-          set -e
-          cd "$(cd "$(dirname "$0")" && pwd)"
-          if [ ! -d "SCM Workbench.app" ]; then
-            echo "The 'SCM Workbench.app' is not next to this script:"
-            echo "  $PWD/SCM Workbench.app"
-            echo "Move this script into the folder that contains the app and run it again."
-            exit 1
-          fi
-          echo "Removing the quarantine flag from the app ..."
-          xattr -cr "SCM Workbench.app"
-          echo "Opening the app ..."
-          open "SCM Workbench.app"
-          echo "Done. If macOS asks for permission for the app's files, allow them."
-          EOF
-          chmod +x "First run on Mac.command"
-          zip -qr scm-workbench-macos.zip "SCM Workbench.app" "First run on Mac.command"
+          # The zip carries the app alone, at its root: no wrapper folder,
+          # no companion script. (An earlier revision shipped a
+          # "First run on Mac.command" beside it; the quarantine gates that
+          # file the same way it gates the app, so it was a second
+          # P&S-allow in disguise and got dropped.) The first launch is
+          # one "Open Anyway" for the app itself in System Settings →
+          # Privacy & Security, remembered by the machine; a Developer ID
+          # + notarization is the only way to make that click disappear.
+          zip -qr scm-workbench-macos.zip "SCM Workbench.app"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
