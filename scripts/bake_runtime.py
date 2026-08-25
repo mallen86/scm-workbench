@@ -45,9 +45,20 @@ def pbs_archive_url() -> str:
     return f"{GITHUB}/astral-sh/python-build-standalone/releases/download/{RELEASE}/{name}"
 
 
+def _runtime_python_path(rt: Path) -> Path:
+    """Where the unpacked pbs archive's interpreter lives, per platform
+    (the same contract scm_workbench.launcher provisions to a data area)."""
+    if os.name == "nt":
+        return rt / "python" / "install" / "python.exe"
+    sys.path.insert(0, str(ROOT))
+    from scm_workbench import launcher
+    minor = ".".join(launcher.RUNTIME_VERSION.split(".")[:2])
+    return rt / "python" / "install" / "bin" / f"python{minor}"
+
+
 def fetch_runtime(bundle: Path, archive: str | None, skip_fetch: bool) -> Path:
     rt = bundle / "runtime"
-    py = rt / "python" / "install" / "python.exe"
+    py = _runtime_python_path(rt)
     if skip_fetch and py.is_file():
         print(f"bake_runtime: using the runtime already at {py}")
         return py
@@ -113,6 +124,20 @@ def bake_deps(py: Path, bundle: Path) -> None:
         # exact set a user would end up with
         patched = repo_sync.apply_bad_pin_fixes(
             src.read_text(encoding="utf-8", errors="replace").splitlines())
+        # Windows-only packages (pywinauto drags in pywin32, which has no
+        # non-Windows build) would fail a strict macOS pip run and take the
+        # whole set down with them; the card-maker features they drive are
+        # Windows-only too, so the mac runtime simply doesn't carry them.
+        if os.name != "nt":
+            win_only = {"pywinauto"}
+            kept = []
+            for line in patched:
+                pkg = line.split("==")[0].split(";")[0].strip().lower()
+                if pkg in win_only:
+                    print(f"bake_runtime: skipping {line.split('==')[0].strip()} (Windows-only) for this platform")
+                    continue
+                kept.append(line)
+            patched = kept
         req = work / f"{key}-requirements.txt"
         req.write_text("\n".join(patched) + "\n", encoding="utf-8")
         run_kw = {"creationflags": 0x08000000} if os.name == "nt" else {}

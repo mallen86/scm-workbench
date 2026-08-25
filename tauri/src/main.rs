@@ -72,7 +72,7 @@ fn main() {
                 return Ok(());
             }
             let root = app_root(&exe);
-            let py = worker_python(&exe_dir, &data);
+            let py = worker_python(&root, &data);
 
             let window = WebviewWindowBuilder::new(app, "main", loading_page())
                 .title("SCM Workbench")
@@ -132,10 +132,19 @@ fn main() {
         .expect("while running the app");
 }
 
-/// The data area: %LOCALAPPDATA%\scm-workbench (or SCM_WORKBENCH_DATA).
+/// The data area: %LOCALAPPDATA%\scm-workbench (Windows),
+/// ~/Library/Application Support/scm-workbench (macOS) — or SCM_WORKBENCH_DATA.
+/// Same place the legacy launcher always used, so an existing install's
+/// runtime, repos and settings are picked up by the new shell in place.
 fn data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("SCM_WORKBENCH_DATA") {
         return PathBuf::from(d);
+    }
+    #[cfg(target_os = "macos")]
+    let home = std::env::var("HOME").unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from(home).join("Library/Application Support/scm-workbench");
     }
     let local = std::env::var("LOCALAPPDATA")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -144,10 +153,12 @@ fn data_dir() -> PathBuf {
 }
 
 /// The app root:
-///   release bundle — the package sits at <exe dir>/app/scm_workbench, so the
-///                    root is the exe's directory itself;
-///   dev checkout   — <root>/tauri/target/{debug,release}/scm-workbench.exe,
-///                    so the root is four parents up.
+///   Windows bundle — the package sits at <exe dir>/app/scm_workbench, so the
+///                     root is the exe's directory itself;
+///   macOS bundle   — the binary lives at <App>.app/Contents/MacOS/<name> and
+///                     the root is the .app itself (two parents up);
+///   dev checkout   — <root>/tauri/target/{debug,release}/scm-workbench, so the
+///                    root is four parents up.
 fn app_root(exe: &Path) -> PathBuf {
     let exe_dir = match exe.parent() {
         Some(p) => p.to_path_buf(),
@@ -155,6 +166,14 @@ fn app_root(exe: &Path) -> PathBuf {
     };
     if exe_dir.join("app/scm_workbench/__init__.py").is_file() {
         return exe_dir;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(app) = exe_dir.parent().and_then(|p| p.parent()) {
+        if app.extension().map(|e| e == "app").unwrap_or(false)
+            && app.join("app/scm_workbench/__init__.py").is_file()
+        {
+            return app.to_path_buf();
+        }
     }
     let mut p = exe.to_path_buf();
     for _ in 0..4 {
@@ -168,18 +187,33 @@ fn app_root(exe: &Path) -> PathBuf {
 
 /// The worker interpreter, in search order:
 ///  1. the SCM_WORKBENCH_PYTHON env var (dev override — any interpreter);
-///  2. the app's own runtime: <exe dir>/runtime/python/install/python.exe —
-///     the release layout, where the machine needs to provide nothing;
+///  2. the app's own runtime inside the bundle (the release layout, where
+///     the machine needs to provide nothing):
+///       Windows — <root>/runtime/python/install/python.exe
+///       macOS   — <root>/runtime/python/install/bin/python3.13
+///     (the pbs pin that scripts/bake_runtime.py unpacks — 3.13 today);
 ///  3. the legacy data-area private runtime (pre-bundle architecture).
-fn worker_python(exe_dir: &Path, data: &Path) -> PathBuf {
+fn worker_python(root: &Path, data: &Path) -> PathBuf {
     if let Ok(p) = std::env::var("SCM_WORKBENCH_PYTHON") {
         return PathBuf::from(p);
     }
-    let bundled = exe_dir.join("runtime/python/install/python.exe");
-    if bundled.is_file() {
-        return bundled;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    candidates.push(root.join("runtime/python/install/python.exe"));
+    #[cfg(target_os = "macos")]
+    candidates.push(root.join("runtime/python/install/bin/python3.13"));
+    #[cfg(windows)]
+    candidates.push(data.join("runtime/python/install/python.exe"));
+    #[cfg(target_os = "macos")]
+    candidates.push(data.join("runtime/python/install/bin/python3.13"));
+    for c in &candidates {
+        if c.is_file() {
+            return c.clone();
+        }
     }
-    data.join("runtime/python/install/python.exe")
+    // None found: hand back the bundled-path candidate — the failure page
+    // shows it, which is the thing to look at when the bundle is incomplete.
+    candidates.into_iter().next().unwrap_or_default()
 }
 
 /// Spawn the UI server as a supervised child: no console, stdio to the
@@ -402,7 +436,54 @@ fn claim_worker_port(port: u16, log_file: &Path) -> Result<(), String> {
             "port {port} is still in use after stopping the previous instance — try again in a moment"
         ))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // lsof names the listener; a leftover of this app's own kind is
+        // stopped, a foreign holder declines the start (same contract as
+        // Windows above).
+        let out = Command::new("lsof")
+            .args(["-i", &format!(":{port}"), "-sTCP:LISTEN", "-t", "-n", "-P"])
+            .output()
+            .map_err(|e| format!("could not inspect port {port}: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let pids: Vec<u32> = text
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect();
+        for pid in pids {
+            let line = Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "comm="])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            let name = line.rsplit('/').next().unwrap_or(line.as_str()).to_string();
+            let ours = name.starts_with("python") || name == "SCM Workbench";
+            record(
+                log_file,
+                &format!(
+                    "[shell] port {port} is held by pid {pid} ({name}) — {}",
+                    if ours { "a leftover from a previous instance; stopping it" } else { "not one of our process kinds" }
+                ),
+            );
+            if !ours {
+                return Err(format!(
+                    "port {port} is in use by another program (pid {pid}, {name}) — close that program and try again"
+                ));
+            }
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        }
+        for _ in 0..20 {
+            if !port_open(port) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        Err(format!(
+            "port {port} is still in use after stopping the previous instance — try again in a moment"
+        ))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = log_file;
         Err(format!(
