@@ -521,14 +521,32 @@ def _patch_winforms_coreclr(log) -> None:
         except Exception as e:
             log(f"[launcher] could not read the winforms platform to patch it ({e})")
             return
+        marker = "clr.AddReference('Microsoft.Win32.SystemEvents')"
+        if marker in src:
+            return  # already at the current patch level
         if "Microsoft.Win32.SystemEvents" in src:
-            return  # already patched (previous launch or a newer bundle)
+            # an earlier patch level: the Core import exists but never references
+            # its assembly, which pythonnet cannot find (it only resolves against
+            # loaded assemblies). Insert the reference right before that import.
+            patched = src.replace(
+                "    from Microsoft.Win32.SystemEvents import SystemEvents",
+                "    " + marker + "\n"
+                "    from Microsoft.Win32.SystemEvents import SystemEvents")
+            if patched != src:
+                try:
+                    wf.write_text(patched, encoding="utf-8")
+                    log("[launcher] upgraded the winforms SystemEvents patch to reference the "
+                        "assembly (one-time, in the bundle copy)")
+                except Exception as e:
+                    log(f"[launcher] could not upgrade the winforms patch ({e})")
+                return
         patched = src.replace(
             "from Microsoft.Win32 import SystemEvents  # noqa: E402",
             "try:\n"
             "    from Microsoft.Win32 import SystemEvents  # .NET Framework\n"
             "except ImportError:\n"
-            "    from Microsoft.Win32.SystemEvents import SystemEvents  # .NET (Core)")
+            "    clr.AddReference('Microsoft.Win32.SystemEvents')  # .NET (Core) moved the type to its own assembly, and pythonnet only sees loaded ones\n"
+            "    from Microsoft.Win32.SystemEvents import SystemEvents")
         if patched == src:
             # tolerate a differently-commented original line
             patched = src.replace(
@@ -536,7 +554,8 @@ def _patch_winforms_coreclr(log) -> None:
                 "try:\n"
                 "    from Microsoft.Win32 import SystemEvents  # .NET Framework\n"
                 "except ImportError:\n"
-                "    from Microsoft.Win32.SystemEvents import SystemEvents  # .NET (Core)")
+                "    clr.AddReference('Microsoft.Win32.SystemEvents')  # .NET (Core)\n"
+                "    from Microsoft.Win32.SystemEvents import SystemEvents")
         if patched == src:
             log("[launcher] the winforms platform's SystemEvents import was not the known "
                 "line - leaving it untouched")
