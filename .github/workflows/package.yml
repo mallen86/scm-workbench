@@ -53,8 +53,9 @@ jobs:
           mv "$bundle/runtime" "$app/runtime"
           rm -rf "$bundle/.bake"
           # The icon: one .iconset from the shared 1024px source, iconutil
-          # does the .icns.
-          iconset="$ws/.iconset"
+          # does the .icns. The directory must be named <name>.iconset -
+          # a bare ".iconset" (empty name) is rejected by iconutil.
+          iconset="$ws/AppIcon.iconset"
           rm -rf "$iconset" && mkdir -p "$iconset"
           src="$ws/tauri/icons/icon.png"
           sips -z 16 16     "$src" --out "$iconset/icon_16x16.png" >/dev/null
@@ -67,7 +68,16 @@ jobs:
           sips -z 512 512   "$src" --out "$iconset/icon_256x256@2x.png" >/dev/null
           sips -z 512 512   "$src" --out "$iconset/icon_512x512.png" >/dev/null
           sips -z 1024 1024 "$src" --out "$iconset/icon_512x512@2x.png" >/dev/null
-          iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+          if ! iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"; then
+            # leave the log the answer next time: what is actually in the
+            # iconset, and each file's true pixel dimensions
+            echo "iconutil rejected the iconset - contents:" >&2
+            ls -la "$iconset" >&2
+            for f in "$iconset"/*.png; do
+              echo "$(basename "$f"): $(sips -g pixelWidth -g pixelHeight -g hasAlpha "$f" 2>/dev/null | grep -E 'pixel|alpha' | tr '\n' ' ')" >&2
+            done
+            exit 1
+          fi
           # The Info.plist: the bundle's identity (identifier + version
           # straight from the pinned tauri.conf.json, so the About panel
           # matches the app's reported version), the icon, and the WKWebView
