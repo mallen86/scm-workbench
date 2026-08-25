@@ -180,19 +180,32 @@ jobs:
           cd "$GITHUB_WORKSPACE/build/macos"
           # The zip carries the app alone, at its root: no wrapper folder,
           # no companion script. (An earlier revision shipped a
-          # "First run on Mac.command" beside it; the quarantine gates that
+          # "First run on Mac" beside it; the quarantine gates that
           # file the same way it gates the app, so it was a second
           # P&S-allow in disguise and got dropped.) The first launch is
           # one "Open Anyway" for the app itself in System Settings →
           # Privacy & Security, remembered by the machine; a Developer ID
           # + notarization is the only way to make that click disappear.
-          zip -qr scm-workbench-macos.zip "SCM Workbench.app"
+          #
+          # -y is load-bearing, not stylistic: the pbs runtime carries
+          # symlinks (bin/python → python3.13, the pkgconfig aliases, the
+          # libpython version link, …) and the seal hashes them *as links*.
+          # Plain `zip -r` follows them and stores the *target's* bytes
+          # under the link's name (bin/python becomes a 17 MB Mach-O), so
+          # every machine that unzips it sees a seal its own files no
+          # longer match - "damaged", with no button. That is precisely
+          # what broke every mac zip of this architecture until -y.
+          zip -y -qr scm-workbench-macos.zip "SCM Workbench.app"
       - name: Verify what the zip actually ships
         # The checks above read the bundle's tree as it stood *then*; the
-        # seal that matters is the one on the zip's own bytes. Unpack the
-        # artifact and verify it. On failure, dump every bundle file newer
-        # than the re-seal's marker: the writer's footprint, named, so the
-        # next red build points at its source instead of guessing.
+        # seal that matters is on the zip's own bytes. This step has caught
+        # both failure classes this pipeline has had: writes that land in
+        # the sealed tree after the last seal (a broken pre-zip snapshot),
+        # and the zip's own encoding diverging from the tree it archived
+        # (the symlink dereferencing above - where the disk was pristine
+        # and only the archive lied). Unpack the artifact and verify it; on
+        # failure, dump the violations and any bundle file newer than the
+        # re-seal's marker, so the next red build points at its cause.
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
