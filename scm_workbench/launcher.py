@@ -497,6 +497,59 @@ def _configure_dotnet(data: Path, log) -> str:
     return "ok"
 
 
+def _patch_winforms_coreclr(log) -> None:
+    """Windows: make the bundled pywebview's winforms platform importable under
+    the .NET (Core) runtime.
+
+    The platform does `from Microsoft.Win32 import SystemEvents` — correct on
+    .NET Framework, where that type sits in the Microsoft.Win32 *namespace* of
+    the monolithic System assembly. .NET (Core) moved the type into its own
+    assembly/namespace (Microsoft.Win32.SystemEvents), so the bare import
+    raises ImportError and the whole platform (and hence the window) dies.
+    Rewriting that single line to a try/except that falls back to the Core
+    spelling is the entire fix; done in place in the bundle at launch
+    (idempotent — a re-shipped bundle just gets patched again).
+    """
+    if os.name != "nt":
+        return
+    if bundle := _app_bundle():
+        wf = bundle / "app_packages" / "webview" / "platforms" / "winforms.py"
+        if not wf.is_file():
+            return
+        try:
+            src = wf.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            log(f"[launcher] could not read the winforms platform to patch it ({e})")
+            return
+        if "Microsoft.Win32.SystemEvents" in src:
+            return  # already patched (previous launch or a newer bundle)
+        patched = src.replace(
+            "from Microsoft.Win32 import SystemEvents  # noqa: E402",
+            "try:\n"
+            "    from Microsoft.Win32 import SystemEvents  # .NET Framework\n"
+            "except ImportError:\n"
+            "    from Microsoft.Win32.SystemEvents import SystemEvents  # .NET (Core)")
+        if patched == src:
+            # tolerate a differently-commented original line
+            patched = src.replace(
+                "from Microsoft.Win32 import SystemEvents",
+                "try:\n"
+                "    from Microsoft.Win32 import SystemEvents  # .NET Framework\n"
+                "except ImportError:\n"
+                "    from Microsoft.Win32.SystemEvents import SystemEvents  # .NET (Core)")
+        if patched == src:
+            log("[launcher] the winforms platform's SystemEvents import was not the known "
+                "line - leaving it untouched")
+            return
+        try:
+            wf.write_text(patched, encoding="utf-8")
+            log("[launcher] patched pywebview's winforms SystemEvents import for the .NET (Core) "
+                "runtime (one-time, in the bundle copy)")
+        except Exception as e:
+            log(f"[launcher] could not patch the winforms platform ({e}) - the native window "
+                "may not start")
+
+
 def _run_window(data: Path, log, server) -> None:
     """Packaged mode: the app's own window is the interface.
 
@@ -568,6 +621,8 @@ def _run_window(data: Path, log, server) -> None:
     # bundled netstandard 2.0 Python.Runtime cannot be loaded by the
     # .NET-Framework loader and the window silently dies into the browser.
     dotnet_note = _configure_dotnet(data, log) if os.name == "nt" else None
+    if os.name == "nt":
+        _patch_winforms_coreclr(log)
 
     try:
         # Route every pywebview log record (including the full traceback of a
@@ -576,7 +631,7 @@ def _run_window(data: Path, log, server) -> None:
         import logging as _logging
         import traceback as _tb
 
-        class _LogSink:
+        class _LogSink(_logging.Handler):
             def emit(self, record):
                 try:
                     msg = record.getMessage()
