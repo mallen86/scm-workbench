@@ -71,68 +71,75 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install Briefcase
-        run: python -m pip install --upgrade pip briefcase
       - name: Pin the version from the release tag
+        # On a tag push GITHUB_REF_NAME is the tag (v0.3.0) - it becomes the
+        # Python side's __version__, the Tauri conf/Cargo version and the
+        # exe's stamped metadata at once. Dispatch/test runs keep the
+        # [project] version declared in the repo.
         run: python scripts/inject_version.py
-      - name: Build the app folder
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the Tauri shell
+        # --features custom-protocol is what `cargo tauri build` passes: it
+        # makes Tauri serve the window's initial page from its embedded asset
+        # protocol instead of the dev URL, so the splash shows instantly
+        # without the worker's port existing yet (no "can't reach" flash).
+        working-directory: tauri
+        run: cargo build --release --features custom-protocol
+      - name: Fetch the pinned runtime and bake the job dependencies into it
+        # The exact python-build-standalone archive the launcher would fetch
+        # on a user's first boot (name imported, not re-spelled), unpacked
+        # into the bundle, with the managed repos' requirements pip-installed
+        # in. The shipped bundle is self-contained: first launch downloads
+        # nothing but the managed repo copies themselves.
+        run: python scripts/bake_runtime.py --bundle build\windows
+      - name: Assemble the bundle
+        # The flat layout a first-boot user sees: the exe at the root, the
+        # app code in app/ (where the worker's PYTHONPATH points), the
+        # runtime beside them. The per-user data area is created by the
+        # app at launch - it is never part of the bundle.
         run: |
-          # same vendored-wheel story as the macOS job (PIP_FIND_LINKS must
-          # be a file:// URL with forward slashes on Windows)
           $ws = (Resolve-Path .).Path
-          $env:PIP_FIND_LINKS = "file:///$($ws.Replace('\', '/'))/ciwheels"
-          # Pin briefcase's tool cache (rcedit, template, support package) to
-          # a known folder in the checkout - the icon step below needs to find
-          # rcedit, and it can't rely on where this briefcase version picks
-          # its PlatformDirs cache to be (briefcase supports BRIEFCASE_HOME
-          # exactly for this; the dir must exist before the run starts).
-          New-Item -ItemType Directory -Force (Join-Path $ws ".briefcase-tools") | Out-Null
-          $env:BRIEFCASE_HOME = Join-Path $ws ".briefcase-tools"
-          briefcase build windows app
-      - name: Stamp the app icon into the exe
+          $bundle = Join-Path $ws "build\windows"
+          Copy-Item (Join-Path $ws "tauri\target\release\scm-workbench.exe") (Join-Path $bundle "SCM Workbench.exe")
+          New-Item -ItemType Directory -Force (Join-Path $bundle "app") | Out-Null
+          Copy-Item (Join-Path $ws "scm_workbench") (Join-Path $bundle "app\scm_workbench") -Recurse
+          Copy-Item (Join-Path $ws "ui") (Join-Path $bundle "app\ui") -Recurse
+          Get-ChildItem $bundle | Select-Object Name, Length
+      - name: Smoke test - the bundle's window must serve the UI
+        # The whole point of the new architecture, verified in CI: the exe
+        # comes up, its worker answers on 127.0.0.1:8038, and the app's
+        # own /api/info is what the user would see. NO_BOOTSTRAP keeps the
+        # test hermetic (no 570 MB repo clone in a CI run).
         run: |
-          # briefcase's own rcedit pass stamps the version strings but uses the
-          # template's generic icon.ico - swap in the real one and re-stamp.
-          # The exe lives in the template's src/ subfolder; everything below is
-          # rooted at the checkout dir, so no ..-counting anywhere.
           $ws = (Resolve-Path .).Path
-          cd build/scm-workbench/windows/app/src
-          Copy-Item "$ws\assets\AppIcon.ico" .\icon.ico
-          $rc = Get-ChildItem "$ws\.briefcase-tools\tools" -Filter "rcedit*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -eq $rc) { throw "rcedit.exe not found in the briefcase tool dir ($ws\.briefcase-tools\tools)" }
-          & $rc.FullName --set-icon "icon.ico" "SCM Workbench.exe"
-      - name: Flatten the app root (the executable belongs at the top level)
-        run: |
-          $app = Join-Path (Resolve-Path .).Path "build/scm-workbench/windows/app"
-          # The template nests everything under src/ (briefcase's packaging_root),
-          # but the stub exe locates everything *relative to its own directory*
-          # (app/, app_packages/, python313.zip, the .pyd runtime - see its strings
-          # "Adding app_packages as site dir" / "Running app module:"), so the
-          # src/ container carries no runtime meaning. Move src/* to the app root,
-          # point briefcase.toml's [paths] at the new layout, and zip the flat tree
-          # next: unzip and run "SCM Workbench.exe" from the top level.
-          $src = Join-Path $app "src"
-          Get-ChildItem $src | ForEach-Object {
-            $dst = Join-Path $app $_.Name
-            if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
-            Move-Item $_.FullName $dst
+          $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
+          $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
+          $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $j = Invoke-RestMethod -Uri "http://127.0.0.1:8038/api/info" -TimeoutSec 2
+              if ($j.server -and $j.server.version) { $ok = $true; Write-Host "smoke: the UI answered (v$($j.server.version))"; break }
+            } catch { }
           }
-          Remove-Item $src
-          $toml = Join-Path $app "briefcase.toml"
-          (Get-Content $toml -Raw) `
-            -replace 'app_path = "src/app"', 'app_path = "app"' `
-            -replace 'app_packages_path = "src/app_packages"', 'app_packages_path = "app_packages"' `
-            -replace 'support_path = "src"', 'support_path = "."' `
-            | Set-Content $toml
+          if (-not $ok) { throw "smoke: the UI server never answered on 127.0.0.1:8038" }
+          $proc | Stop-Process -Force
+          # the worker is the window's child; the hard kill above orphans it,
+          # so collect the bundle's runtime explicitly
+          Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+            Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
       - name: Zip
         run: |
-          cd build/scm-workbench/windows/app
-          Compress-Archive -Path * -DestinationPath ../scm-workbench-windows.zip
+          $app = Join-Path (Resolve-Path .).Path "build\windows"
+          Compress-Archive -Path (Join-Path $app "*") -DestinationPath "$app\scm-workbench-windows.zip"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: scm-workbench-windows
-          path: build/scm-workbench/windows/scm-workbench-windows.zip
+          path: build/windows/scm-workbench-windows.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/')

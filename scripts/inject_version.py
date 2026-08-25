@@ -21,6 +21,11 @@ What it writes:
     dist-info record, and the Windows executable's version metadata all
     read this one value; the briefcase app section deliberately has no
     version of its own and inherits it).
+  * tauri/tauri.conf.json "version" and tauri/Cargo.toml [package]
+    version — the Tauri shell's own version slots, so a tag push keeps
+    the exe's reported version, the crate metadata and the Python side in
+    lockstep (the exe's Windows version *metadata* is stamped from the
+    same value by the pipeline's rcedit step).
 
 The file is rewritten in place and is meant to run *before*
 `briefcase build` (the workflow does this automatically; for a local
@@ -89,6 +94,29 @@ def pin(version: str) -> None:
     if not n:
         raise SystemExit("inject_version: no version line under [project] in pyproject.toml")
     pp.write_text(head + sep + new_tail, encoding="utf-8")
+
+    # 3) the Tauri shell's two version slots (present only in the new-style
+    #    tree; a briefcase-only checkout simply skips these)
+    tc = ROOT / "tauri" / "tauri.conf.json"
+    if tc.is_file():
+        text = tc.read_text(encoding="utf-8")
+        new_text, n = re.subn(r'(?m)^(\s*"version"\s*:\s*")[^"]+(")',
+                              lambda m: m.group(1) + version + m.group(2),
+                              text, count=1)
+        if n:
+            tc.write_text(new_text, encoding="utf-8")
+            print(f"  {tc.relative_to(ROOT)}  ->  \"version\": \"{version}\"")
+    ct = ROOT / "tauri" / "Cargo.toml"
+    if ct.is_file():
+        text = ct.read_text(encoding="utf-8")
+        head, sep, tail = text.partition("[package]")
+        if sep:
+            new_tail, n = re.subn(r'(?m)^(version\s*=\s*")[^"]+(")',
+                                   lambda m: m.group(1) + version + m.group(2),
+                                   tail, count=1)
+            if n:
+                ct.write_text(head + sep + new_tail, encoding="utf-8")
+                print(f"  {ct.relative_to(ROOT)}  ->  version = \"{version}\"")
 
     print(f"inject_version: pinned {version}")
     print(f"  {vf.relative_to(ROOT)}  ->  __version__ = \"{version}\"")

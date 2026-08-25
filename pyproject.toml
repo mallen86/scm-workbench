@@ -12,7 +12,7 @@
 
 [project]
 name = "scm-workbench"
-version = "0.2.6"
+version = "0.3.0"
 description = "A local web UI for silhouette-card-maker and scm-extras — no terminal, no setup."
 authors = [{ name = "the SCM Workbench maintainers" }]
 license = "MIT"

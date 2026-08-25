@@ -630,6 +630,26 @@ _KNOWN_BAD_PINS = {
 }
 
 
+def apply_bad_pin_fixes(lines) -> list:
+    """Rewrite the requirements pins that can never install as written.
+
+    Shared by the user-facing first-boot dependency sync and the CI runtime
+    bake (scripts/bake_runtime.py) so both apply exactly the same rewrites.
+    """
+    patched = []
+    for line in lines:
+        s = line.strip()
+        if "==" in s and not s.startswith(("-", "#")):
+            parts = s.split("==", 1)
+            fix = _KNOWN_BAD_PINS.get((parts[0].strip().lower(), parts[1].strip()))
+            if fix:
+                tail = line.split("==", 1)[1]
+                comment = "  # " + tail.split("#", 1)[1].strip() if "#" in tail else ""
+                s = fix + comment
+        patched.append(s)
+    return patched
+
+
 def _sync_deps(key: str, log=print) -> None:
     # Only when the app launcher says it's a real packaged app: then the
     # interpreter belongs to the app, so pip-ing into it is safe and keeps
@@ -646,17 +666,7 @@ def _sync_deps(key: str, log=print) -> None:
     py = os.environ.get("SCM_WORKBENCH_PYTHON")
     interpreter = [py, "-m", "pip"] if py else [sys.executable, "-m", "pip"]
     src = (repo / req).read_text(encoding="utf-8", errors="replace")
-    patched = []
-    for line in src.splitlines():
-        s = line.strip()
-        if "==" in s and not s.startswith(("-", "#")):
-            parts = s.split("==", 1)
-            fix = _KNOWN_BAD_PINS.get((parts[0].strip().lower(), parts[1].strip()))
-            if fix:
-                tail = line.split("==", 1)[1]
-                comment = "  # " + tail.split("#", 1)[1].strip() if "#" in tail else ""
-                s = fix + comment
-        patched.append(s)
+    patched = apply_bad_pin_fixes(src.splitlines())
     work = repo / ".wb-requirements.txt"
     work.write_text("\n".join(patched) + "\n", encoding="utf-8")
     run_kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
