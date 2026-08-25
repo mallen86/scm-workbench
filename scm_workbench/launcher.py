@@ -106,7 +106,12 @@ def provision_runtime(data: Path, log) -> str:
         ok = False
     if not ok:
         import subprocess as _sp
-        r = _sp.run(["tar", "-xf", str(tgz), "-C", str(rt)], capture_output=True, text=True)
+        # Windows' tar is a console app: without CREATE_NO_WINDOW the one-time
+        # extraction would flash a terminal window open and closed.
+        run_kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+        r = _sp.run(["tar", "-xf", str(tgz), "-C", str(rt)],
+                     capture_output=True, text=True,
+                     encoding="utf-8", errors="replace", **run_kw)
         if r.returncode != 0:
             raise RuntimeError(f"extracting the runtime failed: {(r.stderr or '').strip()[-200:]}")
         ok = expected.is_file()
@@ -248,9 +253,14 @@ def _app_bundle():
             for p in exe.parents:
                 if p.name.endswith(".app"):
                     return p
-        elif os.name == "nt":
-            if exe.suffix.lower() == ".exe" and (exe.parent / "src").is_dir():
+        elif os.name == "nt" and exe.suffix.lower() == ".exe":
+            # Shipped (flattened) layout: the exe sits at the bundle root, beside
+            # app/, app_packages/ and the bundled runtime files.
+            if (exe.parent / "app").is_dir():
                 return exe.parent
+            # Pre-flattening build tree: the exe lives in src/, the root is up.
+            if exe.parent.name == "src" and (exe.parent.parent / "app").is_dir():
+                return exe.parent.parent
     except Exception:
         pass
     return None
@@ -317,13 +327,27 @@ def _ensure_server(data: Path, log, url: str, port: int, server) -> None:
     env["SCM_WORKBENCH_DATA"] = str(data)
     if bundle := _app_bundle():
         env["SCM_WORKBENCH_BUNDLE"] = str(bundle)
+    # The child's own stdio must be UTF-8. The server prints a banner containing
+    # box-drawing glyphs; a freshly spawned interpreter on Windows defaults to
+    # the machine's ANSI codepage (e.g. cp1252), which cannot encode them, so
+    # v0.2.2's server child died with UnicodeEncodeError before ever binding its
+    # port (a terminal window flashed up and closed, and the UI never appeared).
+    # PEP 540/528: UTF-8 mode, and a matching explicit stdio encoding for the
+    # case an older interpreter ignores one of the two.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
-        logf = open(data / "server.log", "a", buffering=1)
+        # UTF-8 log file: the child writes UTF-8 bytes (see above), and this is
+        # the file you read afterwards to inspect what the server did.
+        logf = open(data / "server.log", "a", buffering=1, encoding="utf-8", errors="replace")
         logf.write("\n===== UI server start %s =====\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        # Never let the child allocate a console window — the app is "no
+        # terminal"; everything it prints ends up in server.log anyway.
+        popen_kw = {"creationflags": 0x08000000 | 0x00000200} if os.name == "nt" else {}  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         _ui_child = _sp.Popen(
             [str(py), "-m", "scm_workbench.server",
              "--port", str(port), "--host", "127.0.0.1", "--no-browser"],
-            cwd=str(root), env=env, stdout=logf, stderr=_sp.STDOUT)
+            cwd=str(root), env=env, stdout=logf, stderr=_sp.STDOUT, **popen_kw)
         log("[launcher] UI server process started (pid %d, interpreter %s)" % (_ui_child.pid, py))
     except Exception as e:
         log(f"[launcher] could not start the UI server: {e}")

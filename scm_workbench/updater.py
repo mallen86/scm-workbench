@@ -305,8 +305,10 @@ def stop_ancestors(log=print) -> None:
     for p in _ancestors_to_stop():
         try:
             if os.name == "nt":
+                # taskkill is a console app: CREATE_NO_WINDOW, no flash
                 subprocess.Popen(["taskkill", "/F", "/PID", str(p)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=0x08000000)
             else:
                 os.kill(p, 15)  # SIGTERM — the window host quits cleanly
             log(f"    (stopped the window host, pid {p})")

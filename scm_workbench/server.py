@@ -2812,6 +2812,20 @@ def main():
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
     args = ap.parse_args()
 
+    # Make the banner (and any traceback) robust on *any* stream: a freshly
+    # spawned Windows child defaults its stdio to the machine's ANSI codepage
+    # (e.g. cp1252), which cannot encode the box-drawing characters in the
+    # banner below — the write used to raise UnicodeEncodeError before the port
+    # was ever bound, so the UI never appeared. `errors="replace"` means a
+    # hostile codepage can never kill the server at startup; the worst case is
+    # a couple of '?' glyphs where a fancy character used to be.
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
     settings = load_settings()
     port = args.port or int(settings.get("port") or DEFAULT_PORT)
     scm, extras = effective_dirs(settings)

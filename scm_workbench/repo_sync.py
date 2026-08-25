@@ -659,9 +659,14 @@ def _sync_deps(key: str, log=print) -> None:
         patched.append(s)
     work = repo / ".wb-requirements.txt"
     work.write_text("\n".join(patched) + "\n", encoding="utf-8")
+    run_kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
     try:
+        # pip is a console app on Windows: CREATE_NO_WINDOW keeps the one-time
+        # dependency sync from flashing a terminal (its output is captured anyway).
         r = subprocess.run([*interpreter, "install", "--disable-pip-version-check", "-q",
-                            "-r", str(work)], capture_output=True, text=True)
+                            "-r", str(work)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", **run_kw)
     finally:
         work.unlink(missing_ok=True)
     if r.returncode == 0:
