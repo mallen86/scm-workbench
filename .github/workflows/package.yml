@@ -122,12 +122,13 @@ jobs:
         # the ad-hoc signing made the extension modules loadable.
         #
         # The payload (app/, runtime/) lives under Contents/ - inside the
-        # code-signature seal the Sign step made. Any python running from
-        # there compiles __pycache__ pyc's back into that sealed tree, and
-        # the next seal check (the Verify step below) - and every machine
-        # that downloads the zip - sees the bundle as damaged. So this run
-        # is kept write-free: the env var stops all of it, the precheck and
-        # the spawned worker included.
+        # code-signature seal the Sign step made. Anything that runs from
+        # there (and anything it wakes) can write back into that sealed
+        # tree after the seal was made; the Re-seal step below folds such
+        # writes into a fresh seal, and the zip gate verifies the archived
+        # bytes - so a download can never carry a seal the tree no longer
+        # matches. This run is kept write-free where possible (the env var
+        # stops the pyc compiles, the precheck and the worker included).
         run: |
           set -uo pipefail
           ws="$GITHUB_WORKSPACE"
@@ -157,21 +158,22 @@ jobs:
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
             exit 1
           fi
-      - name: Verify the seal survived the smoke test
-        # The smoke run above executes the app from the bundle; if anything
-        # it writes lands inside the signed Contents/ tree, the code
-        # signature's resource seal breaks and every downloaded copy shows
-        # up as "damaged" - the very failure the flat layout exists to
-        # prevent. A future layout change that puts writeable state back
-        # inside the seal fails the build here instead of shipping a brick.
+      - name: Re-seal the bundle after the smoke test
+        # The smoke run is the last thing that executes from the bundle, and
+        # a straggler it wakes can keep writing after the Sign step's seal.
+        # (The v0.3.0 zip is the standing example: nine pbs runtime files -
+        # bin/python{,3,-config}, idle3, pydoc3, both .pc files, libpython's
+        # .a and the man page - were re-written from the pbs archive *after*
+        # the seal, so the zipped bundle read "damaged" on every machine.)
+        # Re-sign now, whatever has landed is inside the fresh seal; the
+        # marker moves to this seal, and the zip gate below judges the
+        # archived bytes against it - and names the writer on failure.
         run: |
           set -euo pipefail
-          app="$GITHUB_WORKSPACE/build/macos/SCM Workbench.app"
-          if ! codesign --verify --verbose=2 "$app" > "$GITHUB_WORKSPACE/build/macos/codesign-verify.log" 2>&1; then
-            cat "$GITHUB_WORKSPACE/build/macos/codesign-verify.log"
-            exit 1
-          fi
-          echo "seal intact: the bundle the zip will carry verifies clean"
+          cd "$GITHUB_WORKSPACE/build/macos"
+          sleep 5  # let in-flight writers land before the seal, not after
+          codesign --force --deep --sign - "SCM Workbench.app"
+          rm -f sign-marker && touch sign-marker
       - name: Zip
         run: |
           set -euo pipefail
@@ -185,6 +187,26 @@ jobs:
           # Privacy & Security, remembered by the machine; a Developer ID
           # + notarization is the only way to make that click disappear.
           zip -qr scm-workbench-macos.zip "SCM Workbench.app"
+      - name: Verify what the zip actually ships
+        # The checks above read the bundle's tree as it stood *then*; the
+        # seal that matters is the one on the zip's own bytes. Unpack the
+        # artifact and verify it. On failure, dump every bundle file newer
+        # than the re-seal's marker: the writer's footprint, named, so the
+        # next red build points at its source instead of guessing.
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/build/macos"
+          mkdir -p .zipcheck
+          unzip -q scm-workbench-macos.zip -d .zipcheck
+          app=".zipcheck/SCM Workbench.app"
+          if ! codesign --verify --verbose=2 "$app" > .zipcheck/verify.log 2>&1; then
+            echo "---- the zipped bundle fails codesign --verify: ----"
+            cat .zipcheck/verify.log
+            echo "---- bundle files written after the last seal (the writer's footprint): ----"
+            find "$app" -newer sign-marker 2>/dev/null | sed "s|^$app/||" | head -50
+            exit 1
+          fi
+          echo "the zipped bundle verifies clean: what ships is what the signature covers"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
