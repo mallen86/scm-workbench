@@ -155,8 +155,10 @@ fn data_dir() -> PathBuf {
 /// The app root:
 ///   Windows bundle — the package sits at <exe dir>/app/scm_workbench, so the
 ///                     root is the exe's directory itself;
-///   macOS bundle   — the binary lives at <App>.app/Contents/MacOS/<name> and
-///                     the root is the .app itself (two parents up);
+///   macOS bundle   — an app bundle may only carry Contents/ at its root
+///                     (the code-signature seal covers exactly that), so the
+///                     payload lives in <App>.app/Contents/{app,runtime} and
+///                     the root is the Contents dir (one parent up);
 ///   dev checkout   — <root>/tauri/target/{debug,release}/scm-workbench, so the
 ///                    root is four parents up.
 fn app_root(exe: &Path) -> PathBuf {
@@ -168,11 +170,11 @@ fn app_root(exe: &Path) -> PathBuf {
         return exe_dir;
     }
     #[cfg(target_os = "macos")]
-    if let Some(app) = exe_dir.parent().and_then(|p| p.parent()) {
-        if app.extension().map(|e| e == "app").unwrap_or(false)
-            && app.join("app/scm_workbench/__init__.py").is_file()
+    if let Some(contents) = exe_dir.parent() {
+        if contents.file_name().and_then(|n| n.to_str()) == Some("Contents")
+            && contents.join("app/scm_workbench/__init__.py").is_file()
         {
-            return app.to_path_buf();
+            return contents.to_path_buf();
         }
     }
     let mut p = exe.to_path_buf();

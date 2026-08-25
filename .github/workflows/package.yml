@@ -43,14 +43,16 @@ jobs:
           bundle="$ws/build/macos"
           app="$bundle/SCM Workbench.app"
           rm -rf "$app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/app"
-          # The flat mac layout: the standard Contents/ tree plus the app's
-          # code (app/) and the runtime, all inside the bundle, so a moved
-          # or renamed .app keeps working.
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/app"
+          # Everything lives under Contents/: an app bundle's code-signature
+          # seal covers exactly that tree, and codesign refuses to sign a
+          # bundle that carries anything else at its root - so the payload
+          # (the app's code and the runtime) goes inside Contents/, and a
+          # moved or renamed .app keeps working.
           cp "$ws/tauri/target/release/scm-workbench" "$app/Contents/MacOS/SCM Workbench"
-          cp -R "$ws/scm_workbench" "$app/app/scm_workbench"
-          cp -R "$ws/ui" "$app/app/ui"
-          mv "$bundle/runtime" "$app/runtime"
+          cp -R "$ws/scm_workbench" "$app/Contents/app/scm_workbench"
+          cp -R "$ws/ui" "$app/Contents/app/ui"
+          mv "$bundle/runtime" "$app/Contents/runtime"
           rm -rf "$bundle/.bake"
           # The icon: one .iconset from the shared 1024px source, iconutil
           # does the .icns. The directory must be named <name>.iconset -
@@ -98,7 +100,7 @@ jobs:
           # ship unsigned) and the bundle itself. A Developer ID +
           # notarization is the upgrade path when one is available; until
           # then the user right-clicks the app and chooses Open once.
-          find "$app/runtime" -type f | while IFS= read -r f; do
+          find "$app/Contents/runtime" -type f | while IFS= read -r f; do
             case "$(file -b "$f")" in
               *Mach-O*) codesign --force --sign - "$f" 2>/dev/null || true ;;
             esac
@@ -116,7 +118,7 @@ jobs:
           set -uo pipefail
           ws="$GITHUB_WORKSPACE"
           app="$ws/build/macos/SCM Workbench.app"
-          "$app/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
+          "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
           data="$(mktemp -d)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
@@ -134,7 +136,7 @@ jobs:
           kill "$app_pid" 2>/dev/null || true
           # the worker is the window's child; the hard kill above orphans it,
           # so collect the bundle's runtime explicitly
-          pkill -f "$app/runtime/python" 2>/dev/null || true
+          pkill -f "$app/Contents/runtime/python" 2>/dev/null || true
           if [ -z "$ok" ]; then
             echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
