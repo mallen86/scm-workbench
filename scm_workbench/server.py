@@ -708,7 +708,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "python": "",
     "port": DEFAULT_PORT,
     "theme": "dark",
-    "ui_mode": "advanced",
+    "ui_mode": "simple",
     "auto_open_browser": True,
     "onboarded": False,
     "defaults": {
@@ -2880,6 +2880,17 @@ def main():
 
     # at start-up (and then once a day) — quietly check for a newer release
     threading.Thread(target=_update_daemon, daemon=True, name="updater").start()
+
+    # Packaged app, first boot: the app fetches its own managed repo copies
+    # (the UI is already up — the dashboard banner shows the live progress
+    # from bootstrap.json; see bootstrap.run_first_boot). Dev checkouts keep
+    # the classic behavior: no automatic cloning, Settings drives it.
+    if os.environ.get("SCM_WORKBENCH_PACKAGED") == "1" and not os.environ.get("SCM_WORKBENCH_NO_BOOTSTRAP"):
+        from scm_workbench import bootstrap as _first_boot
+        threading.Thread(
+            target=_first_boot.run_first_boot, args=(DATA_DIR,),
+            daemon=True, name="first-boot",
+        ).start()
 
     if not args.no_browser and settings.get("auto_open_browser", True):
         threading.Timer(0.4, _open_browser, args=(browser_url,)).start()

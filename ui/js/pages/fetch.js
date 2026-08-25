@@ -1,7 +1,7 @@
 /* pages/fetch — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
+import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";
 import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";
 import { go } from "../nav.js";
 import { jobStrip } from "../jobstrip.js";
@@ -91,7 +91,7 @@ export function patchFetchForm(kind) {
     const label = el("label", { class: "fp-label" }, "Decklist file ", el("span", { class: "req" }, "*"));
     // In the app's own window we can open the native OS file chooser; in a
     // browser (dev mode) the button doesn't exist and the folder list is it.
-    const canPick = !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file);
+    const canPick = nativePick.canPick();
     if (canPick) {
       const browse = el("button", {
         class: "btn btn-ghost btn-sm", type: "button",
@@ -100,7 +100,7 @@ export function patchFetchForm(kind) {
           browse.disabled = true;
           let picked = null;
           try {
-            picked = await window.pywebview.api.pick_file();
+            picked = await nativePick.pickFile();
           } catch (e) {
             browse.disabled = false;
             toast("warn", "The file picker didn't open — paste the decklist text instead.");

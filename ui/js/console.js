@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";
 import { displayCmd, repoRowForKind } from "./forms.js";
 import { refreshInfo, showBootFailure } from "./info.js";
 import { bindNav, bootPage, uiMode } from "./nav.js";
@@ -233,13 +233,12 @@ export function truncate(s, n) { return s && s.length > n ? "…" + s.slice(-n +
 export function moveJobToMyFiles(job) {
   const outs = (job.outputs || []).filter(Boolean);
   if (!outs.length) return;
-  const bridge = window.pywebview && window.pywebview.api;
-  if (!bridge || !bridge.pick_save) {
+  if (!nativePick.canSave()) {
     toast("warn", "“Move to my files…” needs the app window — it opens the system save dialog.");
     return;
   }
   const next = outs[0];
-  bridge.pick_save(next.split("/").pop()).then(dest => {
+  nativePick.pickSave(next.split("/").pop()).then(dest => {
     if (!dest) return; // cancelled
     api("/api/files/save", { src: next, dest })
       .then(r => {

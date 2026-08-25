@@ -1162,6 +1162,15 @@ body.mode-simple .console { display: none; }
 .rp-label { font-size: 13px; font-weight: 600; }
 .rp-meta { font-size: 11.5px; color: var(--faint, #9aa3b5); font-variant-numeric: tabular-nums; min-height: 1em; }
 .rp-bar { height: 6px; border-radius: 3px; background: var(--line, rgba(255,255,255,.08)); overflow: hidden; }
+#repoprog-global {
+  position: fixed; left: 16px; bottom: 16px; z-index: 95;
+  width: min(440px, calc(100vw - 32px));
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+  display: grid; gap: 12px;
+}
+#repoprog-global .rp-head { font-size: 12px; color: var(--faint); }
 .rp-fill { height: 100%; border-radius: 3px; background: var(--accent-grad, var(--accent, #ffb454));
           transition: width 2.4s linear; will-change: width; }
 .rp-bar.indet .rp-fill { width: 38%; animation: prep-slide 1.5s ease-in-out infinite; }

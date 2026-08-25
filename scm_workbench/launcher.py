@@ -124,44 +124,6 @@ def provision_runtime(data: Path, log) -> str:
     return str(expected)
 
 
-def bootstrap_managed_repos(repo_sync, log=None) -> None:
-    """Fetch newest managed copies on first launch; never fatal."""
-    if log is None:
-        log = print
-    state = repo_sync.load_state()
-    for key, meta in repo_sync.REPOS.items():
-        r = state.get(key) or {}
-        if r.get("deployed"):
-            # The state says “deployed” — but the state file and the tree can
-            # drift (an interrupted update, a pre-lock era write). A cheap
-            # offline probe decides; a mismatch triggers a *safe* re-deploy,
-            # which stages the user's files before touching the tree, so this
-            # path can never be a data-loss path again.
-            try:
-                if repo_sync.verify_deployed(key):
-                    continue
-                log(f"\n[launcher] the managed {meta['name']} copy no longer matches its recorded "
-                    f"state — re-deploying it now (your decklists, images and output are "
-                    f"staged and restored around the swap, so nothing is lost) …")
-                repo_sync.cmd_init(key, log=log, force_redeploy=True)
-                log(f"[launcher] {meta['name']} re-synced — continuing.")
-                continue
-            except Exception as e:
-                log(f"[launcher] {meta['name']} state check failed ({e}) — leaving the copy as-is.")
-            continue
-        log(f"\n[launcher] first launch — fetching the newest {meta['name']} "
-           f"({meta['owner']}/{meta['repo']}) into the Workbench data area …")
-        t0 = time.time()
-        try:
-            repo_sync.cmd_init(key, log=log)
-            log(f"[launcher] done in {time.time() - t0:.0f}s — dashboard is ready.")
-        except Exception as e:
-            log(f"[launcher] could not fetch {meta['name']} yet ({e}).")
-            log("[launcher] no problem — the app still works; open Settings → "
-                "“Managed repo copies” and press “Download latest” when you're online.")
-            log("[launcher] (existing sister folders next to this app are still detected normally)")
-
-
 def main() -> None:
     data = Path(os.environ.get("SCM_WORKBENCH_DATA") or str(default_data_dir())).expanduser()
     data.mkdir(parents=True, exist_ok=True)
@@ -388,6 +350,7 @@ def _background_bootstrap(data: Path, log, url: str, port: int, server) -> None:
     prep is still going.
     """
     from scm_workbench import repo_sync
+    from scm_workbench.bootstrap import bootstrap_managed_repos
     flag = data / "bootstrap.json"
     phase = {"v": "starting up …"}
 

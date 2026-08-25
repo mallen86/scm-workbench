@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SCM Workbench",
+  "version": "0.3.0",
+  "identifier": "com.mallen.scmworkbench",
+  "build": {
+    "frontendDist": "../ui",
+    "devUrl": "http://127.0.0.1:8038"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/512.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}

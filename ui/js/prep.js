@@ -109,9 +109,36 @@ export function ensurePrepRows(rows, container) {
 }
 
 
+// The dashboard hosts the prep rows natively (#repoprog in its card). On
+// other pages — most importantly the simple-mode fetch landing, where a
+// first boot happens with no dashboard in sight — the same rows live in a
+// small fixed strip, so first-launch progress is never invisible.
+function globalStrip() {
+  let s = $("#repoprog-global");
+  if (!s) {
+    s = el("div", { class: "repoprog", id: "repoprog-global" },
+      el("div", { class: "rp-head" }, "Preparing your managed copies — this happens once, on first launch."));
+    document.body.append(s);
+  }
+  return s;
+}
+
+export function removeGlobalStrip() {
+  const s = $("#repoprog-global");
+  if (s) s.remove();
+}
+
+function retargetProws(container) {
+  for (const k of Object.keys(S.prows || {})) {
+    const r = S.prows[k];
+    if (r && r.isConnected && r.parentElement !== container) container.append(r);
+  }
+}
+
 export function updatePrepRows() {
-  const container = $("#repoprog");
-  if (!container) return;
+  const native = $("#repoprog");
+  const container = native || globalStrip();
+  retargetProws(container);
   const rows = (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
   ensurePrepRows(rows, container);
   for (const r of rows) {
@@ -126,6 +153,7 @@ export function updatePrepRows() {
     bar.classList.toggle("indet", !det);
     if (det) fill.style.width = pct + "%";
   }
+  if (!native && !rows.length) removeGlobalStrip();
 }
 
 
@@ -144,7 +172,7 @@ export function stopPrepWatcher() {
 export function startPrepWatcher() {
   stopPrepWatcher();
   const tick = async () => {
-    if (!prepActive()) { _prepTimer = null; return; }
+    if (!prepActive()) { removeGlobalStrip(); _prepTimer = null; return; }
     const before = prepSignature();
     _prepTimer = setTimeout(tick, 2500);
     try {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wb-restart"
+description = "Enables the wb_restart command without any pre-configured scope."
+commands.allow = ["wb_restart"]
+
+[[permission]]
+identifier = "deny-wb-restart"
+description = "Denies the wb_restart command without any pre-configured scope."
+commands.deny = ["wb_restart"]

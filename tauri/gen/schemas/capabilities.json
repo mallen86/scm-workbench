@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"SCM Workbench main window — no extra capabilities needed","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-save","allow-wb-restart"]}}

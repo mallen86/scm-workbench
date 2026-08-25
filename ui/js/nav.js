@@ -107,7 +107,7 @@ export const SIMPLE_PAGES = ["fetch", "pdf", "settings"];   // what the nav keep
 
 export function uiMode() {
   const s = S.info && S.info.settings;
-  return (s && (s.ui_mode || "advanced")) === "simple" ? "simple" : "advanced";
+  return (s && (s.ui_mode || "simple")) === "simple" ? "simple" : "advanced";
 }
 
 
