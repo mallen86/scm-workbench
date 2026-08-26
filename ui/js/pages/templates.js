@@ -65,7 +65,7 @@ export function templatesGallery(which) {
     const g = el("div", { class: "filegrid" });
     for (const n of items) {
       g.append(el("button", { class: "fileitem",
-        title: "Open in its default app (e.g. Silhouette Studio)",
+        title: `Open ${n} in its default app (e.g. Silhouette Studio)`,
         onclick: async () => {
           const r = await fetch(`/api/file?path=${encodeURIComponent(base + dir + n)}&open=1`).then(x => x.json());
           if (r.ok) toast("ok", `Opening ${n} in its default app…`);

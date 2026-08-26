@@ -36,13 +36,16 @@ PAGES.dashboard = (root) => {
   wrap.append(quickActions());
   wrap.append(el("div", { class: "section-label" }, "Layout matrix (default variant)"));
   wrap.append(matrixCard("default"));
-  wrap.append(el("div", { class: "section-label" }, "Recent jobs"));
-  wrap.append(el("div", { id: "recent-jobs" }));
+  // the documentation card gets its own divider and sits above Recent jobs —
+  // tucking it below the jobs list made it read as part of that (empty) box
+  wrap.append(el("div", { class: "section-label" }, "Documentation"));
   wrap.append(el("div", { class: "card" }, el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("book")),
     el("div", { class: "grow" }, el("h2", {}, "Documentation"), el("p", {}, "The docs site walks through every step with photos: supplies, printing, cutting, troubleshooting.")),
     el("button", { class: "btn", onclick: () => openUrl("https://alan-cha.github.io/silhouette-card-maker/", "the silhouette-card-maker docs") }, ico("external"), "Open docs"),
   )));
+  wrap.append(el("div", { class: "section-label" }, "Recent jobs"));
+  wrap.append(el("div", { id: "recent-jobs" }));
   return wrap;
 };
 
