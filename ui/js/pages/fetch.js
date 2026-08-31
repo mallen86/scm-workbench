@@ -103,7 +103,7 @@ export function patchFetchForm(kind) {
             picked = await nativePick.pickFile();
           } catch (e) {
             browse.disabled = false;
-            toast("warn", "The file picker didn't open — paste the decklist text instead.");
+            toast("warn", `The file picker failed to open (${e.message || "unknown error"}) — paste the decklist text instead.`);
             return;
           }
           browse.disabled = false;

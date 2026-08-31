@@ -249,7 +249,7 @@ export function moveJobToMyFiles(job) {
         } else toast("warn", (r.errors && r.errors[0]) || "Could not save the file.");
       })
       .catch(() => toast("warn", "Could not save the file."));
-  }).catch(() => {});
+  }).catch(e => toast("warn", `The save dialog failed to open (${e.message || "unknown error"}).`));
 }
 
 

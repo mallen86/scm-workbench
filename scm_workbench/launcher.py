@@ -649,19 +649,35 @@ def _run_window(data: Path, log, server) -> None:
         def pick_file():
             """Native OS file chooser (single file) for the UI's "Browse…"
             buttons. Returns the chosen path, or None when cancelled. No
-            type restriction — the app decides what a file is for."""
+            type restriction — the app decides what a file is for.
+
+            If the dialog itself fails to open (a pywebview bug on some
+            macOS releases), a RuntimeError propagates to the JS caller, which
+            can then tell the user the picker is broken rather than silently
+            treating the failure as a cancel."""
             try:
                 res = window.create_file_dialog(webview.FileDialog.OPEN, "", False, "", ())
-            except Exception:
+            except RuntimeError:
+                raise
+            except Exception as e:
+                import traceback
+                log("[launcher] pick_file dialog failed: %s" % e)
+                traceback.print_exc()
                 return None
             return res[0] if res else None
 
         def pick_save(filename: str = ""):
-            """Native OS save panel (single file) for “Move to my files…”.
-            Returns the chosen destination path, or None when cancelled."""
+            """Native OS save panel (single file) for "Move to my files…".
+            Returns the chosen destination path, or None when cancelled.
+            RuntimeError propagates to the JS caller (see pick_file)."""
             try:
                 res = window.create_file_dialog(webview.FileDialog.SAVE, "", False, filename or "", ())
-            except Exception:
+            except RuntimeError:
+                raise
+            except Exception as e:
+                import traceback
+                log("[launcher] pick_save dialog failed: %s" % e)
+                traceback.print_exc()
                 return None
             return res[0] if res else None
 
