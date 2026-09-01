@@ -1,6 +1,6 @@
 [package]
 name = "scm-workbench"
-version = "0.3.1"
+version = "0.3.2"
 description = "SCM Workbench — native window (Tauri) over the local UI server"
 authors = ["Michael Allen <mtallen@outlook.com>"]
 edition = "2021"

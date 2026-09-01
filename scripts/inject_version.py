@@ -26,6 +26,11 @@ What it writes:
     the exe's reported version, the crate metadata and the Python side in
     lockstep (the exe's Windows version *metadata* is stamped from the
     same value by the pipeline's rcedit step).
+  * tauri/Cargo.lock — the app's own [[package]] line. Cargo silently
+    self-heals it at build time, but the release pipeline builds from the
+    tag: a lock that disagrees with its manifest is exactly the kind of
+    tag drift that shipped v0.3.1 (whose lock still said 0.3.0), and a tag
+    should be self-consistent without trusting the build to notice.
 
 The file is rewritten in place and is meant to run *before*
 `briefcase build` (the workflow does this automatically; for a local
@@ -117,6 +122,19 @@ def pin(version: str) -> None:
             if n:
                 ct.write_text(head + sep + new_tail, encoding="utf-8")
                 print(f"  {ct.relative_to(ROOT)}  ->  version = \"{version}\"")
+
+    # 4) the app's own [[package]] version line in the lock: newline-agnostic
+    #    (the file is LF in git and autocrlf=input, but local trees vary)
+    cl = ROOT / "tauri" / "Cargo.lock"
+    if cl.is_file():
+        text = cl.read_text(encoding="utf-8")
+        new_text, n = re.subn(
+            r'(\[\[package\]\]\r?\nname = "scm-workbench"\r?\nversion = ")[^"]+(")',
+            lambda m: m.group(1) + version + m.group(2),
+            text, count=1)
+        if n:
+            cl.write_text(new_text, encoding="utf-8")
+            print(f"  {cl.relative_to(ROOT)}  ->  version = \"{version}\"")
 
     print(f"inject_version: pinned {version}")
     print(f"  {vf.relative_to(ROOT)}  ->  __version__ = \"{version}\"")
