@@ -245,14 +245,84 @@ def extract_app(zip_path: Path, dest_dir: Path, log=print) -> Path:
     macOS releases hold "SCM Workbench.app"; Windows releases hold
     "SCM Workbench.exe" (+ src/) directly at the archive top level — the
     returned path is the folder to swap in place of the current one.
+
+    The extract is symlink-aware, on purpose: `zipfile.extractall` *dereferences*
+    zip symlinks (the pbs runtime's bin/python → python3.13, the pkgconfig
+    aliases, the libpython version link, …) into small regular files holding
+    the target's *text*. The ad-hoc signature seals those entries **as links**,
+    so a dereferenced extract is a bundle that passes no seal and refuses to
+    launch on Apple silicon — and unlike a Gatekeeper gate, that refusal is
+    silent. (The pipeline's own `zip -y` exists for exactly this reason in
+    the other direction: to keep the links *inside* the archive.)
+
+    The same extract is mode-restoring: BSD `zip` records each entry's Unix
+    mode in its external-attr field, but Python's `extractall` ignores that
+    field and writes every file `0644` (the `unzip`/`ditto` CLIs do it
+    right - the same 0755 `python3.13` comes out of `extractall` as 0644).
+    A bundle whose main executable is not executable is a *spawn* failure on
+    the user's machine - `RBSRequestError 5` / `POSIX 111`, no dialog - so
+    each member is written through the documented extract-to-tmp-then-chmod
+    path instead, restoring the mode the archive's own metadata claims.
     """
+    import stat
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as zf:
         # path-traversal guard, same policy as the repo sync
-        for m in zf.namelist():
-            if m.startswith("/") or ".." in m.split("/"):
-                raise UpdateError(f"the release archive has an unsafe entry ({m}) — not installing it")
-        zf.extractall(dest_dir)
+        infos = zf.infolist()
+        for i in infos:
+            if i.filename.startswith("/") or ".." in i.filename.split("/"):
+                raise UpdateError(f"the release archive has an unsafe entry ({i.filename}) — not installing it")
+
+        def _extract(i) -> None:
+            target = dest_dir / i.filename
+            if i.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                return
+            # extract to a sibling tmp name, then chmod to the mode the zip
+            # metadata claims (its low 12 bits), then rename into place -
+            # the workaround CPython itself documents, because extractall
+            # never applies the stored mode
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".wbtmp")
+            with zf.open(i) as src, open(tmp, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            attr = i.external_attr >> 16
+            mode = stat.S_IMODE(attr) if attr else 0o644
+            os.chmod(tmp, 0o777 & mode)
+            os.rename(tmp, target)
+        for i in infos:
+            _extract(i)
+        # restore the links extractall flattened (idempotent: a non-link
+        # entry's external_attr carries no S_IFLNK, so nothing moves)
+        fixed = 0
+        for i in zf.infolist():
+            if i.is_dir():
+                continue
+            mode = (i.external_attr >> 16) & 0o77777777
+            if not stat.S_ISLNK(mode):
+                continue
+            target = zf.read(i).decode("utf-8", "replace").rstrip("\n")
+            if not target:
+                continue
+            p = dest_dir / i.filename
+            try:
+                # a previous (pre-fix) extract may have left the flattened
+                # text file where the link belongs: remove it, then link
+                if p.is_symlink():
+                    if os.readlink(p) == target:
+                        continue
+                    p.unlink()
+                elif p.is_file():
+                    p.unlink()
+                elif p.exists():
+                    continue  # a directory sits where a link should be — leave it
+                os.symlink(target, p)
+                fixed += 1
+            except OSError as e:
+                log(f"    ! could not restore the link {i.filename.split('/')[-1]}: {e}")
+        if fixed:
+            log(f"    (restored {fixed} symlink{'s' if fixed != 1 else ''} the plain extract had flattened)")
 
     top = sorted(p for p in dest_dir.iterdir() if not p.name.startswith("."))
     # 1) the normal shape: the bundle itself at the archive top level
@@ -396,11 +466,26 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 pass
 
     try:
+        # the UI's progress strip reads job["progress"]; until the first
+        # stage sets it, the bar shows indeterminate so a slow first byte
+        # never reads as "nothing is happening".
+        job["progress"] = {"stage": "fetch", "done": 0, "total": 0}
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
         # 1) re-verify (the state that started the job can be a few minutes old)
         rel = latest_release()
         if not is_newer(rel["tag"], plan.get("current")) and not plan.get("force"):
-            finish(True, f"Nothing to do — v{plan.get('current')} is still the latest release ({rel['tag']}).")
+            if rel["tag"] == plan.get("current"):
+                # The running app *is* the newest release (a check that ran
+                # while the release it found was still unpublished, or a
+                # manual re-check): the check side shows this as
+                # "update-available" - the user's button press starts the
+                # install, so this re-verification must not dead-end it with
+                # "Nothing to do" (nor re-save "up-to-date" over the
+                # update-available state, which would flip the card back to a
+                # stuck 24-hour "Up to date" on the next render).
+                finish(True, f"You're already on the newest release ({rel['tag']}) - nothing to install.")
+                return
+            finish(True, f"Nothing to do — v{plan.get('current')} is the latest release ({rel['tag']}).")
             return
         # 2) the right zip
         try:
@@ -420,12 +505,16 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         def progress(done: int, total: int) -> None:
             if total and (time.time() - last["t"]) > 1.0:
                 last["t"] = time.time()
+                # raw numbers only: the UI derives the speed/eta line the way
+                # the repo-prep bar does (it needs the timestamps, which only
+                # the client side has)
                 job["progress"] = {"stage": "download", "done": done, "total": total}
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
         download(asset["url"], dest, progress=progress)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")
-        # 4) extract + verify
-        job["progress"] = {"stage": "extract", "done": 1, "total": 1}
+        # 4) extract + verify (indeterminate: a zip of this shape has no
+        # cheap per-file counter, and the stage label is the information)
+        job["progress"] = {"stage": "extract", "done": 0, "total": 0}
         emit("Extracting the new app …")
         new_bundle = extract_app(dest, work / "staging", log=emit)
         emit(f"    ready: {new_bundle}")
@@ -443,6 +532,7 @@ def run_job(job: dict, plan: dict, log_f) -> None:
             fail(f"the current app folder is gone ({old_bundle}) — not swapping")
             return
         # 6) the swap. The data area is a sibling of all this, never inside it.
+        job["progress"] = {"stage": "install", "done": 0, "total": 0}
         emit(f"Installing over {old_bundle} — the app will close and reopen by itself in a few seconds.\n"
              "    (Your data folder is not part of the app folder and stays as-is.)")
         backup = swap_bundle(new_bundle, old_bundle, log=emit)

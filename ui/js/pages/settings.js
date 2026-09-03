@@ -1,10 +1,59 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl } from "../core.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";
+
+/* In-app "What's new": the release notes live on GitHub, but the app's
+   window can't open a browser tab in its webview, so the notes are fetched
+   through the server (which also renders the markdown) and shown in the
+   app's own modal — same chrome as every other confirmation here. */
+function showWhatsNew(tag, releaseUrl) {
+  return (async () => {
+    const root = $("#modal-root");
+    const m = $(".modal", root);
+    m.innerHTML = "";
+    m.append(el("div", { class: "m-ico info" }, ico("info")));
+    m.append(el("h3", {}, `What's new in ${esc(tag)}`));
+    m.append(el("div", { class: "m-loading" }, "Fetching the release notes…"));
+    root.hidden = false;
+    const close = () => { root.hidden = true; };
+    try {
+      const r = await api("/api/release-notes");
+      if (!r.ok) throw new Error(r.error || "the release notes couldn't be fetched");
+      m.querySelectorAll(".m-ico, h3, .m-loading").forEach(n => n.remove());
+      m.append(el("h3", {}, `What's new in ${esc(r.tag)}`));
+      if (r.published) m.append(el("p", { class: "m-when" }, `Released ${esc(r.published)}`));
+      const body = el("div", { class: "notes" });
+      body.innerHTML = r.body || "<p>(no notes on this release)</p>";
+      m.append(body);
+      const actions = el("div", { class: "m-actions" },
+        el("button", { class: "btn", onclick: close }, "Close"),
+      );
+      if (releaseUrl) {
+        // a raw <a> here would carry target="_blank" — the app's webview can't
+        // spawn that (window.open is denied), and even href="#" bounces the
+        // whole app to the dashboard on a mis-click. The OS browser is the
+        // honest target, and the app already has a sanctioned door for it.
+        actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(releaseUrl, "the release page"); } }, "Open on GitHub"));
+      }
+      m.append(actions);
+      document.addEventListener("keydown", function onKey(e) {
+        if (e.key !== "Escape") return;
+        close();
+        document.removeEventListener("keydown", onKey);
+      });
+    } catch (e) {
+      m.querySelector(".m-loading").remove();
+      m.append(el("p", {}, "The notes couldn't be loaded: " + e.message));
+      m.append(el("div", { class: "m-actions" }, el("button", { class: "btn", onclick: close }, "Close")));
+    }
+  })();
+}
 import { doRun, numSteppers } from "../forms.js";
 import { refreshInfo } from "../info.js";
 import { go, setTheme, uiMode } from "../nav.js";
+import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";
+import { startUpdateStrip } from "../updater-ui.js";
 import { watchJobDone } from "./utilities.js";
 
 export function repoCopyRow(row, container, simple = false) {
@@ -366,7 +415,15 @@ PAGES.settings = (root) => {
           uStatus.innerHTML = `A newer version is out — <b>${vv(st.latest)}</b>` +
             (st.published ? ` (released ${esc(new Date(st.published).toLocaleDateString())})` : "") +
             ". The install replaces the app folder and reopens it; your decklists, images and settings stay put." +
-            (st.release_url ? ` <a href="${esc(st.release_url)}" target="_blank" rel="noopener">What's new</a>` : "");
+            (st.release_url ? ` <a class="linkish" href="${esc(st.release_url)}">What's new</a>` : "");
+          $$('.linkish', uStatus).forEach(a => {
+            a.onclick = () => showWhatsNew(st.latest, st.release_url);
+            // no href on purpose: this is a button styled as a link. A real
+            // href (even "#") makes the browser navigate the whole app on a
+            // mis-click, and the webview can't spawn the target="_blank" a
+            // genuine one would want - the click does everything in-app.
+            a.removeAttribute("href");
+          });
           break;
         default:
           setBtn("Check for updates", doCheck);
@@ -401,9 +458,23 @@ PAGES.settings = (root) => {
     const startUpdate = async () => {
       const r = await api("/api/updates/start", {});
       if (!r.ok) { toast("warn", r.errors?.[0] || "The update could not start."); return; }
-      toast("ok", "Update started — the app will close itself and reopen as the new version.");
-      uStatus.textContent = "Working: downloading, installing, then reopening the new version. Watch it live in the console (it lands there automatically).";
-      go("console");
+      uStatus.textContent = "Working — the progress is in the strip at the bottom left. The app closes itself and reopens as the new version when it's done.";
+      const job = r.job || {};
+      // The console (advanced mode) keeps its live transcript view; the strip
+      // follows either way, so simple mode — where the console can't be
+      // reached from this button — sees the same progress.
+      if (uiMode() === "advanced") {
+        // the console keeps its live transcript; the strip (below) follows
+        // in both modes, so simple mode sees the same progress without a
+        // console to host it
+        if (job.id && S.activeJobId !== job.id) {
+          S.activeJobId = job.id;
+          renderConsoleTabs();
+          attachStream(job.id, true);
+        }
+        toggleConsole();
+      }
+      startUpdateStrip(job.id);
     };
 
     uBtn.onclick = null;   // render() owns the button from here

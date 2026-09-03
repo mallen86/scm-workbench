@@ -769,6 +769,30 @@ _UPDATE_CHECK_IN_FLIGHT = False
 _UPDATE_STATE_LOCK = threading.Lock()
 
 
+def _own_bundle() -> str:
+    """The .app bundle this server runs out of (None for a dev checkout).
+
+    The install job needs the *path* of the bundle to swap, and it cannot
+    be asked for by an environment variable: the worker the Tauri shell
+    spawns inherits the shell's environment, which never carries one - and
+    a missing var read as "not packaged" is exactly the failure that made
+    a real install a silent no-op (the job downloaded, extracted, and ended
+    with "no app folder to swap" while the app sat untouched in
+    /Applications). The path is right here in sys.argv[0] instead:
+    <App>.app/Contents/MacOS/<exe>. The old env knob stays honored for
+    tests that set it explicitly."""
+    if os.environ.get("SCM_WORKBENCH_BUNDLE"):
+        return os.environ["SCM_WORKBENCH_BUNDLE"]
+    if not os.environ.get("SCM_WORKBENCH_PACKAGED"):
+        return None
+    exe = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
+    if exe:
+        for parent in exe.parents:
+            if parent.suffix == ".app":
+                return str(parent)
+    return None
+
+
 def load_update_state() -> dict:
     st = _try_read_json(UPDATE_STATE_FILE)
     return st or {"status": "never", "current": SERVER_VERSION, "checked_at": None,
@@ -809,7 +833,16 @@ def run_update_check() -> dict:
         except updater.UpdateError as e:
             st.update(status="error", reason=str(e), checked_at=time.time())
         else:
-            if rel.get("tag") and updater.is_newer(rel["tag"], SERVER_VERSION):
+            if rel.get("tag") and (
+                updater.is_newer(rel["tag"], SERVER_VERSION)
+                or rel["tag"].lstrip("v") == SERVER_VERSION
+        ):
+            # The second arm: the check found a release equal to the running
+            # version - a check that ran while the release it saw was still
+            # unpublished, or a manual re-check. The card treats this as
+            # "update-available" (the user pressed a button and expects the
+            # install flow), and the install's re-verification closes it out
+            # cleanly instead of dead-ending on "Nothing to do".
                 try:
                     asset = updater.pick_asset(rel)
                 except updater.UpdateError as e:
@@ -885,7 +918,7 @@ def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict]
             "current": SERVER_VERSION,
             "latest": st.get("latest"),
             "asset": st.get("asset"),
-            "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or None,
+            "bundle": _own_bundle(),
             "work": DATA_DIR / "update",
             "force": bool(force),
         }
@@ -1092,7 +1125,76 @@ def _bootstrapping() -> bool:
     return _bootstrap_state()["active"]
 
 
+def release_notes_view() -> dict:
+    """The newest release's notes, fetched fresh from GitHub for the
+    in-app "What's new" view: the app itself renders them (release notes
+    live on GitHub, not in the bundle, so the running app shows the
+    release it was built for, even after the release page has moved on).
+    Falls back to the stored update state when the network can't confirm."""
+
+    import re as _re
+
+    try:
+        rel = updater.latest_release(timeout=15)
+        tag, body, url = rel.get("tag") or "", rel.get("body") or "", rel.get("url") or ""
+        published = rel.get("published") or ""
+        name = rel.get("name") or tag
+    except Exception:
+        st = load_update_state()
+        tag = st.get("latest") or ""
+        body, url = "", st.get("release_url") or ""
+        published = st.get("published") or ""
+        name = tag
+
+    if not tag:
+        return {"ok": False, "error": "no release is known yet"}
+
+    # Minimal, conservative markdown → html for release notes: headings,
+    # bold, italic, code, links, lists. The notes are written by us, so
+    # this is display-only, not a general renderer.
+    def md(src: str) -> str:
+        if not src:
+            return ""
+        out = []
+        for raw in src.split("\n"):
+            line = raw.rstrip()
+            if not line.strip():
+                out.append("")
+                continue
+            s = line
+            if _re.match(r"^#{1,4}\s", s):
+                lvl = len(s) - len(s.lstrip("#"))
+                s = s.lstrip("#").strip()
+                out.append(f"<h{min(lvl + 1, 5)}>{s}</h{min(lvl + 1, 5)}>")
+                continue
+            if s.lstrip().startswith(("-", "*", "+")) and len(s.lstrip()) > 1:
+                out.append("<li>" + s.lstrip()[1:] + "</li>")
+                continue
+            out.append(f"<p>{s}</p>")
+        html = "".join(out)
+        html = _re.sub(r"(?:<li>.*?</li>\s*)+", lambda m: "<ul>" + m.group(0).strip() + "</ul>", html, flags=_re.S)
+        html = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+                        lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>', html)
+        html = _re.sub(r"`([^`]+)`", r"<code>\1</code>", html)
+        html = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", html)
+        html = _re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<i>\1</i>", html)
+        return html
+
+    when = ""
+    if published:
+        try:
+            # "2026-09-03T21:03:21Z" -> (2026, 9, 3, 0, 0, 0, 0, 0, 0) for strftime
+            p = published.split("T")
+            d = p[0].split("-")
+            t = p[1][:2].lstrip("0") or "0"
+            when = time.strftime("%b %-d, %Y", (int(d[0]), int(d[1]), int(d[2]), int(t), 0, 0, 0, 0, 0))
+        except Exception:
+            when = published
+    return {"ok": True, "tag": tag, "name": name, "published": when, "url": url, "body": md(body)}
+
+
 def get_info() -> dict:
+
     settings = load_settings()
     scm, extras = effective_dirs(settings)
     return {
@@ -2178,6 +2280,8 @@ class Handler(BaseHTTPRequestHandler):
                                   extra=[("Access-Control-Allow-Origin", "*")])
             if path == "/api/info":
                 return self._json(get_info())
+            if path == "/api/release-notes":
+                return self._json(release_notes_view())
             if path == "/api/repos":
                 return self._json({"repos": repos_view(load_settings())})
             if path == "/api/manifest":
@@ -2187,6 +2291,10 @@ class Handler(BaseHTTPRequestHandler):
                     running = [
                         {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
                          "status": j["status"], "exit_code": j["exit_code"], "cmd": j["cmd"],
+                         # "progress" is live (throttled) state the UI's job
+                         # progress strip reads; a finished/unknown stage is
+                         # simply absent, not a lie of zeros.
+                         **({"progress": j.get("progress")} if j.get("progress") else {}),
                          "warnings": j.get("warnings", []), "outputs": job_outputs(j)}
                         for j in sorted(JOBS.values(), key=lambda x: x["ts"], reverse=True)[:50]
                     ]

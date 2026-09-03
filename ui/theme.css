@@ -994,6 +994,19 @@ body.mode-simple .console { display: none; }
 }
 .linkish:hover { text-decoration: underline; }
 
+/* the in-app release-notes view ("What's new" on the app-update card) */
+.modal .m-loading { font-size: 13px; color: var(--muted); }
+.modal .m-when { font-size: 12.5px; color: var(--muted); }
+.modal .notes { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 12px 16px; max-height: 46vh; overflow: auto; }
+.modal .notes h4, .modal .notes h5 { font-size: 13px; font-weight: 750; margin: 12px 0 6px; color: var(--text); }
+.modal .notes h4:first-child, .modal .notes h5:first-child { margin-top: 0; }
+.modal .notes p { font-size: 13px; line-height: 1.55; color: var(--text); margin: 6px 0; }
+.modal .notes ul { margin: 6px 0; padding-left: 20px; }
+.modal .notes li { font-size: 13px; line-height: 1.55; color: var(--text); }
+.modal .notes b { font-weight: 700; }
+.modal .notes code { font-family: var(--mono); font-size: 12px; background: rgba(128, 128, 128, 0.12); border-radius: 4px; padding: 1px 5px; }
+.modal .notes a { color: var(--info); text-decoration: underline; }
+
 /* pdf preview frame */
 .pdf-frame { width: 100%; height: 430px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
 .img-preview { max-width: 100%; max-height: 430px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
