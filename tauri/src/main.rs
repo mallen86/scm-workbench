@@ -299,16 +299,74 @@ fn spawn_worker(
     Ok(())
 }
 
+/// One worker is ready on the port, but no app window owns it: a hard-killed
+/// previous instance (End Task) or a translocated launch whose temp copy died
+/// leaves the python listening behind, and the window now has to decide
+/// whether that listener is the one it will drive. It is almost never right:
+/// a window whose webview is denied plain-HTTP loopback (the local-network
+/// privacy prompt on current macOS, denied or never shown because the app
+/// ran from a quarantined, translocated copy) can't drive *any* server -
+/// it renders the splash, times out, and the user sees a stuck window while
+/// the old worker runs fine in the dark. The only safe shape is "the worker
+/// this very launch spawned" - the slot is populated by `spawn_worker` before
+/// we get here, so a populated slot is this launch's child, and an empty one
+/// means the spawn failed or the child died in the first poll. Claiming the
+/// port is kept as a separate, *declined* step in that case: we never kill
+/// a listener we did not spawn.
+fn foreign_worker(slot: &WorkerSlot) -> bool {
+    !port_open(WORKER_PORT)
+        || slot
+            .lock()
+            .ok()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+}
+
 /// Wait until the worker answers on the loopback port (or it dies), then
 /// point the window at it. Keep watching: if the worker dies later, the
 /// window says so instead of going quiet.
 fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
     let url = format!("http://127.0.0.1:{WORKER_PORT}");
 
+    // The child died before the loop ever polled it (spawn succeeded, the
+    // worker bailed in its first instants). The old page said "ended before
+    // it was ready" - true, but it leaves the user staring at a dead window
+    // when the real problem is usually the port being held by a leftover
+    // (the macOS window, denied the network, can never say "the port is
+    // busy" for itself, because its own webview is the thing that's denied;
+    // this check is the honest substitute). Name it.
+    if let Some(code) = slot
+        .lock()
+        .ok()
+        .and_then(|mut g| g.as_mut().and_then(|c| c.try_wait().ok()).flatten())
+    {
+        let _ = app.run_on_main_thread({
+            let w = window.clone();
+            let d = data_dir();
+            move || {
+                let held = port_open(WORKER_PORT);
+                fail_window(
+                    &w,
+                    &d,
+                    if held {
+                        "The worker died at start-up, and its port (8038) is already taken by a program this launch did not start. The window can't use that listener, and it will not kill one it didn't spawn."
+                    } else {
+                        "The part of the app that does the work ended before it was ready."
+                    },
+                    &format!(
+                        "(exit code {code})\nA held port is usually a worker left over from a previous launch - close any SCM Workbench windows, and if this keeps happening, delete the app's own data area (the path below) and open it fresh.\n{}",
+                        log_tail(&d, 20)
+                    ),
+                );
+            }
+        });
+        return;
+    }
+
     let mut up = false;
     let deadline = Instant::now() + Duration::from_secs(120);
     while !up && Instant::now() < deadline {
-        if port_open(WORKER_PORT) {
+        if foreign_worker(&slot) {
             up = true;
             break;
         }

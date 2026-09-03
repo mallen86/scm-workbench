@@ -12,7 +12,7 @@ It wraps those repos' scripts in a normal app: pick options in a form, see the e
 
 Download the latest release from the [releases page](https://github.com/mallen86/scm-workbench/releases) — one archive per platform, both built by the repo's CI.
 
-* **macOS** — open `SCM Workbench.app`. If the system warns that it is unsigned, right-click → *Open* once.
+* **macOS** — move `SCM Workbench.app` out of Downloads (drag it, in Finder, to **Applications** — a downloaded app launched straight from Downloads is *translocated*, run from a temporary copy that can't hold its one-time permissions), then open it from there. The app is ad-hoc signed rather than notarized, so the first launch is gated by macOS: if it says the app *couldn't be opened* or is *from an unknown developer*, go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**. That's it — the allow is remembered by the machine, though each new release gets its own (one more *Open Anyway*). If the window opens but stays on *Starting the SCM Workbench server…* for longer than a few seconds, allow it once under **System Settings → Privacy & Security → Local Network** (the window reaches its own worker over the loopback) — or just follow the first-run guide: [docs/macos-first-run.md](docs/macos-first-run.md).
 * **Windows** — unzip and run it (one-time SmartScreen prompt).
 
 That's the whole install. The app puts nothing on your machine: no Python, no packages, no terminal. It keeps everything in its own per-user data folder (`~/Library/Application Support/scm-workbench` on macOS, `%LOCALAPPDATA%\scm-workbench` on Windows) — a private Python runtime it provisions itself, your settings, job history, and working copies of the two repos.

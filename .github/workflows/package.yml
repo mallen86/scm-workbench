@@ -225,6 +225,12 @@ jobs:
         with:
           name: scm-workbench-macos
           path: build/macos/scm-workbench-macos.zip
+          # The release job consumes the artifact in the same minutes, so a
+          # 1-day retention is plenty; it also keeps the account's 500 MB
+          # free artifact-storage allowance from filling up with a ~180 MB
+          # zip per platform per run for the full 90-day default. (Valid
+          # range: 1-90; 0 = repo default.)
+          retention-days: 1
   windows:
     runs-on: windows-latest
     steps:
@@ -304,6 +310,7 @@ jobs:
         with:
           name: scm-workbench-windows
           path: build/windows/scm-workbench-windows.zip
+          retention-days: 1  # see the macos step above
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
