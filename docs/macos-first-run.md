@@ -23,15 +23,24 @@ Two things that make this step feel broken:
   fresh identity. The clean flow is: **move the app (drag it, in Finder) to
   Applications**, then run it from there.
 - The allow in step 2 is per *signature*. Each release is re-signed with a new
-  ad-hoc seal, so **each new version gets its one "Open Anyway"**. (The
-  app's own updater swaps the bundle in place and keeps the allow it already
-  has; only the first launch of a brand-new download pays for it.)
+  ad-hoc seal, so **each new version gets its one "Open Anyway"**. This is
+  true of the in-app updater too: it swaps the bundle in place, the new seal
+  makes the relaunched copy an unknown developer again, and the next launch
+  sits blocked behind *System Settings → Privacy & Security → Open Anyway*
+  until you click it — **a window that opens blank right after an update is
+  that gate, not a broken update**. Click it once; the build is remembered.
 
 ## "The window opens but it never loads"
 
-If the window comes up and just sits there (splash, or a blank page), the
-usual suspect is the **Local Network** permission, which current macOS asks
-for separately from Gatekeeper:
+If the window comes up and just sits there (splash, or a blank page), there
+are two gates, in this order:
+
+1. **Gatekeeper** — if the app was *just updated or freshly downloaded*, the
+   launch is blocked outright: *System Settings → Privacy & Security* shows
+   "SCM Workbench from an unknown developer was prevented from opening" —
+   click **Open Anyway** there, then launch it again. (This is the one users
+   hit after in-app updates; see the update section below.)
+2. **Local Network** permission, which current macOS asks for separately:
 
 - **System Settings → Privacy & Security → Local Network** — make sure
   *SCM Workbench* is switched **on**.
