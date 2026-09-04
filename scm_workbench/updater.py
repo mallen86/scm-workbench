@@ -392,13 +392,13 @@ def relaunch_detached(bundle: Path, log=print, delay: float = 2.5) -> None:
     one-liner is the parent-agnostic way: the new instance wants the port
     the old one (us) still holds, so the relaunch must land after our exit.
 
-    macOS note: the swapped bundle is re-signed, so to the operating system
-    the relaunch looks like a *different* app than the one you allowed local
-    networking for - the next launch may get the "allow this app to accept
-    incoming connections on the local network?" prompt (and the window waits
-    on the answer rather than showing a blank UI). The finish message below
-    tells the user that; the prompt is one click, remembered for the life of
-    this build."""
+    macOS note: the swapped bundle is re-signed with a fresh ad-hoc seal, so
+    to Gatekeeper the relaunch looks like a *different, never-seen* app - the
+    launch is blocked behind the "SCM Workbench cannot be opened" entry in
+    System Settings → Privacy & Security until the user clicks **Open
+    Anyway** there (once, remembered for this build). If a local-network
+    prompt shows too (it can, for the same reason), that answer is one
+    click as well. The finish message below names both."""
     if sys.platform == "darwin":
         cmd = ["/bin/sh", "-c", f"sleep {delay:.0f} && open '{bundle}'"]
         subprocess.Popen(cmd, start_new_session=True,
@@ -552,13 +552,14 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         stop_ancestors(log=emit)
         if sys.platform == "darwin":
             finish(True,
-                   "New version is starting. If the window doesn't reopen within ~10 s, "
-                   f"launch {old_bundle} yourself — everything is already in place.\n"
-                   "    The app was just replaced, so macOS may treat this launch as a new "
-                   "app and ask whether it may accept connections on your local network\n"
-                   "    (the same question as on first install). Allow it if you see that "
-                   "prompt — the window is waiting on it, and the answer is remembered "
-                   "for this build.")
+                   "New version is starting. One thing to expect: the update re-signs the app\n"
+                   "    in place, so macOS treats the relaunched copy as brand new and may refuse it -\n"
+                   "    if you see \"SCM Workbench cannot be opened\" in\n"
+                   "    System Settings → Privacy & Security, click **Open Anyway** (once,\n"
+                   "    remembered for this build). If a separate prompt asks about the local\n"
+                   "    network, allow that too - the window loads through either.\n"
+                   "    If the window doesn't reopen within ~10 s, launch "
+                   f"{old_bundle} yourself — everything is already in place.")
         else:
             finish(True, f"New version is starting. If the window doesn't reopen within ~10 s, "
                           f"launch {old_bundle} yourself — everything is already in place.")

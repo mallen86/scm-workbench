@@ -39,12 +39,14 @@ for separately from Gatekeeper:
   (not Downloads, not a terminal) and the prompt appears; answer **Allow**.
   The window needs plain-HTTP access to its own worker on `127.0.0.1:8038`;
   without the grant the webview is denied and no app version can load.
-- **The same prompt returns after an in-app update.** The updater re-signs
-  the bundle in place, so macOS sees the relaunch as a new app: if the
-  window stays blank after an update, the local-network question is waiting
-  for you (Settings → Privacy & Security → Local Network, or the prompt
-  itself). Allow it once per build; the updater's closing message tells you
-  to expect it.
+- **The one-time gates return after an in-app update, too.** The updater
+  re-signs the bundle in place with a fresh ad-hoc seal, so macOS treats the
+  relaunched copy as a brand-new, never-seen app: expect the same
+  **"Open Anyway"** entry under *Privacy & Security* as on first install
+  (click it once; it is remembered for this build), and possibly the local-
+  network question as well (allow it — the window loads through either).
+  The updater's closing message names both, so a blocked relaunch has an
+  answer instead of a mystery.
 
 What it is *not*: a broken download. A quarantined copy still passes the
 signature check (the app verifies its own seal at build time, and a copy that
