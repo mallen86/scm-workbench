@@ -473,8 +473,9 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
         # 1) re-verify (the state that started the job can be a few minutes old)
         rel = latest_release()
-        if not is_newer(rel["tag"], plan.get("current")) and not plan.get("force"):
-            if rel["tag"] == plan.get("current"):
+        same_release = (rel["tag"].lstrip("v") == plan.get("current"))
+        if (same_release or not is_newer(rel["tag"], plan.get("current"))) and not plan.get("force"):
+            if same_release:
                 # The running app *is* the newest release (a check that ran
                 # while the release it found was still unpublished, or a
                 # manual re-check): the check side shows this as
