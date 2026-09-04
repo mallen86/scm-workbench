@@ -1150,35 +1150,69 @@ def release_notes_view() -> dict:
         return {"ok": False, "error": "no release is known yet"}
 
     # Minimal, conservative markdown → html for release notes: headings,
-    # bold, italic, code, links, lists. The notes are written by us, so
-    # this is display-only, not a general renderer.
+    # paragraphs (with soft-wrap), bold, italic, code, links, lists, and
+    # fenced code blocks. The notes are written by us, so this is
+    # display-only, not a general renderer. Structure comes from blocks:
+    # consecutive text lines merge into one <p> (markdown soft-wrap),
+    # consecutive list lines into one <ul> — a <p> per raw line is what
+    # made an earlier revision of this view read like broken prose.
+    def inline(s: str) -> str:
+        s = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+                    lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>', s)
+        s = _re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        s = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+        s = _re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
+        return s
+
     def md(src: str) -> str:
         if not src:
             return ""
         out = []
+        para = []
+        items = []
+        fence = False
+        code = []
+
+        def flush_para():
+            if para:
+                out.append("<p>" + inline(" ".join(para)) + "</p>")
+                para.clear()
+
+        def flush_list():
+            if items:
+                out.append("<ul>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ul>")
+                items.clear()
+
         for raw in src.split("\n"):
             line = raw.rstrip()
-            if not line.strip():
-                out.append("")
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if fence:
+                    out.append("<pre><code>" + _re.sub(r"<[^>]+>", "", "\n".join(code)) + "</code></pre>")
+                    code.clear()
+                    fence = False
+                else:
+                    flush_para(); flush_list(); fence = True
                 continue
-            s = line
-            if _re.match(r"^#{1,4}\s", s):
-                lvl = len(s) - len(s.lstrip("#"))
-                s = s.lstrip("#").strip()
-                out.append(f"<h{min(lvl + 1, 5)}>{s}</h{min(lvl + 1, 5)}>")
+            if fence:
+                code.append(line)
                 continue
-            if s.lstrip().startswith(("-", "*", "+")) and len(s.lstrip()) > 1:
-                out.append("<li>" + s.lstrip()[1:] + "</li>")
+            if not stripped:
+                flush_para(); flush_list()
                 continue
-            out.append(f"<p>{s}</p>")
-        html = "".join(out)
-        html = _re.sub(r"(?:<li>.*?</li>\s*)+", lambda m: "<ul>" + m.group(0).strip() + "</ul>", html, flags=_re.S)
-        html = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
-                        lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>', html)
-        html = _re.sub(r"`([^`]+)`", r"<code>\1</code>", html)
-        html = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", html)
-        html = _re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<i>\1</i>", html)
-        return html
+            if _re.match(r"^#{1,4}\s", stripped):
+                flush_para(); flush_list()
+                lvl = len(stripped) - len(stripped.lstrip("#"))
+                out.append(f"<h{min(lvl + 1, 5)}>{inline(stripped.lstrip('#').strip())}</h{min(lvl + 1, 5)}>")
+                continue
+            m = _re.match(r"^[-*+]\s+(.*)$", stripped)
+            if m:
+                flush_para(); items.append(m.group(1)); continue
+            flush_list(); para.append(stripped)
+        if fence:  # an unclosed fence still shows its code
+            out.append("<pre><code>" + _re.sub(r"<[^>]+>", "", "\n".join(code)) + "</code></pre>")
+        flush_para(); flush_list()
+        return "".join(out)
 
     when = ""
     if published:

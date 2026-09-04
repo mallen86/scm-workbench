@@ -23,9 +23,6 @@ jobs:
         # the modules, so this check is the gate: no unresolvable import
         # specifier reaches a build.
         run: python scripts/check_ui_imports.py
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
       - name: Pin the version from the release tag
         # The tag (vX.Y.Z) becomes the app's reported version and the
         # bundle's metadata (Info.plist, exe FileVersion) in one stroke;

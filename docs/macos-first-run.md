@@ -39,6 +39,12 @@ for separately from Gatekeeper:
   (not Downloads, not a terminal) and the prompt appears; answer **Allow**.
   The window needs plain-HTTP access to its own worker on `127.0.0.1:8038`;
   without the grant the webview is denied and no app version can load.
+- **The same prompt returns after an in-app update.** The updater re-signs
+  the bundle in place, so macOS sees the relaunch as a new app: if the
+  window stays blank after an update, the local-network question is waiting
+  for you (Settings → Privacy & Security → Local Network, or the prompt
+  itself). Allow it once per build; the updater's closing message tells you
+  to expect it.
 
 What it is *not*: a broken download. A quarantined copy still passes the
 signature check (the app verifies its own seal at build time, and a copy that
