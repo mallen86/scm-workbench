@@ -31,3 +31,26 @@
 </div>
 </body>
 </html>
+  <script>
+    // The shell takes this window to the worker's origin the moment the
+    // worker answers; normally this page never notices it is still here.
+    // If it is after a long wait, the navigation never happened - on macOS
+    // that state has a name, so say it instead of pulsing forever.
+    (function () {
+      var waited = 0;
+      var timer = setInterval(function () {
+        waited += 1;
+        if (waited >= 120) {
+          clearInterval(timer);
+          document.querySelector(".d").textContent =
+            "This window is waiting for the app's own server, and it never " +
+            "arrived. Quit SCM Workbench (completely) and open it again. If " +
+            "that does not fix it, see \u201CFirst run on Mac\u201D in the " +
+            "README - on current macOS the window needs the app allowed under " +
+            "System Settings \u2192 Privacy & Security, and a fresh " +
+            "allow can take one full re-open.";
+        }
+      }, 500);
+    })();
+  </script>
+</body>

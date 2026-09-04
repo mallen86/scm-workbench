@@ -26,7 +26,6 @@ use std::time::{Duration, Instant};
 use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
-use tauri::webview::PageLoadEvent;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -40,20 +39,10 @@ const WORKER_PORT: u16 = 8038;
 /// Type shared with the watchdog thread: the live worker child, if any.
 type WorkerSlot = Arc<Mutex<Option<std::process::Child>>>;
 
-/// The page shown while the worker is starting.
-///
-/// This deliberately points at the worker's *real origin* (http), not at the
-/// Tauri embedded-asset protocol. On at least one macOS 26 build the custom
-/// `tauri://localhost` scheme never attaches to the webview, so the initial
-/// navigation is a silent no-op and the window sits on a blank "loading" page
-/// forever even though the worker is up and serving (the shell's own log then
-/// reads as a perfectly healthy launch - which is what made this one hard to
-/// see). Loading from the live server instead means the *first* paint is the
-/// real UI the moment the port answers, and there is no separate embedded page
-/// whose protocol could be broken. The worker's own index.html carries the
-/// same splash markup, so nothing the user sees changes.
+/// The page shown while the worker is starting: an app asset (served from
+/// the bundle), navigated to the live server once the port answers.
 fn loading_page() -> WebviewUrl {
-    WebviewUrl::External(format!("http://127.0.0.1:{WORKER_PORT}/").parse().unwrap())
+    WebviewUrl::App("loading.html".into())
 }
 
 fn main() {
@@ -108,7 +97,7 @@ fn main() {
             match spawn_worker(&data, &root, &log_path, &py, &slot) {
                 Ok(()) => {
                     let w = window.clone();
-                    thread::spawn(move || watch_worker(app_handle, slot, w, py, root));
+                    thread::spawn(move || watch_worker(app_handle, slot, w));
                 }
                 Err(e) => {
                     fail_window(
@@ -122,11 +111,10 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the app stops *everything*: the worker leads its own
-            // process group (spawn_worker), and its job children inherit it -
-            // one signal to the group takes the worker and any fetch or
-            // conversion it has in flight, so a close can never leave a
-            // listener on the port (or a job running in the dark) behind.
+            // The window goes, the worker goes with it. (A plain kill() is
+            // enough: the server's own job children are killed by the server
+            // when it dies, and on Windows a process exit does not orphan a
+            // console.)
             if let WindowEvent::CloseRequested { .. } = event {
                 if let Some(mut child) = window
                     .app_handle()
@@ -135,26 +123,9 @@ fn main() {
                     .ok()
                     .and_then(|mut g| g.take())
                 {
-                    reap_worker_group(&mut child);
+                    let _ = child.kill();
+                    let _ = child.wait();
                 }
-            }
-        })
-        .on_page_load(|window, payload| {
-            // The one failure the design can still hit silently: the webview
-            // process is alive but never loaded its first page - on macOS 26
-            // the Tauri custom-protocol initial navigation can no-op without
-            // an error, so the window shows a blank page forever while the
-            // worker serves the real UI fine on the same origin. A load-
-            // finish with a blank document is exactly that shape: reload the
-            // same (correct) origin. This is the in-app version of
-            // "re-open the window" - no terminal required.
-            if let PageLoadEvent::Finished = payload.event() {
-                let w = window.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(600));
-                    let js = r#"(function(){try{var d=document.body?document.body.innerHTML:'';if(!d||d.length<64){window.location.reload(true);}}catch(e){}})()"#;
-                    let _ = w.eval(js);
-                });
             }
         })
         .run(tauri::generate_context!())
@@ -306,13 +277,6 @@ fn spawn_worker(
     // boot).
     #[cfg(target_os = "macos")]
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-    #[cfg(target_os = "macos")]
-    unsafe {
-        // become a process-group leader: the worker (and every job it
-        // spawns, which inherit the group) share one kill scope - see
-        // reap_worker_group
-        libc::setsid(); // (returns the new session id; we only need the side effect)
-    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -324,43 +288,15 @@ fn spawn_worker(
             .open(log_path)?;
         let _ = writeln!(
             log,
-            "== tauri shell {} spawned worker: {} (cwd {}, data {}, python {})",
+            "== tauri shell {} spawned worker: {} (cwd {}, data {})",
             env!("CARGO_PKG_VERSION"),
             py.display(),
             root.display(),
-            data.display(),
-            py.display(),
+            data.display()
         );
     }
     let _ = slot.lock().ok().and_then(|mut g| g.replace(child)).is_some();
     Ok(())
-}
-
-/// Signal the worker's *whole* process group (it leads one - see
-/// `spawn_worker`), not just the worker itself: the worker's job children
-/// inherit the group, so one call takes the worker and every job it has in
-/// flight. This is what "closing the app stops everything" means - the
-/// window can never leave a listener on the port, or a fetch running in
-/// the dark.
-#[cfg(target_os = "macos")]
-fn reap_worker_group(child: &mut std::process::Child) {
-    let pgid = child.id() as i32; // the worker is a group leader: pgid == pid
-    // SIGTERM first: a cooperative worker can stop its jobs gracefully.
-    let _ = unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    // give it a moment, then make it certain
-    std::thread::sleep(Duration::from_millis(700));
-    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
-    let _ = child.wait();
-}
-#[cfg(windows)]
-fn reap_worker_group(child: &mut std::process::Child) {
-    let pid = child.id();
-    let _ = Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = child.wait();
 }
 
 /// One worker is ready on the port, but no app window owns it: a hard-killed
@@ -387,33 +323,10 @@ fn foreign_worker(slot: &WorkerSlot) -> bool {
 }
 
 /// Wait until the worker answers on the loopback port (or it dies), then
-/// keep the window pointed at it. The window already sits on the worker's
-/// origin (see `loading_page`), so this no longer "navigates" - it either
-/// lets the first real paint land, or - if the webview is up but never loaded
-/// the page (the macOS 26 tauri:// protocol no-op) or the worker died -
-/// reloads / fails loudly instead of leaving a silent blank window.
-fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, py: PathBuf, root: PathBuf) {
-
-    // The interpreter itself is missing: the worker could not have started at
-    // all (spawn_worker would have failed earlier - this is the shape in
-    // which a half-installed bundle presents itself). Name it, with the
-    // exact path to look at.
-    if !py.as_os_str().is_empty() && !py.is_file() {
-        let _ = app.run_on_main_thread({
-            let w = window.clone();
-            let d = data_dir();
-            let pyd = py.display().to_string();
-            move || {
-                fail_window(
-                    &w,
-                    &d,
-                    "The app's own runtime is missing a piece - the program that does the work can't be found inside the bundle.",
-                    &format!("expected the worker interpreter at\n    {}\n(the app's own folder is {} - if it was moved or only partly installed, reinstall it from the latest release).", pyd, root.display()),
-                );
-            }
-        });
-        return;
-    }
+/// point the window at it. Keep watching: if the worker dies later, the
+/// window says so instead of going quiet.
+fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
+    let url = format!("http://127.0.0.1:{WORKER_PORT}");
 
     // The child died before the loop ever polled it (spawn succeeded, the
     // worker bailed in its first instants). The old page said "ended before
@@ -497,23 +410,10 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, py: Pat
 
     let _ = app.run_on_main_thread({
         let w = window.clone();
+        let url = url.clone();
         move || {
-            // The worker is up. If the first paint already landed the page is
-            // the real UI and there is nothing to do. If the webview is up but
-            // never loaded anything (the tauri:// initial navigation is a
-            // silent no-op on this macOS - the page the user sees is the
-            // embedded splash that never turned into the worker's), a hard
-            // reload of the *same* origin forces a fresh load from the
-            // worker: the URL is already right, we just make the webview
-            // actually go get it.
-            let js = r#"(function(){
-              try {
-                var d = document.body ? document.body.innerHTML : '';
-                if (d.indexOf('id=\"app\"') !== -1 || d.indexOf('data-page') !== -1) return; // already the real UI
-                window.location.reload(true);
-              } catch (e) { window.location.replace(location.href); }
-            })()"#;
-            let _ = w.eval(js);
+            // From a data: page a top-level http navigation is allowed.
+            let _ = w.eval(&format!("window.location.replace('{url}');"));
         }
     });
 
