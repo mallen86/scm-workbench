@@ -1,13 +1,7 @@
 /* pages/offset — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";
-import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";
-import { refreshInfo } from "../info.js";
-import { go } from "../nav.js";
-import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
-
-/* =============================== offset page ============================== */
+import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});

@@ -1,12 +1,7 @@
 /* pages/extras — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, PAGES, S, el, ico, pageHead } from "../core.js";
-import { doRun, formCard } from "../forms.js";
-import { go } from "../nav.js";
-import { cardSvg, mm } from "./sizes.js";
-import { templatesGallery } from "./templates.js";
-
+import { $, PAGES, S, el, ico, pageHead } from "../core.js";import { doRun, formCard } from "../forms.js";import { go } from "../nav.js";import { cardSvg, mm } from "./sizes.js";import { templatesGallery } from "./templates.js";
 /* ================================= extras page ============================ */
 
 PAGES.extras = (root) => {

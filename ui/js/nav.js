@@ -1,11 +1,7 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole, refreshJobs } from "./console.js";
-import { refreshInfo } from "./info.js";
-import { $, $$, PAGES, S, iconize, toast } from "./core.js";
-import { defaultArgs } from "./forms.js";
-
+import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs } from "./forms.js";
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {

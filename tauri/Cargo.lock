@@ -2606,6 +2606,7 @@ dependencies = [
 name = "scm-workbench"
 version = "0.3.5"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tauri",

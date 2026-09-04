@@ -7,9 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, api } from "../core.js";
-
-const UPDATE_STAGES = {
+import { $, S, el, api } from "./core.js";const UPDATE_STAGES = {
   fetch: "fetching the release…",
   download: "downloading the new version",
   extract: "unpacking the new build",

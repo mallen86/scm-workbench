@@ -1,11 +1,7 @@
 /* pages/dashboard — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, ico, iconize, toast, openUrl } from "../core.js";
-import { refreshInfo } from "../info.js";
-import { go } from "../nav.js";
-import { prepActive, updatePrepRows } from "../prep.js";
-
+import { $, $$, PAGES, S, api, el, ico, iconize, toast, openUrl } from "../core.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { prepActive, updatePrepRows } from "../prep.js";
 PAGES.dashboard = (root) => {
   const wrap = el("div", {});
   const s = S.info.settings;

@@ -1,11 +1,7 @@
 /* pages/sizes — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, el, pageHead } from "../core.js";
-import { go } from "../nav.js";
-import { matrixCard } from "./dashboard.js";
-
-PAGES.sizes = (root) => {
+import { PAGES, S, el, pageHead } from "../core.js";import { go } from "../nav.js";import { matrixCard } from "./dashboard.js";PAGES.sizes = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Sizes & layouts", "Every card size the repos know about — core + extras — with a scaled silhouette of each card, plus the full paper × card layout matrix."));
   wrap.append(el("div", { class: "section-label" }, "Card sizes"));

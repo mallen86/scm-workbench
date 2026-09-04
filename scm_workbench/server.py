@@ -2266,7 +2266,27 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         q = parse_qs(url.query)
         try:
+            if path == "/smoke":
+                # Build/CI proof that a real WKWebView can reach this server.
+                # curl reaching /api/info proves the worker; this proves the
+                # webview (the piece three consecutive releases shipped
+                # broken because nothing in CI ever looked at it): the Tauri
+                # shell points its window at this origin, and this endpoint
+                # answers only a connection the webview itself opens.
+                return self._json({
+                    "smoke": "ok",
+                    "version": SERVER_VERSION,
+                    "client": self.headers.get("User-Agent", ""),
+                })
             if path in ("/", "/index.html"):
+                ua = self.headers.get("User-Agent", "")
+                if "AppleWebKit" in ua:
+                    # A WebKit session on the index: the worker says so at
+                    # request time. This is the marker the CI smoke test
+                    # greps for, and on a real machine it is the answer to
+                    # "is the window on the UI?" - the app's own webview,
+                    # not curl.
+                    sys.stderr.write("[workbench] webview session on / (WebKit)\n")
                 return self._static("index.html")
             if path.startswith("/ui/"):
                 return self._static(path[4:])

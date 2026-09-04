@@ -1,12 +1,7 @@
 /* forms — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { openConsole, refreshJobs } from "./console.js";
-import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";
-import { refreshInfo } from "./info.js";
-import { repoReady } from "./prep.js";
-import { uiMode } from "./nav.js";
-
+import { openConsole, refreshJobs } from "./console.js";import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { refreshInfo } from "./info.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 

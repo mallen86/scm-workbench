@@ -112,14 +112,22 @@ jobs:
             esac
           done
           codesign --force --deep --sign - "$app"
-      - name: Smoke test - the bundle's window must serve the UI
-        # The whole point of the new architecture, verified in CI: the app
-        # comes up, its worker answers on 127.0.0.1:8038, and the app's
-        # own /api/info is what the user would see. NO_BOOTSTRAP keeps the
-        # test hermetic (no 570 MB repo clone in a CI run). Before the
-        # launch, the bundled runtime must import the core job dependencies -
-        # that is what "self-contained" means, and on arm64 it also proves
-        # the ad-hoc signing made the extension modules loadable.
+      - name: Smoke test - the window's webview must be on the UI
+        # The piece three releases shipped broken: the worker answered, the
+        # webview never reached it, and nothing in CI looked at the webview.
+        # (The old smoke curled /api/info - that proves the *worker*, not
+        # the *window*.) The shape of the proof: only a real WebKit session
+        # sends a WebKit User-Agent, so a WebKit UA on the worker's request
+        # log is the marker that a human would see the UI. Two failures,
+        # named: the worker never binds (the old check), and the worker
+        # serves but no webview ever connects (the blank-window class -
+        # exactly what the user saw on v0.3.2 through v0.3.4: a healthy
+        # server log next to a window stuck on its splash). NO_BOOTSTRAP
+        # keeps the test hermetic (no 570 MB repo clone in a CI run). Before
+        # the launch, the bundled runtime must import the core job
+        # dependencies - that is what "self-contained" means, and on arm64
+        # it also proves the ad-hoc signing made the extension modules
+        # loadable.
         #
         # The payload (app/, runtime/) lives under Contents/ - inside the
         # code-signature seal the Sign step made. Anything that runs from
@@ -140,12 +148,22 @@ jobs:
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
           "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/smoke.log" 2>&1 &
           app_pid=$!
-          ok=""
+          worker_ok=""
+          webview_ok=""
           for i in $(seq 1 90); do
             sleep 1
-            if curl -sf "http://127.0.0.1:8038/api/info" 2>/dev/null | grep -q '"server"'; then
-              ok=1
-              echo "smoke: the UI answered on 127.0.0.1:8038"
+            if [ -z "$worker_ok" ] && curl -sf "http://127.0.0.1:8038/api/info" 2>/dev/null | grep -q '"server"'; then
+              worker_ok=1
+              echo "smoke: the worker answers on 127.0.0.1:8038"
+            fi
+            # The worker logs a marker line at request time when a WebKit
+            # session loads its index (server.py, / GET): that marker is
+            # what this check greps for. A curl in this same loop loads /
+            # with curl's own agent, so it cannot produce the marker.
+            if [ -n "$worker_ok" ] && [ -z "$webview_ok" ] \
+               && grep -q "webview session on / (WebKit)" "$data/server-tauri.log" 2>/dev/null; then
+              webview_ok=1
+              echo "smoke: the window's webview is on the UI (a WebKit connection hit the worker)"
               break
             fi
           done
@@ -153,11 +171,20 @@ jobs:
           # the worker is the window's child; the hard kill above orphans it,
           # so collect the bundle's runtime explicitly
           pkill -f "$app/Contents/runtime/python" 2>/dev/null || true
-          if [ -z "$ok" ]; then
+          if [ -z "$worker_ok" ]; then
             echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
+            echo "smoke FAILED: the worker never answered" >&2
             exit 1
           fi
+          if [ -z "$webview_ok" ]; then
+            echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
+            echo "---- server log (last 40) ----"; tail -40 "$data/server-tauri.log" 2>/dev/null || true
+            echo "smoke FAILED: the worker serves, but no webview ever reached it" >&2
+            echo "              (the blank-window failure the user would see - not shippable)" >&2
+            exit 1
+          fi
+          echo "smoke: worker up AND the webview is on the page - the UI the user gets"
       - name: Re-seal the bundle after the smoke test
         # The smoke run is the last thing that executes from the bundle, and
         # a straggler it wakes can keep writing after the Sign step's seal.

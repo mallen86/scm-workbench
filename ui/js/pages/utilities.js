@@ -1,11 +1,7 @@
 /* pages/utilities — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, PAGES, api, confirmModal, el, ico, pageHead } from "../core.js";
-import { doRun } from "../forms.js";
-import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
-import { mm } from "./sizes.js";
-
+import { $, PAGES, api, confirmModal, el, ico, pageHead } from "../core.js";import { doRun } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { mm } from "./sizes.js";
 /* ================================ utilities page ========================== */
 
 PAGES.utilities = (root) => {

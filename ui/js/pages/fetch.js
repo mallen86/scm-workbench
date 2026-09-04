@@ -1,13 +1,7 @@
 /* pages/fetch — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";
-import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";
-import { go } from "../nav.js";
-import { jobStrip } from "../jobstrip.js";
-import { watchJobDone } from "./utilities.js";
-
-/* ================================ fetch page =============================== */
+import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});

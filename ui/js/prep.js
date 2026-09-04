@@ -1,10 +1,7 @@
 /* prep — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, S, el, toast } from "./core.js";
-import { refreshInfo } from "./info.js";
-import { go } from "./nav.js";
-
+import { $, S, el, toast } from "./core.js";import { refreshInfo } from "./info.js";import { go } from "./nav.js";
 /* ================================ dashboard ================================ */
 
 /* ---------------- repo prep state (first clone + updates) ------------------ */

@@ -2,7 +2,6 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";
-
 /* In-app "What's new": the release notes live on GitHub, but the app's
    window can't open a browser tab in its webview, so the notes are fetched
    through the server (which also renders the markdown) and shown in the
@@ -49,14 +48,7 @@ function showWhatsNew(tag, releaseUrl) {
     }
   })();
 }
-import { doRun, numSteppers } from "../forms.js";
-import { refreshInfo } from "../info.js";
-import { go, setTheme, uiMode } from "../nav.js";
-import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";
-import { startUpdateStrip } from "../updater-ui.js";
-import { watchJobDone } from "./utilities.js";
-
-export function repoCopyRow(row, container, simple = false) {
+import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, setTheme, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";

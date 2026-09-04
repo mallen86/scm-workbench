@@ -8,9 +8,7 @@
    "go create the PDF", create pdf → "open the PDF"). Advanced mode never
    sees the strip — the console drawer is that page's status there instead. */
 
-import { $, S, el, ico, api, toast } from "./core.js";
-import { uiMode } from "./nav.js";
-
+import { $, S, el, ico, api, toast } from "./core.js";import { uiMode } from "./nav.js";
 export function jobStrip(kind, opts = {}) {
   const strip = el("div", { class: "jobstrip", hidden: true });
   const label = el("div", { class: "js-label" }, "");

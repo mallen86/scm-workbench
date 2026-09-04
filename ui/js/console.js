@@ -1,12 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";
-import { displayCmd, repoRowForKind } from "./forms.js";
-import { refreshInfo, showBootFailure } from "./info.js";
-import { bindNav, bootPage, uiMode } from "./nav.js";
-import { startPrepWatcher } from "./prep.js";
-
+import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { displayCmd, repoRowForKind } from "./forms.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
 export let _lastJobsSig;
 
 

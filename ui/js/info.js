@@ -1,11 +1,7 @@
 /* info — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { refreshJobs, startJobsPoll } from "./console.js";
-import { $, $$, S, api, el, ico } from "./core.js";
-import { bootPage, syncUiMode } from "./nav.js";
-import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
-
+import { refreshJobs, startJobsPoll } from "./console.js";import { $, $$, S, api, el, ico } from "./core.js";import { bootPage, syncUiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
 /* ================================= bootstrap =============================== */
 
 export async function refreshInfo({ keepForms = false, jobs = true } = {}) {

@@ -1,12 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";
-import { afterFormChange, defaultArgs, formCard } from "../forms.js";
-import { go, uiMode } from "../nav.js";
-import { connectCardNeeded, repoSetupCard } from "./dashboard.js";
-import { paperForCreatePdf } from "./offset.js";
-import { jobStrip } from "../jobstrip.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";
 
 /* ================================ pdf page ================================ */
 
