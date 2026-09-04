@@ -14,6 +14,15 @@ jobs:
     runs-on: macos-latest  # Apple silicon (arm64)
     steps:
       - uses: actions/checkout@v4
+      - name: Guard — every UI import must resolve
+        # The v0.3.2–v0.3.4 blank-window failure: page modules imported
+        # their shared dependencies from the wrong directory, the worker
+        # 404'd them as JSON, WebKit refused the MIME type, and the whole
+        # UI died after the nav shell painted. The worker serves the UI
+        # fine and /api/info answers — the old smoke test never looked at
+        # the modules, so this check is the gate: no unresolvable import
+        # specifier reaches a build.
+        run: python scripts/check_ui_imports.py
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
