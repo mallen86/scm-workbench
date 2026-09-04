@@ -59,9 +59,11 @@ are two gates, in this order:
 
 What it is *not*: a broken download. A quarantined copy still passes the
 signature check (the app verifies its own seal at build time, and a copy that
-failed that check never ships), so a stuck window is an OS-permission state
-on that machine, not damaged bytes — re-downloading usually doesn't help;
-moving it to Applications and granting Local Network does.
+failed that check never ships), so a stuck window is a state of the webview
+on that machine after a fresh signature, not damaged bytes — re-downloading
+the same version won't change it. On current macOS the reliable clear is a
+reboot (or the Open Anyway / Local Network steps above, then a re-open); the
+window's own splash message now tells you which one to try first.
 
 ## "The worker died at start-up, and its port (8038) is already taken…"
 

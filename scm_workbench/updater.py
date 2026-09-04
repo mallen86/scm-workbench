@@ -552,14 +552,16 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         stop_ancestors(log=emit)
         if sys.platform == "darwin":
             finish(True,
-                   "New version is starting. One thing to expect: the update re-signs the app\n"
-                   "    in place, so macOS treats the relaunched copy as brand new and may refuse it -\n"
-                   "    if you see \"SCM Workbench cannot be opened\" in\n"
-                   "    System Settings → Privacy & Security, click **Open Anyway** (once,\n"
-                   "    remembered for this build). If a separate prompt asks about the local\n"
-                   "    network, allow that too - the window loads through either.\n"
-                   "    If the window doesn't reopen within ~10 s, launch "
-                   f"{old_bundle} yourself — everything is already in place.")
+                   "New version is starting. One thing to expect on macOS: the update re-signs\n"
+                   "    the app in place, so the relaunched copy reads to the system as brand new.\n"
+                   "    - If it is refused (\\u201cSCM Workbench cannot be opened\\u201d in\n"
+                   "      System Settings → Privacy & Security), click **Open Anyway** and reopen.\n"
+                   "    - If it opens but the window stays on its starting page, that is the\n"
+                   "      webview wedged by the fresh signature: quit the app fully and reopen it;\n"
+                   "      if that still does not load, a reboot clears it.\n"
+                   "    If a prompt asks about the local network, allow it too.\n"
+                   "    (If the window doesn't reopen within ~10 s, launch "
+                   f"{old_bundle} yourself — everything is already in place.)")
         else:
             finish(True, f"New version is starting. If the window doesn't reopen within ~10 s, "
                           f"launch {old_bundle} yourself — everything is already in place.")
