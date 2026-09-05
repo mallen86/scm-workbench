@@ -375,44 +375,64 @@ export function formCard(kind, opts = {}) {
     // Flat layout: no group headers, no collapsible wrappers, no card title
     // of its own. In simple mode only the options flagged `simple` in the
     // manifest make it in (the everyday ones); everything else keeps its
-    // default behind the scenes. A kind-level `simple_rows` list, when
-    // given, is the layout of that section — one form row per entry, in
-    // the listed order (e.g. the two dropdowns alone up top, the four
-    // toggles together below, each field of a row taking an even share);
-    // simple options not named in any row fall into a final row, manifest order.
-    const os = [];
-    for (const g of spec.groups || [])
-      for (const o of g.options || [])
-        if (optVisible(o, spec)) os.push(o);
+    // default behind the scenes. Each group becomes one form row; a
+    // kind-level `simple_rows` list (create_pdf, fetch:*) names which
+    // groups hold which option rows, in order. A group that names its own
+    // `simple_rows` (MTG's preferences group does: 7 toggles = 3+3+1
+    // per row) renders them as sub-rows inside the group's row. The fetch
+    // form is fully flat — every group, every option — unlike create_pdf,
+    // whose flat section shows only its `simple`-flagged options.
     const rows = uiMode() === "simple" ? (spec.simple_rows || []) : [];
-    const place = keys => {
+    // Render one group's options into one flat row. A group that names its
+    // own `simple_rows` (MTG's preferences group) gets a sub-frow for each
+    // of those rows — 3-per-row, the standard rhythm — inside its row.
+    const placeGroup = (g, keys) => {
       const row = el("div", { class: "frow" });
-      for (const k of keys) {
-        const o = os.find(x => x.key === k);
-        if (!o) continue;
+      // simple-mode visibility: create_pdf's flat section shows only its
+      // `simple`-flagged options; the fetch form is fully flat, so every
+      // option is visible there.
+      const visible = kind === "create_pdf" ? o => optVisible(o, spec) : () => true;
+      const draw = (o, k, target) => {
         const node = renderOption(o, args, kind);
-        if (node) row.append(node);
+        if (node) target.append(node);
+      };
+      const fill = r => {
+        // flat rows split evenly, whatever the manifest widths say: the four-
+        // toggle row needs 25% apiece to fit, and a two-dropdown row reads
+        // better at half width than two one-thirds with dead space at the end
+        const n = r.childElementCount;
+        if (n > 1) {
+          for (const f of r.children) {
+            f.classList.remove("w-half", "w-third", "w-quarter", "w-full");
+            f.style.flex = `1 1 calc(${100 / n}% - ${14 * (n - 1) / n}px)`;
+          }
+        }
+      };
+      if (g.simple_rows?.length) {
+        for (const rkeys of g.simple_rows) {
+          const sub = el("div", { class: "frow" });
+          for (const k of rkeys) {
+            const o = (g.options || []).find(x => x.key === k);
+            if (o && visible()) draw(o, k, sub);
+          }
+          fill(sub);
+          if (sub.childElementCount) row.append(sub);
+        }
+      } else {
+        for (const k of keys) {
+          const o = (g.options || []).find(x => x.key === k);
+          if (o && visible()) draw(o, k, row);
+        }
+        fill(row);
       }
       if (!row.childElementCount) return;
-      // flat rows split evenly, whatever the manifest widths say: the four-
-      // toggle row needs 25% apiece to fit, and a two-dropdown row reads
-      // better at half width than two one-thirds with dead space at the end
-      const n = row.childElementCount;
-      if (n > 1) {
-        for (const f of row.children) {
-          f.classList.remove("w-half", "w-third", "w-quarter", "w-full");
-          f.style.flex = `1 1 calc(${100 / n}% - ${14 * (n - 1) / n}px)`;
-        }
-      }
       card.append(row);
     };
-    if (rows.length) {
-      const listed = new Set(rows.flat());
-      rows.forEach(place);
-      place(os.filter(o => !listed.has(o.key)).map(o => o.key));
-    } else {
-      place(os.map(o => o.key));
-    }
+    // one frow per group, in manifest order. `rows` (the kind-level
+    // simple_rows) documents the section's layout on the server; every group
+    // still renders, so a stale manifest from an older server (with groups
+    // the rows don't name) is fully covered too.
+    (spec.groups || []).forEach(g => placeGroup(g, g.options?.map(o => o.key) || []));
   } else {
     for (const g of spec.groups || []) {
       const os = (g.options || []).filter(o => !o.simple_only);   // simple-only options never appear in the advanced form

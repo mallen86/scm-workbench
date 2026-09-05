@@ -686,7 +686,16 @@ def build_manifest(info: dict) -> dict:
             "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
             "description": f"Downloads card images for {meta['title']} from a decklist into the game/ folders.",
+            # Simple mode lays the form out as one flat row per group — the
+            # standard 3-per-row rhythm the PDF page uses (create_pdf's
+            # `simple_rows` does it in the manifest because the PDF groups are
+            # static; here the groups are built per game, so the rows are added
+            # below for the one game whose groups exceed the default shape).
             "groups": fetch_groups(slug),
+            # Every game's fetch form: the decklist group (source + file/name/
+            # text/URL), then the format group, then each preferences group in
+            # its own row (MTG's has 3 toggle-per-row sub-rows inside it).
+            "simple_rows": [[o["key"] for o in g["options"]] for g in fetch_groups(slug) if not g.get("collapsible")],
             # URL-based formats (consumed by the same rule the command builder
             # uses): the client auto-selects one of these when the source is URL.
             "url_formats": [f for f, _ in meta["formats"] if f == "url" or f.endswith("_url")],
@@ -694,6 +703,16 @@ def build_manifest(info: dict) -> dict:
             # picked existing decklist file is an .xml (e.g. MTG's MPCFill XML).
             "xml_formats": [f for f, _ in meta["formats"] if f.endswith("_xml")],
         }
+        # MTG alone has a preferences group (7 toggles): give it the standard
+        # 3-per-row flat layout — the group-level rows above become sub-rows
+        # rendered inside the group's own row.
+        if slug == "mtg":
+            kinds[f"fetch:{slug}"]["groups"][2]["simple_rows"] = [
+                ["prefer_set", "ignore_set", "prefer_lang"],
+                ["prefer_older_sets", "prefer_showcase", "prefer_extra_art"],
+                ["prefer_ub", "ignore_ub", "tokens"],
+                ["ignore_set_and_collector_number"],
+            ]
 
     return kinds
 

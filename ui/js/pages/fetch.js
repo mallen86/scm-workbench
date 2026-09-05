@@ -1,7 +1,7 @@
 /* pages/fetch — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
+import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
@@ -32,7 +32,7 @@ PAGES.fetch = (root) => {
     wrap.append(el("div", { class: "banner err" }, el("span", { class: "b-ico" }, ico("alert")), el("span", { class: "grow" }, "SCM repo not connected — the plugins live inside it. Fix it in Settings.")));
     return wrap;
   }
-  wrap.append(formCard(kind, { icon: "download" }));
+  wrap.append(formCard(kind, { icon: "download", flat: uiMode() === "simple", head: uiMode() !== "simple" }));
   wrap.__patch = () => patchFetchForm(kind);
 
   // The plugins never delete existing images: fetching a *different* deck

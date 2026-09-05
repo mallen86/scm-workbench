@@ -1085,7 +1085,11 @@ body.mode-simple .console { display: none; }
 .frow .w-half { flex: 1 1 calc(50% - 14px); min-width: 200px; }
 .frow .w-third { flex: 1 1 calc(33.33% - 10px); min-width: 170px; }
 .frow .w-quarter { flex: 1 1 calc(25% - 11px); min-width: 140px; }
-@media (max-width: 900px) { .frow .w-half, .frow .w-third, .frow .w-quarter { flex-basis: 100%; } }
+/* a flat row that contains sub-rows (the MTG preferences group's 3+3+1
+   toggle rows) instead of fields: full width, a little extra breathing room */
+.frow > .frow { flex: 1 1 100%; gap: 18px; }
+.frow > .frow .field { min-width: 140px; }
+@media (max-width: 900px) { .frow .w-half, .frow .w-third, .frow .w-quarter, .frow > .frow { flex-basis: 100%; } }
 /* consecutive rows (the flat simple section) need real breathing room between
    them — the regular forms get that from their section labels, which sit
    22px below the previous row */
