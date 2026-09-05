@@ -26,6 +26,7 @@ jobs:
           python scripts/check_ui_transport.py
           python scripts/check_ui_jobs.py
           python scripts/check_ui_preview.py
+          python scripts/check_ui_artifacts.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
@@ -227,7 +228,24 @@ jobs:
             echo "smoke FAILED: the WebView fetched /api/preview over HTTP" >&2
             exit 1
           fi
-          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC, no migrated WebView route used HTTP"
+          # Metadata reads are migrated, but opening a file remains an HTTP
+          # compatibility action.  Keep this list narrow: reject the template
+          # resolver and image-directory listing, not /api/file?...open=1.
+          # The image-list expression requires the exact images_only=1 query
+          # key, so a plain /api/file?path=...&open=1 remains permitted.
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched /api/template over HTTP" >&2
+            exit 1
+          fi
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "GET /api/file\?([^ ]*&)?images_only=1(&[^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched a directory image listing over HTTP" >&2
+            exit 1
+          fi
+          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; template and image-list HTTP routes were not used"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -369,6 +387,7 @@ jobs:
           python scripts/check_ui_transport.py
           python scripts/check_ui_jobs.py
           python scripts/check_ui_preview.py
+          python scripts/check_ui_artifacts.py
       - name: Node syntax check — every UI module
         shell: pwsh
         run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
@@ -460,12 +479,19 @@ jobs:
             if ($webviewLine) {
               $jobPattern = '^\[workbench\] "(GET|POST) /api/jobs( HTTP/|[? ][^\"]* HTTP/|/[\w-]+/(log|stream|kill)(\?[^ ]*)? HTTP/)'
               $previewPattern = '^\[workbench\] "GET /api/preview([? ][^\"]*)? HTTP/'
+              $templatePattern = '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'
+              $imageListPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?images_only=1(&[^\"]*)? HTTP/'
               $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
-              if ($jobHttp -or $previewHttp) {
+              $templateHttp = $webviewRequests | Select-String -Pattern $templatePattern
+              $imageListHttp = $webviewRequests | Select-String -Pattern $imageListPattern
+              # The exact images_only=1 key is migrated; a plain
+              # /api/file?path=...&open=1 intentionally remains HTTP until a
+              # separate OS-action capability is designed and migrated.
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp) {
                 Get-Content $log
-                throw "smoke: the WebView2 page fetched a migrated route over HTTP"
+                throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
               }
             }
           }

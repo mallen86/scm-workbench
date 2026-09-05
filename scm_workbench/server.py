@@ -2598,6 +2598,137 @@ def _inside(path: Path, roots: List[Path]) -> bool:
     return any(rp == r or r in rp.parents for r in (x.resolve() for x in roots))
 
 
+# Native artifact reads are deliberately bounded independently of the JSON-lines
+# frame limit. A directory iterator is never materialized before the scan
+# limit is applied.
+FILE_LIST_MAX_SCANNED = 8192
+FILE_LIST_MAX_ITEMS = 1024
+FILE_LIST_MAX_RESULT_BYTES = 512 * 1024
+
+
+class FileListError(Exception):
+    """A safe, user-facing failure while resolving a managed directory."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _managed_path(raw: Path | str, roots: List[Path]) -> Path:
+    """Resolve a managed path without following it outside the sandbox."""
+    p = Path(raw)
+    if not p.is_absolute():
+        # Preserve the HTTP route's precedence for relative paths: the first
+        # existing root wins, otherwise paths are relative to the first root.
+        candidate = next((root / p for root in roots if (root / p).exists()), None)
+        p = candidate or (roots[0] / p if roots else p)
+    if not _inside(p, roots):
+        raise FileListError("forbidden", "path is outside the allowed repos")
+    return p
+
+
+def list_files(path: Path | str, images_only: bool = False,
+               settings: Optional[dict] = None) -> dict:
+    """Return a bounded, read-only listing from the managed-path sandbox.
+
+    ``scanned`` is the number of directory entries inspected and ``found`` is
+    the number matching the filter during that scan. ``truncated`` is
+    conservative when a bound is reached; callers must not use a truncated
+    listing as the basis for a destructive follow-up.
+    """
+    roots = allowed_roots(settings if settings is not None else load_settings())
+    p = _managed_path(path, roots)
+    if not p.exists():
+        raise FileListError("not_found", "path does not exist")
+    if not p.is_dir():
+        raise FileListError("not_directory", "path is not a directory")
+
+    items = []
+    scanned = 0
+    found = 0
+    truncated = False
+    # Account for each encoded item once instead of serializing the growing
+    # result for every entry. Reserve the maximum digit width for counters and
+    # the larger boolean token so the final result remains within the bound.
+    try:
+        dir_encoded_size = len(json.dumps(str(p), ensure_ascii=False).encode("utf-8"))
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise FileListError("unreadable", "could not encode directory listing") from error
+    counter_width = len(str(max(FILE_LIST_MAX_SCANNED, FILE_LIST_MAX_ITEMS)))
+    fixed_size = (len(b'{"dir":') + dir_encoded_size
+                  + len(b',"exists":true,"items":[')
+                  + len(b'],"truncated":false,"scanned":') + counter_width
+                  + len(b',"found":') + counter_width + len(b'}'))
+    item_bytes = 0
+    try:
+        iterator = iter(p.iterdir())
+        for _ in range(FILE_LIST_MAX_SCANNED):
+            try:
+                child = next(iterator)
+            except StopIteration:
+                break
+            scanned += 1
+            # Never disclose an entry whose symlink resolves outside the
+            # managed roots, even when the directory itself is safe.
+            if not _inside(child, roots):
+                truncated = True
+                continue
+            try:
+                is_dir = child.is_dir()
+                if images_only and (is_dir or not child.is_file() or not is_image_file(child)):
+                    continue
+                size = 0 if is_dir else child.stat().st_size
+            except (OSError, ValueError):
+                # The caller cannot safely treat an unreadable entry as absent,
+                # especially when the listing gates a destructive follow-up.
+                truncated = True
+                continue
+            found += 1
+            if len(items) >= FILE_LIST_MAX_ITEMS:
+                truncated = True
+                continue
+            item = {"name": child.name, "dir": is_dir, "size": size, "path": str(child)}
+            try:
+                encoded_item_size = len(json.dumps(
+                    item, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8"))
+            except (TypeError, UnicodeError, ValueError):
+                truncated = True
+                continue
+            projected = fixed_size + item_bytes + encoded_item_size + (1 if items else 0)
+            if projected > FILE_LIST_MAX_RESULT_BYTES:
+                truncated = True
+                break
+            items.append(item)
+            item_bytes += encoded_item_size + (1 if len(items) > 1 else 0)
+    except (OSError, ValueError) as error:
+        raise FileListError("unreadable", "could not read directory") from error
+
+    items.sort(key=lambda item: item["name"])
+    # Reaching the scan ceiling is reported as truncated even for exactly that
+    # many entries: proving completeness requires one extra unbounded probe.
+    if scanned >= FILE_LIST_MAX_SCANNED:
+        truncated = True
+    result = {"dir": str(p), "exists": True, "items": items,
+              "truncated": bool(truncated), "scanned": scanned, "found": found}
+    try:
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise FileListError("unreadable", "could not encode directory listing") from error
+    if len(encoded) > FILE_LIST_MAX_RESULT_BYTES:
+        # Keep the final guard for unusual filesystem changes or counter widths;
+        # it is not part of the normal per-item accounting path.
+        result["items"] = []
+        result["truncated"] = True
+    return result
+
+
+# Descriptive alias retained for callers that used the HTTP helper name while
+# the native contract identifies this operation as file.list.
+list_managed_directory = list_files
+
+
 def reveal_path(path: Path) -> Optional[str]:
     """Reveal a path in the platform file manager. Returns an error string or None."""
     if not path.exists():
@@ -2677,6 +2808,61 @@ MIME = {
     ".txt": "text/plain; charset=utf-8",
     ".md": "text/plain; charset=utf-8",
 }
+
+
+def resolve_template(paper: str, card: str, borderless: bool,
+                     settings: Optional[dict] = None) -> dict:
+    """Resolve one upstream cutting template for both HTTP and native IPC."""
+    settings = settings if settings is not None else load_settings()
+    paper = paper.strip().lower()
+    card = card.strip().lower()
+    if not (paper and card):
+        return {"ok": False, "errors": ["needs both a card size and a paper size"]}
+
+    # get_info remains authoritative for card ownership and source precedence;
+    # this helper only locates the file selected by that upstream metadata.
+    info = get_info()
+    scm_root, extras_root = effective_dirs(settings)
+    cards = {}
+    for c in info.get("scm", {}).get("card_sizes", []):
+        cards.setdefault(c["name"].lower(), c)
+    for c in info.get("extras", {}).get("card_sizes", []):
+        cards[c["name"].lower()] = c
+    c = cards.get(card)
+    if c is None:
+        return {"ok": False, "errors": [f"no card size named “{card}” in either repo"]}
+
+    sub = "borderless" if borderless else ""
+    if c.get("source") == "extras":
+        probes = [("scm-extras", extras_root and extras_root / "cutting_templates" / sub),
+                  ("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub)]
+    else:
+        probes = [("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub),
+                  ("scm-extras", extras_root and extras_root / "cutting_templates" / sub)]
+    roots = allowed_roots(settings)
+    fam = " (borderless)" if borderless else ""
+    infix = "-borderless" if borderless else ""
+    for repo, directory in probes:
+        if not directory or not directory.is_dir() or not _inside(directory, roots):
+            continue
+        best, best_v = None, -1
+        pat = re.compile(rf"^{re.escape(paper)}-{re.escape(card)}{re.escape(infix)}-v(\d+)\.studio3$")
+        try:
+            for candidate in directory.iterdir():
+                # A matching symlink is not a safe template unless it resolves
+                # within one of the managed roots.
+                if not _inside(candidate, roots) or not candidate.is_file():
+                    continue
+                m = pat.fullmatch(candidate.name)
+                if m and int(m.group(1)) > best_v:
+                    best, best_v = candidate, int(m.group(1))
+        except OSError:
+            continue
+        if best is not None:
+            return {"ok": True, "name": best.name, "path": str(best), "repo": repo}
+    return {"ok": False, "errors": [
+        f"no cutting template for {paper} + {card}{fam} in either repo "
+        f"(looked for {paper}-{card}{'-borderless' if borderless else ''}-v*.studio3)"]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3126,13 +3312,13 @@ class Handler(BaseHTTPRequestHandler):
             err = reveal_path(p)
             return self._json({"ok": err is None, "errors": [err] if err else []})
         if p.is_dir():
-            listing = [
-                {"name": c.name, "dir": c.is_dir(), "size": 0 if c.is_dir() else c.stat().st_size, "path": str(c)}
-                for c in sorted(p.iterdir())
-            ]
-            if (q.get("images_only") or [""])[0] == "1":
-                listing = [i for i in listing if not i["dir"] and is_image_file(p / i["name"])]
-            return self._json({"dir": str(p), "items": listing})
+            try:
+                listing = list_files(
+                    p, (q.get("images_only") or [""])[0] == "1", settings)
+            except FileListError as error:
+                status = 403 if error.code == "forbidden" else 404
+                return self._json({"error": "path outside sandbox" if status == 403 else "not found"}, status)
+            return self._json(listing)
         if not p.is_file():
             return self._json({"error": "not found"}, 404)
         data = p.read_bytes()
@@ -3140,53 +3326,12 @@ class Handler(BaseHTTPRequestHandler):
                    [("Content-Disposition", f'inline; filename="{p.name}"')])
 
     def _template(self, q):
-        """Resolve the cutting template for a create_pdf form state.
-
-        Templates are named {paper}-{card}-v{N}.studio3; borderless layouts use
-        {paper}-{card}-borderless-v{N}.studio3 and live in a borderless/ sub-
-        directory (scm-extras only — the SCM repo has no borderless family). The
-        card's own repo is probed first (extras cards in scm-extras, SCM cards in
-        silhouette-card-maker), then the other, and the newest version wins.
-        """
+        """Resolve a cutting template using the shared HTTP/native helper."""
         settings = load_settings()
-        paper = (q.get("paper") or [""])[0].strip().lower()
-        card = (q.get("card") or [""])[0].strip().lower()
+        paper = (q.get("paper") or [""])[0]
+        card = (q.get("card") or [""])[0]
         borderless = (q.get("borderless") or ["0"])[0] == "1"
-        if not (paper and card):
-            return self._json({"ok": False, "errors": ["needs both a card size and a paper size"]})
-        info = get_info()
-        scm_root, extras_root = effective_dirs(settings)
-        cards = {}
-        for c in info.get("scm", {}).get("card_sizes", []):
-            cards.setdefault(c["name"].lower(), c)
-        for c in info.get("extras", {}).get("card_sizes", []):
-            cards[c["name"].lower()] = c
-        c = cards.get(card)
-        if c is None:
-            return self._json({"ok": False, "errors": [f"no card size named “{card}” in either repo"]})
-        sub = "borderless" if borderless else ""
-        if c.get("source") == "extras":
-            probes = [("scm-extras", extras_root and extras_root / "cutting_templates" / sub),
-                      ("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub)]
-        else:
-            probes = [("silhouette-card-maker", scm_root and scm_root / "cutting_templates" / sub),
-                      ("scm-extras", extras_root and extras_root / "cutting_templates" / sub)]
-        fam = " (borderless)" if borderless else ""
-        infix = "-borderless" if borderless else ""
-        for repo, d in probes:
-            if not d or not d.is_dir():
-                continue
-            best, best_v = None, -1
-            pat = re.compile(rf"^{re.escape(paper)}-{re.escape(card)}{re.escape(infix)}-v(\d+)\.studio3$")
-            for f in d.iterdir():
-                m = pat.fullmatch(f.name)
-                if m and int(m.group(1)) > best_v:
-                    best, best_v = f, int(m.group(1))
-            if best is not None:
-                return self._json({"ok": True, "name": best.name, "path": str(best), "repo": repo})
-        return self._json({"ok": False, "errors": [
-            f"no cutting template for {paper} + {card}{fam} in either repo "
-            f"(looked for {paper}-{card}{'-borderless' if borderless else ''}-v*.studio3)"]})
+        return self._json(resolve_template(paper, card, borderless, settings))
 
     def _preview(self, q):
         kind = (q.get("kind") or [""])[0]

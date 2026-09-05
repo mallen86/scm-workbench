@@ -231,7 +231,7 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "jobs.list" | "jobs.start" | "jobs.log"
-        | "jobs.kill" | "jobs.poll" | "preview" => Ok(()),
+        | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -474,6 +474,8 @@ mod tests {
             "jobs.kill",
             "jobs.poll",
             "preview",
+            "template.resolve",
+            "file.list",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -485,6 +487,9 @@ mod tests {
             "jobs",
             "jobs.poll.push",
             "preview.extra",
+            "template.resolve.extra",
+            "file.list.extra",
+            "file.list.open",
             "server.shutdown",
             "__import__",
         ] {
@@ -746,6 +751,43 @@ mod tests {
         assert_eq!(row["status"], "missing");
         assert_eq!(row["complete"], true);
         assert_eq!(row["lines"], json!([]));
+        rpc.shutdown();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn real_worker_serves_read_only_artifact_metadata_methods() {
+        let mut child = real_python_worker();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(2));
+        rpc.install(stdin, stdout).unwrap();
+
+        let template = rpc
+            .call(
+                "template.resolve",
+                json!({
+                    "paper": "missing-paper-from-native-test",
+                    "card": "missing-card-from-native-test",
+                    "borderless": false
+                }),
+            )
+            .unwrap();
+        assert_eq!(template["ok"], false);
+        assert!(template["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("no card size"));
+
+        let listing = rpc
+            .call("file.list", json!({"path": "data", "images_only": false}))
+            .unwrap();
+        assert_eq!(listing["truncated"], false);
+        assert!(listing["scanned"].as_u64().unwrap() <= 8192);
+        assert!(listing["found"].as_u64().unwrap() <= 1024);
+        assert!(listing["items"].is_array());
+
         rpc.shutdown();
         let _ = child.kill();
         let _ = child.wait();

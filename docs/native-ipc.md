@@ -21,8 +21,9 @@ It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads, preview, and packaged-Tauri job control/log operations below; other
-surfaces remain on their existing HTTP compatibility paths.
+reads, preview, packaged-Tauri job control/log operations, and the read-only
+`template.resolve`/`file.list` metadata slice below; other surfaces remain on
+their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -46,8 +47,9 @@ A request has this exact shape:
 ```
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
-below, and `params` must be a JSON object. Read-only methods take `{}`; the
-preview and job methods use the parameter contracts below.
+below, and `params` must be a JSON object. The bootstrap read methods take
+`{}`; preview, job, and artifact metadata methods use the parameter contracts
+below.
 
 | HTTP compatibility route | Native method | Python implementation |
 | --- | --- | --- |
@@ -60,6 +62,8 @@ preview and job methods use the parameter contracts below.
 | `POST /api/jobs/<id>/kill` | `jobs.kill` | `server.kill_job()` |
 | `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
+| `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
+| `GET /api/file?...images_only=1` (directory metadata) | `file.list` (packaged Tauri) | `server.list_files()` |
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
 a client transport choice, not their removal. The methods use these exact
@@ -95,6 +99,36 @@ parameter and result shapes inside the common RPC envelope:
   "status":"...","exit_code":...,"cmd":"...","complete":false,
   "truncated":false,"gap":false}`. Missing jobs are complete rows with an
   empty `lines` array and status `missing`.
+* `template.resolve`: params `{"paper":"<string>","card":"<string>",
+  "borderless":false}` (exactly those three keys; `paper` and `card` are
+  non-empty strings, each at most 128 UTF-8 bytes). It returns the same
+  metadata as the compatibility route:
+  `{"ok":true,"name":"...","path":"...","repo":"..."}` when a
+  matching `.studio3` exists, or `{"ok":false,"errors":["..."]}` when the
+  card, repository, or template is missing. It reads directory entries only;
+  it never returns template bytes and never opens the result. Its result is
+  bounded to 512 KiB.
+* `file.list`: params `{"path":"<string>","images_only":true}` (exactly
+  those two keys; `path` is a non-empty string of at most 4096 UTF-8 bytes).
+  A successful directory result is
+  `{"exists":true,"dir":"...","items":[],"truncated":false,
+  "scanned":0,"found":0}`. `found` is always the numeric count of entries
+  matching the filter during the bounded scan; it is never a boolean. Each
+  item is metadata only: `{"name":"...","dir":false,"size":0,
+  "path":"..."}`. `dir` is true for directories and their size is zero.
+  `images_only:true` applies the same image-file predicate as Python. A
+  native missing-directory result is successful metadata with
+  `{"exists":false,"items":[],"truncated":false,"scanned":0,"found":0}`;
+  it contains no path contents. The worker scans at most 8192 directory
+  entries, returns at most 1024 matching items, and caps the encoded result
+  at 512 KiB. `truncated:true` means one of those bounds stopped the listing;
+  it does not mean an item was deleted or that a path may be opened. Items
+  are the deterministic sorted prefix of the bounded scan. A non-directory,
+  unreadable path, or sandbox escape is a structured RPC error
+  (`not_directory`, `unreadable`, or `forbidden`), never a file read. The
+  HTTP compatibility route retains its legacy 404 for a missing directory;
+  the browser HTTP facade normalizes that response to
+  `{exists:false,items:[],truncated:false,scanned:0,found:0}`.
 
 A successful response has exactly this shape (with the method's JSON result):
 
@@ -113,7 +147,12 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the nine-method allowlist.
+* `unknown_method` — a method outside the eleven-method allowlist.
+* `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
+  metadata resolution could not produce a listing. A missing directory is
+  instead the successful `{exists:false,...}` result described above. These
+  are structured read-only metadata failures; they never authorize a file
+  read or OS action.
 * `internal` — the existing handler failed or the response exceeded the
   configured limit. Handler details are written to stderr, not exposed on the
   wire.
@@ -190,13 +229,15 @@ framing and deadlock or mis-correlate the native caller.
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
-`preview`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, and aggregate
-`jobs.poll`, as well as the three bootstrap reads, use native IPC when a
-callable Tauri `invoke` capability exists. In a normal browser there is no
-Tauri capability: preview and job list/start/log/kill use the existing HTTP
-routes and live output uses the SSE stream. A native invocation failure is reported to the UI; “browser
-fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. The state-changing update-start operation remains HTTP.
+`preview`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, aggregate
+`jobs.poll`, `template.resolve`, and `file.list`, as well as the three
+bootstrap reads, use native IPC when a callable Tauri `invoke` capability
+exists. In a normal browser there is no Tauri capability: preview, template
+resolution, directory metadata, and job list/start/log/kill use the existing
+HTTP routes and live output uses the SSE stream. A native invocation failure is
+reported to the UI; “browser fallback” means running without the Tauri bridge,
+not silently hiding a failed worker call. Binary file reads, `/api/file` open
+and reveal actions, and the state-changing update-start operation remain HTTP.
 
 The current migration ledger is:
 
@@ -206,7 +247,9 @@ The current migration ledger is:
 | Static assets, `/`, `/up`, worker-origin navigation | HTTP | Compatibility path |
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
-| Binary artifacts, templates, file lists, and open/file access | HTTP | Later: needs bounded artifact/path handling |
+| `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| Binary artifacts/file reads and `/api/file` open/reveal actions | HTTP | Later: needs bounded artifact/path handling and OS-action capability design |
 | Settings writes, repo sync/ref actions, and offsets | HTTP | Later: preserve atomic state writes and ref resolution |
 | Updates and external filesystem/open actions | HTTP | Update-start remains HTTP; later: strict capability/root validation |
 
@@ -240,6 +283,7 @@ python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_preview.py
+python scripts/check_ui_artifacts.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
@@ -249,9 +293,15 @@ The packaged smoke checks use temporary data and
 webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
 native IPC, no bootstrap or migrated route was fetched over HTTP by the
 WebView, and the worker is reaped. They intentionally do not require
-`jobs.poll`, `jobs.start`, or `jobs.kill` markers: hermetic startup has no real
-upstream repository or job to exercise. The lower-layer Python, Rust, and Node
-contracts cover those operations. Build the shell with
+`template.resolve` or `file.list` markers: these methods are read-only metadata
+facades and are not deterministically invoked during startup, so CI does not
+add fake UI calls or claim WebView markers for them. The executable facade
+contract, Python HTTP/native parity, and Rust real-worker coverage prove their
+behavior; the runtime smoke guard still rejects a WebView HTTP request to the
+migrated `/api/template` or `images_only=1` directory-list route after the
+WebKit marker, while deliberately allowing the still-unmigrated `/api/file`
+`open=1` action. The lower-layer Python, Rust, and Node contracts cover the
+remaining operations. Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical
 assembly path for both platforms.

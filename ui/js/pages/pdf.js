@@ -1,7 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
@@ -73,7 +73,7 @@ PAGES.pdf = (root) => {
       // so the answer is the same in both modes
       const f = S.forms.create_pdf || {};
       if (f.card_size && f.paper_size) {
-        api(`/api/template?paper=${encodeURIComponent(f.paper_size)}&card=${encodeURIComponent(f.card_size)}&borderless=${f.borderless ? 1 : 0}`)
+        resolveTemplate(f.paper_size, f.card_size, !!f.borderless)
           .then(t => {
             if (!body.isConnected) return;
             if (t?.ok) {
@@ -95,7 +95,9 @@ PAGES.pdf = (root) => {
               body.append(el("div", { class: "js-hint" }, t?.errors?.[0] || "No matching cutting template found."));
             }
           })
-          .catch(() => {});
+          .catch(err => {
+            if (body.isConnected) body.append(el("div", { class: "js-hint" }, err?.message || "Couldn’t check for a matching cutting template."));
+          });
       }
     },
   }));
@@ -122,45 +124,52 @@ export function patchPdfForm(kind) {
     const dir = ((S.forms[kind] || {}).double_sided_dir || "").trim();
     if (!dir || !input.checked) return;
     scanning = true;
-    let items = null;
     try {
-      const r = await fetch(`/api/file?path=${encodeURIComponent(dir)}&images_only=1`);
-      if (r.status === 404) items = [];                 // folder missing → nothing to remove
-      else if (r.status === 200) items = (await r.json().catch(() => ({}))).items || [];
-      else toast("warn", `Couldn’t check “${dir}” (HTTP ${r.status}).`);
-    } catch { items = []; }
-    scanning = false;
-    if (!items || !items.length) return;
-
-    const n = items.length;
-    const ok = await confirmModal({
-      title: "Images in the double-sided folder",
-      text: `“${dir}” contains ${n} image${n === 1 ? "" : "s"}. While any are there, “Front pages only” (--only_fronts) can’t work — create_pdf.py refuses to run.`,
-      paras: [`Remove them from the folder now? This can’t be undone.`],
-      list: items.map(i => i.name),
-      okLabel: "Yes, remove them",
-      danger: true,
-      icon: "trash",
-      iconCls: "warn",
-    });
-    if (!ok) {
-      toast("warn", `“Front pages only” stays on, but the job will fail while “${dir}” still has images — remove them, or uncheck the option.`, 7000);
-      return;
-    }
-    let j = {};
-    try {
-      const r = await fetch("/api/fs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op: "delete_images", path: dir }) });
-      j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) {
-        toast("err", (j.errors || ["Could not remove the images."]).join("; "), 7000);
+      const listing = await listFiles(dir, true);
+      if (listing.truncated) {
+        // Never offer a destructive action when the bounded listing may have
+        // omitted images. Leave the switch on so its current state remains
+        // honest, and explain why the warning cannot be cleared here.
+        toast("warn", `Couldn’t safely check “${dir}”: the image list was truncated. “Front pages only” stays on, but remove the images manually or uncheck it before running.`, 7000);
         return;
       }
-    } catch {
-      toast("err", "Could not remove the images.", 7000);
-      return;
+      const items = listing.items;
+      if (!items.length) return;
+
+      const n = items.length;
+      const ok = await confirmModal({
+        title: "Images in the double-sided folder",
+        text: `“${dir}” contains ${n} image${n === 1 ? "" : "s"}. While any are there, “Front pages only” (--only_fronts) can’t work — create_pdf.py refuses to run.`,
+        paras: [`Remove them from the folder now? This can’t be undone.`],
+        list: items.map(i => i.name),
+        okLabel: "Yes, remove them",
+        danger: true,
+        icon: "trash",
+        iconCls: "warn",
+      });
+      if (!ok) {
+        toast("warn", `“Front pages only” stays on, but the job will fail while “${dir}” still has images — remove them, or uncheck the option.`, 7000);
+        return;
+      }
+      let j = {};
+      try {
+        const r = await fetch("/api/fs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op: "delete_images", path: dir }) });
+        j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          toast("err", (j.errors || ["Could not remove the images."]).join("; "), 7000);
+          return;
+        }
+      } catch {
+        toast("err", "Could not remove the images.", 7000);
+        return;
+      }
+      toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
+      afterFormChange(kind, S.forms[kind]);   // refresh the preview so the warning clears
+    } catch (err) {
+      toast("warn", err?.message || `Couldn’t check “${dir}”.`, 7000);
+    } finally {
+      scanning = false;
     }
-    toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
-    afterFormChange(kind, S.forms[kind]);   // refresh the preview so the warning clears
   });
 }
 

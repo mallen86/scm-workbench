@@ -29,7 +29,7 @@ MAX_PREVIEW_RESULT_SIZE = 512 * 1024
 MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 ALLOWED_METHODS = frozenset((
-    "info", "manifest", "settings.get", "preview",
+    "info", "manifest", "settings.get", "preview", "template.resolve", "file.list",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
 ))
 
@@ -87,6 +87,42 @@ def dispatch(request: dict) -> dict:
             result = server.load_settings()
         elif method == "jobs.list":
             result = server.list_jobs()
+        elif method == "template.resolve":
+            if set(params) != {"paper", "card", "borderless"}:
+                return _bad_params(request_id, "template.resolve requires exactly paper, card, and borderless")
+            paper = params["paper"]
+            card = params["card"]
+            if not isinstance(paper, str) or not paper or not isinstance(card, str) or not card:
+                return _bad_params(request_id, "template.resolve paper and card must be non-empty strings")
+            try:
+                if len(paper.encode("utf-8")) > 128 or len(card.encode("utf-8")) > 128:
+                    return _bad_params(request_id, "template.resolve paper and card exceed 128 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "template.resolve paper and card must be valid UTF-8")
+            if not isinstance(params["borderless"], bool):
+                return _bad_params(request_id, "template.resolve borderless must be boolean")
+            result = server.resolve_template(paper, card, params["borderless"])
+        elif method == "file.list":
+            if set(params) != {"path", "images_only"}:
+                return _bad_params(request_id, "file.list requires exactly path and images_only")
+            path = params["path"]
+            if not isinstance(path, str) or not path:
+                return _bad_params(request_id, "file.list path must be a non-empty string")
+            try:
+                if len(path.encode("utf-8")) > 4096:
+                    return _bad_params(request_id, "file.list path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "file.list path must be valid UTF-8")
+            if not isinstance(params["images_only"], bool):
+                return _bad_params(request_id, "file.list images_only must be boolean")
+            try:
+                result = server.list_files(path, params["images_only"])
+            except server.FileListError as error:
+                if error.code == "not_found":
+                    result = {"exists": False, "items": [], "truncated": False,
+                              "scanned": 0, "found": 0}
+                else:
+                    return _error(request_id, error.code, error.message)
         elif method == "preview":
             if set(params) != {"kind", "args"}:
                 return _bad_params(request_id, "preview requires exactly string kind and object args")
