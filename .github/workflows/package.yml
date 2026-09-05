@@ -27,6 +27,7 @@ jobs:
           python scripts/check_ui_jobs.py
           python scripts/check_ui_preview.py
           python scripts/check_ui_artifacts.py
+          python scripts/check_ui_native_actions.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
@@ -228,11 +229,22 @@ jobs:
             echo "smoke FAILED: the WebView fetched /api/preview over HTTP" >&2
             exit 1
           fi
-          # Metadata reads are migrated, but opening a file remains an HTTP
-          # compatibility action.  Keep this list narrow: reject the template
-          # resolver and image-directory listing, not /api/file?...open=1.
-          # The image-list expression requires the exact images_only=1 query
-          # key, so a plain /api/file?path=...&open=1 remains permitted.
+          # Metadata reads are migrated, and native OS actions must not leak
+          # back to HTTP once the actual WebView has loaded. Match query keys
+          # as complete pairs so raw reads and images_only metadata remain
+          # allowed, while query order does not matter for the action keys.
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched the native reveal action over HTTP" >&2
+            exit 1
+          fi
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "GET /api/file\?([^ ]*&)?(open=1|reveal=1|url=[^& ]*)(&[^ ]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched a native file/url action over HTTP" >&2
+            exit 1
+          fi
           if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
               | grep -Eq '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'; then
             echo "---- server log ----"; cat "$data/server-tauri.log" >&2
@@ -388,6 +400,7 @@ jobs:
           python scripts/check_ui_jobs.py
           python scripts/check_ui_preview.py
           python scripts/check_ui_artifacts.py
+          python scripts/check_ui_native_actions.py
       - name: Node syntax check — every UI module
         shell: pwsh
         run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
@@ -481,15 +494,18 @@ jobs:
               $previewPattern = '^\[workbench\] "GET /api/preview([? ][^\"]*)? HTTP/'
               $templatePattern = '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'
               $imageListPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?images_only=1(&[^\"]*)? HTTP/'
+              $revealActionPattern = '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'
+              $fileActionPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?(open=1|reveal=1|url=[^& ]*)(&[^\"]*)? HTTP/'
               $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
               $templateHttp = $webviewRequests | Select-String -Pattern $templatePattern
               $imageListHttp = $webviewRequests | Select-String -Pattern $imageListPattern
-              # The exact images_only=1 key is migrated; a plain
-              # /api/file?path=...&open=1 intentionally remains HTTP until a
-              # separate OS-action capability is designed and migrated.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp) {
+              $revealActionHttp = $webviewRequests | Select-String -Pattern $revealActionPattern
+              $fileActionHttp = $webviewRequests | Select-String -Pattern $fileActionPattern
+              # Raw file reads, images_only metadata, save, and delete remain
+              # HTTP. Exact action query keys are rejected in any order.
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp) {
                 Get-Content $log
                 throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
               }

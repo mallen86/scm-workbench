@@ -34,7 +34,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 from typing import Any, Dict, List, Optional, Tuple
 
 from scm_workbench import repo_sync, updater
@@ -1628,7 +1628,8 @@ def _proc_kwargs() -> dict:
 
 def _external_proc_kwargs() -> dict:
     """Detach UI-launched helpers from the worker's protocol stdio."""
-    return {**_proc_kwargs(), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    return {**_proc_kwargs(), "shell": False,
+            "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
 
 
 def _fmt_argv(argv: List[str]) -> str:
@@ -2547,6 +2548,136 @@ def sse_stream(job_id: str, after: int):
 # File sandbox
 # ============================================================================
 
+# Native OS actions accept only bounded, printable values. Keep these limits
+# independent of the JSON-lines frame limit and the HTTP request parser.
+ACTION_PATH_MAX_BYTES = 4096
+ACTION_URL_MAX_BYTES = 8192
+ACTION_ERROR_MAX_BYTES = 4096
+
+
+def has_forbidden_action_controls(value: str) -> bool:
+    """Whether *value* contains a C0 (or DEL) control character."""
+    return any(ord(char) < 0x20 or ord(char) == 0x7f for char in value)
+
+
+def _bounded_action_error(error: Any) -> str:
+    """Make launcher errors safe to put in either action response surface."""
+    text = str(error).replace("\r", " ").replace("\n", " ")
+    # HTTP action responses use the default JSON ASCII escaping. Restricting
+    # diagnostics to printable ASCII makes the byte bound hold on both HTTP
+    # and native serialization paths, including Unicode OSError messages.
+    text = "".join(char if 0x20 <= ord(char) < 0x7f else " " for char in text)
+    if not text:
+        text = "action failed"
+    encoded = text.encode("ascii")
+    if len(encoded) <= ACTION_ERROR_MAX_BYTES:
+        return text
+    return encoded[:ACTION_ERROR_MAX_BYTES].decode("ascii") or "action failed"
+
+
+def _action_response(error: Optional[Any] = None) -> dict:
+    if error is None:
+        return {"ok": True, "errors": []}
+    return {"ok": False, "errors": [_bounded_action_error(error)]}
+
+
+class _ActionFailure(Exception):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _validate_action_value(value: Any, name: str, max_bytes: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise _ActionFailure(f"{name} must be a non-empty string", 400)
+    try:
+        encoded_size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise _ActionFailure(f"{name} must be valid UTF-8", 400) from error
+    if encoded_size > max_bytes:
+        raise _ActionFailure(f"{name} exceeds {max_bytes} UTF-8 bytes", 400)
+    if has_forbidden_action_controls(value):
+        raise _ActionFailure(f"{name} contains control characters", 400)
+    return value
+
+
+def _action_path(raw: Any, operation: str, settings: Optional[dict] = None) -> Path:
+    value = _validate_action_value(raw, "path", ACTION_PATH_MAX_BYTES)
+    roots = allowed_roots(settings if settings is not None else load_settings())
+    try:
+        # _managed_path retains the HTTP route's existing relative precedence;
+        # canonicalize immediately afterwards so the launcher never receives a
+        # traversal or a symlink that resolves outside the managed roots.
+        candidate = _managed_path(value, roots)
+        path = candidate.resolve(strict=False)
+    except FileListError as error:
+        raise _ActionFailure(error.message, 403 if error.code == "forbidden" else 400) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise _ActionFailure("could not resolve path", 400) from error
+    if not _inside(path, roots):
+        raise _ActionFailure("path is outside the allowed repos", 403)
+    if not path.exists():
+        raise _ActionFailure("path does not exist", 200)
+    if operation == "open" and not path.is_file():
+        raise _ActionFailure("path must be an existing regular file", 200)
+    if operation == "reveal" and not (path.is_file() or path.is_dir()):
+        raise _ActionFailure("path must be an existing file or directory", 200)
+    return path
+
+
+def file_open_action(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, int]:
+    try:
+        return _action_response(open_path(_action_path(raw, "open", settings))), 200
+    except _ActionFailure as error:
+        return _action_response(error.message), error.status
+    except Exception as error:
+        return _action_response(error), 200
+
+
+def file_reveal_action(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, int]:
+    try:
+        return _action_response(reveal_path(_action_path(raw, "reveal", settings))), 200
+    except _ActionFailure as error:
+        return _action_response(error.message), error.status
+    except Exception as error:
+        return _action_response(error), 200
+
+
+def _validate_action_url(raw: Any) -> str:
+    value = _validate_action_value(raw, "url", ACTION_URL_MAX_BYTES)
+    try:
+        parsed = urlsplit(value)
+        # Accessing hostname and port performs urllib's strict authority
+        # checks (including malformed brackets and out-of-range ports).
+        hostname = parsed.hostname
+        _port = parsed.port
+    except ValueError as error:
+        raise _ActionFailure("URL has a malformed port or authority", 400) from error
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise _ActionFailure("only http(s) URLs can be opened", 400)
+    if any(char.isspace() for char in value):
+        raise _ActionFailure("URL must not contain whitespace", 400)
+    if not hostname:
+        raise _ActionFailure("URL must have a hostname", 400)
+    if "@" in parsed.netloc:
+        raise _ActionFailure("URL userinfo is not allowed", 400)
+    # urllib treats a trailing colon as an absent port, but it is not a valid
+    # authority for this action and is commonly an accidental malformed port.
+    if parsed.netloc.endswith(":"):
+        raise _ActionFailure("URL has a malformed port or authority", 400)
+    return value
+
+
+def url_open_action(raw: Any) -> Tuple[dict, int]:
+    try:
+        return _action_response(open_url(_validate_action_url(raw))), 200
+    except _ActionFailure as error:
+        return _action_response(error.message), error.status
+    except Exception as error:
+        return _action_response(error), 200
+
+
 # Magic-byte signatures for the image formats silhouette-card-maker accepts
 # (its `valid_mimetypes` list in utilities.py). The Workbench is stdlib-only,
 # so this sniffs the file header instead of the `filetype` package — keeping
@@ -2738,7 +2869,10 @@ def reveal_path(path: Path) -> Optional[str]:
             if path.is_dir():
                 subprocess.Popen(["explorer", str(path)], **_external_proc_kwargs())
             else:
-                os.startfile(path)  # type: ignore[attr-defined]
+                # Explorer's /select, action reveals the file without opening
+                # it in whatever application is associated with its suffix.
+                subprocess.Popen(["explorer", f"/select,{path}"],
+                                 **_external_proc_kwargs())
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R" if not path.is_dir() else "", str(path)] if not path.is_dir()
                              else ["open", str(path)], **_external_proc_kwargs())
@@ -3206,17 +3340,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "errors": [f"Could not copy the file: {e}"]}, 500)
             if path == "/api/reveal":
                 body = self._body()
-                p = Path(body.get("path", ""))
-                if not str(p):
-                    return self._json({"ok": False, "errors": ["no path"]}, 400)
-                roots = allowed_roots(load_settings())
-                if not p.is_absolute():
-                    cand = next((r / p for r in roots if (r / p).exists()), None)
-                    p = cand or roots[0] / p if roots else p
-                if not _inside(p, roots):
-                    return self._json({"ok": False, "errors": ["path is outside the allowed repos"]}, 403)
-                err = reveal_path(p)
-                return self._json({"ok": err is None, "errors": [err] if err else []})
+                result, status = file_reveal_action(body.get("path"), load_settings())
+                return self._json(result, status)
             if path == "/api/fs":
                 body = self._body()
                 raw = str(body.get("path") or "").strip()
@@ -3286,18 +3411,26 @@ class Handler(BaseHTTPRequestHandler):
         url = (q.get("url") or [""])[0]
         if url:
             # Same open semantics as open=1, aimed at a link: the server
-            # opens it in the default browser. http(s) only — this is not a
-            # way out of the sandbox, it's how the UI's link buttons work.
-            if not (url.startswith("https://") or url.startswith("http://")):
-                return self._json({"ok": False, "errors": ["only http(s) URLs can be opened"]}, 400)
-            err = open_url(url)
-            return self._json({"ok": err is None, "errors": [err] if err else []})
+            # opens it in the default browser. Validation is shared with the
+            # native RPC action.
+            result, status = url_open_action(url)
+            return self._json(result, status)
         settings = load_settings()
         rel = (q.get("path") or [""])[0]
         reveal = (q.get("reveal") or ["0"])[0] == "1"
         do_open = (q.get("open") or ["0"])[0] == "1"
         if not rel:
             return self._json({"error": "no path"}, 400)
+        # Action requests use the same canonical resolver as native RPC. Keep
+        # this ahead of the legacy raw-read path so action errors retain the
+        # established {ok, errors} shape instead of the read route's {error}.
+        if do_open:
+            result, status = file_open_action(rel, settings)
+            return self._json(result, status)
+        if reveal:
+            result, status = file_reveal_action(rel, settings)
+            return self._json(result, status)
+
         roots = allowed_roots(settings)
         p = Path(rel)
         if not p.is_absolute():
@@ -3305,12 +3438,6 @@ class Handler(BaseHTTPRequestHandler):
             p = cand or (roots[0] / rel if roots else rel)
         if not _inside(p, roots):
             return self._json({"error": "path outside sandbox"}, 403)
-        if do_open:
-            err = open_path(p)
-            return self._json({"ok": err is None, "errors": [err] if err else []})
-        if reveal:
-            err = reveal_path(p)
-            return self._json({"ok": err is None, "errors": [err] if err else []})
         if p.is_dir():
             try:
                 listing = list_files(

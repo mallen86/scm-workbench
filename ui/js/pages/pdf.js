@@ -1,7 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
@@ -58,7 +58,7 @@ PAGES.pdf = (root) => {
             // errors) - calling .json() on its result is what made every click
             // look like a failure even while “open” was doing its job.
             try {
-              const r = await api(`/api/file?path=${encodeURIComponent(out)}&open=1`);
+              const r = await openFile(out);
               if (r?.ok) toast("ok", "Opening the PDF — big files can take a moment to appear in the viewer.", 6000);
               else toast("warn", r?.errors?.[0] || "Couldn't open the PDF.");
             } catch (err) {
@@ -82,7 +82,7 @@ PAGES.pdf = (root) => {
                   const b = e.currentTarget;
                   b.disabled = true;
                   try {
-                    const r = await api(`/api/file?path=${encodeURIComponent(t.path)}&open=1`);
+                    const r = await openFile(t.path);
                     if (r?.ok) toast("ok", `Opening ${t.name} — it should appear in its cutting app shortly.`);
                     else toast("warn", r?.errors?.[0] || "Couldn't open the cutting template.");
                   } catch (err) {

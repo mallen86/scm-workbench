@@ -21,9 +21,9 @@ It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads, preview, packaged-Tauri job control/log operations, and the read-only
-`template.resolve`/`file.list` metadata slice below; other surfaces remain on
-their existing HTTP compatibility paths.
+reads, preview, packaged-Tauri job control/log operations, the read-only
+`template.resolve`/`file.list` metadata slice, and the bounded OS-action methods
+below. Other surfaces remain on their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -64,6 +64,9 @@ below.
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
 | `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
 | `GET /api/file?...images_only=1` (directory metadata) | `file.list` (packaged Tauri) | `server.list_files()` |
+| `GET /api/file?...open=1` (regular file action) | `file.open` (packaged Tauri) | `server.file_open_action()` |
+| `POST /api/reveal` (file/directory action) | `file.reveal` (packaged Tauri) | `server.file_reveal_action()` |
+| `GET /api/file?...url=` (external URL action) | `url.open` (packaged Tauri) | `server.url_open_action()` |
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
 a client transport choice, not their removal. The methods use these exact
@@ -130,6 +133,51 @@ parameter and result shapes inside the common RPC envelope:
   the browser HTTP facade normalizes that response to
   `{exists:false,items:[],truncated:false,scanned:0,found:0}`.
 
+### Native OS actions
+
+The three OS actions are deliberately separate allowlisted methods, not an
+arbitrary Python call or a path/command escape hatch. Each has an exact
+parameter object and returns only the bounded action result (never file bytes):
+
+* `file.open`: params exactly `{"path":"<string>"}`. `path` is a non-empty,
+  valid UTF-8 string of at most **4096 UTF-8 bytes** with no C0 or DEL control
+  characters. Python canonicalizes it and requires an existing regular file.
+* `file.reveal`: params exactly `{"path":"<string>"}`, with the same 4096-byte
+  and printable-value bounds. Python canonicalizes it and requires an existing
+  file or directory. On Windows, revealing a file selects it with Explorer
+  (`explorer /select,`); revealing a directory opens that directory in
+  Explorer. Other platforms use their native file-manager reveal equivalent.
+* `url.open`: params exactly `{"url":"<string>"}`. `url` is non-empty, valid
+  UTF-8, has no C0 or DEL control characters, and is at most **8192 UTF-8
+  bytes**. Its parsed scheme must be `http` or `https` (case-insensitive), it
+  must have a hostname, must have a valid authority/port, and must not contain
+  userinfo. `file:`, `javascript:`, `data:`, custom schemes, empty-host URLs,
+  malformed authorities, and userinfo URLs are rejected.
+
+The result is exactly `{"ok":true,"errors":[]}` on a launch request accepted
+by the platform helper, or `{"ok":false,"errors":["<message>"]}` for a
+bounded failure. Error text is sanitized and capped at **4096 UTF-8 bytes**;
+no path or URL result is returned. The ordinary JSON-lines frame limits still
+apply (7 MiB Python response ceiling and 8 MiB Tauri reader ceiling), but an
+OS-action result is much smaller than either bound.
+
+Python remains the owner of validation, canonicalization, allowed-root policy,
+and OS launching. The allowed roots are the Workbench data directory, the UI
+asset directory, and the effective configured SCM and extras repositories.
+Relative paths retain the existing first-existing-root precedence; absolute
+and relative paths are resolved canonically (including symlinks) before the
+candidate is checked with the canonical `_inside` root test. A path that
+resolves outside those roots is rejected, and no launcher is called. Tauri
+only forwards these exact method names through the existing `wb_rpc` command;
+there is no new capability, command, framing rule, or lifecycle behavior.
+
+Native actions do not silently fail over to HTTP. A packaged WebView invokes
+the native method and surfaces a native error; a normal browser, which has no
+callable Tauri capability, uses the existing HTTP compatibility route instead.
+This is a browser-versus-packaged transport choice, not a retry policy. The
+Python helper owns the actual platform process launch, including Windows
+Explorer selection; the Rust shell never launches an arbitrary executable.
+
 A successful response has exactly this shape (with the method's JSON result):
 
 ```json
@@ -147,7 +195,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the eleven-method allowlist.
+* `unknown_method` — a method outside the fourteen-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -201,8 +249,9 @@ stdin and stdout pipes. It:
 The webview reaches one narrow Tauri command, `wb_rpc`. The Tauri capability
 ACL grants `allow-wb-rpc` to the main window and permits the worker-served
 origin `http://127.0.0.1:8038`; the command itself validates the same method
-allowlist before writing to the child. Python validates it again. This is a
-transport/orchestration boundary, not a general native escape hatch.
+allowlist before writing to the child. Python validates it again, including
+OS-action path and URL policy. This is a transport/orchestration boundary, not
+a general native escape hatch.
 
 The shell supervises the same single worker for its entire lifetime. Closing
 the window or a hard shell exit reaps it and its descendants: macOS uses a
@@ -230,14 +279,15 @@ framing and deadlock or mis-correlate the native caller.
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
 `preview`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, aggregate
-`jobs.poll`, `template.resolve`, and `file.list`, as well as the three
-bootstrap reads, use native IPC when a callable Tauri `invoke` capability
-exists. In a normal browser there is no Tauri capability: preview, template
-resolution, directory metadata, and job list/start/log/kill use the existing
-HTTP routes and live output uses the SSE stream. A native invocation failure is
-reported to the UI; “browser fallback” means running without the Tauri bridge,
-not silently hiding a failed worker call. Binary file reads, `/api/file` open
-and reveal actions, and the state-changing update-start operation remain HTTP.
+`jobs.poll`, `template.resolve`, `file.list`, `file.open`, `file.reveal`, and
+`url.open`, as well as the three bootstrap reads, use native IPC when a
+callable Tauri `invoke` capability exists. In a normal browser there is no
+Tauri capability: preview, template resolution, directory metadata, OS actions,
+and job list/start/log/kill use the existing HTTP routes and live output uses
+the SSE stream. A native invocation failure is reported to the UI; “browser
+fallback” means running without the Tauri bridge, not silently hiding a failed
+worker call. Binary file reads, save/copy, delete, settings, repo actions, and
+the state-changing update-start operation remain HTTP.
 
 The current migration ledger is:
 
@@ -249,9 +299,13 @@ The current migration ledger is:
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
-| Binary artifacts/file reads and `/api/file` open/reveal actions | HTTP | Later: needs bounded artifact/path handling and OS-action capability design |
-| Settings writes, repo sync/ref actions, and offsets | HTTP | Later: preserve atomic state writes and ref resolution |
-| Updates and external filesystem/open actions | HTTP | Update-start remains HTTP; later: strict capability/root validation |
+| `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
+| Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
+| Save/copy and image deletion (`/api/files/save`, `/api/fs`) | HTTP | Deferred: preserve user-selected destinations and destructive-operation guards |
+| Settings reads/writes | HTTP | Deferred: native settings ownership is not part of this slice |
+| Repo sync/ref actions | HTTP | Deferred: preserve atomic state writes and ref resolution |
+| Updates and update-start | HTTP | Deferred: update lifecycle and replacement remain HTTP |
+| Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
 
 This ledger is a follow-up checklist, not permission to expand the current
 slice. New UI features must go through the transport adapter (`api()` and its
@@ -284,6 +338,7 @@ python scripts/check_ui_transport.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_preview.py
 python scripts/check_ui_artifacts.py
+python scripts/check_ui_native_actions.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
@@ -297,11 +352,15 @@ WebView, and the worker is reaped. They intentionally do not require
 facades and are not deterministically invoked during startup, so CI does not
 add fake UI calls or claim WebView markers for them. The executable facade
 contract, Python HTTP/native parity, and Rust real-worker coverage prove their
-behavior; the runtime smoke guard still rejects a WebView HTTP request to the
-migrated `/api/template` or `images_only=1` directory-list route after the
-WebKit marker, while deliberately allowing the still-unmigrated `/api/file`
-`open=1` action. The lower-layer Python, Rust, and Node contracts cover the
-remaining operations. Build the shell with
+behavior; the runtime smoke guard still rejects WebView HTTP requests to the
+migrated metadata routes and, after the WebKit marker, rejects `POST
+/api/reveal` plus `/api/file` action queries containing the exact `open=1`,
+`reveal=1`, or `url=` keys in any reasonable query order. It deliberately
+allows raw `/api/file` reads, `images_only=1` metadata, save, and delete
+compatibility requests. No native-action marker is required: the five
+existing startup IPC markers remain the complete packaged smoke contract. The
+lower-layer Python, Rust, and Node contracts cover the remaining operations.
+Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical
 assembly path for both platforms.

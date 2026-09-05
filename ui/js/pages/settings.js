@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";
 /* In-app "What's new": the release notes live on GitHub, but the app's
    window can't open a browser tab in its webview, so the notes are fetched
    through the server (which also renders the markdown) and shown in the
@@ -485,7 +485,14 @@ PAGES.settings = (root) => {
     el("div", { class: "card-ico" }, el("img", { src: "/ui/logo.svg", alt: "SCM Workbench", style: "width:26px; height:26px; display:block" })),
     el("div", { class: "grow" }, el("h2", {}, "Data & about"), el("p", {}, `Workbench v${S.info.server.version} · server python ${S.info.server.python} · data dir ${S.info.server.data_dir}`))));
   ac.append(el("div", { style: "display:flex; gap:9px; flex-wrap:wrap" },
-    el("button", { class: "btn", onclick: async () => { const r = await api("/api/reveal", { path: S.info.server.data_dir }); r.ok ? toast("ok", "Opening data folder…") : toast("warn", r.errors?.[0]); } }, ico("folder"), "Open data folder"),
+    el("button", { class: "btn", onclick: async () => {
+      try {
+        const r = await revealPath(S.info.server.data_dir);
+        r.ok ? toast("ok", "Opening data folder…") : toast("warn", r.errors?.[0]);
+      } catch (error) {
+        toast("warn", error?.message || "Could not reveal data folder");
+      }
+    } }, ico("folder"), "Open data folder"),
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/silhouette-card-maker", "silhouette-card-maker on GitHub") }, ico("external"), "silhouette-card-maker on GitHub"),
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/scm-extras", "scm-extras on GitHub") }, ico("external"), "scm-extras on GitHub"),
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/mallen86/scm-workbench", "scm-workbench on GitHub") }, ico("external"), "scm-workbench on GitHub"),

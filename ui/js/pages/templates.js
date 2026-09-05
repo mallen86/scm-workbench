@@ -1,7 +1,7 @@
 /* pages/templates — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, el, ico, pageHead, toast } from "../core.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* ============================== templates page ============================= */
+import { $, $$, PAGES, S, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* ============================== templates page ============================= */
 
 PAGES.templates = (root) => {
   const wrap = el("div", {});
@@ -63,9 +63,13 @@ export function templatesGallery(which) {
       g.append(el("button", { class: "fileitem",
         title: `Open ${n} in its default app (e.g. Silhouette Studio)`,
         onclick: async () => {
-          const r = await fetch(`/api/file?path=${encodeURIComponent(base + dir + n)}&open=1`).then(x => x.json());
-          if (r.ok) toast("ok", `Opening ${n} in its default app…`);
-          else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${n}.`);
+          try {
+            const r = await openFile(base + dir + n);
+            if (r.ok) toast("ok", `Opening ${n} in its default app…`);
+            else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${n}.`);
+          } catch (error) {
+            toast("warn", error?.message || `Couldn't open ${n}.`);
+          }
         } },
         el("span", { class: "fi-ico" }, ico(ext === "dxf" ? "scissors" : "card")),
         el("span", { class: "fi-name" }, n),

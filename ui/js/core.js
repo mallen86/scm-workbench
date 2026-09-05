@@ -6,6 +6,7 @@
    ========================================================================== */
 
 import { getTauriInvoke, invokeNativeBootstrap, selectNativeBootstrapRoute } from "./transport.js";
+import { openExternalUrl } from "./native-actions.js";
 
 /* ----------------------------- tiny DOM helpers -------------------------- */
 
@@ -183,13 +184,19 @@ export function toast(kind, msg, ms = 3800) {
 }
 
 /* Links (and "open this file" actions) can't window.open in the app's
-   embedded webview — WebKit won't spawn a new window there — so they go
-   through the UI server instead: it opens the target in the OS (default
-   app for files, default browser for URLs) and this toasts the result. */
+   embedded webview — WebKit won't spawn a new window there. The native action
+   facade selects the OS bridge in packaged windows and the compatibility HTTP
+   route in a browser, while this wrapper keeps the shared result toast. */
 export async function openUrl(url, what) {
-  const r = await fetch(`/api/file?url=${encodeURIComponent(url)}`).then(x => x.json().catch(() => ({})));
-  if (r.ok) toast("ok", `Opening ${what}…`);
-  else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${what}.`);
+  try {
+    const r = await openExternalUrl(url);
+    if (r.ok) toast("ok", `Opening ${what}…`);
+    else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${what}.`);
+    return r;
+  } catch (error) {
+    toast("warn", error?.message || `Couldn't open ${what}.`);
+    return null;
+  }
 }
 
 

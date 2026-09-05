@@ -231,7 +231,8 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "jobs.list" | "jobs.start" | "jobs.log"
-        | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list" => Ok(()),
+        | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list"
+        | "file.open" | "file.reveal" | "url.open" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -476,6 +477,9 @@ mod tests {
             "preview",
             "template.resolve",
             "file.list",
+            "file.open",
+            "file.reveal",
+            "url.open",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -490,6 +494,12 @@ mod tests {
             "template.resolve.extra",
             "file.list.extra",
             "file.list.open",
+            "file.open.extra",
+            "file.reveal.extra",
+            "url.open.extra",
+            "file.open.path",
+            "file.reveal.path",
+            "url.open.path",
             "server.shutdown",
             "__import__",
         ] {

@@ -30,6 +30,7 @@ MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "preview", "template.resolve", "file.list",
+    "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
 ))
 
@@ -123,6 +124,37 @@ def dispatch(request: dict) -> dict:
                               "scanned": 0, "found": 0}
                 else:
                     return _error(request_id, error.code, error.message)
+        elif method in ("file.open", "file.reveal"):
+            if set(params) != {"path"}:
+                return _bad_params(request_id, f"{method} requires exactly path")
+            path = params["path"]
+            if not isinstance(path, str) or not path:
+                return _bad_params(request_id, f"{method} path must be a non-empty string")
+            try:
+                if len(path.encode("utf-8")) > server.ACTION_PATH_MAX_BYTES:
+                    return _bad_params(request_id, f"{method} path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, f"{method} path must be valid UTF-8")
+            if server.has_forbidden_action_controls(path):
+                return _bad_params(request_id, f"{method} path contains control characters")
+            if method == "file.open":
+                result, _status = server.file_open_action(path)
+            else:
+                result, _status = server.file_reveal_action(path)
+        elif method == "url.open":
+            if set(params) != {"url"}:
+                return _bad_params(request_id, "url.open requires exactly url")
+            url = params["url"]
+            if not isinstance(url, str) or not url:
+                return _bad_params(request_id, "url.open url must be a non-empty string")
+            try:
+                if len(url.encode("utf-8")) > server.ACTION_URL_MAX_BYTES:
+                    return _bad_params(request_id, "url.open url exceeds 8192 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "url.open url must be valid UTF-8")
+            if server.has_forbidden_action_controls(url):
+                return _bad_params(request_id, "url.open url contains control characters")
+            result, _status = server.url_open_action(url)
         elif method == "preview":
             if set(params) != {"kind", "args"}:
                 return _bad_params(request_id, "preview requires exactly string kind and object args")

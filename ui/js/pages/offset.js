@@ -1,7 +1,7 @@
 /* pages/offset — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
+import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
@@ -49,9 +49,13 @@ PAGES.offset = (root) => {
     grid.append(el("button", { class: "fileitem",
       title: `Open ${c.name} in its default app (e.g. Preview)`,
       onclick: async () => {
-        const r = await fetch(`/api/file?path=${encodeURIComponent(c.path)}&open=1`).then(x => x.json());
-        if (r.ok) toast("ok", `Opening ${c.name} in its default app…`);
-        else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
+        try {
+          const r = await openFile(c.path);
+          if (r.ok) toast("ok", `Opening ${c.name} in its default app…`);
+          else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
+        } catch (error) {
+          toast("warn", error?.message || `Couldn't open ${c.name}.`);
+        }
       } },
       el("span", { class: "fi-ico" }, ico("file")),
       el("span", { class: "fi-main" },

@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { revealPath } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -273,8 +273,12 @@ export function updateFooter() {
           title: "The output stays in the app's private working area; when the run is done you can move it out." },
           ico("folder"), "In the app area");
       return el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
-        const r = await api("/api/reveal", { path: cwdOf(job) });
-        if (r.ok) toast("ok", "Opened folder in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal folder");
+        try {
+          const r = await revealPath(cwdOf(job));
+          if (r.ok) toast("ok", "Opened folder in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal folder");
+        } catch (error) {
+          toast("warn", error?.message || "Could not reveal folder");
+        }
       } }, ico("folder"), "Reveal folder");
     })(),
     el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") jobs.kill(job.id).then(() => toast("warn", "Stopping…")).catch(e => toast("err", e.message || "Could not stop job")); } }, ico("stop"), "Stop"),
@@ -310,7 +314,7 @@ export function moveJobToMyFiles(job) {
     return;
   }
   const next = outs[0];
-  nativePick.pickSave(next.split("/").pop()).then(dest => {
+  nativePick.pickSave(next.split(/[\\/]/).pop()).then(dest => {
     if (!dest) return; // cancelled
     api("/api/files/save", { src: next, dest })
       .then(r => {
@@ -373,8 +377,12 @@ export function bindConsole() {
       moveJobToMyFiles(job);
       return;
     }
-    const r = await api("/api/reveal", { path: cwdOf(job) });
-    if (r.ok) toast("ok", "Opened in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal");
+    try {
+      const r = await revealPath(cwdOf(job));
+      if (r.ok) toast("ok", "Opened in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal");
+    } catch (error) {
+      toast("warn", error?.message || "Could not reveal");
+    }
   };
   $("#console-kill").onclick = () => {
     if (!S.activeJobId) return;
