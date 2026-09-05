@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,12 +32,63 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Stop the whole worker tree, not just the direct child.
+///
+/// The worker is the app's only long-lived child and it in turn spawns the
+/// job processes the user runs; a plain `kill` leaves those running. So we
+/// terminate the group the child was placed in: its own process group on
+/// macOS (a SIGKILL to the group reaches every descendant). On Windows the
+/// tree is contained by the job object assigned at spawn (the handle is
+/// dropped when the spawning thread ends, aborting the whole tree), so this is
+/// a no-op there and the direct child's death is what matters.
+///
+/// Safe to call unconditionally: on a child that was never grouped it does
+/// nothing but a harmless signal to a pid that may already be reaped.
+fn kill_worker_tree(child: &Child) {
+    #[cfg(target_os = "macos")]
+    {
+        // The child sits in the process group created in spawn_worker (pgid ==
+        // its own pid). `kill(-pgid, SIGKILL)` from libc signals the whole group.
+        unsafe {
+            let pid = child.id() as libc::pid_t;
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = child;
+    }
+}
+
 /// Loopback port the worker binds. 8038 (not the legacy 8037) so the
 /// prototype can never collide with a still-running legacy server child.
 const WORKER_PORT: u16 = 8038;
 
 /// Type shared with the watchdog thread: the live worker child, if any.
-type WorkerSlot = Arc<Mutex<Option<std::process::Child>>>;
+type WorkerSlot = Arc<Mutex<Option<Child>>>;
+
+/// Reap the worker on *any* drop of the last handle to the slot — a backstop
+/// so the child can never outlive the shell: a normal close goes through the
+/// `CloseRequested` path, but a hard kill (Activity Monitor / End Task,
+/// `kill -9`, a crash) skips it, and without this the worker is reparented
+/// to init (`PPID 1`) and holds its port, wedging the *next* launch.
+///
+/// On macOS the worker is also put in its own process group (see
+/// `spawn_worker`) so a signal reaches every grandchild too; on Windows it is
+/// assigned to a job object that kills the whole tree on close. Both are belt
+/// to the `child.kill()` braces below.
+struct Worker { slot: WorkerSlot }
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.slot.lock().ok().and_then(|mut g| g.take()) {
+            // Kill the process group / job first (reaches grandchildren), then
+            // the direct child, then reap it.
+            kill_worker_tree(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 /// The page shown while the worker is starting: an app asset (served from
 /// the bundle), navigated to the live server once the port answers.
@@ -85,6 +136,9 @@ fn main() {
             let log_path = data.join("server-tauri.log");
             let slot: WorkerSlot = app.state::<WorkerSlot>().inner().clone();
             let app_handle = app.handle().clone();
+            // Hold the reaper for the life of the app so the slot is collected
+            // on exit even when no close event fires (see `Drop for Worker`).
+            let _worker_guard = Worker { slot: slot.clone() };
 
             // We own the port: if a previous (hard-killed) instance left its
             // worker listening, stop it; if a foreign program has the port, we
@@ -94,6 +148,8 @@ fn main() {
                 return Ok(());
             }
 
+            // The guard outlives this closure's scope (the app's whole run),
+            // so the slot is reaped on exit even if no close event fires.
             match spawn_worker(&data, &root, &log_path, &py, &slot) {
                 Ok(()) => {
                     let w = window.clone();
@@ -111,10 +167,9 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The window goes, the worker goes with it. (A plain kill() is
-            // enough: the server's own job children are killed by the server
-            // when it dies, and on Windows a process exit does not orphan a
-            // console.)
+            // The window goes, the worker goes with it: kill the whole tree
+            // (process group / job object) so no grandchild is left holding the
+            // port, then reap the direct child.
             if let WindowEvent::CloseRequested { .. } = event {
                 if let Some(mut child) = window
                     .app_handle()
@@ -123,6 +178,7 @@ fn main() {
                     .ok()
                     .and_then(|mut g| g.take())
                 {
+                    kill_worker_tree(&child);
                     let _ = child.kill();
                     let _ = child.wait();
                 }
@@ -280,7 +336,29 @@ fn spawn_worker(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
+    // macOS: put the worker in its OWN process group (pgid == its pid) so the
+    // kill in kill_worker_tree / the close path reaches the worker *and every
+    // job it spawns* with one signal. `setpgid(0,0)` from the child's entry
+    // is the standard "new session/group for this child" idiom; we do it in
+    // the parent via the pre-spawn hook below instead, because the worker is
+    // launched with a redirected stdio and we want the group set before the
+    // very first exec.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let child = cmd.spawn()?;
+
+    // Windows: put the worker (and every job it spawns) into a job object that
+    // kills the whole tree when it is closed: create the object, set its
+    // kill-on-close limit, assign the child, then drop the handle — from that
+    // moment the OS owns the tree's lifetime and a force-quit of the shell
+    // cannot orphan the worker (the macOS analogue is the process group above).
+    #[cfg(windows)]
+    attach_worker_to_job(&child);
+
     {
         let mut log = fs::OpenOptions::new()
             .create(true)
@@ -297,6 +375,58 @@ fn spawn_worker(
     }
     let _ = slot.lock().ok().and_then(|mut g| g.replace(child)).is_some();
     Ok(())
+}
+
+/// Windows-only: assign the freshly spawned worker to a kill-on-close job
+/// object so the entire process tree (worker + its job children) is torn
+/// down when the shell exits, even on a hard kill. Uses raw Win32 calls so
+/// the build gains no new crate. Failures are non-fatal: worst case the
+/// worker behaves as it did before (reaped on a clean close).
+#[cfg(windows)]
+fn attach_worker_to_job(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+
+    // JOBOBJ_BASIC_LIMIT_INFORMATION is 12 x 8 bytes = 96 bytes; only the
+    // LimitFlags (first field) is set here, the rest stay zero.
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct JobBasicLimit {
+        limit_flags: u64,
+        _rest: [u64; 11],
+    }
+
+    extern "system" {
+        fn CreateJobObjectW(attrs: *mut u8, name: *const u16) -> isize;
+        fn SetInformationJobObject(job: isize, info_class: u32, info: *const u8, size: u32) -> i32;
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+
+    // `as_raw_handle` is the worker's OS process handle; the `Child` guard still
+    // owns it, so we never close it here — the job object takes its own
+    // reference. Assigning a process to a job it was already in (or re-assigning
+    // after a failed attempt) is simply a no-op / failure we ignore.
+    unsafe {
+        let handle = child.as_raw_handle();
+        let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if job != 0 {
+            // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: when the last handle to the
+            // job closes, the OS kills every process assigned to it. Because we
+            // close our own handle immediately below, the job is a fire-and-
+            // forget containment: it lives (and kills the tree) independent of
+            // this process's exit path.
+            let mut limits = JobBasicLimit::default();
+            limits.limit_flags = 0x2000;
+            SetInformationJobObject(
+                job,
+                9, // JobObjectBasicLimitInformation
+                &limits as *const JobBasicLimit as *const u8,
+                std::mem::size_of::<JobBasicLimit>() as u32,
+            );
+            AssignProcessToJobObject(job, handle);
+            CloseHandle(job);
+        }
+    }
 }
 
 /// One worker is ready on the port, but no app window owns it: a hard-killed

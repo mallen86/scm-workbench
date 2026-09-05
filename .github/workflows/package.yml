@@ -191,6 +191,54 @@ jobs:
             exit 1
           fi
           echo "smoke: worker up AND the webview is on the page - the UI the user gets"
+      - name: Reap check - a hard-killed app must not orphan its worker
+        # The inverse of the blank-window class: a worker that outlives the app
+        # (PPID 1, port still held) wedges the *next* launch. The old smoke
+        # cleaned up with a soft kill and then had to pkill the runtime by
+        # hand - the comment there literally says "the hard kill above orphans
+        # it". That is now the failure mode we refuse: hard-kill the shell and
+        # assert the worker reaped itself, with no manual pkill to rescue it.
+        run: |
+          set -uo pipefail
+          ws="$GITHUB_WORKSPACE"
+          app="$ws/build/macos/SCM Workbench.app"
+          export PYTHONDONTWRITEBYTECODE=1
+          data="$(mktemp -d)/scm-data"
+          export SCM_WORKBENCH_DATA="$data"
+          export SCM_WORKBENCH_NO_BOOTSTRAP=1
+          "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/reap.log" 2>&1 &
+          app_pid=$!
+          # wait (bounded, ~5s is plenty - the worker binds in well under a
+          # second) for the worker to come up on the loopback port
+          worker_ok=""
+          for i in $(seq 1 10); do
+            sleep 0.5
+            if curl -sf "http://127.0.0.1:8038/api/info" 2>/dev/null | grep -q '"server"'; then worker_ok=1; break; fi
+          done
+          if [ -z "$worker_ok" ]; then
+            echo "---- reap.log ----"; cat "$ws/build/macos/reap.log" || true
+            echo "reap FAILED: the worker never came up (cannot verify reaping)" >&2
+            kill -9 "$app_pid" 2>/dev/null || true
+            exit 1
+          fi
+          # the whole point: HARD-kill the shell (the Activity-Monitor case) and
+          # confirm the worker is gone on its own. No pkill in between.
+          kill -9 "$app_pid" 2>/dev/null || true
+          # give the shell's exit a beat to run its teardown
+          sleep 1
+          # the worker is the bundle's runtime python running scm_workbench.server
+          if pgrep -f "$app/Contents/runtime/python" >/dev/null 2>&1; then
+            echo "reap FAILED: a worker outlived the hard-killed app (it would orphan to init)" >&2
+            pgrep -fl "$app/Contents/runtime/python" >&2 || true
+            exit 1
+          fi
+          if ! curl -sf "http://127.0.0.1:8038/api/info" >/dev/null 2>&1; then
+            : # expected: the port is free
+          else
+            echo "reap FAILED: the worker still answers on 8038 after the app died" >&2
+            exit 1
+          fi
+          echo "reap: hard-killed the app, the worker reaped itself, the port is free - no orphan"
       - name: Re-seal the bundle after the smoke test
         # The smoke run is the last thing that executes from the bundle, and
         # a straggler it wakes can keep writing after the Sign step's seal.
