@@ -29,7 +29,7 @@ MAX_PREVIEW_RESULT_SIZE = 512 * 1024
 MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 ALLOWED_METHODS = frozenset((
-    "info", "manifest", "settings.get", "preview", "template.resolve", "file.list",
+    "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
 ))
@@ -86,6 +86,16 @@ def dispatch(request: dict) -> dict:
             result = server.get_manifest()
         elif method == "settings.get":
             result = server.load_settings()
+        elif method == "settings.set":
+            if set(params) != {"changes"}:
+                return _bad_params(request_id, "settings.set requires exactly changes")
+            changes = params["changes"]
+            if not isinstance(changes, dict):
+                return _bad_params(request_id, "settings.set changes must be an object")
+            # Value validation, the 64 KiB encoded budget, merge semantics, and
+            # persistence are shared with HTTP /api/settings. Invalid values
+            # are application results so both transports expose the same body.
+            result = server.update_settings(changes)
         elif method == "jobs.list":
             result = server.list_jobs()
         elif method == "template.resolve":

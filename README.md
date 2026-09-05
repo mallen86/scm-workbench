@@ -50,4 +50,4 @@ Everything runs as a tracked job: a live log, a stop button, a persistent histor
 
 ## Development
 
-Running from source, packaging the app, and cutting releases are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The current transitional native boundary, including bounded `file.open`, `file.reveal`, and `url.open` OS actions, is documented in [docs/native-ipc.md](docs/native-ipc.md); raw bytes, save/delete, settings, repos, and updates remain HTTP and HTTP has not been removed.
+Running from source, packaging the app, and cutting releases are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The current transitional native boundary, including bounded `settings.set`, `file.open`, `file.reveal`, and `url.open` OS actions, is documented in [docs/native-ipc.md](docs/native-ipc.md); browser settings fallback, raw bytes, save/delete, repos (including `/api/repos/save`), offsets, and updates remain HTTP and HTTP has not been removed.

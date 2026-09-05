@@ -230,8 +230,8 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
-        "info" | "manifest" | "settings.get" | "jobs.list" | "jobs.start" | "jobs.log"
-        | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list"
+        "info" | "manifest" | "settings.get" | "settings.set" | "jobs.list" | "jobs.start"
+        | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list"
         | "file.open" | "file.reveal" | "url.open" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
@@ -469,6 +469,7 @@ mod tests {
             "info",
             "manifest",
             "settings.get",
+            "settings.set",
             "jobs.list",
             "jobs.start",
             "jobs.log",
@@ -497,6 +498,9 @@ mod tests {
             "file.open.extra",
             "file.reveal.extra",
             "url.open.extra",
+            "settings.set.extra",
+            "settings.set/",
+            "settings.set ",
             "file.open.path",
             "file.reveal.path",
             "url.open.path",
@@ -684,6 +688,10 @@ mod tests {
     }
 
     fn real_python_worker() -> std::process::Child {
+        real_python_worker_with_data(None)
+    }
+
+    fn real_python_worker_with_data(data: Option<&std::path::Path>) -> std::process::Child {
         #[cfg(windows)]
         let mut command = Command::new("python");
         #[cfg(not(windows))]
@@ -691,11 +699,16 @@ mod tests {
         let package_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         command
             .env("PYTHONPATH", package_root)
+            .env("SCM_WORKBENCH_NO_BOOTSTRAP", "1")
             .arg("-c")
             .arg("from scm_workbench.ipc import serve_stdio; serve_stdio()")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(data) = data {
+            command.env("SCM_WORKBENCH_DATA", data);
+        }
+        command
             .spawn()
             .expect("Python is required for the native worker integration test")
     }
@@ -739,6 +752,49 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn real_worker_settings_set_round_trip_is_isolated_to_temporary_data() {
+        let package_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let production_settings = package_root.join("data").join("settings.json");
+        let production_before = std::fs::read(&production_settings).ok();
+        let data = std::env::temp_dir().join(format!(
+            "scm-workbench-settings-rpc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data).unwrap();
+
+        let mut child = real_python_worker_with_data(Some(&data));
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(2));
+        rpc.install(stdin, stdout).unwrap();
+
+        let result = rpc
+            .call(
+                "settings.set",
+                json!({"changes": {"theme": "light", "onboarded": true}}),
+            )
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["settings"]["theme"], "light");
+        assert_eq!(result["settings"]["onboarded"], true);
+
+        let loaded = rpc.call("settings.get", json!({})).unwrap();
+        assert_eq!(loaded["theme"], "light");
+        assert_eq!(loaded["onboarded"], true);
+        assert!(data.join("settings.json").is_file());
+
+        rpc.shutdown();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(std::fs::read(&production_settings).ok(), production_before);
+        std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[test]

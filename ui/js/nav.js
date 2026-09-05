@@ -1,7 +1,7 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs } from "./forms.js";
+import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
@@ -85,12 +85,37 @@ export function bindNav() {
 }
 
 
-export function setTheme(theme) {
-  const s = S.info?.settings || {};
+let themeSelection = 0;
+let confirmedTheme = null;
+let themeWriteQueue = Promise.resolve();
+
+
+function applyTheme(s, theme) {
   s.theme = theme;
-  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ theme }) });
   document.documentElement.dataset.theme = theme;
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === theme));
+}
+
+
+export function setTheme(theme) {
+  const s = S.info?.settings || {};
+  const previous = s.theme || document.documentElement.dataset.theme || "dark";
+  if (confirmedTheme === null) confirmedTheme = previous;
+  const selection = ++themeSelection;
+  applyTheme(s, theme);
+  // Paint immediately, but serialize persistence so browser POSTs cannot land
+  // out of order. Each completed write becomes the confirmed rollback point;
+  // an old failure is intentionally silent when a newer click owns the UI.
+  themeWriteQueue = themeWriteQueue
+    .then(() => setSettings({ theme }))
+    .then(() => { confirmedTheme = theme; }, error => {
+      if (selection !== themeSelection) return;
+      applyTheme(s, confirmedTheme || previous);
+      toast("err", error?.message || "Couldn't save the theme — reverted.");
+    });
+  // The rejection handler above consumes write failures so the next queued
+  // selection still runs and no click creates an unhandled promise.
+  void themeWriteQueue;
 }
 
 /* show commands the way a user would run them: a bare "python" interpreter
@@ -131,11 +156,7 @@ export async function setUiMode(mode) {
   // returning the previous value must not roll the switch back, or the
   // user would have to click twice.
   try {
-    const r = await fetch("/api/settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ui_mode: mode }),
-    });
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    await setSettings({ ui_mode: mode });
   } catch {
     toast("err", "Couldn't save the interface setting — still in " + cur + " mode.");
     return;

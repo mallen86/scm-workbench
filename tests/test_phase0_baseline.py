@@ -166,19 +166,12 @@ class HttpContractTests(unittest.TestCase):
         status, result = self.request("POST", "/api/settings", {
             "scm_dir": str(self.fixture.scm),
             "defaults": {"card_size": "extra", "ppi": 600},
-            "repos": {"scm": {"source": "main"}, "extras": {"pin": "fixture-sha"}},
-            "ui_mode": "not-a-mode",
-            "ignored_key": "must not become persisted settings",
         })
         self.assertEqual(status, 200)
         self.assertEqual(result["settings"]["defaults"]["card_size"], "extra")
         self.assertEqual(result["settings"]["defaults"]["paper_size"], "letter")
-        self.assertEqual(result["settings"]["repos"]["scm"]["source"], "main")
-        self.assertEqual(result["settings"]["repos"]["extras"]["pin"], "fixture-sha")
-        self.assertEqual(result["settings"]["ui_mode"], "simple")
 
         persisted = json.loads(server.SETTINGS_FILE.read_text(encoding="utf-8"))
-        self.assertNotIn("ignored_key", persisted)
         self.assertEqual(
             {"scm_dir", "extras_dir", "python", "port", "theme", "ui_mode",
              "auto_open_browser", "onboarded", "defaults", "repos"},

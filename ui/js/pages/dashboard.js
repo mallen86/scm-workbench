@@ -1,7 +1,7 @@
 /* pages/dashboard — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, ico, iconize, toast, openUrl } from "../core.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { prepActive, updatePrepRows } from "../prep.js";
+import { $, $$, PAGES, S, api, el, ico, iconize, toast, openUrl } from "../core.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { prepActive, updatePrepRows } from "../prep.js";import { setSettings } from "../settings-transport.js";
 PAGES.dashboard = (root) => {
   const wrap = el("div", {});
   const s = S.info.settings;
@@ -63,7 +63,7 @@ export function onboardCard() {
       )),
     ),
     el("div", { style: "margin-top:16px" },
-      el("button", { class: "btn primary", onclick: async () => { await api("/api/settings", { onboarded: true }); S.info.settings.onboarded = true; go("dashboard"); } }, "Got it — show me the dashboard"),
+      el("button", { class: "btn primary", onclick: async () => { await setSettings({ onboarded: true }); S.info.settings.onboarded = true; go("dashboard"); } }, "Got it — show me the dashboard"),
     ),
   );
 }
@@ -107,7 +107,7 @@ export function repoSetupCard() {
   wrap.append(row);
   wrap.append(el("div", { style: "margin-top:14px; display:flex; gap:10px; align-items:center" },
     el("button", { class: "btn primary", onclick: async () => {
-      const r = await api("/api/settings", { scm_dir: scmInp.value.trim(), extras_dir: exInp.value.trim() });
+      const r = await setSettings({ scm_dir: scmInp.value.trim(), extras_dir: exInp.value.trim() });
       await refreshInfo();
       toast(S.info.scm.found ? "ok" : "err", S.info.scm.found ? "Connected! Reloaded the dashboard." : "Still not found — check the path and try again.");
       go("dashboard");

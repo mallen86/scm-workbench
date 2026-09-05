@@ -21,9 +21,10 @@ It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads, preview, packaged-Tauri job control/log operations, the read-only
-`template.resolve`/`file.list` metadata slice, and the bounded OS-action methods
-below. Other surfaces remain on their existing HTTP compatibility paths.
+reads, the bounded `settings.set` write, preview, packaged-Tauri job control/log
+operations, the read-only `template.resolve`/`file.list` metadata slice, and the
+bounded OS-action methods below. Other surfaces remain on their existing HTTP
+compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -56,6 +57,7 @@ below.
 | `GET /api/info` | `info` | `server.get_info()` |
 | `GET /api/manifest` | `manifest` | `server.get_manifest()` |
 | `GET /api/settings` | `settings.get` | `server.load_settings()` |
+| `POST /api/settings` | `settings.set` | `server.update_settings()` |
 | `GET /api/jobs` | `jobs.list` | `server.list_jobs()` |
 | `POST /api/jobs` | `jobs.start` | `server.start_job()` |
 | `GET /api/jobs/<id>/log` | `jobs.log` | `server.get_job_log()` |
@@ -70,13 +72,38 @@ below.
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
 a client transport choice, not their removal. The methods use these exact
-parameter and result shapes inside the common RPC envelope:
+parameter and result shapes inside the common RPC envelope. For `settings.set`,
+the worker holds the settings lock across load, schema validation, merge, and
+atomic commit. It writes a sibling temporary file and replaces `settings.json`
+with `os.replace`; a failed validation or write leaves the previous file intact.
+After a successful commit it invalidates the manifest cache, so the returned
+settings and the next `settings.get` agree. It never writes repos state or the
+per-size offset table:
 
 * `preview`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). `kind` is at most 128 UTF-8 bytes. The JSON encoding of the `args`
   object is at most 512 KiB. The result is the same object as `GET
   /api/preview` (`cmd`, `cwd`, `env`, `warnings`, `errors`, and
   `no_front_images`) and its encoded JSON is at most 512 KiB.
+* `settings.get`: params `{}`. Result is the complete merged settings object.
+* `settings.set`: params exactly `{"changes":{...}}`. The `changes` object
+  must be valid JSON, non-empty, and at most **64 KiB (65,536 bytes)** when
+  encoded as compact UTF-8 JSON. Only these top-level keys are accepted:
+  `scm_dir`, `extras_dir`, `python`, `port`, `theme`, `ui_mode`,
+  `auto_open_browser`, `onboarded`, and `defaults`. Unknown keys,
+  `repos`, and offset state are rejected. String paths/interpreters may be
+  empty but are at most 4096 UTF-8 bytes and contain no C0 or DEL controls.
+  `port` is a non-boolean integer in `1024..65535`; `theme` is `dark` or
+  `light`; `ui_mode` is `simple` or `advanced`; and the two remaining scalar
+  values are strict booleans. `defaults` must be a non-empty partial object
+  containing only `card_size`, `paper_size`, `ppi`, and `quality`. Card and
+  paper names are non-empty, at most 128 UTF-8 bytes, and contain no C0 or
+  DEL controls; `ppi` is a non-boolean finite number in `0..10000`, and
+  `quality` is a non-boolean finite number in `0..100`. The merged settings
+  result is schema-checked and must also fit within 64 KiB encoded JSON.
+  Success is exactly `{"ok":true,"settings":<complete merged settings>}`.
+  Validation happens before any write, so a rejected change cannot partially
+  update settings.
 * `jobs.list`: params `{}`. Result is `{"jobs":[...]}`. Each live row contains
   `id`, `ts`, `kind`, `title`, `status`, `exit_code`, `cmd`, `warnings`, and
   `outputs`; `progress` is present while progress is available. Persisted
@@ -195,7 +222,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the fourteen-method allowlist.
+* `unknown_method` — a method outside the fifteen-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -278,16 +305,19 @@ framing and deadlock or mis-correlate the native caller.
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
-`preview`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, aggregate
-`jobs.poll`, `template.resolve`, `file.list`, `file.open`, `file.reveal`, and
-`url.open`, as well as the three bootstrap reads, use native IPC when a
+`preview`, `settings.set`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`,
+aggregate `jobs.poll`, `template.resolve`, `file.list`, `file.open`,
+`file.reveal`, and `url.open`, as well as the three bootstrap reads, use native IPC when a
 callable Tauri `invoke` capability exists. In a normal browser there is no
 Tauri capability: preview, template resolution, directory metadata, OS actions,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, delete, settings, repo actions, and
-the state-changing update-start operation remain HTTP.
+worker call. Binary file reads, save/copy, delete, repo actions (including
+`/api/repos/save`), offsets, and the state-changing update-start operation remain
+HTTP. The packaged smoke test rejects a WebView `POST /api/settings` after the
+WebKit marker; it does not reject browser-mode GET fallback or the compatibility
+`/api/repos/save` route.
 
 The current migration ledger is:
 
@@ -302,8 +332,9 @@ The current migration ledger is:
 | `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
 | Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
 | Save/copy and image deletion (`/api/files/save`, `/api/fs`) | HTTP | Deferred: preserve user-selected destinations and destructive-operation guards |
-| Settings reads/writes | HTTP | Deferred: native settings ownership is not part of this slice |
-| Repo sync/ref actions | HTTP | Deferred: preserve atomic state writes and ref resolution |
+| Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos`, offsets, and unknown schema keys are excluded |
+| Repo sync/ref actions and `/api/repos/save` | HTTP | Deferred: preserve atomic state writes and ref resolution |
+| Per-size offsets | HTTP | Deferred: preserve offset-table semantics; never part of `settings.set` |
 | Updates and update-start | HTTP | Deferred: update lifecycle and replacement remain HTTP |
 | Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
 
@@ -339,6 +370,7 @@ python scripts/check_ui_jobs.py
 python scripts/check_ui_preview.py
 python scripts/check_ui_artifacts.py
 python scripts/check_ui_native_actions.py
+python scripts/check_ui_settings.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
@@ -347,14 +379,17 @@ The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
 webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
 native IPC, no bootstrap or migrated route was fetched over HTTP by the
-WebView, and the worker is reaped. They intentionally do not require
+WebView, and the worker is reaped. The five existing startup markers remain
+exactly the contract (`info`, `manifest`, `settings.get`, `jobs.list`, and
+`preview`); settings writes do not add a startup mutation or fake marker.
+They intentionally do not require
 `template.resolve` or `file.list` markers: these methods are read-only metadata
 facades and are not deterministically invoked during startup, so CI does not
 add fake UI calls or claim WebView markers for them. The executable facade
 contract, Python HTTP/native parity, and Rust real-worker coverage prove their
 behavior; the runtime smoke guard still rejects WebView HTTP requests to the
 migrated metadata routes and, after the WebKit marker, rejects `POST
-/api/reveal` plus `/api/file` action queries containing the exact `open=1`,
+/api/settings`, `/api/reveal`, plus `/api/file` action queries containing the exact `open=1`,
 `reveal=1`, or `url=` keys in any reasonable query order. It deliberately
 allows raw `/api/file` reads, `images_only=1` metadata, save, and delete
 compatibility requests. No native-action marker is required: the five

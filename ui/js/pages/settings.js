@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";
 /* In-app "What's new": the release notes live on GitHub, but the app's
    window can't open a browser tab in its webview, so the notes are fetched
    through the server (which also renders the markdown) and shown in the
@@ -251,7 +251,7 @@ PAGES.settings = (root) => {
   ));
   dc.append(el("div", { style: "margin-top:12px" },
     el("button", { class: "btn primary", onclick: async () => {
-      await api("/api/settings", { defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
+      await setSettings({ defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
       toast("ok", "Defaults saved.");
       go("settings");
     } }, ico("check"), "Save defaults"),
@@ -271,7 +271,7 @@ PAGES.settings = (root) => {
   ));
   rc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px; align-items:center" },
     el("button", { class: "btn primary", onclick: async () => {
-      const r = await api("/api/settings", { scm_dir: scmI.value.trim(), extras_dir: exI.value.trim() });
+      const r = await setSettings({ scm_dir: scmI.value.trim(), extras_dir: exI.value.trim() });
       await refreshInfo();
       toast(S.info.scm.found ? "ok" : "warn", S.info.scm.found ? "Reconnected — settings reloaded." : "Saved, but the SCM repo still isn't found at that path.");
       go("settings");
@@ -323,7 +323,7 @@ PAGES.settings = (root) => {
     pc.append(el("div", { class: "field", style: "margin-top:10px" }, lab, sw));
     pc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px" },
       el("button", { class: "btn primary", onclick: async () => {
-        const r = await api("/api/settings", { python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
+        const r = await setSettings({ python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
         toast("ok", "Saved. Port changes apply on next server start.");
         go("settings");
       } }, ico("check"), "Save python & server"),

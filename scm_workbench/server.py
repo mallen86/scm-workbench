@@ -20,6 +20,7 @@ Requires Python 3.10+ (3.12+ recommended to match silhouette-card-maker).
 import argparse
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -800,9 +801,139 @@ def save_settings(s: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-# The server is threaded; two /api/settings POSTs in flight would otherwise
-# interleave their read-modify-write and one change would be lost.
+# The server is threaded; two settings writers in flight would otherwise
+# interleave their read-modify-write and one change would be lost.  Both the
+# HTTP settings endpoint and native settings.set use this lock.
 _SETTINGS_LOCK = threading.Lock()
+
+SETTINGS_CHANGES_MAX_BYTES = 64 * 1024
+_SETTINGS_PATH_FIELDS = frozenset(("scm_dir", "extras_dir", "python"))
+_SETTINGS_FIELDS = frozenset((
+    "scm_dir", "extras_dir", "python", "port", "theme", "ui_mode",
+    "auto_open_browser", "onboarded", "defaults",
+))
+_DEFAULT_FIELDS = frozenset(("card_size", "paper_size", "ppi", "quality"))
+
+
+def _setting_string(value: Any, *, name: str, max_bytes: int,
+                    nonempty: bool = False) -> Optional[str]:
+    """Validate a user-controlled UTF-8 string and return an error, if any."""
+    if not isinstance(value, str):
+        return f"{name} must be a string"
+    if nonempty and not value:
+        return f"{name} must be non-empty"
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return f"{name} must be valid UTF-8"
+    if size > max_bytes:
+        return f"{name} exceeds {max_bytes} UTF-8 bytes"
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+        return f"{name} contains C0/DEL control characters"
+    return None
+
+
+def validate_settings_changes(changes: Any) -> List[str]:
+    """Return bounded, application-level errors for a settings patch.
+
+    This is deliberately shared by the HTTP and native transports.  The
+    native method validates its exact ``{changes: ...}`` envelope separately;
+    values and the resulting merge have one semantic implementation here.
+    """
+    if not isinstance(changes, dict):
+        return ["changes must be an object"]
+    if not changes:
+        return ["changes must contain at least one setting"]
+    try:
+        encoded = json.dumps(changes, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        return ["changes must be valid JSON"]
+    if len(encoded) > SETTINGS_CHANGES_MAX_BYTES:
+        return ["changes exceed 64 KiB when encoded"]
+
+    errors: List[str] = []
+    for key in changes:
+        if not isinstance(key, str) or key not in _SETTINGS_FIELDS:
+            errors.append(f"unknown setting: {key}")
+    for key, value in changes.items():
+        if key in _SETTINGS_PATH_FIELDS:
+            error = _setting_string(value, name=key, max_bytes=4096)
+            if error:
+                errors.append(error)
+        elif key == "port":
+            if not isinstance(value, int) or isinstance(value, bool) or not 1024 <= value <= 65535:
+                errors.append("port must be an integer from 1024 through 65535")
+        elif key == "theme":
+            if value not in ("dark", "light") or not isinstance(value, str):
+                errors.append("theme must be dark or light")
+        elif key == "ui_mode":
+            if value not in ("simple", "advanced") or not isinstance(value, str):
+                errors.append("ui_mode must be simple or advanced")
+        elif key in ("auto_open_browser", "onboarded"):
+            if not isinstance(value, bool):
+                errors.append(f"{key} must be boolean")
+        elif key == "defaults":
+            if not isinstance(value, dict):
+                errors.append("defaults must be an object")
+                continue
+            if not value:
+                errors.append("defaults must contain at least one setting")
+                continue
+            for nested_key in value:
+                if not isinstance(nested_key, str) or nested_key not in _DEFAULT_FIELDS:
+                    errors.append(f"unknown default: {nested_key}")
+            for nested_key, nested_value in value.items():
+                label = f"defaults.{nested_key}"
+                if nested_key in ("card_size", "paper_size"):
+                    error = _setting_string(nested_value, name=label, max_bytes=128, nonempty=True)
+                    if error:
+                        errors.append(error)
+                elif nested_key in ("ppi", "quality"):
+                    if (isinstance(nested_value, bool) or
+                            not isinstance(nested_value, (int, float)) or
+                            (isinstance(nested_value, float) and not math.isfinite(nested_value))):
+                        errors.append(f"{label} must be a finite number")
+                    elif nested_key == "ppi" and not 0 <= nested_value <= 10000:
+                        errors.append(f"{label} must be from 0 through 10000")
+                    elif nested_key == "quality" and not 0 <= nested_value <= 100:
+                        errors.append(f"{label} must be from 0 through 100")
+    return errors
+
+
+def update_settings(changes: Any) -> dict:
+    """Atomically validate and apply a settings patch.
+
+    Invalid patches are application results (the HTTP transport sends them as
+    400, while native settings.set returns this same result in its ``result``
+    field).  The lock covers validation, load, merge, and atomic commit so this
+    helper is also safe against callers changing a patch concurrently.  A
+    successful save invalidates both manifest and repo snapshots so path/default
+    changes are visible immediately.  ``repos`` is intentionally not accepted
+    here; /api/repos/save remains its separate locked writer.
+    """
+    with _SETTINGS_LOCK:
+        errors = validate_settings_changes(changes)
+        if errors:
+            return {"ok": False, "errors": errors}
+        settings = load_settings()
+        for key, value in changes.items():
+            if key == "defaults":
+                settings.setdefault("defaults", {}).update(value)
+            else:
+                settings[key] = value
+        try:
+            encoded_size = len(json.dumps(
+                settings, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8"))
+        except (TypeError, ValueError, UnicodeError):
+            return {"ok": False, "errors": ["merged settings must be valid JSON"]}
+        if encoded_size > SETTINGS_CHANGES_MAX_BYTES:
+            return {"ok": False, "errors": ["merged settings exceed 64 KiB when encoded"]}
+        save_settings(settings)
+        invalidate_manifest_cache()
+        _INFO_SNAP.clear()
+        _REPOS_MTIME.clear()
+    return {"ok": True, "settings": settings}
 
 # ============================================================================
 # App updates (see updater.py)
@@ -3170,25 +3301,13 @@ class Handler(BaseHTTPRequestHandler):
                     "cmd": job["cmd"],
                 }})
             if path == "/api/settings":
+                # HTTP keeps its historical direct-patch body shape, while the
+                # native method wraps the same patch as {changes: ...}.  Invalid
+                # patches are application results with HTTP 400, matching the
+                # native result exactly; no invalid patch reaches save_settings.
                 body = self._body()
-                with _SETTINGS_LOCK:
-                    settings = load_settings()
-                    for k in ("scm_dir", "extras_dir", "python", "port", "theme", "auto_open_browser", "onboarded"):
-                        if k in body:
-                            settings[k] = body[k]
-                    if "ui_mode" in body:
-                        m = str(body["ui_mode"]).strip()
-                        if m in ("simple", "advanced"):
-                            settings["ui_mode"] = m
-                    if isinstance(body.get("defaults"), dict):
-                        settings["defaults"].update(body["defaults"])
-                    if isinstance(body.get("repos"), dict):
-                        for k, v in body["repos"].items():
-                            if k in settings["repos"] and isinstance(v, dict):
-                                settings["repos"][k].update(v)
-                    save_settings(settings)
-                invalidate_manifest_cache()
-                return self._json({"ok": True, "settings": settings})
+                result = update_settings(body)
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/repos/save":
                 body = self._body()
                 key = str(body.get("repo") or "")
@@ -3202,12 +3321,16 @@ class Handler(BaseHTTPRequestHandler):
                     target = repo_sync.resolve_target(key, source)
                 except repo_sync.RepoError as e:
                     return self._json({"ok": False, "errors": [str(e)]}, 400)
-                settings = load_settings()
-                settings.setdefault("repos", {}).setdefault(
-                    key, {"source": repo_sync.REPOS[key].get("default_source", "main")})
-                settings["repos"][key]["source"] = source if source in ("main", "latest-release") else "pinned"
-                settings["repos"][key]["pin"] = source if source not in ("main", "latest-release") else ""
-                save_settings(settings)
+                # This endpoint remains the sole writer for the excluded
+                # `repos` settings.  Keep its read-modify-write under the same
+                # lock as settings.set so concurrent updates cannot be lost.
+                with _SETTINGS_LOCK:
+                    settings = load_settings()
+                    settings.setdefault("repos", {}).setdefault(
+                        key, {"source": repo_sync.REPOS[key].get("default_source", "main")})
+                    settings["repos"][key]["source"] = source if source in ("main", "latest-release") else "pinned"
+                    settings["repos"][key]["pin"] = source if source not in ("main", "latest-release") else ""
+                    save_settings(settings)
                 repo_sync.set_source(key, source)
                 # record a check immediately — we already know the target, so the UI
                 # can show “new version available” without a second round-trip
