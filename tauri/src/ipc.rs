@@ -231,7 +231,7 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "jobs.list" | "jobs.start" | "jobs.log"
-        | "jobs.kill" | "jobs.poll" => Ok(()),
+        | "jobs.kill" | "jobs.poll" | "preview" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -473,6 +473,7 @@ mod tests {
             "jobs.log",
             "jobs.kill",
             "jobs.poll",
+            "preview",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -483,6 +484,7 @@ mod tests {
             "",
             "jobs",
             "jobs.poll.push",
+            "preview.extra",
             "server.shutdown",
             "__import__",
         ] {

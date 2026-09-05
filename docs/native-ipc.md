@@ -21,8 +21,8 @@ It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads and packaged-Tauri job control/log operations below; other surfaces remain
-on their existing HTTP compatibility paths.
+reads, preview, and packaged-Tauri job control/log operations below; other
+surfaces remain on their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -35,8 +35,9 @@ Each request and response is one UTF-8 JSON object terminated by `\n`. The
 worker flushes after every response. The input frame is limited to 1 MiB and
 the complete response frame is limited to 8 MiB on the Tauri reader (the Python
 worker keeps ordinary responses below 7 MiB). An oversized result becomes a
-bounded error response rather than a truncated JSON frame. `jobs.poll` has a
-stricter 6 MiB result budget.
+bounded error response rather than a truncated JSON frame. `preview` has a
+stricter 512 KiB encoded result budget, and `jobs.poll` has a stricter 6 MiB
+result budget.
 
 A request has this exact shape:
 
@@ -45,10 +46,10 @@ A request has this exact shape:
 ```
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
-below, and `params` must be a JSON object. Read-only methods take `{}`; the job
-methods use the parameter contracts below.
+below, and `params` must be a JSON object. Read-only methods take `{}`; the
+preview and job methods use the parameter contracts below.
 
-| HTTP compatibility read | Native method | Python implementation |
+| HTTP compatibility route | Native method | Python implementation |
 | --- | --- | --- |
 | `GET /api/info` | `info` | `server.get_info()` |
 | `GET /api/manifest` | `manifest` | `server.get_manifest()` |
@@ -58,11 +59,17 @@ methods use the parameter contracts below.
 | `GET /api/jobs/<id>/log` | `jobs.log` | `server.get_job_log()` |
 | `POST /api/jobs/<id>/kill` | `jobs.kill` | `server.kill_job()` |
 | `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
+| `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
-a client transport choice, not their removal. The job methods use these exact
+a client transport choice, not their removal. The methods use these exact
 parameter and result shapes inside the common RPC envelope:
 
+* `preview`: params `{"kind":"<string>","args":{...}}` (exactly those two
+  keys). `kind` is at most 128 UTF-8 bytes. The JSON encoding of the `args`
+  object is at most 512 KiB. The result is the same object as `GET
+  /api/preview` (`cmd`, `cwd`, `env`, `warnings`, `errors`, and
+  `no_front_images`) and its encoded JSON is at most 512 KiB.
 * `jobs.list`: params `{}`. Result is `{"jobs":[...]}`. Each live row contains
   `id`, `ts`, `kind`, `title`, `status`, `exit_code`, `cmd`, `warnings`, and
   `outputs`; `progress` is present while progress is available. Persisted
@@ -106,7 +113,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the eight-method allowlist.
+* `unknown_method` — a method outside the nine-method allowlist.
 * `internal` — the existing handler failed or the response exceeded the
   configured limit. Handler details are written to stderr, not exposed on the
   wire.
@@ -183,11 +190,11 @@ framing and deadlock or mis-correlate the native caller.
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
-`jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, and aggregate `jobs.poll`,
-as well as the three bootstrap reads, use native IPC when a callable Tauri
-`invoke` capability exists. In a normal browser there is no Tauri capability:
-job list/start/log/kill use the existing HTTP routes and live output uses the
-SSE stream. A native invocation failure is reported to the UI; “browser
+`preview`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, and aggregate
+`jobs.poll`, as well as the three bootstrap reads, use native IPC when a
+callable Tauri `invoke` capability exists. In a normal browser there is no
+Tauri capability: preview and job list/start/log/kill use the existing HTTP
+routes and live output uses the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
 worker call. The state-changing update-start operation remains HTTP.
 
@@ -198,7 +205,8 @@ The current migration ledger is:
 | Bootstrap `info`, `manifest`, `settings.get` reads | Tauri → worker JSON-lines | **This first slice** |
 | Static assets, `/`, `/up`, worker-origin navigation | HTTP | Compatibility path |
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
-| Preview, generated artifacts, templates, and file access | HTTP | Later: needs bounded artifact/path handling |
+| Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| Binary artifacts, templates, file lists, and open/file access | HTTP | Later: needs bounded artifact/path handling |
 | Settings writes, repo sync/ref actions, and offsets | HTTP | Later: preserve atomic state writes and ref resolution |
 | Updates and external filesystem/open actions | HTTP | Update-start remains HTTP; later: strict capability/root validation |
 
@@ -231,18 +239,19 @@ python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_jobs.py
+python scripts/check_ui_preview.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
 
 The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
-webview loaded, all three bootstrap reads and `jobs.list` used native IPC, no
-bootstrap or migrated job route was fetched over HTTP by the WebView, and the
-worker is reaped. They intentionally do not require `jobs.poll`, `jobs.start`,
-or `jobs.kill` markers: hermetic startup has no real upstream repository or
-job to exercise. The lower-layer Python, Rust, and Node contracts cover those
-operations. Build the shell with
+webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
+native IPC, no bootstrap or migrated route was fetched over HTTP by the
+WebView, and the worker is reaped. They intentionally do not require
+`jobs.poll`, `jobs.start`, or `jobs.kill` markers: hermetic startup has no real
+upstream repository or job to exercise. The lower-layer Python, Rust, and Node
+contracts cover those operations. Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical
 assembly path for both platforms.

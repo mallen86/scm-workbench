@@ -1,7 +1,7 @@
 /* forms — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { jobs } from "./jobs.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
+import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -91,11 +91,9 @@ export function updatePreview(kind) {
   // then say so, instead of swallowing the error and keeping whatever the box
   // showed before.
   const run = (attempt = 0) => {
-    fetch(`/api/preview?kind=${encodeURIComponent(kind)}&args=${encodeURIComponent(JSON.stringify(S.forms[kind]))}`)
-      .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
-      .then(({ ok, status, d }) => {
+    preview(kind, S.forms[kind])
+      .then(d => {
         if (!isCurrent()) return;
-        if (!ok) throw new Error(d?.error || `the server answered ${status}`);
         renderPreview(box, d);
       })
       .catch(err => {

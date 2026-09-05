@@ -2129,6 +2129,17 @@ def invalidate_manifest_cache() -> None:
         MANIFEST_CACHE.clear()
 
 
+class PreviewError(Exception):
+    """A user-facing preview request error shared by HTTP and native IPC."""
+
+    def __init__(self, *, status: int, http_body: dict, ipc_code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.http_body = http_body
+        self.ipc_code = ipc_code
+        self.message = message
+
+
 def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
     """Coerce/validate raw client values against the manifest. Returns (args, errors, warnings)."""
     errors: List[str] = []
@@ -2196,6 +2207,60 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
             else:  # text / path
                 args[key] = "" if v is None else str(v).strip()
     return args, errors, warns
+
+
+def build_preview(kind: str, raw_args: dict) -> dict:
+    """Build the command preview used by both HTTP and native IPC.
+
+    This deliberately shares the manifest, argument normalization, command
+    builder, and cached repo snapshot used by jobs.  It only assembles a
+    command: ``write_deck=False`` keeps preview requests side-effect free.
+    """
+    manifest = get_manifest()
+    if kind not in manifest:
+        raise PreviewError(
+            status=404, http_body={"error": "unknown kind"},
+            ipc_code="bad_request", message="unknown kind",
+        )
+    if not isinstance(raw_args, dict):
+        raise PreviewError(
+            status=400, http_body={"error": "bad args"},
+            ipc_code="bad_request", message="preview args must be an object",
+        )
+
+    normalized, errors, norm_warns = normalize_args(manifest[kind], raw_args)
+    settings = load_settings()
+    argv, cwd, env, title, warnings, errs = build_command(
+        kind, normalized, settings, get_info_cached(), write_deck=False,
+    )
+    # Create PDF needs card images to work with — the front directory
+    # (SCM's own default when the form leaves it empty) empty means the
+    # job would produce nothing, so the client keeps the run button
+    # disabled until it has images.
+    no_front = False
+    if kind == "create_pdf" and not errs and cwd:
+        front = normalized.get("front_dir") or "game/front"
+        fd = Path(front) if os.path.isabs(front) else (Path(cwd) / front)
+        n = sum(1 for c in fd.iterdir() if c.is_file() and is_image_file(c)) if fd.is_dir() else 0
+        if n == 0:
+            no_front = True
+            # the alternate tip only exists in advanced mode — simple mode
+            # can't change the front directory, so fetching is the only way
+            # to run
+            tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
+            warnings.append(f"No images in the front directory ({front}). Use the fetch card art workflow first{tip or '.'}")
+    return {
+        # Always show the command that was built: validation problems are
+        # already visible in the notes below, and a (partial or
+        # default-substituted) command is the most useful thing on screen.
+        "cmd": _fmt_argv(argv),
+        "cwd": str(cwd) if cwd else None,
+        "env": {k: v for k, v in env.items()
+                if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
+        "warnings": warnings + norm_warns + errors,
+        "errors": errs,
+        "no_front_images": no_front,
+    }
 
 
 def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
@@ -3126,51 +3191,19 @@ class Handler(BaseHTTPRequestHandler):
     def _preview(self, q):
         kind = (q.get("kind") or [""])[0]
         args_json = (q.get("args") or ["{}"])[0]
-        # a wiped form slot serializes as the literal string "undefined" from a
-        # stale client - treat that as defaults instead of 400ing (a 400 puts
-        # the client into its retry ladder and the box sits on the stale
-        # command); the client's re-own fix prevents the wipe itself
+        # A wiped form slot serializes as the literal string "undefined" from
+        # a stale client; treat that and the old literal "null" as defaults.
         if args_json in ("undefined", "null"):
             args_json = "{}"
         try:
             args = json.loads(args_json)
         except Exception:
             return self._json({"error": "bad args"}, 400)
-        manifest = get_manifest()
-        if kind not in manifest:
-            return self._json({"error": "unknown kind"}, 404)
-        normalized, errors, norm_warns = normalize_args(manifest[kind], args)
-        settings = load_settings()
-        argv, cwd, env, title, warnings, errs = build_command(kind, normalized, settings, get_info_cached(), write_deck=False)
-        # Create PDF needs card images to work with — the front directory
-        # (SCM's own default when the form leaves it empty) empty means the
-        # job would produce nothing, so the client keeps the run button
-        # disabled until it has images.
-        no_front = False
-        if kind == "create_pdf" and not errs and cwd:
-            front = normalized.get("front_dir") or "game/front"
-            fd = Path(front) if os.path.isabs(front) else (Path(cwd) / front)
-            n = sum(1 for c in fd.iterdir() if c.is_file() and is_image_file(c)) if fd.is_dir() else 0
-            if n == 0:
-                no_front = True
-                # the alternate tip only exists in advanced mode — simple mode
-                # can't change the front directory, so fetching is the only way
-                tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
-                warnings.append(f"No images in the front directory ({front}). Use the fetch card art workflow first{tip or '.'}")
-        return self._json({
-            # always show the command that was built: validation problems are
-            # already visible in the notes below, and a (partial or
-            # default-substituted) command is the most useful thing on screen.
-            # Hiding it turned any single rejected value into a blank
-            # “— incomplete —” that looked like the whole form was broken.
-            "cmd": _fmt_argv(argv),
-            "cwd": str(cwd) if cwd else None,
-            "env": {k: v for k, v in env.items()
-                     if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
-            "warnings": warnings + norm_warns + errors,
-            "errors": errs,
-            "no_front_images": no_front,
-        })
+        try:
+            result = build_preview(kind, args)
+        except PreviewError as error:
+            return self._json(error.http_body, error.status)
+        return self._json(result)
 
     def _sse(self, jid: str, after: int):
         self.send_response(200)

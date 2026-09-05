@@ -1,8 +1,8 @@
 """The bounded JSON-lines protocol used by the native shell.
 
 This module is deliberately a small adapter around the server's existing read
-functions.  It does not expose arbitrary server callables: the three methods
-below are the complete child-process RPC surface for the first native slice.
+functions.  It does not expose arbitrary server callables: the allowlisted
+methods below are the complete child-process RPC surface for the native slice.
 """
 
 from __future__ import annotations
@@ -21,8 +21,15 @@ MAX_LINE_SIZE = 1024 * 1024
 # Responses are complete newline-delimited frames. Keep the limit safely below
 # the native reader's 8 MiB ceiling while bounding accidental or hostile data.
 MAX_RESPONSE_SIZE = 7 * 1024 * 1024
+# Preview has a narrower budget than the general protocol so a large manifest
+# value cannot monopolize the native request/response channel.
+MAX_PREVIEW_ARGS_SIZE = 512 * 1024
+MAX_PREVIEW_RESULT_SIZE = 512 * 1024
+# Byte-oriented aliases make the unit explicit for callers and tests.
+MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
+MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 ALLOWED_METHODS = frozenset((
-    "info", "manifest", "settings.get",
+    "info", "manifest", "settings.get", "preview",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
 ))
 
@@ -80,6 +87,33 @@ def dispatch(request: dict) -> dict:
             result = server.load_settings()
         elif method == "jobs.list":
             result = server.list_jobs()
+        elif method == "preview":
+            if set(params) != {"kind", "args"}:
+                return _bad_params(request_id, "preview requires exactly string kind and object args")
+            kind = params["kind"]
+            if not isinstance(kind, str) or not kind:
+                return _bad_params(request_id, "preview kind must be a non-empty string")
+            try:
+                kind_size = len(kind.encode("utf-8"))
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "preview kind must be valid UTF-8")
+            if kind_size > 128:
+                return _bad_params(request_id, "preview kind exceeds 128 UTF-8 bytes")
+            args = params["args"]
+            if not isinstance(args, dict):
+                return _bad_params(request_id, "preview args must be an object")
+            try:
+                args_size = len(json.dumps(
+                    args, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8"))
+            except (TypeError, ValueError, UnicodeError):
+                return _bad_params(request_id, "preview args must be valid JSON")
+            if args_size > MAX_PREVIEW_ARGS_SIZE:
+                return _bad_params(request_id, "preview args exceed 512 KiB when encoded")
+            try:
+                result = server.build_preview(kind, args)
+            except server.PreviewError as error:
+                return _error(request_id, error.ipc_code, error.message)
         elif method == "jobs.start":
             if set(params) != {"kind", "args"} or not _string(params.get("kind"), "kind"):
                 return _bad_params(request_id, "jobs.start requires string kind and object args")
@@ -129,6 +163,18 @@ def dispatch(request: dict) -> dict:
         # useful to the supervising shell and belongs on stderr, not stdout.
         traceback.print_exc(file=sys.stderr)
         return _error(request_id, "internal", "request handler failed")
+    if method == "preview":
+        # This is deliberately outside the handler exception block: a genuine
+        # build failure remains an ``internal`` error, never a size error.
+        try:
+            result_size = len(json.dumps(
+                result, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8"))
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > MAX_PREVIEW_RESULT_SIZE:
+            return _error(request_id, "result_too_large", "preview result exceeds 512 KiB")
     # stdout is exclusively the JSON-lines protocol.  This concise stderr
     # marker lets packaged smoke tests prove the native dispatch path without
     # corrupting a response frame.

@@ -88,7 +88,7 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
   persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when
   packaged).
 * The Workbench never imports code from the base repos — it reads their JSON and shells out, so it stays compatible with whatever version the repos are on. `silhouette-card-maker` and `scm-extras` are always authoritative for fetching, PDF/DXF generation, and layouts; Workbench only wraps and orchestrates them.
-* **Native boundary (current migration wave).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Bootstrap reads and packaged-Tauri job list/start/log/kill/poll use native IPC; browser HTTP/SSE fallback, previews, settings writes, repo actions, filesystem operations, update-start, and static/worker-origin navigation remain HTTP. See [docs/native-ipc.md](docs/native-ipc.md) for the exact schema, bounds, ACL, rollout rule, and verification commands.
+* **Native boundary (current migration wave).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Bootstrap reads, preview, and packaged-Tauri job list/start/log/kill/poll use native IPC; browser HTTP/SSE fallback, binary artifacts, templates, file lists/open, settings writes, repo actions, filesystem operations, update-start, and static/worker-origin navigation remain HTTP. See [docs/native-ipc.md](docs/native-ipc.md) for the exact schema, bounds, ACL, rollout rule, and verification commands.
 
 The data area holds `settings.json`, job history/logs, the per-size offset table, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
 
@@ -108,6 +108,7 @@ python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_jobs.py
+python scripts/check_ui_preview.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 (cd tauri && cargo build --release --features custom-protocol)
