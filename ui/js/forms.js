@@ -1,7 +1,7 @@
 /* forms — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { openConsole, refreshJobs } from "./console.js";import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { refreshInfo } from "./info.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
+import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { jobs } from "./jobs.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -521,34 +521,40 @@ export async function doRun(kind, btn, opts = {}) {
     if (!ok) return;
   }
   if (btn) { btn.disabled = true; btn.innerHTML = ""; btn.append(el("span", { class: "spinner" }), " Starting…"); }
+  let startFailed = false;
   try {
-    const r = await fetch("/api/jobs", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, args: opts.args !== undefined ? opts.args : S.forms[kind] }),
-    });
-    const j = await r.json();
+    let j;
+    try {
+      j = await jobs.start(kind, opts.args !== undefined ? opts.args : S.forms[kind]);
+    } catch (error) {
+      startFailed = true;
+      toast("err", error?.message || "Failed to start job");
+      return null;
+    }
     if (!j.ok) {
       toast("err", j.errors?.join("; ") || "Failed to start job");
     } else {
-      for (const w of j.warnings || []) toast("warn", w, 5200);
+      const warnings = j.job?.warnings || j.warnings || [];
+      for (const w of warnings) toast("warn", w, 5200);
       toast("ok", `${j.job.title} — job started`);
       // register the job locally right away: the console tab (advanced mode)
       // and the page's status strip (simple mode) must not wait for the next
-      // /api/jobs poll to learn something is running.
+      // background list refresh to learn something is running.
       const j0 = { id: j.job.id, ts: Date.now() / 1000, kind, title: j.job.title,
                    status: "running", exit_code: null, cmd: j.job.cmd,
-                   warnings: j.warnings || [], outputs: [] };
+                   warnings, outputs: [] };
       const i = (S.jobs || []).findIndex(x => x.id === j0.id);
       if (i >= 0) S.jobs[i] = { ...S.jobs[i], ...j0 };
       else S.jobs = [j0, ...(S.jobs || [])];
+      const { refreshJobs, openConsole } = await import("./console.js");
       refreshJobs();
       if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over
       if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
-        setTimeout(() => refreshInfo(), 2500);
+        setTimeout(() => import("./info.js").then(({ refreshInfo }) => refreshInfo()), 2500);
       }
       if (kind.startsWith("fetch:")) {
         // keep the user's form state (pasted decklists etc.) alive
-        setTimeout(() => refreshInfo({ keepForms: true }), 2500);
+        setTimeout(() => import("./info.js").then(({ refreshInfo }) => refreshInfo({ keepForms: true })), 2500);
       }
       return j.job;
     }
@@ -556,6 +562,6 @@ export async function doRun(kind, btn, opts = {}) {
   } finally {
     // don't silently re-enable a button the latest preview has since blocked
     // (e.g. the front directory is still empty)
-    if (btn && !S.previewBlock?.[kind]) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
+    if (btn && (startFailed || !S.previewBlock?.[kind])) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
   }
 }

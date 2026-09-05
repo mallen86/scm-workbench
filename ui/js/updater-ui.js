@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, api } from "./core.js";const UPDATE_STAGES = {
+import { $, S, el } from "./core.js";import { jobs } from "./jobs.js";const UPDATE_STAGES = {
   fetch: "fetching the release…",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -71,9 +71,9 @@ function updateStrip(job) {
 export function startUpdateStrip(jobId) {
   stopUpdateStrip();
   const tick = async () => {
-    let jobs;
-    try { jobs = (await api("/api/jobs")).jobs || []; } catch { return; }
-    const j = jobs.find(x => x.id === jobId) || jobs.find(x => x.kind === "update");
+    let rows;
+    try { rows = (await jobs.list()).jobs || []; } catch { return; }
+    const j = rows.find(x => x.id === jobId) || rows.find(x => x.kind === "update");
     if (!j) return;
     updateStrip(j);
     if (j.status !== "running") {

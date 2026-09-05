@@ -18,11 +18,27 @@ from typing import Any, BinaryIO, Dict, Optional, TextIO, Tuple
 # limit here (rather than in the Tauri side only) means a directly launched
 # worker has the same safety boundary.
 MAX_LINE_SIZE = 1024 * 1024
-# Responses are complete newline-delimited frames.  8 MiB is intentionally
-# above the current real manifest size while still bounding accidental or
-# hostile results before they reach the native reader.
-MAX_RESPONSE_SIZE = 8 * 1024 * 1024
-ALLOWED_METHODS = frozenset(("info", "manifest", "settings.get"))
+# Responses are complete newline-delimited frames. Keep the limit safely below
+# the native reader's 8 MiB ceiling while bounding accidental or hostile data.
+MAX_RESPONSE_SIZE = 7 * 1024 * 1024
+ALLOWED_METHODS = frozenset((
+    "info", "manifest", "settings.get",
+    "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
+))
+
+
+def _bad_params(request_id: str, message: str) -> dict:
+    return _error(request_id, "bad_request", message)
+
+
+def _string(value: Any, name: str) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _error(request_id: Any, code: str, message: str) -> dict:
@@ -54,12 +70,60 @@ def dispatch(request: dict) -> dict:
     from scm_workbench import server
 
     try:
+        if method in ("info", "manifest", "settings.get", "jobs.list") and params:
+            return _bad_params(request_id, f"{method} does not accept parameters")
         if method == "info":
             result = server.get_info()
         elif method == "manifest":
             result = server.get_manifest()
-        else:  # settings.get
+        elif method == "settings.get":
             result = server.load_settings()
+        elif method == "jobs.list":
+            result = server.list_jobs()
+        elif method == "jobs.start":
+            if set(params) != {"kind", "args"} or not _string(params.get("kind"), "kind"):
+                return _bad_params(request_id, "jobs.start requires string kind and object args")
+            if not isinstance(params.get("args"), dict):
+                return _bad_params(request_id, "jobs.start args must be an object")
+            job, errors = server.start_job(params["kind"], params["args"])
+            if errors:
+                result = {"ok": False, "errors": errors}
+            else:
+                result = {"ok": True, "job": {
+                    "id": job["id"], "title": job["title"], "status": job["status"],
+                    "cmd": job["cmd"], "warnings": job.get("warnings", []),
+                }}
+        elif method == "jobs.kill":
+            if set(params) != {"job_id"} or not _string(params.get("job_id"), "job_id"):
+                return _bad_params(request_id, "jobs.kill requires string job_id")
+            result = {"ok": bool(server.kill_job(params["job_id"]))}
+        elif method == "jobs.log":
+            allowed = {"job_id", "after", "max_lines"}
+            if not set(params).issubset(allowed) or not _string(params.get("job_id"), "job_id"):
+                return _bad_params(request_id, "jobs.log requires string job_id")
+            after = params.get("after", 0)
+            max_lines = params.get("max_lines", server.JOB_LOG_MAX_LINES)
+            if not _nonnegative_int(after) or not isinstance(max_lines, int) or isinstance(max_lines, bool) \
+                    or not (1 <= max_lines <= server.JOB_LOG_MAX_LINES):
+                return _bad_params(request_id, "jobs.log cursor or max_lines is out of range")
+            result = server.get_job_log(params["job_id"], after, max_lines)
+        else:  # jobs.poll
+            allowed = {"cursors", "max_events"}
+            if set(params) != allowed or not isinstance(params.get("cursors"), list):
+                return _bad_params(request_id, "jobs.poll requires cursors and max_events")
+            cursors = params["cursors"]
+            max_events = params["max_events"]
+            if len(cursors) > 32 or not isinstance(max_events, int) or isinstance(max_events, bool) \
+                    or not (1 <= max_events <= 256):
+                return _bad_params(request_id, "jobs.poll accepts at most 32 cursors and max_events 1..256")
+            clean = []
+            for cursor in cursors:
+                if not isinstance(cursor, dict) or set(cursor) != {"job_id", "after"} \
+                        or not _string(cursor.get("job_id"), "job_id") \
+                        or not _nonnegative_int(cursor.get("after")):
+                    return _bad_params(request_id, "each poll cursor requires job_id and nonnegative after")
+                clean.append({"job_id": cursor["job_id"], "after": cursor["after"]})
+            result = server.poll_jobs(clean, max_events)
     except Exception:
         # Keep exception details out of the wire contract.  The traceback is
         # useful to the supervising shell and belongs on stderr, not stdout.
@@ -129,7 +193,7 @@ def _read_physical_line(stream: BinaryIO | TextIO, max_line_size: int) -> Tuple[
 
 
 def _encode_response(response: dict, max_response_size: int) -> bytes:
-    encoded = json.dumps(response, default=str, separators=(",", ":")).encode("utf-8") + b"\n"
+    encoded = json.dumps(response, default=str, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(encoded) <= max_response_size:
         return encoded
     # Do not truncate JSON: replace the entire result with a bounded error

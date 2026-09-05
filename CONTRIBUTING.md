@@ -83,9 +83,12 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 
 * **One manifest, two users.** The server holds a single option manifest for every job (each option: type, choices, default, help). The UI renders forms *from it* and the server assembles argv *from it* — so the on-screen command preview is byte-identical to what runs.
 * **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on both platforms.
-* **Live logs** flow over a per-job SSE stream (`/api/jobs/<id>/stream`); history is persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when packaged).
+* **Live logs** use native aggregate polling for packaged Tauri windows and a
+  per-job SSE stream (`/api/jobs/<id>/stream`) in the browser; history is
+  persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when
+  packaged).
 * The Workbench never imports code from the base repos — it reads their JSON and shells out, so it stays compatible with whatever version the repos are on. `silhouette-card-maker` and `scm-extras` are always authoritative for fetching, PDF/DXF generation, and layouts; Workbench only wraps and orchestrates them.
-* **Native boundary (current first slice).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Only the read-only bootstrap calls `info`, `manifest`, and `settings.get` use native IPC; jobs, SSE, previews, settings writes, repo actions, filesystem operations, updates, and static/worker-origin navigation remain HTTP. See [docs/native-ipc.md](docs/native-ipc.md) for the schema, ACL, rollout rule, and verification commands.
+* **Native boundary (current migration wave).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Bootstrap reads and packaged-Tauri job list/start/log/kill/poll use native IPC; browser HTTP/SSE fallback, previews, settings writes, repo actions, filesystem operations, update-start, and static/worker-origin navigation remain HTTP. See [docs/native-ipc.md](docs/native-ipc.md) for the exact schema, bounds, ACL, rollout rule, and verification commands.
 
 The data area holds `settings.json`, job history/logs, the per-size offset table, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
 
@@ -104,6 +107,7 @@ uv venv && uv sync
 python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
+python scripts/check_ui_jobs.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 (cd tauri && cargo build --release --features custom-protocol)

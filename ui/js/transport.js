@@ -1,7 +1,7 @@
 /* --------------------------------------------------------------------------
    Frontend transport boundary.
 
-   Only the small, read-only bootstrap slice is native for now. Everything
+   Bootstrap reads and background jobs have explicit native facades. Everything
    else stays on the worker's HTTP origin until it gets its own transport.
    Keeping route selection pure makes the boundary straightforward to test
    without requiring a Tauri or DOM runtime.

@@ -51,6 +51,24 @@ DEFAULT_PORT = 8037
 # stdout is reserved for protocol frames in that mode.
 _IPC_MODE = False
 
+# Native job responses and SSE frames share these conservative wire limits.
+# Log files remain complete on disk; only transmitted lines are clipped.
+JOB_LINE_MAX_BYTES = 64 * 1024
+JOB_LOG_MAX_LINES = 4096
+SSE_QUEUE_SIZE = 128
+
+
+class _WakeQueue(queue.Queue):
+    """Queue compatible with legacy producers but never blocks their pump."""
+    def put(self, item, block=True, timeout=None):  # noqa: D401
+        return super().put(item, block=False)
+
+    def put_nowait(self, item):
+        return super().put(item, block=False)
+
+
+IPC_POLL_MAX_BYTES = 6 * 1024 * 1024  # safely below the 8 MiB frame ceiling
+
 
 def _diag(message: str = "", *, error: bool = False) -> None:
     """Write human diagnostics without contaminating IPC stdout."""
@@ -923,6 +941,7 @@ def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict]
         "exit_code": None,
         "log_file": str(LOGS_DIR / f"{job_id}.log"),
         "log_lines": [],
+        "first_seq": 0,
         "subs": [],
         "warnings": [],
         "started": time.time(),
@@ -1318,6 +1337,78 @@ JOBS: Dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 
 
+def _line_wire(line: Any) -> Tuple[str, bool]:
+    """Return a UTF-8 bounded line and whether it had to be clipped."""
+    text = str(line)
+    raw = text.encode("utf-8", "replace")
+    if len(raw) <= JOB_LINE_MAX_BYTES:
+        return text, False
+    # Decode a byte prefix without splitting a code point and make the loss
+    # visible to native callers rather than silently changing a transcript.
+    marker = "… [line truncated]"
+    room = max(1, JOB_LINE_MAX_BYTES - len(marker.encode("utf-8")))
+    clipped = raw[:room].decode("utf-8", "ignore")
+    return clipped + marker, True
+
+
+def _job_lines_locked(job: dict) -> Tuple[int, List[str]]:
+    """Copy transcript state while JOBS_LOCK is already held."""
+    lines = list(job.get("log_lines") or [])
+    return int(job.get("first_seq", 0) or 0), lines
+
+
+def _job_lines_snapshot(job: dict) -> Tuple[int, List[str]]:
+    """Copy transcript state without exposing a mutating list to readers."""
+    with JOBS_LOCK:
+        return _job_lines_locked(job)
+
+
+def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
+    """Append a complete line and wake subscribers without ever blocking."""
+    text = str(line)
+    if log_f is not None:
+        log_f.write(text + "\n")
+        log_f.flush()
+    with JOBS_LOCK:
+        lines = job.setdefault("log_lines", [])
+        first = int(job.get("first_seq", 0) or 0)
+        seq = first + len(lines)
+        lines.append(text)
+        subscribers = list(job.get("subs", []))
+    _notify_subscribers(job, subscribers, ("line", seq, text))
+    return seq
+
+
+def _notify_subscribers(job: dict, subscribers: list, message: tuple, *, terminal: bool = False) -> None:
+    """Non-blocking subscriber wakeups; a slow SSE client gets a replay gap."""
+    for q in subscribers:
+        try:
+            q.put_nowait(message)
+        except queue.Full:
+            # Drop queued wakes, not the transcript.  The consumer will replay
+            # from log_lines after the explicit gap marker.  A terminal marker
+            # is forced in below so completion can never be lost.
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(("gap",))
+            except queue.Full:
+                pass
+            if terminal:
+                try:
+                    while True:
+                        q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(message)
+                except queue.Full:
+                    pass
+
+
 def _persist_jobs() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     with JOBS_LOCK:
@@ -1344,6 +1435,142 @@ def _persist_jobs() -> None:
 def read_persisted_jobs() -> list:
     data = _try_read_json(JOBS_FILE)
     return data or []
+
+
+def list_jobs() -> dict:
+    """The one authoritative shape used by HTTP and native callers."""
+    with JOBS_LOCK:
+        live = [dict(j) for j in sorted(JOBS.values(), key=lambda x: x["ts"], reverse=True)[:50]]
+    running = []
+    for j in live:
+        row = {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
+               "status": j["status"], "exit_code": j.get("exit_code"), "cmd": j["cmd"]}
+        if j.get("progress"):
+            row["progress"] = j["progress"]
+        row.update(warnings=j.get("warnings", []), outputs=job_outputs(j))
+        running.append(row)
+    ids = {r["id"] for r in running}
+    history = []
+    for old in read_persisted_jobs():
+        if old.get("id") in ids:
+            continue
+        row = dict(old)
+        row.setdefault("outputs", job_outputs(row))
+        history.append(row)
+    return {"jobs": running + history[:200]}
+
+
+def _job_record(job_id: str) -> Optional[dict]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return None
+        snapshot = dict(job)
+        snapshot["log_lines"] = list(job.get("log_lines") or [])
+        return snapshot
+
+
+def _persisted_record(job_id: str) -> Optional[dict]:
+    return next((dict(j) for j in read_persisted_jobs() if j.get("id") == job_id), None)
+
+
+def get_job_log(job_id: str, after: int = 0, max_lines: int = JOB_LOG_MAX_LINES,
+                *, byte_limit: int = IPC_POLL_MAX_BYTES) -> dict:
+    """Read a bounded cursor window shared by HTTP and native IPC."""
+    job = _job_record(job_id) or _persisted_record(job_id)
+    if not job:
+        return {"lines": [], "status": "missing", "exit_code": None, "cmd": "",
+                "first_seq": 0, "next_seq": 0, "truncated": False, "gap": False}
+    first = int(job.get("first_seq", 0) or 0)
+    lines = list(job.get("log_lines") or [])
+    if not lines and job.get("log_file"):
+        try:
+            with open(job["log_file"], encoding="utf-8", errors="replace") as f:
+                lines = [line.rstrip("\r\n") for line in f]
+        except OSError:
+            pass
+    available_next = first + len(lines)
+    requested = max(0, int(after))
+    start = max(requested, first)
+    truncated = requested < first
+    selected = lines[start - first:]
+    if len(selected) > max_lines:
+        selected = selected[:max_lines]
+        truncated = True
+    wire, clipped = [], False
+    # Add lines incrementally so a hostile transcript never causes an
+    # quadratic serialize-and-pop loop. The one-byte list comma is included.
+    base_size = len(json.dumps({"lines": [], "status": job.get("status", "missing"),
+                                "exit_code": job.get("exit_code"), "cmd": job.get("cmd", ""),
+                                "first_seq": first, "next_seq": start,
+                                "truncated": False, "gap": bool(requested < first),
+                                "line_truncated": False}, ensure_ascii=False,
+                               separators=(",", ":")).encode("utf-8"))
+    used = base_size
+    for line in selected:
+        bounded, was_clipped = _line_wire(line)
+        item_size = len(json.dumps(bounded, ensure_ascii=False).encode("utf-8")) + (1 if wire else 0)
+        if wire and used + item_size > byte_limit:
+            truncated = True
+            break
+        wire.append(bounded)
+        used += item_size
+        clipped = clipped or was_clipped
+    next_seq = max(start + len(wire), min(requested, available_next))
+    return {"lines": wire, "status": job.get("status", "missing"),
+            "exit_code": job.get("exit_code"), "cmd": job.get("cmd", ""),
+            "first_seq": first, "next_seq": next_seq,
+            "truncated": bool(truncated or clipped or len(wire) < len(selected)),
+            "gap": bool(requested < first),
+            "line_truncated": bool(clipped)}
+
+
+def poll_jobs(cursors: list, max_events: int) -> dict:
+    """Return independent bounded windows for native job polling."""
+    result = []
+    # Keep a little room for the IPC envelope. This is the complete frame
+    # budget for the result, not a decrementing per-row budget.
+    frame_budget = IPC_POLL_MAX_BYTES - 64 * 1024
+
+    def encoded_size(rows: list) -> int:
+        return len(json.dumps({"jobs": rows}, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8"))
+
+    for index, cursor in enumerate(cursors):
+        jid, after = cursor["job_id"], cursor["after"]
+        # Allocate the remaining frame budget fairly before reading any lines;
+        # each helper also stops incrementally at this per-job byte budget.
+        remaining = max(1, len(cursors) - index)
+        used = encoded_size(result)
+        remaining_budget = max(0, frame_budget - used)
+        per_cursor = max(4096, remaining_budget // remaining)
+        job = _job_record(jid) or _persisted_record(jid)
+        if not job:
+            row = {"job_id": jid, "lines": [], "next_seq": after,
+                   "status": "missing", "exit_code": None, "cmd": "",
+                   "complete": True, "truncated": False, "gap": False}
+            result.append(row)
+            continue
+        log = get_job_log(jid, after, max_events, byte_limit=per_cursor)
+        # get_job_log returns strings; native batches retain the established
+        # SSE indexes and independently advance each cursor.
+        first = log["first_seq"]
+        indexed = [{"i": first + max(0, after - first) + i, "s": line}
+                   for i, line in enumerate(log["lines"])]
+        row = {"job_id": jid, "lines": indexed, "next_seq": log["next_seq"],
+               "status": log["status"], "exit_code": log["exit_code"],
+               "cmd": _line_wire(log["cmd"])[0], "complete": log["status"] != "running",
+               "truncated": log["truncated"], "gap": log["gap"]}
+        # A long line or many jobs can otherwise make max_events exceed the
+        # frame budget. Remove tail events (never another job's events) and
+        # report the resulting gap through truncated while preserving cursor.
+        while indexed and encoded_size(result + [row]) > frame_budget:
+            indexed.pop()
+            row["lines"] = indexed
+            row["truncated"] = True
+            row["next_seq"] = max(first + len(indexed), min(after, log["next_seq"]))
+        result.append(row)
+    return {"jobs": result}
 
 
 def job_outputs(job: dict) -> list:
@@ -2009,12 +2236,14 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "exit_code": None,
         "log_file": str(LOGS_DIR / f"{job_id}.log"),
         "log_lines": [],
+        "first_seq": 0,
         "subs": [],
         "warnings": warnings,
         "started": time.time(),
         "ended": None,
         "duration": None,
         "proc": None,
+        "pump_thread": None,
     }
     if kind == "offset_pdf" and args.get("save") and args.get("paper_size"):
         # SCM's own -s writes the shared file with the values just used;
@@ -2032,9 +2261,14 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **_proc_kwargs())
         job["proc"] = proc
+        pump_thread = threading.Thread(
+            target=_pump, args=(job, proc, log_f), daemon=True,
+            name=f"job-pump-{job_id}",
+        )
         with JOBS_LOCK:
+            job["pump_thread"] = pump_thread
             JOBS[job_id] = job
-        threading.Thread(target=_pump, args=(job, proc, log_f), daemon=True).start()
+        pump_thread.start()
     except Exception as e:
         log_f.write(f"failed to start: {e}\n")
         log_f.close()
@@ -2047,19 +2281,15 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
 
 def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
     for line in iter(proc.stdout.readline, b""):
-        s = line.decode("utf-8", "replace").rstrip("\n")
-        job["log_lines"].append(s)
-        log_f.write(s + "\n")
-        log_f.flush()
-        for q in list(job["subs"]):
-            try:
-                q.put(("line", s))
-            except Exception:
-                pass
+        s = line.decode("utf-8", "replace").rstrip("\r\n")
+        _append_job_line(job, s, log_f=log_f)
     rc = proc.wait()
-    if job.get("kill_requested"):
+    with JOBS_LOCK:
+        kill_requested = bool(job.get("kill_requested"))
+        pump_lines = list(job.get("log_lines") or [])
+    if kill_requested:
         status = "killed"
-    elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in job["log_lines"]):
+    elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in pump_lines):
         # most fetch plugins report a missing decklist this way and still exit
         # cleanly — a clean exit containing that line is a failed run
         status = "fail"
@@ -2067,10 +2297,11 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         status = "ok"
     else:
         status = "fail"
-    job["status"] = status
-    job["exit_code"] = rc
-    job["ended"] = time.time()
-    job["duration"] = round(job["ended"] - job["started"], 2)
+    with JOBS_LOCK:
+        job["status"] = status
+        job["exit_code"] = rc
+        job["ended"] = time.time()
+        job["duration"] = round(job["ended"] - job["started"], 2)
     if job.get("offset_sync"):
         # The run saved via SCM's own -s: mirror the shared file's new values
         # into this paper size's row in the Workbench's table.
@@ -2080,15 +2311,11 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             table[job["offset_sync"]] = {"x": g["x"], "y": g["y"], "angle": g["angle"]}
             save_per_size_offsets(table)
             s = f"(offset: recorded the saved values in the “{job['offset_sync']}” row — x {g['x']}, y {g['y']}, {g['angle']}°)"
-            job["log_lines"].append(s)
-            log_f.write(s + "\n")
-            log_f.flush()
+            _append_job_line(job, s, log_f=log_f)
     log_f.close()
-    for q in list(job["subs"]):
-        try:
-            q.put(("done", status, rc))
-        except Exception:
-            pass
+    with JOBS_LOCK:
+        subscribers = list(job.get("subs", []))
+    _notify_subscribers(job, subscribers, ("done", status, rc), terminal=True)
     if job.get("kind", "").startswith("fetch:"):
         invalidate_manifest_cache()
     _persist_jobs()
@@ -2097,10 +2324,10 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
 def kill_job(job_id: str) -> bool:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-    if not job or job["status"] != "running":
-        return False
-    job["kill_requested"] = True
-    proc = job.get("proc")
+        if not job or job.get("status") != "running" or job.get("proc") is None:
+            return False
+        job["kill_requested"] = True
+        proc = job["proc"]
     try:
         if os.name != "nt":
             try:
@@ -2108,10 +2335,62 @@ def kill_job(job_id: str) -> bool:
             except Exception:
                 proc.terminate()
         else:
+            # CREATE_NEW_PROCESS_GROUP is retained by _proc_kwargs; terminate
+            # is the portable Windows fallback for controlled child fixtures.
             proc.terminate()
     except Exception:
         pass
     return True
+
+
+def stop_all_jobs(timeout: float = 2.0) -> None:
+    """Terminate/reap children and join pumps before a transport exits.
+
+    The lock is used only to take the work list. Waiting while holding it would
+    deadlock a pump trying to publish its terminal status.
+    """
+    with JOBS_LOCK:
+        active = []
+        for job in JOBS.values():
+            pump = job.get("pump_thread")
+            if job.get("status") == "running" or (pump is not None and getattr(pump, "is_alive", lambda: False)()):
+                active.append(job)
+    for job in active:
+        if job.get("status") == "running":
+            kill_job(job.get("id", ""))
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    for job in active:
+        proc = job.get("proc")
+        if proc is None or not hasattr(proc, "wait"):
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Reaping closes the child's stdout, allowing _pump to finish its final
+    # log write, subscriber wake, and persistence update. Join outside the
+    # global lock so those operations can acquire it freely.
+    pump_deadline = time.monotonic() + max(0.0, timeout)
+    for job in active:
+        pump = job.get("pump_thread")
+        if pump is None or pump is threading.current_thread() or not hasattr(pump, "join"):
+            continue
+        try:
+            pump.join(timeout=max(0.0, pump_deadline - time.monotonic()))
+        except Exception:
+            pass
 
 
 def sse_stream(job_id: str, after: int):
@@ -2121,42 +2400,82 @@ def sse_stream(job_id: str, after: int):
     if not job:
         yield "done", json.dumps({"status": "missing"})
         return
-    q = queue.Queue()
-    job["subs"].append(q)
+    q = _WakeQueue(maxsize=SSE_QUEUE_SIZE)
+    with JOBS_LOCK:
+        job.setdefault("subs", []).append(q)
+        first, initial = _job_lines_locked(job)
+        status = job.get("status", "missing")
+        exit_code = job.get("exit_code")
     sent = after - 1
     try:
-        for i, line in enumerate(job["log_lines"]):
-            if i >= after:
-                yield "line", json.dumps({"i": i, "s": line})
-                sent = i
-        # job already finished: late subscribers can't receive its done marker
-        if job["status"] != "running":
-            yield "done", json.dumps({"status": job["status"], "exit_code": job.get("exit_code")})
+        for offset, line in enumerate(initial):
+            seq = first + offset
+            if seq >= after:
+                bounded, _ = _line_wire(line)
+                yield "line", json.dumps({"i": seq, "s": bounded}, ensure_ascii=False, separators=(",", ":"))
+                sent = seq
+        if status != "running":
+            yield "done", json.dumps({"status": status, "exit_code": exit_code})
             return
         while True:
             try:
                 msg = q.get(timeout=15)
-            except Exception:
+            except queue.Empty:
+                with JOBS_LOCK:
+                    status = job.get("status", "missing")
+                    exit_code = job.get("exit_code")
                 yield "ping", "{}"
-                if job["status"] != "running":
-                    yield "done", json.dumps({"status": job["status"], "exit_code": job.get("exit_code")})
+                if status != "running":
+                    # The terminal notification may have raced this timeout;
+                    # replay from the authoritative transcript before done.
+                    first, lines = _job_lines_snapshot(job)
+                    for n, line in enumerate(lines):
+                        seq = first + n
+                        if seq > sent:
+                            bounded, _ = _line_wire(line)
+                            yield "line", json.dumps({"i": seq, "s": bounded}, ensure_ascii=False, separators=(",", ":"))
+                            sent = seq
+                    yield "done", json.dumps({"status": status, "exit_code": exit_code})
                     return
                 continue
-            if msg[0] == "line":
-                sent += 1
-                yield "line", json.dumps({"i": sent, "s": msg[1]})
+            if msg[0] == "gap":
+                first, lines = _job_lines_snapshot(job)
+                for n, line in enumerate(lines):
+                    seq = first + n
+                    if seq > sent:
+                        bounded, _ = _line_wire(line)
+                        yield "line", json.dumps({"i": seq, "s": bounded}, ensure_ascii=False, separators=(",", ":"))
+                        sent = seq
+            elif msg[0] == "line":
+                # Legacy in-process update jobs still emit (line, text),
+                # while subprocess jobs carry an authoritative sequence.
+                if len(msg) >= 3:
+                    seq, line = msg[1], msg[2]
+                else:
+                    seq, line = sent + 1, msg[1]
+                if seq > sent:
+                    bounded, _ = _line_wire(line)
+                    yield "line", json.dumps({"i": seq, "s": bounded}, ensure_ascii=False, separators=(",", ":"))
+                    sent = seq
             elif msg[0] == "done":
-                for i, line in enumerate(job["log_lines"]):
-                    if i > sent:
-                        yield "line", json.dumps({"i": i, "s": line})
-                        sent = i
-                yield "done", json.dumps({"status": job["status"], "exit_code": job.get("exit_code")})
+                first, lines = _job_lines_snapshot(job)
+                for n, line in enumerate(lines):
+                    seq = first + n
+                    if seq > sent:
+                        bounded, _ = _line_wire(line)
+                        yield "line", json.dumps({"i": seq, "s": bounded}, ensure_ascii=False, separators=(",", ":"))
+                        sent = seq
+                with JOBS_LOCK:
+                    final_status = job.get("status")
+                    final_exit_code = job.get("exit_code")
+                yield "done", json.dumps({"status": final_status, "exit_code": final_exit_code})
                 return
     finally:
-        try:
-            job["subs"].remove(q)
-        except Exception:
-            pass
+        with JOBS_LOCK:
+            try:
+                job["subs"].remove(q)
+            except (ValueError, KeyError):
+                pass
 
 
 # ============================================================================
@@ -2374,34 +2693,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/manifest":
                 return self._json(get_manifest())
             if path == "/api/jobs":
-                with JOBS_LOCK:
-                    running = [
-                        {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
-                         "status": j["status"], "exit_code": j["exit_code"], "cmd": j["cmd"],
-                         # "progress" is live (throttled) state the UI's job
-                         # progress strip reads; a finished/unknown stage is
-                         # simply absent, not a lie of zeros.
-                         **({"progress": j.get("progress")} if j.get("progress") else {}),
-                         "warnings": j.get("warnings", []), "outputs": job_outputs(j)}
-                        for j in sorted(JOBS.values(), key=lambda x: x["ts"], reverse=True)[:50]
-                    ]
-                ids = {r["id"] for r in running}
-                hist = []
-                for h in read_persisted_jobs():
-                    if h["id"] in ids:
-                        continue
-                    h = dict(h)
-                    h.setdefault("outputs", job_outputs(h))
-                    hist.append(h)
-                return self._json({"jobs": running + hist[:200]})
+                return self._json(list_jobs())
             m = re.fullmatch(r"/api/jobs/([\w-]+)/log", path)
             if m:
-                with JOBS_LOCK:
-                    job = JOBS.get(m.group(1))
-                if not job:
+                jid = m.group(1)
+                if not (_job_record(jid) or _persisted_record(jid)):
                     return self._json({"error": "job not found"}, 404)
-                return self._json({"lines": job["log_lines"], "status": job["status"],
-                                    "exit_code": job["exit_code"], "cmd": job["cmd"]})
+                try:
+                    after = int((q.get("after") or ["0"])[0])
+                    max_lines = int((q.get("max_lines") or [str(JOB_LOG_MAX_LINES)])[0])
+                    if after < 0 or not (1 <= max_lines <= JOB_LOG_MAX_LINES):
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return self._json({"error": "invalid log cursor"}, 400)
+                return self._json(get_job_log(jid, after, max_lines))
             m = re.fullmatch(r"/api/jobs/([\w-]+)/stream", path)
             if m:
                 after = int((q.get("after") or ["0"])[0])
@@ -3005,6 +3310,13 @@ def _open_browser(url: str) -> None:
     _diag(f"  (Could not open a browser automatically — visit {url} manually.)")
 
 
+class WorkbenchHTTPServer(ThreadingHTTPServer):
+    """HTTP server that owns the same upstream children as the IPC server."""
+    def server_close(self):
+        stop_all_jobs()
+        super().server_close()
+
+
 def start_http(host: str, port: int) -> ThreadingHTTPServer:
     """Bind the UI server (no serve_forever — the caller runs it).
 
@@ -3013,7 +3325,7 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        srv = ThreadingHTTPServer((host, port), Handler)
+        srv = WorkbenchHTTPServer((host, port), Handler)
     except OSError as e:
         # The one bind failure that matters, stated plainly: another process
         # already owns the port — usually a previous app instance whose window
@@ -3102,11 +3414,15 @@ def main():
     if args.ipc:
         # Import after the HTTP server is bound: this is one supervised child,
         # with the compatibility HTTP transport and native transport sharing
-        # the same authoritative server functions.  The IPC reader signals
-        # EOF; the IPC-mode request loop below then stops the HTTP server.
+        # the same authoritative server functions. EOF owns shutdown as well
+        # as merely waking the request loop, so no upstream child survives a
+        # native shell disappearing.
         from scm_workbench import ipc
         ipc_eof = threading.Event()
-        ipc.start_thread(on_eof=ipc_eof.set)
+        def _ipc_eof() -> None:
+            stop_all_jobs()
+            ipc_eof.set()
+        ipc.start_thread(on_eof=_ipc_eof)
 
     # Record this server's pid so a future launcher can spot (and stop) an
     # orphaned UI server left over from a previous launch.
@@ -3156,6 +3472,7 @@ def main():
     except KeyboardInterrupt:
         _diag("\nBye.")
     finally:
+        stop_all_jobs()
         server.server_close()
 
 

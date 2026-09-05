@@ -21,3 +21,4 @@ dist/
 # local logs & tooling scratch
 logs/
 .playwright-mcp/
+.pi/

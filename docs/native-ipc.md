@@ -20,8 +20,9 @@ The worker is one process, not a native server plus a second Python server.
 It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
-calls use relative HTTP URLs. The native protocol is used only for the three
-bootstrap reads below.
+calls use relative HTTP URLs. The native protocol covers the three bootstrap
+reads and packaged-Tauri job control/log operations below; other surfaces remain
+on their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -32,8 +33,10 @@ browser for its worker.
 
 Each request and response is one UTF-8 JSON object terminated by `\n`. The
 worker flushes after every response. The input frame is limited to 1 MiB and
-the complete response frame is limited to 8 MiB; an oversized result becomes a
-bounded error response rather than a truncated JSON frame.
+the complete response frame is limited to 8 MiB on the Tauri reader (the Python
+worker keeps ordinary responses below 7 MiB). An oversized result becomes a
+bounded error response rather than a truncated JSON frame. `jobs.poll` has a
+stricter 6 MiB result budget.
 
 A request has this exact shape:
 
@@ -42,17 +45,49 @@ A request has this exact shape:
 ```
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
-below, and `params` must be a JSON object. The first slice has no method
-parameters, so callers send `{}`.
+below, and `params` must be a JSON object. Read-only methods take `{}`; the job
+methods use the parameter contracts below.
 
 | HTTP compatibility read | Native method | Python implementation |
 | --- | --- | --- |
 | `GET /api/info` | `info` | `server.get_info()` |
 | `GET /api/manifest` | `manifest` | `server.get_manifest()` |
 | `GET /api/settings` | `settings.get` | `server.load_settings()` |
+| `GET /api/jobs` | `jobs.list` | `server.list_jobs()` |
+| `POST /api/jobs` | `jobs.start` | `server.start_job()` |
+| `GET /api/jobs/<id>/log` | `jobs.log` | `server.get_job_log()` |
+| `POST /api/jobs/<id>/kill` | `jobs.kill` | `server.kill_job()` |
+| `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
 
-Those three HTTP routes remain served as compatibility endpoints; native
-selection is a client transport choice, not their removal.
+Those HTTP routes remain served as compatibility endpoints; native selection is
+a client transport choice, not their removal. The job methods use these exact
+parameter and result shapes inside the common RPC envelope:
+
+* `jobs.list`: params `{}`. Result is `{"jobs":[...]}`. Each live row contains
+  `id`, `ts`, `kind`, `title`, `status`, `exit_code`, `cmd`, `warnings`, and
+  `outputs`; `progress` is present while progress is available. Persisted
+  history rows retain the same metadata (and may carry older persisted fields).
+* `jobs.start`: params `{"kind":"<string>","args":{...}}` (exactly those two
+  keys). Success is `{"ok":true,"job":{"id":"...","title":"...",
+  "status":"running","cmd":"...","warnings":[...]}}`. Rejected form
+  arguments are a successful RPC containing `{"ok":false,"errors":["..."]}`.
+* `jobs.log`: params `{"job_id":"<string>"}` with optional non-negative
+  `after` (default `0`) and `max_lines` (default `4096`, range `1..4096`).
+  Result is `{"lines":["..."],"status":"...","exit_code":...,
+  "cmd":"...","first_seq":0,"next_seq":0,"truncated":false,
+  "gap":false,"line_truncated":false}`. A missing job is a normal result
+  with status `missing`, not an RPC error.
+* `jobs.kill`: params `{"job_id":"<string>"}` (exactly that key). Result is
+  `{"ok":true}` when a running job was found and asked to stop, otherwise
+  `{"ok":false}`.
+* `jobs.poll`: params `{"cursors":[{"job_id":"<string>","after":0},...],
+  "max_events":256}` (both keys required). There may be at most 32 cursors;
+  `max_events` is an integer from 1 through 256. Result is
+  `{"jobs":[...]}` in the same cursor order. Each row is
+  `{"job_id":"...","lines":[{"i":0,"s":"..."}],"next_seq":0,
+  "status":"...","exit_code":...,"cmd":"...","complete":false,
+  "truncated":false,"gap":false}`. Missing jobs are complete rows with an
+  empty `lines` array and status `missing`.
 
 A successful response has exactly this shape (with the method's JSON result):
 
@@ -71,15 +106,34 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the three-method allowlist.
+* `unknown_method` — a method outside the eight-method allowlist.
 * `internal` — the existing handler failed or the response exceeded the
   configured limit. Handler details are written to stderr, not exposed on the
   wire.
 
-There is no arbitrary Python callable, path dispatch, or job operation in
-this protocol. Protocol frames are the only data written to the worker's
-stdout; startup text and diagnostics go to stderr (captured in the packaged
-worker log).
+There is no arbitrary Python callable or path dispatch in this protocol.
+Protocol frames are the only data written to the worker's stdout; startup text
+and diagnostics go to stderr (captured in the packaged worker log).
+
+### Job polling bounds and cursors
+
+Packaged Tauri job output uses one bounded aggregate `jobs.poll` request for all
+currently displayed jobs. Each subscription owns an independent `after` cursor
+(sequence number); rows are correlated with the requested `job_id` and cursors
+advance from `next_seq`. The request accepts at most 32 cursors and at most 256
+`max_events` per cursor. The aggregate response is capped at 6 MiB and is
+allocated fairly across cursors, so one large transcript cannot starve the
+others. Displayed lines are capped at 64 KiB of UTF-8, with a visible
+`… [line truncated]` marker; complete transcripts remain in the worker's log
+storage.
+
+`truncated` means bounded pagination or display clipping, not missing sequence
+numbers: continue with the returned `next_seq`. `gap` is different: the
+requested cursor predates the retained `first_seq`, so earlier output is no
+longer available and the UI warns. A terminal row sends its final lines before
+`complete:true`/`onDone`. Native polling reports a temporary outage once, then
+retries with bounded backoff and stops after six failed polls; it never retries
+a failed native operation over HTTP.
 
 ## Tauri `WorkerRpc`
 
@@ -108,6 +162,14 @@ The shell supervises the same single worker for its entire lifetime. Closing
 the window or a hard shell exit reaps it and its descendants: macOS uses a
 process group and Windows uses a kill-on-close job object. The worker is
 started with `--ipc --no-browser`; it does not start another worker or browser.
+When the IPC input reaches EOF, the worker's shutdown callback terminates every
+active upstream job, waits/reaps each process, and joins every output-pump
+thread before the HTTP worker exits; no upstream job is left behind.
+
+Each installed pair of worker pipes has a session generation. EOF, malformed
+output, and pending-call failure are applied only to the generation that saw
+them, so a stale reader from an old worker cannot disable or deliver data to a
+newly installed worker session.
 
 ### Stdout reservation rule
 
@@ -120,13 +182,14 @@ framing and deadlock or mis-correlate the native caller.
 
 ## Browser fallback and migration boundary
 
-The UI keeps its existing `api(path, body)` seam. In a Tauri window, only a
-body-less `GET` for the three routes in the table is selected for native IPC
-when a callable Tauri `invoke` capability exists. In a normal browser there is
-no Tauri capability, so those reads use the existing HTTP endpoint. All other
-requests use HTTP in both environments. A native invocation failure is
-reported to the UI; “browser fallback” means running without the Tauri bridge,
-not silently hiding a failed worker call.
+The UI keeps its existing transport seams. In a packaged Tauri window,
+`jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`, and aggregate `jobs.poll`,
+as well as the three bootstrap reads, use native IPC when a callable Tauri
+`invoke` capability exists. In a normal browser there is no Tauri capability:
+job list/start/log/kill use the existing HTTP routes and live output uses the
+SSE stream. A native invocation failure is reported to the UI; “browser
+fallback” means running without the Tauri bridge, not silently hiding a failed
+worker call. The state-changing update-start operation remains HTTP.
 
 The current migration ledger is:
 
@@ -134,10 +197,10 @@ The current migration ledger is:
 | --- | --- | --- |
 | Bootstrap `info`, `manifest`, `settings.get` reads | Tauri → worker JSON-lines | **This first slice** |
 | Static assets, `/`, `/up`, worker-origin navigation | HTTP | Compatibility path |
-| Jobs, job logs, and SSE streams | HTTP | Later: needs streaming, events, and backpressure |
+| Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview, generated artifacts, templates, and file access | HTTP | Later: needs bounded artifact/path handling |
 | Settings writes, repo sync/ref actions, and offsets | HTTP | Later: preserve atomic state writes and ref resolution |
-| Updates and external filesystem/open actions | HTTP | Later: strict capability/root validation |
+| Updates and external filesystem/open actions | HTTP | Update-start remains HTTP; later: strict capability/root validation |
 
 This ledger is a follow-up checklist, not permission to expand the current
 slice. New UI features must go through the transport adapter (`api()` and its
@@ -154,7 +217,10 @@ compatibility proxy. Do not infer HTTP removal from this first slice.
 fetching, PDF generation, DXF generation, card layouts, and other repo-specific
 functionality. Workbench code only wraps and orchestrates those repositories:
 it validates options, persists Workbench state, supervises processes, and
-presents their outputs. Native IPC must not reimplement or fork that behavior.
+presents their outputs. Native `jobs.start` and `jobs.kill` call the same
+Workbench orchestration and upstream child processes as HTTP; native IPC must
+not reimplement or fork upstream behavior. The upstream operations remain the
+authoritative work.
 
 ## Local verification and packaging
 
@@ -164,14 +230,19 @@ From the repository root, the first-slice checks are:
 python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
+python scripts/check_ui_jobs.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
 
 The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
-webview loaded, all three bootstrap reads used native IPC, no bootstrap route
-was fetched over HTTP, and the worker is reaped. Build the shell with
+webview loaded, all three bootstrap reads and `jobs.list` used native IPC, no
+bootstrap or migrated job route was fetched over HTTP by the WebView, and the
+worker is reaped. They intentionally do not require `jobs.poll`, `jobs.start`,
+or `jobs.kill` markers: hermetic startup has no real upstream repository or
+job to exercise. The lower-layer Python, Rust, and Node contracts cover those
+operations. Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical
 assembly path for both platforms.

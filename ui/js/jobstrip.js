@@ -8,7 +8,7 @@
    "go create the PDF", create pdf → "open the PDF"). Advanced mode never
    sees the strip — the console drawer is that page's status there instead. */
 
-import { $, S, el, ico, api, toast } from "./core.js";import { uiMode } from "./nav.js";
+import { $, S, el, ico, toast } from "./core.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
 export function jobStrip(kind, opts = {}) {
   const strip = el("div", { class: "jobstrip", hidden: true });
   const label = el("div", { class: "js-label" }, "");
@@ -30,43 +30,45 @@ export function jobStrip(kind, opts = {}) {
   // progress from it. Any line containing "n/m" (the fetch plugins print
   // "Fetched 42/101 images" per batch) moves the bar to the real fraction.
   // If no such line ever arrives the bar keeps its indeterminate slide.
-  let es = null, esJobId = null, lastX = 0, lastY = 0;
-  const closeEs = () => { if (es) { try { es.close(); } catch {} es = null; } };
+  let subscription = null, esJobId = null, lastX = 0, lastY = 0;
+  const closeEs = () => { if (subscription) { try { subscription.close(); } catch {} subscription = null; } };
 
   const attachProgress = (job) => {
-    if (es && esJobId === job.id) return;
+    if (subscription && esJobId === job.id) return;
     closeEs();
     esJobId = job.id;
     lastX = 0; lastY = 0;
-    es = new EventSource(`/api/jobs/${job.id}/stream?after=0`);
-    es.addEventListener("line", e => {
-      const d = JSON.parse(e.data);
-      const m = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
-      if (!m) return;
-      const x = +m[1], y = +m[2];
-      if (y <= 0 || x > y) return;
-      if (y === lastY && x < lastX) return;      // replay/overlap — never move backwards
-      lastX = x; lastY = y;
-      if (!strip.isConnected) return;
-      const pct = Math.min(100, Math.round(x / y * 100));
-      bar.style.setProperty("--pct", pct + "%");
-      strip.classList.add("prog");
-      label.textContent = `${opts.runningLabel || "Working"}  ·  ${x}/${y} (${pct}%)`;
-    });
-    es.addEventListener("done", e => {
-      // flip to the final state now, instead of waiting for the 2 s poll
-      const d = JSON.parse(e.data);
-      const j = (S.jobs || []).find(x => x.id === esJobId);
-      if (j) { j.status = d.status; j.exit_code = d.exit_code; }
-      const id = esJobId;
-      closeEs(); esJobId = null;
-      if (id) paint();
+    subscription = jobs.subscribe(job.id, {
+      after: 0,
+      onLine: d => {
+        const m = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
+        if (!m) return;
+        const x = +m[1], y = +m[2];
+        if (y <= 0 || x > y) return;
+        if (y === lastY && x < lastX) return;      // replay/overlap — never move backwards
+        lastX = x; lastY = y;
+        if (!strip.isConnected) return;
+        const pct = Math.min(100, Math.round(x / y * 100));
+        bar.style.setProperty("--pct", pct + "%");
+        strip.classList.add("prog");
+        label.textContent = `${opts.runningLabel || "Working"}  ·  ${x}/${y} (${pct}%)`;
+      },
+      onDone: d => {
+        // flip to the final state now, instead of waiting for the 2 s poll
+        const j = (S.jobs || []).find(x => x.id === esJobId);
+        if (j) { j.status = d.status; j.exit_code = d.exit_code; }
+        const id = esJobId;
+        closeEs(); esJobId = null;
+        if (id) paint();
+      },
+      onError: error => { if (strip.isConnected) toast("warn", `Job output: ${error.message || error}`); },
+      onGap: () => { if (strip.isConnected) toast("warn", "Some earlier job output was truncated."); },
     });
   };
 
   const tail = async (id) => {
     try {
-      const d = await api(`/api/jobs/${id}/log`);
+      const d = await jobs.log(id);
       const lines = (d.lines || []).filter(l => l.trim() && !/^\($/.test(l.trim()));
       return lines.slice(-2).join("  ·  ");
     } catch { return ""; }

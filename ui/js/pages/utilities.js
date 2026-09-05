@@ -1,7 +1,7 @@
 /* pages/utilities — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, PAGES, api, confirmModal, el, ico, pageHead } from "../core.js";import { doRun } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { mm } from "./sizes.js";
+import { $, PAGES, confirmModal, el, ico, pageHead } from "../core.js";import { jobs } from "../jobs.js";import { doRun } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { mm } from "./sizes.js";
 /* ================================ utilities page ========================== */
 
 PAGES.utilities = (root) => {
@@ -78,7 +78,7 @@ export function converterCard() {
 export function watchJobDone(jobId, cb) {
   const t = setInterval(async () => {
     let d;
-    try { d = await api(`/api/jobs/${jobId}/log`); } catch { return; }
+    try { d = await jobs.log(jobId); } catch { return; }
     if (d.status !== "running") {
       clearInterval(t);
       cb(d);

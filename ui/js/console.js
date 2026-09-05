@@ -1,24 +1,75 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { displayCmd, repoRowForKind } from "./forms.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+let _streamSerial = 0;
+function closeStream() {
+  _streamSerial++;
+  if (S.jobSub) { S.jobSub.close(); S.jobSub = null; }
+}
+
+// Keep the DOM transcript bounded while paging through the entire bounded
+// native/HTTP log window.  A fifth, one-line probe tells us whether the fourth
+// page ended because of a clipped line or because more transcript remains.
+const CONSOLE_LOG_PAGE = 4096;
+const CONSOLE_LOG_CAP = 16384;
+
+export async function loadConsoleLog(jobId) {
+  const lines = [];
+  let after = 0;
+  let firstSeq = 0;
+  let status = null;
+  let exitCode = null;
+  let gap = false;
+  let lineTruncated = false;
+  let omitted = false;
+  let probeFailed = false;
+  for (let page = 0; page < CONSOLE_LOG_CAP / CONSOLE_LOG_PAGE; page++) {
+    const before = after;
+    const data = await jobs.log(jobId, before, CONSOLE_LOG_PAGE);
+    if (page === 0) firstSeq = Number(data.first_seq) || 0;
+    status = data.status || status;
+    exitCode = data.exit_code ?? exitCode;
+    gap = gap || !!data.gap;
+    lineTruncated = lineTruncated || !!data.line_truncated;
+    const pageLines = data.lines || [];
+    lines.push(...pageLines.slice(0, CONSOLE_LOG_CAP - lines.length));
+    const next = Number(data.next_seq);
+    after = Number.isInteger(next) && next >= before ? next : before + pageLines.length;
+    const more = !!data.truncated && after > before && pageLines.length > 0;
+    if (!more) break;
+    if (page === CONSOLE_LOG_CAP / CONSOLE_LOG_PAGE - 1) {
+      // Do not put the probe's line in the DOM; the live handoff remains the
+      // last displayed cursor, so the subscription will deliver it normally.
+      try {
+        const probe = await jobs.log(jobId, after, 1);
+        omitted = (probe.lines || []).length > 0 ||
+          (!!probe.truncated && Number(probe.next_seq) > after);
+      } catch {
+        omitted = true;
+        probeFailed = true;
+      }
+    }
+  }
+  return { lines, nextSeq: after, firstSeq, status, exitCode, gap, lineTruncated, omitted, probeFailed };
+}
 export let _lastJobsSig;
 
 
 export async function refreshJobs(forceRender = false) {
-  const next = (await api("/api/jobs")).jobs;
+  const next = (await jobs.list()).jobs;
   // Redraw only when the job set actually changed (new job, status flip) —
   // the 4 s poll must not repaint an unchanged list (no blink). An explicit
   // forceRender (used when the dashboard is (re)entered) repaints once even
   // though nothing changed — a freshly rendered page needs its list filled.
   const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
   const changed = sig !== _lastJobsSig;
+  S.jobs = next;
   if (changed) {
     _lastJobsSig = sig;
     updateBadge();
     renderConsoleTabs();
   }
-  S.jobs = next;
   setRevealButtons();
   if (S.page === "dashboard" && (changed || forceRender)) {
     const slot = $("#recent-jobs");
@@ -67,7 +118,7 @@ export function toggleConsole() {
   if (!c.hidden) {
     c.classList.remove("closed");
     if (S.activeJobId) attachStream(S.activeJobId, true);
-  } else if (S.es) { S.es.close(); S.es = null; }
+  } else closeStream();
 }
 
 
@@ -103,55 +154,81 @@ export function renderConsoleTabs() {
 }
 
 
-export function attachStream(id, resume) {
-  if (S.es) S.es.close();
+export async function attachStream(id, resume) {
+  const serial = ++_streamSerial;
+  if (S.jobSub) { S.jobSub.close(); S.jobSub = null; }
   const log = $("#console-log");
   log.innerHTML = "";
   const job = S.jobs.find(j => j.id === id);
-  const isRunning = job && job.status === "running";
-  if (!isRunning && job) {
-    // finished: load the stored log directly (works even after a server restart)
-    api(`/api/jobs/${id}/log`).then(d => {
-      for (const l of d.lines) appendLogLine(l);
-      log.scrollTop = log.scrollHeight;
-      if (d.status === "ok") appendLogLine("✓ done", "ok");
-      if (d.status === "fail") appendLogLine(`✕ exited with code ${d.exit_code ?? "?"}`, "err");
-    }).catch(() => appendLogLine("(log unavailable — job may have been recorded before a restart)", "dim"));
+  if (!job) return;
+
+  // Load the existing transcript first.  The returned next_seq is the exact
+  // hand-off cursor: output produced during this request is replayed by the
+  // native aggregate poller or by the browser EventSource without duplication.
+  let initial;
+  try {
+    initial = await loadConsoleLog(id);
+  } catch (error) {
+    if (serial === _streamSerial) appendLogLine(`(log unavailable — ${error.message || "job output could not be loaded"})`, "dim");
     updateFooter();
     return;
   }
-  S.esIdx = 0;
-  // a running job whose output hasn't started flowing yet looks dead in an
-  // empty pane - seed it with the running state and the start time
-  if (isRunning) appendLogLine("▸ running — started " + new Date((job.ts || Date.now() / 1000) * 1000).toLocaleTimeString() + " (output streams in below as it happens)", "dim");
-  const es = new EventSource(`/api/jobs/${id}/stream?after=${S.esIdx}`);
-  S.es = es;
-  es.addEventListener("line", e => {
-    const d = JSON.parse(e.data);
-    appendLogLine(d.s, d.i);
-    S.esIdx = d.i + 1;
-    const logEl = $("#console-log");
-    if (logEl) logEl.scrollTop = logEl.scrollHeight;
-  });
-  es.addEventListener("done", e => {
-    const d = JSON.parse(e.data);
-    S.esIdx = 0;
-    es.close();
-    S.es = null;
-    const job = S.jobs.find(j => j.id === id);
-    if (job) job.status = d.status;
+  if (serial !== _streamSerial) return;
+  for (const line of initial.lines) appendLogLine(line);
+  if (initial.gap) appendLogLine("⚠ earlier output is unavailable (the log was truncated)", "warn");
+  if (initial.lineTruncated) appendLogLine("⚠ one or more output lines were clipped to the log line limit", "warn");
+  if (initial.omitted) appendLogLine(
+    initial.probeFailed
+      ? "⚠ the display cap was reached; further output is available in the job log (availability could not be checked)"
+      : `⚠ display capped at ${CONSOLE_LOG_CAP.toLocaleString()} lines; further output is available in the job log`,
+    "warn",
+  );
+  log.scrollTop = log.scrollHeight;
+  const current = S.jobs.find(j => j.id === id);
+  const status = initial.status || current.status;
+  if (current && status !== "running") {
+    current.status = status;
+    current.exit_code = initial.exitCode;
     updateBadge();
     renderConsoleTabs();
     updateFooter();
-    if (d.status === "ok") {
-      appendLogLine("", null);
-      appendLogLine("✓ done", "ok");
-    } else if (d.status === "fail") {
-      appendLogLine("", null);
-      appendLogLine(`✕ exited with code ${d.exit_code ?? "?"}`, "err");
-    }
+    if (status === "ok") appendLogLine("✓ done", "ok");
+    else if (status === "fail") appendLogLine(`✕ exited with code ${initial.exitCode ?? "?"}`, "err");
+    else if (status === "killed") appendLogLine("✕ stopped", "warn");
+    return;
+  }
+
+  appendLogLine("▸ running — started " + new Date((job.ts || Date.now() / 1000) * 1000).toLocaleTimeString() + " (output streams in below as it happens)", "dim");
+  const subscription = jobs.subscribe(id, {
+    after: initial.nextSeq,
+    onLine: line => {
+      if (serial !== _streamSerial) return;
+      appendLogLine(line.s);
+      const logEl = $("#console-log");
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    },
+    onGap: () => {
+      if (serial === _streamSerial) appendLogLine("⚠ earlier output is unavailable (the log was truncated)", "warn");
+    },
+    onError: error => {
+      if (serial === _streamSerial) appendLogLine(`⚠ output stream: ${error.message || error}`, "warn");
+    },
+    onDone: done => {
+      if (serial !== _streamSerial) return;
+      if (S.jobSub === subscription) S.jobSub = null;
+      const finished = S.jobs.find(j => j.id === id);
+      if (finished) { finished.status = done.status; finished.exit_code = done.exit_code; }
+      updateBadge();
+      renderConsoleTabs();
+      updateFooter();
+      if (done.status === "ok") { appendLogLine("", null); appendLogLine("✓ done", "ok"); }
+      else if (done.status === "fail") { appendLogLine("", null); appendLogLine(`✕ exited with code ${done.exit_code ?? "?"}`, "err"); }
+      else if (done.status === "killed") { appendLogLine("", null); appendLogLine("✕ stopped", "warn"); }
+    },
   });
-  es.onerror = () => { if (S.es === es) { /* auto-retry once */ } };
+  if (serial === _streamSerial) S.jobSub = subscription;
+  else subscription.close();
+  updateFooter();
 }
 
 
@@ -200,7 +277,7 @@ export function updateFooter() {
         if (r.ok) toast("ok", "Opened folder in your file manager"); else toast("warn", r.errors?.[0] || "Could not reveal folder");
       } }, ico("folder"), "Reveal folder");
     })(),
-    el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") api(`/api/jobs/${job.id}/kill`).then(() => toast("warn", "Stopping…")); } }, ico("stop"), "Stop"),
+    el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") jobs.kill(job.id).then(() => toast("warn", "Stopping…")).catch(e => toast("err", e.message || "Could not stop job")); } }, ico("stop"), "Stop"),
   );
 }
 
@@ -279,7 +356,8 @@ export function bindConsole() {
   $("#console-close").onclick = () => {
     const c = $("#console");
     c.classList.add("closed");
-    setTimeout(() => { c.hidden = true; if (S.es) { S.es.close(); S.es = null; } }, 220);
+    closeStream();
+    setTimeout(() => { c.hidden = true; }, 220);
   };
   $("#console-copy").onclick = async () => {
     const log = $("#console-log");
@@ -300,7 +378,8 @@ export function bindConsole() {
   };
   $("#console-kill").onclick = () => {
     if (!S.activeJobId) return;
-    api(`/api/jobs/${S.activeJobId}/kill`).then(r => r.ok ? toast("warn", "Stopping…") : null);
+    jobs.kill(S.activeJobId).then(r => r.ok ? toast("warn", "Stopping…") : null)
+      .catch(e => toast("err", e.message || "Could not stop job"));
   };
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && !$("#console").hidden && !$("#console").classList.contains("closed")) $("#console-close").click();

@@ -25,8 +25,15 @@ struct Inner {
     stdin: Mutex<Option<ChildStdin>>,
     stdout: Mutex<Option<ChildStdout>>,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>,
+    /// Serializes install/shutdown publication so concurrent lifecycle
+    /// operations cannot assign one generation to two reader threads.
+    lifecycle: Mutex<()>,
     call_lock: Mutex<()>,
     next_id: AtomicU64,
+    /// Identifies the currently installed pair of worker pipes. Reader
+    /// threads outlive reinstall briefly because they cannot be joined
+    /// without risking a shutdown hang.
+    generation: AtomicU64,
     available: AtomicBool,
 }
 
@@ -54,8 +61,10 @@ impl WorkerRpc {
                 stdin: Mutex::new(None),
                 stdout: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
+                lifecycle: Mutex::new(()),
                 call_lock: Mutex::new(()),
                 next_id: AtomicU64::new(1),
+                generation: AtomicU64::new(0),
                 available: AtomicBool::new(false),
             }),
             timeout,
@@ -65,7 +74,13 @@ impl WorkerRpc {
     /// Install the pipes taken from the already-spawned worker.  The reader
     /// owns stdout after this point and continuously drains complete frames.
     pub fn install(&self, stdin: ChildStdin, stdout: ChildStdout) -> Result<(), String> {
-        self.shutdown();
+        let _lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| "worker unavailable".to_string())?;
+        self.shutdown_locked();
+        let generation = self.inner.generation.load(Ordering::Acquire);
         {
             let mut pipe = self
                 .inner
@@ -96,10 +111,10 @@ impl WorkerRpc {
         let inner = Arc::clone(&self.inner);
         if thread::Builder::new()
             .name("scm-worker-rpc-reader".into())
-            .spawn(move || read_worker_output(inner, reader))
+            .spawn(move || read_worker_output(inner, reader, generation))
             .is_err()
         {
-            self.mark_unavailable("worker unavailable");
+            mark_unavailable_inner(&self.inner, generation, "worker unavailable");
             return Err("worker unavailable".to_string());
         }
         Ok(())
@@ -108,27 +123,16 @@ impl WorkerRpc {
     /// Make future calls fail and wake a call which is waiting for a frame.
     /// This is used both on stdout EOF and during application close.
     pub fn shutdown(&self) {
-        self.mark_unavailable("worker unavailable");
-        if let Ok(mut stdout) = self.inner.stdout.lock() {
-            stdout.take();
+        if let Ok(_lifecycle) = self.inner.lifecycle.lock() {
+            self.shutdown_locked();
         }
     }
 
-    fn mark_unavailable(&self, message: &str) {
-        self.inner.available.store(false, Ordering::Release);
-        if let Ok(mut stdin) = self.inner.stdin.lock() {
-            stdin.take();
-        }
-        let pending = self
-            .inner
-            .pending
-            .lock()
-            .ok()
-            .map(|mut calls| std::mem::take(&mut *calls));
-        if let Some(calls) = pending {
-            for (_, sender) in calls {
-                let _ = sender.send(Err(message.to_string()));
-            }
+    fn shutdown_locked(&self) {
+        let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        mark_unavailable_inner(&self.inner, generation, "worker unavailable");
+        if let Ok(mut stdout) = self.inner.stdout.lock() {
+            stdout.take();
         }
     }
 
@@ -141,7 +145,7 @@ impl WorkerRpc {
             return Err("worker unavailable".to_string());
         }
 
-        // The one lock is intentional: this first slice has one in-flight
+        // The one lock is intentional: bounded polling uses one in-flight
         // request, while the reader remains independent and always drains.
         let _serialized = self
             .inner
@@ -151,15 +155,24 @@ impl WorkerRpc {
         if !self.inner.available.load(Ordering::Acquire) {
             return Err("worker unavailable".to_string());
         }
+        let generation = self.inner.generation.load(Ordering::Acquire);
 
         let id = format!("rpc-{}", self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let request = encode_request(&id, method, &params)?;
         let (sender, receiver) = mpsc::channel();
-        self.inner
-            .pending
-            .lock()
-            .map_err(|_| "worker unavailable".to_string())?
-            .insert(id.clone(), sender);
+        {
+            let mut pending = self
+                .inner
+                .pending
+                .lock()
+                .map_err(|_| "worker unavailable".to_string())?;
+            if self.inner.generation.load(Ordering::Acquire) != generation
+                || !self.inner.available.load(Ordering::Acquire)
+            {
+                return Err("worker unavailable".to_string());
+            }
+            pending.insert(id.clone(), sender);
+        }
 
         let write_result = (|| {
             let mut stdin = self
@@ -167,6 +180,9 @@ impl WorkerRpc {
                 .stdin
                 .lock()
                 .map_err(|_| "worker unavailable".to_string())?;
+            if self.inner.generation.load(Ordering::Acquire) != generation {
+                return Err("worker unavailable".to_string());
+            }
             let pipe = stdin
                 .as_mut()
                 .ok_or_else(|| "worker unavailable".to_string())?;
@@ -177,7 +193,7 @@ impl WorkerRpc {
         })();
         if let Err(error) = write_result {
             self.remove_pending(&id);
-            self.mark_unavailable(&error);
+            mark_unavailable_inner(&self.inner, generation, &error);
             return Err(error);
         }
 
@@ -189,7 +205,7 @@ impl WorkerRpc {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.remove_pending(&id);
-                self.mark_unavailable("worker timeout");
+                mark_unavailable_inner(&self.inner, generation, "worker timeout");
                 Err("worker timeout".to_string())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -214,7 +230,8 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
-        "info" | "manifest" | "settings.get" => Ok(()),
+        "info" | "manifest" | "settings.get" | "jobs.list" | "jobs.start" | "jobs.log"
+        | "jobs.kill" | "jobs.poll" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -254,8 +271,9 @@ fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Frame>> {
         if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
             let end = newline + 1;
             if frame.len() + end > MAX_RESPONSE_BYTES {
+                // The newline is already in this chunk, so this complete
+                // oversized frame needs no further draining.
                 reader.consume(end);
-                drain_frame(reader)?;
                 return Ok(Some(Frame::TooLarge));
             }
             frame.extend_from_slice(&chunk[..end]);
@@ -293,18 +311,26 @@ fn drain_frame<R: BufRead>(reader: &mut R) -> io::Result<()> {
     }
 }
 
-fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout) {
+fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout, generation: u64) {
     let mut reader = BufReader::new(stdout);
     loop {
+        // A reader from a prior install may still be blocked in read_frame.
+        // It must become inert as soon as a newer session is installed.
+        if !generation_is_current(&inner, generation) {
+            return;
+        }
         match read_frame(&mut reader) {
             Ok(None) => {
-                mark_unavailable_inner(&inner, "worker unavailable");
+                mark_unavailable_inner(&inner, generation, "worker unavailable");
                 return;
             }
             Ok(Some(Frame::TooLarge)) => {
-                fail_pending(&inner, "worker response too large");
+                fail_pending_generation(&inner, generation, "worker response too large");
             }
             Ok(Some(Frame::Data(mut frame))) => {
+                if !generation_is_current(&inner, generation) {
+                    return;
+                }
                 // read_frame only returns newline-terminated frames.
                 frame.pop();
                 if frame.last() == Some(&b'\r') {
@@ -316,16 +342,22 @@ fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout) {
                 {
                     Some(value) => value,
                     None => {
-                        fail_pending(&inner, "malformed worker response");
+                        fail_pending_generation(&inner, generation, "malformed worker response");
                         continue;
                     }
                 };
                 let Some(id) = value.get("id").and_then(Value::as_str).map(str::to_owned) else {
-                    fail_pending(&inner, "malformed worker response");
+                    fail_pending_generation(&inner, generation, "malformed worker response");
                     continue;
                 };
                 let mut mismatch = None;
                 if let Ok(mut pending) = inner.pending.lock() {
+                    // Recheck while holding the pending map lock. This closes
+                    // the reinstall race between the reader's loop check and
+                    // delivery, so a stale frame cannot touch new calls.
+                    if !generation_is_current(&inner, generation) {
+                        return;
+                    }
                     if let Some(sender) = pending.remove(&id) {
                         let _ = sender.send(Ok(value));
                     } else if !pending.is_empty() {
@@ -339,19 +371,24 @@ fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout) {
                 }
             }
             Err(_) => {
-                mark_unavailable_inner(&inner, "worker unavailable");
+                mark_unavailable_inner(&inner, generation, "worker unavailable");
                 return;
             }
         }
     }
 }
 
-fn fail_pending(inner: &Inner, message: &str) {
-    let pending = inner
-        .pending
-        .lock()
-        .ok()
-        .map(|mut calls| std::mem::take(&mut *calls));
+fn generation_is_current(inner: &Inner, generation: u64) -> bool {
+    inner.generation.load(Ordering::Acquire) == generation
+}
+
+fn fail_pending_generation(inner: &Inner, generation: u64, message: &str) {
+    let pending = inner.pending.lock().ok().and_then(|mut calls| {
+        if !generation_is_current(inner, generation) {
+            return None;
+        }
+        Some(std::mem::take(&mut *calls))
+    });
     if let Some(calls) = pending {
         for (_, sender) in calls {
             let _ = sender.send(Err(message.to_string()));
@@ -359,12 +396,20 @@ fn fail_pending(inner: &Inner, message: &str) {
     }
 }
 
-fn mark_unavailable_inner(inner: &Inner, message: &str) {
-    inner.available.store(false, Ordering::Release);
+fn mark_unavailable_inner(inner: &Inner, generation: u64, message: &str) {
+    // Check the generation while holding stdin: install publishes the next
+    // generation before replacing this pipe, so a stale reader cannot take a
+    // newly installed stdin or change its availability.
     if let Ok(mut stdin) = inner.stdin.lock() {
+        if !generation_is_current(inner, generation) {
+            return;
+        }
+        inner.available.store(false, Ordering::Release);
         stdin.take();
+    } else {
+        return;
     }
-    fail_pending(inner, message);
+    fail_pending_generation(inner, generation, message);
 }
 
 fn validate_response(expected_id: &str, response: Value) -> Result<Value, String> {
@@ -418,11 +463,31 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn allowlist_is_narrow() {
-        assert!(validate_method("info").is_ok());
-        assert!(validate_method("manifest").is_ok());
-        assert!(validate_method("settings.get").is_ok());
-        assert_eq!(validate_method("jobs.start"), Err("unknown method".into()));
+    fn allowlist_is_exact() {
+        for method in [
+            "info",
+            "manifest",
+            "settings.get",
+            "jobs.list",
+            "jobs.start",
+            "jobs.log",
+            "jobs.kill",
+            "jobs.poll",
+        ] {
+            assert!(
+                validate_method(method).is_ok(),
+                "{method} should be allowed"
+            );
+        }
+        for method in [
+            "",
+            "jobs",
+            "jobs.poll.push",
+            "server.shutdown",
+            "__import__",
+        ] {
+            assert_eq!(validate_method(method), Err("unknown method".into()));
+        }
     }
 
     #[test]
@@ -489,8 +554,28 @@ mod tests {
             rpc.call("info", json!({})),
             Err("worker unavailable".into())
         );
-        rpc.mark_unavailable("worker unavailable");
+        rpc.shutdown();
         assert!(!rpc.inner.available.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn stale_generation_cannot_fail_current_pending_calls() {
+        let rpc = WorkerRpc::new();
+        rpc.inner.generation.store(2, Ordering::Release);
+        rpc.inner.available.store(true, Ordering::Release);
+        let (sender, receiver) = mpsc::channel();
+        rpc.inner
+            .pending
+            .lock()
+            .unwrap()
+            .insert("current".into(), sender);
+
+        fail_pending_generation(&rpc.inner, 1, "stale reader");
+        mark_unavailable_inner(&rpc.inner, 1, "stale reader");
+        assert!(receiver.try_recv().is_err());
+        assert!(rpc.inner.available.load(Ordering::Acquire));
+        assert!(rpc.inner.pending.lock().unwrap().contains_key("current"));
+        rpc.shutdown();
     }
 
     #[test]
@@ -555,6 +640,17 @@ mod tests {
         assert!(matches!(read_frame(&mut reader), Ok(None)));
     }
 
+    #[test]
+    fn oversized_complete_frame_does_not_consume_following_frame() {
+        let mut input = vec![b'x'; MAX_RESPONSE_BYTES];
+        input.extend_from_slice(b"\nnext\n");
+        let mut reader = std::io::Cursor::new(input);
+        assert!(matches!(read_frame(&mut reader), Ok(Some(Frame::TooLarge))));
+        assert!(
+            matches!(read_frame(&mut reader), Ok(Some(Frame::Data(frame))) if frame == b"next\n")
+        );
+    }
+
     fn python_child(script: &str) -> std::process::Child {
         #[cfg(windows)]
         let mut command = Command::new("python");
@@ -568,6 +664,23 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("Python is required for the WorkerRpc pipe integration test")
+    }
+
+    fn real_python_worker() -> std::process::Child {
+        #[cfg(windows)]
+        let mut command = Command::new("python");
+        #[cfg(not(windows))]
+        let mut command = Command::new("python3");
+        let package_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        command
+            .env("PYTHONPATH", package_root)
+            .arg("-c")
+            .arg("from scm_workbench.ipc import serve_stdio; serve_stdio()")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("Python is required for the native worker integration test")
     }
 
     #[test]
@@ -609,5 +722,62 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn real_worker_returns_bounded_poll_missing_job() {
+        let mut child = real_python_worker();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(2));
+        rpc.install(stdin, stdout).unwrap();
+        let result = rpc
+            .call(
+                "jobs.poll",
+                json!({
+                    "cursors": [{"job_id": "missing-from-native-test", "after": 0}],
+                    "max_events": 1
+                }),
+            )
+            .unwrap();
+        let row = &result["jobs"][0];
+        assert_eq!(row["status"], "missing");
+        assert_eq!(row["complete"], true);
+        assert_eq!(row["lines"], json!([]));
+        rpc.shutdown();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn stale_reader_eof_cannot_disable_reinstalled_worker() {
+        let mut old = python_child(
+            "import sys,time; sys.stdin.read(); time.sleep(.1); print('not-json', flush=True); time.sleep(30)\n",
+        );
+        let old_stdin = old.stdin.take().unwrap();
+        let old_stdout = old.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(1));
+        rpc.install(old_stdin, old_stdout).unwrap();
+        let old_generation = rpc.inner.generation.load(Ordering::Acquire);
+
+        let mut current = python_child(
+            "import json,sys,time\nfor line in sys.stdin:\n r=json.loads(line)\n time.sleep(.3)\n print(json.dumps({'id':r['id'],'ok':True,'result':{'session':'current'}}), flush=True)\n",
+        );
+        rpc.install(
+            current.stdin.take().unwrap(),
+            current.stdout.take().unwrap(),
+        )
+        .unwrap();
+        let current_generation = rpc.inner.generation.load(Ordering::Acquire);
+        assert!(current_generation > old_generation);
+
+        assert_eq!(rpc.call("info", json!({})).unwrap()["session"], "current");
+        assert!(rpc.inner.available.load(Ordering::Acquire));
+        old.kill().unwrap();
+        old.wait().unwrap();
+
+        rpc.shutdown();
+        let _ = current.kill();
+        let _ = current.wait();
     }
 }

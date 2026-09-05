@@ -103,8 +103,9 @@ export const S = {
   plugin: "mtg",
   activeJobId: null,
   jobs: [],
-  es: null,
+  es: null,                 // retained for compatibility with older page code
   esIdx: 0,
+  jobSub: null,
   timers: {},
 };
 

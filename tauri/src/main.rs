@@ -585,7 +585,8 @@ mod windows_tests {
 /// One worker is ready on the port, but no app window owns it: a hard-killed
 /// previous instance (End Task) or a translocated launch whose temp copy died
 /// leaves the python listening behind, and the window now has to decide
-/// whether that listener is the one it will drive. It is almost never right:
+/// whether that listener is the one it will drive. Bounded native RPC polling
+/// still requires this launch's worker, so it is almost never right:
 /// a window whose webview is denied plain-HTTP loopback (the local-network
 /// privacy prompt on current macOS, denied or never shown because the app
 /// ran from a quarantined, translocated copy) can't drive *any* server -
@@ -593,9 +594,9 @@ mod windows_tests {
 /// the old worker runs fine in the dark. The only safe shape is "the worker
 /// this very launch spawned" - the slot is populated by `spawn_worker` before
 /// we get here, so a populated slot is this launch's child, and an empty one
-/// means the spawn failed or the child died in the first poll. Claiming the
-/// port is kept as a separate, *declined* step in that case: we never kill
-/// a listener we did not spawn.
+/// means the spawn failed or the child died during the initial readiness
+/// check. Claiming the port is kept as a separate, *declined* step in that
+/// case: we never kill a listener we did not spawn.
 fn foreign_worker(slot: &WorkerSlot) -> bool {
     !port_open(WORKER_PORT) || slot.lock().ok().map(|g| g.is_some()).unwrap_or(false)
 }
@@ -606,7 +607,7 @@ fn foreign_worker(slot: &WorkerSlot) -> bool {
 fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: WorkerRpc) {
     let url = format!("http://127.0.0.1:{WORKER_PORT}");
 
-    // The child died before the loop ever polled it (spawn succeeded, the
+    // The child died before the initial readiness check (spawn succeeded, the
     // worker bailed in its first instants). The old page said "ended before
     // it was ready" - true, but it leaves the user staring at a dead window
     // when the real problem is usually the port being held by a leftover
