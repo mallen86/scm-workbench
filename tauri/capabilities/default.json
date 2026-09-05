@@ -3,7 +3,7 @@
   "identifier": "default",
   "description": "SCM Workbench main window — the UI the window actually runs is the worker's local server (http://127.0.0.1:8038), not the embedded assets: the shell loads its splash from the app's own origin, then hands the window to that server. Both origins need the same grants, or the worker-served UI sees an empty ACL and every invoke — the file dialogs first — is denied (local stays on by default; the remote context admits exactly the worker's loopback origin and nothing else).",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "allow-wb-restart"],
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "allow-wb-restart", "allow-wb-rpc"],
   "remote": {
     "urls": ["http://127.0.0.1:8038"]
   }

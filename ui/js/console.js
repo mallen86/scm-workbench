@@ -321,7 +321,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // collapse, from the same early settings read, so the first paint is already
   // in the right shape
   try {
-    const r = await fetch("/api/settings"); const s = await r.json();
+    const s = await api("/api/settings");
     document.documentElement.dataset.theme = s.theme || "dark";
     const simple = (s.ui_mode || "advanced") === "simple";
     document.body.classList.toggle("mode-simple", simple);

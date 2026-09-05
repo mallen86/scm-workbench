@@ -11,24 +11,30 @@ concurrency:
 
 jobs:
   macos:
-    runs-on: macos-latest  # Apple silicon (arm64)
+    runs-on: macos-14  # arm64 runner; Intel is intentionally not a release target
     steps:
       - uses: actions/checkout@v4
-      - name: Guard — every UI import must resolve
-        # The v0.3.2–v0.3.4 blank-window failure: page modules imported
-        # their shared dependencies from the wrong directory, the worker
-        # 404'd them as JSON, WebKit refused the MIME type, and the whole
-        # UI died after the nav shell painted. The worker serves the UI
-        # fine and /api/info answers — the old smoke test never looked at
-        # the modules, so this check is the gate: no unresolvable import
-        # specifier reaches a build.
-        run: python scripts/check_ui_imports.py
+      - name: Assert the release architecture
+        run: test "$(uname -m)" = "arm64"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Python and UI transport checks
+        run: |
+          python -m unittest discover -s tests -v
+          python scripts/check_ui_imports.py
+          python scripts/check_ui_transport.py
+      - name: Node syntax check — every UI module
+        run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
         # The tag (vX.Y.Z) becomes the app's reported version and the
         # bundle's metadata (Info.plist, exe FileVersion) in one stroke;
         # dispatch/test runs keep the declared [project] version.
         run: python scripts/inject_version.py
       - uses: dtolnay/rust-toolchain@stable
+      - name: Rust tests
+        working-directory: tauri
+        run: cargo test
       - name: Build the Tauri shell
         # The same Rust as the Windows build: on macOS the window is the
         # system WKWebView (nothing to install, in-OS) and the app spawns
@@ -121,7 +127,7 @@ jobs:
       - name: Smoke test - the window's webview must be on the UI
         # The piece three releases shipped broken: the worker answered, the
         # webview never reached it, and nothing in CI looked at the webview.
-        # (The old smoke curled /api/info - that proves the *worker*, not
+        # (The old smoke curled /up - that proves the *worker*, not
         # the *window*.) The shape of the proof: only a real WebKit session
         # sends a WebKit User-Agent, so a WebKit UA on the worker's request
         # log is the marker that a human would see the UI. Two failures,
@@ -158,20 +164,22 @@ jobs:
           webview_ok=""
           for i in $(seq 1 90); do
             sleep 1
-            if [ -z "$worker_ok" ] && curl -sf "http://127.0.0.1:8038/api/info" 2>/dev/null | grep -q '"server"'; then
+            if [ -z "$worker_ok" ] && curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then
               worker_ok=1
               echo "smoke: the worker answers on 127.0.0.1:8038"
             fi
-            # The worker logs a marker line at request time when a WebKit
-            # session loads its index (server.py, / GET): that marker is
-            # what this check greps for. A curl in this same loop loads /
-            # with curl's own agent, so it cannot produce the marker.
-            if [ -n "$worker_ok" ] && [ -z "$webview_ok" ] \
-               && grep -q "webview session on / (WebKit)" "$data/server-tauri.log" 2>/dev/null; then
+            # The webview marker proves the actual window loaded the live UI;
+            # the three stderr markers below prove its bootstrap reads used
+            # native IPC rather than HTTP.
+            if [ -n "$worker_ok" ] && grep -q "webview session on / (WebKit)" "$data/server-tauri.log" 2>/dev/null; then
               webview_ok=1
-              echo "smoke: the window's webview is on the UI (a WebKit connection hit the worker)"
-              break
             fi
+            if [ -n "$worker_ok" ] && grep -q "\[ipc\] served info" "$data/server-tauri.log" 2>/dev/null \
+               && grep -q "\[ipc\] served manifest" "$data/server-tauri.log" 2>/dev/null \
+               && grep -q "\[ipc\] served settings.get" "$data/server-tauri.log" 2>/dev/null; then
+              ipc_ok=1
+            fi
+            if [ -n "$webview_ok" ] && [ -n "${ipc_ok:-}" ]; then break; fi
           done
           # A *soft* kill here is deliberate for the smoke test: it exercises the
           # normal CloseRequested path (the window closes cleanly). The separate
@@ -190,7 +198,17 @@ jobs:
             echo "              (the blank-window failure the user would see - not shippable)" >&2
             exit 1
           fi
-          echo "smoke: worker up AND the webview is on the page - the UI the user gets"
+          if [ -z "${ipc_ok:-}" ]; then
+            echo "---- server log (last 80) ----"; tail -80 "$data/server-tauri.log" 2>/dev/null || true
+            echo "smoke FAILED: the webview did not produce all three native IPC markers" >&2
+            exit 1
+          fi
+          if grep -Eq '"GET /api/(info|manifest|settings)([ ?"]|$)' "$data/server-tauri.log"; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: a bootstrap endpoint was fetched over HTTP" >&2
+            exit 1
+          fi
+          echo "smoke: worker up, actual webview loaded, all three bootstrap reads used native IPC, and no bootstrap endpoint used HTTP"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -213,7 +231,7 @@ jobs:
           worker_ok=""
           for i in $(seq 1 10); do
             sleep 0.5
-            if curl -sf "http://127.0.0.1:8038/api/info" 2>/dev/null | grep -q '"server"'; then worker_ok=1; break; fi
+            if curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then worker_ok=1; break; fi
           done
           if [ -z "$worker_ok" ]; then
             # A worker that never comes up is a *startup* problem - the smoke
@@ -236,7 +254,7 @@ jobs:
             pgrep -fl "$app/Contents/runtime/python" >&2 || true
             exit 1
           fi
-          if curl -sf "http://127.0.0.1:8038/api/info" >/dev/null 2>&1; then
+          if curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then
             echo "reap FAILED: the worker still answers on 8038 after the app died" >&2
             exit 1
           fi
@@ -315,12 +333,24 @@ jobs:
           # range: 1-90; 0 = repo default.)
           retention-days: 1
   windows:
-    runs-on: windows-latest
+    runs-on: windows-latest  # x64 release target
     steps:
       - uses: actions/checkout@v4
+      - name: Assert the release architecture
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { throw "Windows package requires AMD64, got $env:PROCESSOR_ARCHITECTURE" }
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Python and UI transport checks
+        run: |
+          python -m unittest discover -s tests -v
+          python scripts/check_ui_imports.py
+          python scripts/check_ui_transport.py
+      - name: Node syntax check — every UI module
+        shell: pwsh
+        run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
       - name: Pin the version from the release tag
         # On a tag push GITHUB_REF_NAME is the tag (v0.3.0) - it becomes the
         # Python side's __version__, the Tauri conf/Cargo version and the
@@ -329,6 +359,9 @@ jobs:
         run: python scripts/inject_version.py
       - name: Install Rust (stable, MSVC)
         uses: dtolnay/rust-toolchain@stable
+      - name: Rust tests
+        working-directory: tauri
+        run: cargo test
       - name: Build the Tauri shell
         # --features custom-protocol is what `cargo tauri build` passes: it
         # makes Tauri serve the window's initial page from its embedded asset
@@ -362,28 +395,55 @@ jobs:
       - name: Smoke test - the bundle's window must serve the UI
         # The whole point of the new architecture, verified in CI: the exe
         # comes up, its worker answers on 127.0.0.1:8038, and the app's
-        # own /api/info is what the user would see. NO_BOOTSTRAP keeps the
+        # own webview is what the user would see. NO_BOOTSTRAP keeps the
         # test hermetic (no 570 MB repo clone in a CI run).
         run: |
           $ws = (Resolve-Path .).Path
           $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
+          $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
-          $ok = $false
+          $workerOk = $false
+          $webviewOk = $false
+          $ipcOk = $false
           for ($i = 0; $i -lt 90; $i++) {
             Start-Sleep -Seconds 1
-            try {
-              $j = Invoke-RestMethod -Uri "http://127.0.0.1:8038/api/info" -TimeoutSec 2
-              if ($j.server -and $j.server.version) { $ok = $true; Write-Host "smoke: the UI answered (v$($j.server.version))"; break }
-            } catch { }
+            if (-not $workerOk) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:8038/up" -TimeoutSec 2 -UseBasicParsing | Out-Null
+                $workerOk = $true
+                Write-Host "smoke: the worker answers on 127.0.0.1:8038"
+              } catch { }
+            }
+            if (Test-Path $log) {
+              $webviewOk = [bool](Select-String -Path $log -Pattern 'webview session on / \(WebKit\)' -Quiet)
+              $ipcOk = [bool]((Select-String -Path $log -Pattern '\[ipc\] served info' -Quiet) -and
+                (Select-String -Path $log -Pattern '\[ipc\] served manifest' -Quiet) -and
+                (Select-String -Path $log -Pattern '\[ipc\] served settings\.get' -Quiet))
+            }
+            if ($workerOk -and $webviewOk -and $ipcOk) { break }
           }
-          if (-not $ok) { throw "smoke: the UI server never answered on 127.0.0.1:8038" }
+          if (-not $workerOk) { throw "smoke: the worker never answered on 127.0.0.1:8038" }
+          if (-not $webviewOk) { throw "smoke: the worker serves, but no actual WebView2 page reached the UI" }
+          if (-not $ipcOk) { throw "smoke: the WebView2 page did not produce all three native IPC markers" }
+          if (Test-Path $log) {
+            if (Select-String -Path $log -Pattern '"GET /api/(info|manifest|settings)([ ?"]|$)' -Quiet) {
+              Get-Content $log
+              throw "smoke: a bootstrap endpoint was fetched over HTTP"
+            }
+          }
+          Write-Host "smoke: worker up, actual WebView2 loaded, all three bootstrap reads used native IPC, and no bootstrap endpoint used HTTP"
           $proc | Stop-Process -Force
-          # the worker is the window's child; the hard kill above orphans it,
-          # so collect the bundle's runtime explicitly
-          Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
-            Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $proc.WaitForExit()
+          Start-Sleep -Seconds 2
+          # The worker is contained by the existing Windows job-object
+          # supervision. Assert that it reaped itself; do not manually kill it
+          # here, since that would mask a broken containment guarantee.
+          $remaining = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+            Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" }
+          if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "smoke: the supervised worker outlived the app" }
+          $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
+          if ($port.TcpTestSucceeded) { throw "smoke: port 8038 remains open after the app exited" }
       - name: Zip
         run: |
           $app = Join-Path (Resolve-Path .).Path "build\windows"

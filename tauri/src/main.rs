@@ -18,14 +18,15 @@ use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::{
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+
+mod ipc;
+use ipc::WorkerRpc;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -38,9 +39,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// job processes the user runs; a plain `kill` leaves those running. So we
 /// terminate the group the child was placed in: its own process group on
 /// macOS (a SIGKILL to the group reaches every descendant). On Windows the
-/// tree is contained by the job object assigned at spawn (the handle is
-/// dropped when the spawning thread ends, aborting the whole tree), so this is
-/// a no-op there and the direct child's death is what matters.
+/// tree is contained by the job object assigned at spawn; the application
+/// keeps that handle until shutdown, so this is a no-op there and the direct
+/// child's death is what matters.
 ///
 /// Safe to call unconditionally: on a child that was never grouped it does
 /// nothing but a harmless signal to a pid that may already be reaped.
@@ -75,9 +76,25 @@ type WorkerSlot = Arc<Mutex<Option<Child>>>;
 ///
 /// On macOS the worker is also put in its own process group (see
 /// `spawn_worker`) so a signal reaches every grandchild too; on Windows it is
-/// assigned to a job object that kills the whole tree on close. Both are belt
-/// to the `child.kill()` braces below.
-struct Worker { slot: WorkerSlot }
+/// assigned to a job object whose handle is retained here until the shell
+/// exits. Both are belt to the `child.kill()` braces below.
+struct Worker {
+    slot: WorkerSlot,
+    #[cfg(windows)]
+    job: Mutex<Option<WorkerJob>>,
+}
+
+#[cfg(windows)]
+impl Worker {
+    fn install_job(&self, job: WorkerJob) -> std::io::Result<()> {
+        let mut current = self.job.lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "worker job state was poisoned")
+        })?;
+        *current = Some(job);
+        Ok(())
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
         if let Some(mut child) = self.slot.lock().ok().and_then(|mut g| g.take()) {
@@ -97,13 +114,19 @@ fn loading_page() -> WebviewUrl {
 }
 
 fn main() {
+    let worker_slot = WorkerSlot::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![wb_restart])
-        .manage(WorkerSlot::default())
+        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc])
+        .manage(worker_slot.clone())
+        .manage(Worker {
+            slot: worker_slot,
+            #[cfg(windows)]
+            job: Mutex::new(None),
+        })
+        .manage(WorkerRpc::default())
         .setup(|app| {
             let exe = std::env::current_exe().expect("current_exe");
-            let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let data = data_dir();
             // The per-user data area is created at launch, exactly as the old
             // bootstrap did: on a fresh machine the first thing the app ever
@@ -135,10 +158,13 @@ fn main() {
 
             let log_path = data.join("server-tauri.log");
             let slot: WorkerSlot = app.state::<WorkerSlot>().inner().clone();
+            let worker = app.state::<Worker>().inner();
+            let rpc: WorkerRpc = app.state::<WorkerRpc>().inner().clone();
             let app_handle = app.handle().clone();
-            // Hold the reaper for the life of the app so the slot is collected
-            // on exit even when no close event fires (see `Drop for Worker`).
-            let _worker_guard = Worker { slot: slot.clone() };
+            // Worker is managed by the application builder and therefore
+            // survives this setup closure until the app state is dropped.
+            // CloseRequested still takes the slot first, making shutdown
+            // idempotent while retaining the Drop backstop for hard exits.
 
             // We own the port: if a previous (hard-killed) instance left its
             // worker listening, stop it; if a foreign program has the port, we
@@ -148,13 +174,28 @@ fn main() {
                 return Ok(());
             }
 
-            // The guard outlives this closure's scope (the app's whole run),
-            // so the slot is reaped on exit even if no close event fires.
-            match spawn_worker(&data, &root, &log_path, &py, &slot) {
-                Ok(()) => {
-                    let w = window.clone();
-                    thread::spawn(move || watch_worker(app_handle, slot, w));
-                }
+            // The managed Worker keeps the slot reaped if no close event
+            // fires, while the explicit close path remains authoritative.
+            match spawn_worker(&data, &root, &log_path, &py, worker) {
+                Ok((mut child, stdin, stdout)) => match rpc.install(stdin, stdout) {
+                    Ok(()) => {
+                        let _ = slot.lock().ok().and_then(|mut g| g.replace(child));
+                        let w = window.clone();
+                        let watch_rpc = rpc.clone();
+                        thread::spawn(move || watch_worker(app_handle, slot, w, watch_rpc));
+                    }
+                    Err(e) => {
+                        kill_worker_tree(&child);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        fail_window(
+                            &window,
+                            &data,
+                            "The part of the app that does the work didn't start. That usually means the bundled runtime inside the app is missing or damaged.",
+                            &e,
+                        );
+                    }
+                },
                 Err(e) => {
                     fail_window(
                         &window,
@@ -171,6 +212,7 @@ fn main() {
             // (process group / job object) so no grandchild is left holding the
             // port, then reap the direct child.
             if let WindowEvent::CloseRequested { .. } = event {
+                window.app_handle().state::<WorkerRpc>().shutdown();
                 if let Some(mut child) = window
                     .app_handle()
                     .state::<WorkerSlot>()
@@ -197,15 +239,17 @@ fn data_dir() -> PathBuf {
         return PathBuf::from(d);
     }
     #[cfg(target_os = "macos")]
-    let home = std::env::var("HOME").unwrap_or_default();
-    #[cfg(target_os = "macos")]
     {
-        return PathBuf::from(home).join("Library/Application Support/scm-workbench");
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(home).join("Library/Application Support/scm-workbench")
     }
-    let local = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    PathBuf::from(local).join("scm-workbench")
+    #[cfg(not(target_os = "macos"))]
+    {
+        let local = std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        PathBuf::from(local).join("scm-workbench")
+    }
 }
 
 /// The app root:
@@ -274,15 +318,16 @@ fn worker_python(root: &Path, data: &Path) -> PathBuf {
     candidates.into_iter().next().unwrap_or_default()
 }
 
-/// Spawn the UI server as a supervised child: no console, stdio to the
-/// server log, the data area pinned via env (same contract as before).
+/// Spawn the UI server as a supervised child: protocol stdio is piped to
+/// WorkerRpc, stderr remains in the server log, and the data area is pinned
+/// via env (same contract as before).
 fn spawn_worker(
     data: &Path,
     root: &Path,
     log_path: &Path,
     py: &Path,
-    slot: &WorkerSlot,
-) -> std::io::Result<()> {
+    worker: &Worker,
+) -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
     let mut cmd = Command::new(py);
     cmd.current_dir(root)
         .env("SCM_WORKBENCH_DATA", data)
@@ -293,14 +338,8 @@ fn spawn_worker(
         .env("SCM_WORKBENCH_PYTHON", py)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
-        .stdin(Stdio::null())
-        .stdout({
-            let f = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)?;
-            Stdio::from(f)
-        })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr({
             let f = fs::OpenOptions::new()
                 .create(true)
@@ -314,7 +353,8 @@ fn spawn_worker(
         .arg("scm_workbench.server")
         .arg("--port")
         .arg(WORKER_PORT.to_string())
-        .arg("--no-browser");
+        .arg("--no-browser")
+        .arg("--ipc");
     // The package is importable from the app root (dev) or from <root>/app
     // (bundle layout, where the package lives in app/scm_workbench).
     let pkg = if root.join("app").is_dir() {
@@ -340,93 +380,205 @@ fn spawn_worker(
     // kill in kill_worker_tree / the close path reaches the worker *and every
     // job it spawns* with one signal. `setpgid(0,0)` from the child's entry
     // is the standard "new session/group for this child" idiom; we do it in
-    // the parent via the pre-spawn hook below instead, because the worker is
-    // launched with a redirected stdio and we want the group set before the
-    // very first exec.
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
+    // the parent via the post-spawn call below instead, because the worker is
+    // launched with a redirected stdio and we want the group set immediately.
     let child = cmd.spawn()?;
 
-    // Windows: put the worker (and every job it spawns) into a job object that
-    // kills the whole tree when it is closed: create the object, set its
-    // kill-on-close limit, assign the child, then drop the handle — from that
-    // moment the OS owns the tree's lifetime and a force-quit of the shell
-    // cannot orphan the worker (the macOS analogue is the process group above).
+    // Assign the child before doing any further startup work. The job handle
+    // is installed in the application-managed Worker immediately, so a hard
+    // shell termination during startup still closes it and kills the worker.
     #[cfg(windows)]
-    attach_worker_to_job(&child);
-
     {
-        let mut log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?;
-        let _ = writeln!(
-            log,
-            "== tauri shell {} spawned worker: {} (cwd {}, data {})",
-            env!("CARGO_PKG_VERSION"),
-            py.display(),
-            root.display(),
-            data.display()
-        );
+        let job = match attach_worker_to_job(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if let Err(error) = worker.install_job(job) {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
     }
-    let _ = slot.lock().ok().and_then(|mut g| g.replace(child)).is_some();
-    Ok(())
+    #[cfg(not(windows))]
+    let _ = worker;
+
+    // macOS: move the (already running) worker into its own process group so
+    // `kill(-pgid, SIGKILL)` reaches it and every job it spawns. Done from the
+    // *parent* after spawn, via setpgid(child_pid, child_pid) — a parent may
+    // regroup its direct child, and this is the form that does not touch the
+    // child's exec. (The pre-spawn `posix_spawnattr_setpgid` route failed on
+    // the runner: an exception in the pre-exec hook aborts the whole spawn.)
+    // If it can't be grouped we simply skip — reaping the direct child still
+    // happens in the Drop backstop below, we just lose the grandchild sweep.
+    #[cfg(target_os = "macos")]
+    {
+        let pid = child.id() as libc::pid_t;
+        // setpgid(pid,0) == "new group whose id is pid"; only valid while the
+        // child has not yet changed its own group. Best-effort, non-fatal.
+        unsafe {
+            libc::setpgid(pid, pid);
+        }
+    }
+
+    let mut child = child;
+    // Take the protocol pipes before publishing the child in WorkerSlot. The
+    // slot remains the sole owner used by the watchdog and close path, while
+    // WorkerRpc owns the pipes after installation.
+    let stdin = match child.stdin.take() {
+        Some(pipe) => pipe,
+        None => {
+            kill_worker_tree(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "worker stdin was not piped",
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            kill_worker_tree(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "worker stdout was not piped",
+            ));
+        }
+    };
+
+    let mut log = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(log) => log,
+        Err(error) => {
+            kill_worker_tree(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let _ = writeln!(
+        log,
+        "== tauri shell {} spawned worker: {} (cwd {}, data {})",
+        env!("CARGO_PKG_VERSION"),
+        py.display(),
+        root.display(),
+        data.display()
+    );
+    Ok((child, stdin, stdout))
 }
 
-/// Windows-only: assign the freshly spawned worker to a kill-on-close job
-/// object so the entire process tree (worker + its job children) is torn
-/// down when the shell exits, even on a hard kill. Uses raw Win32 calls so
-/// the build gains no new crate. Failures are non-fatal: worst case the
-/// worker behaves as it did before (reaped on a clean close).
+/// A Windows job handle retained for the shell's lifetime. Closing it kills
+/// the worker and every process it spawned when the shell is hard-terminated.
 #[cfg(windows)]
-fn attach_worker_to_job(child: &Child) {
-    use std::os::windows::io::AsRawHandle;
+struct WorkerJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
 
-    // JOBOBJ_BASIC_LIMIT_INFORMATION is 12 x 8 bytes = 96 bytes; only the
-    // LimitFlags (first field) is set here, the rest stay zero.
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct JobBasicLimit {
-        limit_flags: u64,
-        _rest: [u64; 11],
-    }
+#[cfg(windows)]
+unsafe impl Send for WorkerJob {}
 
-    extern "system" {
-        fn CreateJobObjectW(attrs: *mut u8, name: *const u16) -> isize;
-        fn SetInformationJobObject(job: isize, info_class: u32, info: *const u8, size: u32) -> i32;
-        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
-        fn CloseHandle(handle: isize) -> i32;
-    }
-
-    // `as_raw_handle` is the worker's OS process handle (*mut c_void); the
-    // Win32 HANDLE the job APIs take is an isize, so cast it. The `Child`
-    // guard still owns the handle, so we never close *it* here — the job
-    // object takes its own reference. Assigning a process already in the job
-    // is a no-op / failure we ignore.
-    unsafe {
-        let handle = child.as_raw_handle() as isize;
-        let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-        if job != 0 {
-            // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: when the last handle to the
-            // job closes, the OS kills every process assigned to it. Because we
-            // close our own handle immediately below, the job is a fire-and-
-            // forget containment: it lives (and kills the tree) independent of
-            // this process's exit path.
-            let mut limits = JobBasicLimit::default();
-            limits.limit_flags = 0x2000;
-            SetInformationJobObject(
-                job,
-                9, // JobObjectBasicLimitInformation
-                &limits as *const JobBasicLimit as *const u8,
-                std::mem::size_of::<JobBasicLimit>() as u32,
-            );
-            AssignProcessToJobObject(job, handle);
-            CloseHandle(job);
+#[cfg(windows)]
+impl Drop for WorkerJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(windows)]
+fn windows_api_error(operation: &str, code: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!(
+            "{operation} failed with Windows error {code}: {}",
+            std::io::Error::from_raw_os_error(code as i32)
+        ),
+    )
+}
+
+#[cfg(windows)]
+fn last_windows_api_error(operation: &str) -> std::io::Error {
+    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    windows_api_error(operation, code)
+}
+
+#[cfg(windows)]
+fn kill_on_close_limits(
+) -> windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    let mut limits =
+        windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags =
+        windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits
+}
+
+/// Create and configure the kill-on-close job, then assign the child before
+/// returning its handle to the application state. Every Win32 failure is
+/// returned so startup diagnostics can explain why supervision was unavailable.
+#[cfg(windows)]
+fn attach_worker_to_job(child: &Child) -> std::io::Result<WorkerJob> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if handle.is_null() {
+        return Err(last_windows_api_error("CreateJobObjectW"));
+    }
+    let job = WorkerJob { handle };
+    let mut limits = kill_on_close_limits();
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.handle,
+            JobObjectExtendedLimitInformation,
+            &mut limits as *mut _ as *const _,
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    if configured == 0 {
+        return Err(last_windows_api_error("SetInformationJobObject"));
+    }
+    let assigned = unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle()) };
+    if assigned == 0 {
+        return Err(last_windows_api_error("AssignProcessToJobObject"));
+    }
+    Ok(job)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn kill_on_close_limit_uses_the_windows_flag() {
+        let limits = kill_on_close_limits();
+        assert_eq!(
+            limits.BasicLimitInformation.LimitFlags,
+            windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        );
+    }
+
+    #[test]
+    fn windows_api_errors_include_operation_and_code() {
+        let error = windows_api_error("AssignProcessToJobObject", 5);
+        let text = error.to_string();
+        assert!(text.contains("AssignProcessToJobObject"));
+        assert!(text.contains("Windows error 5"));
     }
 }
 
@@ -445,18 +597,13 @@ fn attach_worker_to_job(child: &Child) {
 /// port is kept as a separate, *declined* step in that case: we never kill
 /// a listener we did not spawn.
 fn foreign_worker(slot: &WorkerSlot) -> bool {
-    !port_open(WORKER_PORT)
-        || slot
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
+    !port_open(WORKER_PORT) || slot.lock().ok().map(|g| g.is_some()).unwrap_or(false)
 }
 
 /// Wait until the worker answers on the loopback port (or it dies), then
 /// point the window at it. Keep watching: if the worker dies later, the
 /// window says so instead of going quiet.
-fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
+fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: WorkerRpc) {
     let url = format!("http://127.0.0.1:{WORKER_PORT}");
 
     // The child died before the loop ever polled it (spawn succeeded, the
@@ -491,6 +638,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
                 );
             }
         });
+        rpc.shutdown();
         return;
     }
 
@@ -519,6 +667,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
                     );
                 }
             });
+            rpc.shutdown();
             return;
         }
         thread::sleep(Duration::from_millis(250));
@@ -536,6 +685,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
                 );
             }
         });
+        rpc.shutdown();
         return;
     }
 
@@ -569,6 +719,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow) {
                         );
                     }
                 });
+                rpc.shutdown();
                 return;
             }
             _ => continue,
@@ -609,13 +760,22 @@ fn claim_worker_port(port: u16, log_file: &Path) -> Result<(), String> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
                 .unwrap_or_default();
-            let name = line.split(',').next().unwrap_or("").trim_matches('"').to_string();
+            let name = line
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim_matches('"')
+                .to_string();
             let ours = name == "python.exe" || name == "scm workbench.exe";
             record(
                 log_file,
                 &format!(
                     "[shell] port {port} is held by pid {pid} ({name}) — {}",
-                    if ours { "a leftover from a previous instance; stopping it" } else { "not one of our process kinds" }
+                    if ours {
+                        "a leftover from a previous instance; stopping it"
+                    } else {
+                        "not one of our process kinds"
+                    }
                 ),
             );
             if !ours {
@@ -664,7 +824,11 @@ fn claim_worker_port(port: u16, log_file: &Path) -> Result<(), String> {
                 log_file,
                 &format!(
                     "[shell] port {port} is held by pid {pid} ({name}) — {}",
-                    if ours { "a leftover from a previous instance; stopping it" } else { "not one of our process kinds" }
+                    if ours {
+                        "a leftover from a previous instance; stopping it"
+                    } else {
+                        "not one of our process kinds"
+                    }
                 ),
             );
             if !ours {
@@ -773,10 +937,7 @@ fn fail_window(window: &WebviewWindow, data: &Path, body: &str, detail: &str) {
         js = js,
     );
     let page = format!("data:text/html;charset=utf-8,{}", percent_encode(&html));
-    let _ = window.eval(&format!(
-        "window.location.replace({});",
-        json_string(&page)
-    ));
+    let _ = window.eval(&format!("window.location.replace({});", json_string(&page)));
 }
 
 /// "Try again" on the startup-failure page: restart the whole app. The data

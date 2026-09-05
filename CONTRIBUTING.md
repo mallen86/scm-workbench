@@ -75,7 +75,7 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 
 ### Other entry points
 
-* `python -m scm_workbench` — the app's own entry point (the one the bundle's stub binary calls): native window, private runtime, managed-copy bootstrap. In a plain dev checkout it behaves like the app, not like the classic dev server above.
+* `python -m scm_workbench` — the source-checkout entry point: it prepares the dev data area and runs the HTTP server for a browser. The packaged app is the Tauri shell in `tauri/`, which spawns the bundled Python worker.
 * `python -m scm_workbench.repo_sync {check|refs|update|init} --repo scm|extras` — the repo-sync CLI behind the "Managed repo copies" page, if you like terminals.
 * Silhouette Studio automation (`dxf_to_studio3.py`) is intentionally **not** wrapped: it drives a Windows-only GUI and lives in its own repo workflow. Use the `.studio3` files the Workbench generates/opens, or run that script in a terminal if you need the conversion itself.
 
@@ -84,51 +84,53 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 * **One manifest, two users.** The server holds a single option manifest for every job (each option: type, choices, default, help). The UI renders forms *from it* and the server assembles argv *from it* — so the on-screen command preview is byte-identical to what runs.
 * **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on both platforms.
 * **Live logs** flow over a per-job SSE stream (`/api/jobs/<id>/stream`); history is persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when packaged).
-* The Workbench never imports code from the base repos — it reads their JSON (`assets/layouts.json`, `assets/extra_layouts/`) and shells out, so it stays compatible with whatever version the repos are on.
+* The Workbench never imports code from the base repos — it reads their JSON and shells out, so it stays compatible with whatever version the repos are on. `silhouette-card-maker` and `scm-extras` are always authoritative for fetching, PDF/DXF generation, and layouts; Workbench only wraps and orchestrates them.
+* **Native boundary (current first slice).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Only the read-only bootstrap calls `info`, `manifest`, and `settings.get` use native IPC; jobs, SSE, previews, settings writes, repo actions, filesystem operations, updates, and static/worker-origin navigation remain HTTP. See [docs/native-ipc.md](docs/native-ipc.md) for the schema, ACL, rollout rule, and verification commands.
 
 The data area holds `settings.json`, job history/logs, the per-size offset table, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
 
 ## Packaging the app
 
-The repo doubles as its own [briefcase](https://briefcase.readthedocs.io) definition (see `pyproject.toml`). A **from-scratch** build (i.e. after deleting `build/`) has two local requirements — CI enforces both as well — and missing either breaks the pip step that installs the bundle's `app_packages`:
+The packaged app is a Tauri native webview plus one bundled, supervised Python
+worker. It is not a Briefcase/pywebview window. The worker serves the UI's
+transitional HTTP origin and the first-slice JSON-lines IPC described in
+[docs/native-ipc.md](docs/native-ipc.md).
 
-* **Run briefcase from a Python 3.13 venv.** That interpreter is the one pip resolves the bundled wheels (pyobjc, numpy, …) for, and the bundle ships CPython 3.13 — the `python_version` in the briefcase config, matching CI's `setup-python`. A newer venv (3.14, …) fails the install below, or worse, silently bundles cp3xx wheels the 3.13 runtime can't import. `pyproject.toml` pins `requires-python` to 3.13 so `uv` lands on it automatically.
-* **Export `PIP_FIND_LINKS` at the vendored wheels.** `pywebview` depends on `proxy_tools`, whose only PyPI release is a ~2014 *sdist* — uninstallable under briefcase's `--only-binary :all:`. A prebuilt `py3-none-any` wheel is vendored in `ciwheels/` (CI sets this same env var for exactly this reason; it's commented there), and the pip subprocess inherits it.
+Use a Python 3.13 development environment, Rust, and Node.js for the local
+checks and build:
 
 ```sh
-uv venv && uv sync          # 3.13, per the requires-python pin
-uv pip install briefcase    # (or: pip install briefcase)
-export PIP_FIND_LINKS=file://$(pwd)/ciwheels
-briefcase build macos app   # → build/scm-workbench/macos/app/SCM Workbench.app
-briefcase build windows app # → build/scm-workbench/windows/app/ (zip it)
+uv venv && uv sync
+python -m unittest discover -s tests -v
+python scripts/check_ui_imports.py
+python scripts/check_ui_transport.py
+find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
+(cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
+(cd tauri && cargo build --release --features custom-protocol)
 ```
 
-…or skip the ceremony: `scripts/build.sh macos app` (sets the find-links export, checks the venv is the pinned 3.13, runs the same briefcase build).
+`PIP_FIND_LINKS=file://$(pwd)/ciwheels` is used by CI and by
+`scripts/build.sh` when baking the bundled runtime. On an ARM64 Mac,
+`scripts/build.sh macos` also assembles the local `.app`. The complete
+platform-specific assembly and smoke checks live in
+`.github/workflows/package.yml`; use that workflow (or a matching local copy
+of its steps) for the Windows bundle.
 
-The signature failure without the find-links export is a resolution error, not a network one:
-
-```
-ERROR: Could not find a version that satisfies the requirement proxy_tools (from pywebview) (from versions: none)
-ERROR: No matching distribution found for proxy_tools
-```
-
-An *existing* `build/` tree dodges all of this: briefcase asks “already exists; overwrite?” **before** the create step, and declining it just re-packages the old bundle — which is why a stale tree “works” while a clean one doesn't.
-
-* **The app icon needs no surgery.** Briefcase's create step installs the `icon` from the briefcase config (`assets/AppIcon.icns`) over the template's placeholder icon — the exact file the template's `Info.plist` points `CFBundleIconFile` at — so a *completed* create leaves the real mark in the Dock/Finder/About box. If a fresh bundle still shows the template's generic icon, create didn't finish: icon install is one of its last steps, after the pip step above. Grep the build log for `No matching distribution found for proxy_tools` / `Installing app requirements... errored`, fix the two requirements above, and rebuild.
-
-* **Entry point** is `scm_workbench.launcher`: it pins the app's data area to the writable per-user directory, marks the run as packaged (dependency sync may then `pip` into the app's own private runtime — never anything of the user's), bootstraps first launch, and hands over to the server, which the launcher runs as a **separate child process** with its own log (`server.log`) so the window can never take it down with it.
-* **First launch** provisions the relocatable CPython runtime (GHCI python-build-standalone, pinned build in `launcher.py`) into the data area, then fetches the newest managed copy of each sister repo. The runtime's minor version must track the bundle's (`python_version` in the briefcase config): job scripts also import the bundle's own `Resources/app_packages` wheels, and a mismatched interpreter can't load their compiled extensions. A data area left with an older, mismatched runtime re-provisions itself automatically on the next launch. On Windows the provisioned runtime is additionally load-bearing: the app's own exe is a fixed stub that can only re-launch the app, so the launcher never spawns it as a server child (and jobs on it), and the first launch that precedes provisioning just waits for the next one instead. The server child it spawns is a *console* interpreter, so the launcher gives it UTF-8 stdio (`PYTHONUTF8=1` — the startup banner contains glyphs the Windows ANSI codepage can't encode, and the v0.2.2 child died on exactly that before binding its port) and `CREATE_NO_WINDOW` (no terminal flash — its transcript lands in `server.log`); every other helper subprocess the app spawns on Windows passes `CREATE_NO_WINDOW` for the same reason. The transcript goes to `launcher.log` in the data area; if a fetch can't finish (offline first run), the app still works and **Settings → "Managed repo copies"** retries on demand. The app *window* itself (Windows) is pywebview's WinForms platform, which runs on the machine's .NET (Core) runtime: the bundled pythonnet ships only the netstandard-2.0 (Core) build of Python.Runtime, and pythonnet's Windows default (.NET Framework) cannot load it — its `import clr` fallback retries with coreclr, but pythonnet's sticky runtime global defeats that, so the launcher selects coreclr *before* the first import and pins a runtimeconfig (in the data area) that also pulls in the Windows Desktop framework. If no .NET Desktop runtime is installed the launcher falls back to the system browser, and the dashboard explains why (via `window.json`). The generated runtimeconfig uses the canonical major.minor TFM (the same shape clr_loader writes in its own auto-generated configs), and any fallback now records the *full* traceback (with the .NET hresult) in `<data>/window-error.log` and routes pywebview's own logger output into `launcher.log` — a silent browser tab is a bug, never a design. The bundled pywebview's winforms platform also needs a one-line launch-time rewrite for Core: it imports `SystemEvents` from the .NET-Framework `Microsoft.Win32` namespace, but .NET (Core) moved the type to its own `Microsoft.Win32.SystemEvents` assembly (the `import clr` chain otherwise dies with `ImportError: cannot import name 'SystemEvents'...`), so the launcher rewrites that single import to a try/except that falls back to the Core spelling.
-* **TLS** works without system configuration: `certifi` ships in the support packages and the launcher points `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` at it (bundled macOS Pythons can't see the OS trust store).
-* **Signing** (optional, for a friction-free first launch): macOS — an Apple Developer ID plus notarization (`briefcase` passes both through once an identity is configured); Windows — an OV code-signing certificate. Unsigned builds run fine after the one-time Gatekeeper/SmartScreen exception.
-* `.github/workflows/package.yml` builds both platforms, and on a `v*` tag publishes a GitHub release with the two archives.
+The supported release matrix is **macOS ARM64 only** and **Windows x64 only**:
+there is no Intel/universal macOS artifact and no ARM Windows artifact. The
+macOS workflow uses the current ad-hoc signature and no notarization; current
+Windows artifacts are unsigned. Those signing tradeoffs, including the
+expected macOS **Open Anyway** and Windows SmartScreen prompts, are explicitly
+accepted for the current first slice. Do not add Developer ID/notarization or
+an OV certificate as part of this work.
 
 ## Releasing a new version
 
-**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the two places a build consumes it: `scm_workbench/_version.py` (what the running app reports — the "Data & about" line and the version the update checker compares against the newest release) and the `[project]` version in `pyproject.toml` (what briefcase stamps into the bundle — the macOS About box, the dist-info record, the Windows executable's version metadata). The briefcase app section has no version of its own by design, so there is nothing left to keep in sync:
+**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then builds the macOS ARM64 and Windows x64 archives and attaches them to the GitHub release.
 
 ```bash
 git tag v0.1.1
 git push origin v0.1.1        # CI builds both archives and publishes the release
 ```
 
-(For a local build, run `python scripts/inject_version.py v0.1.1` before `briefcase build`; with no tag in sight it keeps the version the repo declares.)
+For a local build, run `python scripts/inject_version.py v0.1.1` before building; with no tag in sight it keeps the version the repository declares.

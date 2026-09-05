@@ -5,6 +5,8 @@
    from here. The entry point is ui/js/app.js.
    ========================================================================== */
 
+import { getTauriInvoke, invokeNativeBootstrap, selectNativeBootstrapRoute } from "./transport.js";
+
 /* ----------------------------- tiny DOM helpers -------------------------- */
 
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -118,6 +120,19 @@ export const fmtTs = t => new Date(t * 1000).toLocaleTimeString([], { hour: "2-d
 
 export async function api(path, body) {
   const opts = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined;
+  const nativeMethod = selectNativeBootstrapRoute(path, body);
+  const invoke = nativeMethod && getTauriInvoke();
+  if (invoke) {
+    try {
+      return await invokeNativeBootstrap(nativeMethod, invoke);
+    } catch (e) {
+      // Tauri command errors may arrive as a string or a plain object rather
+      // than an Error, while callers of api() consistently expect Error-like
+      // failures just as they get from fetch().
+      if (e instanceof Error) throw e;
+      throw new Error(typeof e === "string" ? e : e?.message || "Native request failed");
+    }
+  }
   const r = await fetch(path, opts);
   const j = await r.json().catch(() => ({}));
   if (!r.ok && !j.error && j.errors) throw new Error(j.errors.join("; "));
@@ -138,9 +153,7 @@ export async function api(path, body) {
        IPC bridge (window.__TAURI_INTERNALS__.invoke), via the dialog plugin
        (plugin:dialog|open / |save). Both resolve to a promise of
        path-or-null, so callers can await them identically. */
-const _tauriInvoke = () =>
-  (typeof window !== "undefined" && window.__TAURI_INTERNALS__ &&
-   window.__TAURI_INTERNALS__.invoke) || null;
+const _tauriInvoke = () => getTauriInvoke();
 const _pbApi = () => (window.pywebview && window.pywebview.api) || null;
 
 export const nativePick = {

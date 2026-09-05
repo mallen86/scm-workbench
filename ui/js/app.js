@@ -14,7 +14,7 @@
      info.js      refreshInfo() and the boot-failure banner
      pages/*.js   one module per page (dashboard, fetch, pdf, offset, ...)
    ========================================================================== */
-import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { startPrepWatcher } from "./prep.js";import { iconize, $, $$ } from "./core.js";import "./pages/dashboard.js";
+import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import "./pages/dashboard.js";
 import "./pages/fetch.js";
 import "./pages/pdf.js";
 import "./pages/offset.js";
@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // collapse, from the same early settings read, so the first paint is already
   // in the right shape
   try {
-    const r = await fetch("/api/settings"); const s = await r.json();
+    const s = await api("/api/settings");
     document.documentElement.dataset.theme = s.theme || "dark";
     const simple = (s.ui_mode || "advanced") === "simple";
     document.body.classList.toggle("mode-simple", simple);

@@ -183,10 +183,22 @@
           "markdownDescription": "Enables the wb_restart command without any pre-configured scope."
         },
         {
+          "description": "Enables the wb_rpc command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-rpc",
+          "markdownDescription": "Enables the wb_rpc command without any pre-configured scope."
+        },
+        {
           "description": "Denies the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "deny-wb-restart",
           "markdownDescription": "Denies the wb_restart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_rpc command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-rpc",
+          "markdownDescription": "Denies the wb_rpc command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

@@ -47,6 +47,14 @@ from scm_workbench._version import __version__
 
 SERVER_VERSION = __version__
 DEFAULT_PORT = 8037
+# True only while this process owns the native child JSON-lines transport.
+# stdout is reserved for protocol frames in that mode.
+_IPC_MODE = False
+
+
+def _diag(message: str = "", *, error: bool = False) -> None:
+    """Write human diagnostics without contaminating IPC stdout."""
+    print(message, file=sys.stderr if (_IPC_MODE or error) else sys.stdout)
 
 # The package lives one level down from the repo root in a dev checkout, and
 # next to a `ui/` folder inside an app bundle; accept either layout.
@@ -890,9 +898,9 @@ def _update_daemon() -> None:
             if st.get("status") == "never" or age is None or age > UPDATE_CHECK_INTERVAL:
                 out = run_update_check()
                 tag = out.get("latest") or ""
-                print(f"[updater] release check: {out.get('status')}" + (f" → {tag}" if tag else ""))
+                _diag(f"[updater] release check: {out.get('status')}" + (f" → {tag}" if tag else ""))
         except Exception as e:
-            print(f"[updater] check failed: {e}")
+            _diag(f"[updater] check failed: {e}")
         time.sleep(1800)
 
 
@@ -1389,6 +1397,11 @@ def _proc_kwargs() -> dict:
         CREATE_NEW_PROCESS_GROUP = 0x00000200
         return {"creationflags": CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+def _external_proc_kwargs() -> dict:
+    """Detach UI-launched helpers from the worker's protocol stdio."""
+    return {**_proc_kwargs(), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
 
 
 def _fmt_argv(argv: List[str]) -> str:
@@ -2208,14 +2221,15 @@ def reveal_path(path: Path) -> Optional[str]:
     try:
         if os.name == "nt":
             if path.is_dir():
-                subprocess.Popen(["explorer", str(path)], **_proc_kwargs())
+                subprocess.Popen(["explorer", str(path)], **_external_proc_kwargs())
             else:
                 os.startfile(path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R" if not path.is_dir() else "", str(path)] if not path.is_dir()
-                             else ["open", str(path)])
+                             else ["open", str(path)], **_external_proc_kwargs())
         else:
-            subprocess.Popen(["xdg-open", str(path.parent if path.is_file() else path)])
+            subprocess.Popen(["xdg-open", str(path.parent if path.is_file() else path)],
+                             **_external_proc_kwargs())
         return None
     except Exception as e:
         return str(e)
@@ -2233,9 +2247,9 @@ def open_path(path: Path) -> Optional[str]:
         if os.name == "nt":
             os.startfile(path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)], **_proc_kwargs())
+            subprocess.Popen(["open", str(path)], **_external_proc_kwargs())
         else:
-            subprocess.Popen(["xdg-open", str(path)], **_proc_kwargs())
+            subprocess.Popen(["xdg-open", str(path)], **_external_proc_kwargs())
         return None
     except Exception as e:
         return str(e)
@@ -2249,9 +2263,9 @@ def open_url(url: str) -> Optional[str]:
         if os.name == "nt":
             os.startfile(url)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", url], **_proc_kwargs())
+            subprocess.Popen(["open", url], **_external_proc_kwargs())
         else:
-            subprocess.Popen(["xdg-open", url], **_proc_kwargs())
+            subprocess.Popen(["xdg-open", url], **_external_proc_kwargs())
         return None
     except Exception as e:
         return str(e)
@@ -2988,7 +3002,7 @@ def _open_browser(url: str) -> None:
                 return
         except Exception:
             pass
-    print(f"  (Could not open a browser automatically — visit {url} manually.)")
+    _diag(f"  (Could not open a browser automatically — visit {url} manually.)")
 
 
 def start_http(host: str, port: int) -> ThreadingHTTPServer:
@@ -3005,9 +3019,9 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
         # already owns the port — usually a previous app instance whose window
         # was killed without a clean close (the app tries to reclaim such
         # ports itself at start; this is the last line of defence).
-        print(
+        _diag(
             f"\n  [server] could not bind {host}:{port} — another process already holds that port ({e}).\n"
-            f"         Close the other SCM Workbench (or whatever else uses port {port}) and try again.\n"
+            f"         Close the other SCM Workbench (or whatever else uses port {port}) and try again.\n",
         )
         sys.exit(1)
     srv.daemon_threads = True
@@ -3015,13 +3029,17 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
 
 
 def main():
+    global _IPC_MODE
     ap = argparse.ArgumentParser(description="SCM Workbench — local UI for silhouette-card-maker + scm-extras")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default=None,
                     help="Address to bind (default: 127.0.0.1; on WSL all interfaces of the VM, "
                          "so the Windows host can also reach the server)")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
+    ap.add_argument("--ipc", action="store_true",
+                    help="Also serve the native newline-delimited JSON child protocol")
     args = ap.parse_args()
+    _IPC_MODE = bool(args.ipc)
 
     # Make the banner (and any traceback) robust on *any* stream: a freshly
     # spawned Windows child defaults its stdio to the machine's ANSI codepage
@@ -3038,7 +3056,7 @@ def main():
                 pass
 
     settings = load_settings()
-    port = args.port or int(settings.get("port") or DEFAULT_PORT)
+    port = args.port if args.port is not None else int(settings.get("port") or DEFAULT_PORT)
     scm, extras = effective_dirs(settings)
 
     host = args.host
@@ -3050,6 +3068,10 @@ def main():
         # platform keeps the loopback-only default.
         host = "0.0.0.0" if _in_wsl() else "127.0.0.1"
 
+    # Bind before emitting the banner so --port 0 can report the actual port.
+    server = start_http(host, port)
+    actual_port = server.server_address[1]
+
     out = io.StringIO()
     w = out.write
     w("\n")
@@ -3059,13 +3081,13 @@ def main():
     w("  Extras repo:   %s\n" % (extras if extras else "\x1b[33mnot found (optional)\x1b[0m"))
     w("  Python:        %s\n" % sys.version.split()[0])
     w("  ───────────────────────────────────────────────────────\n")
-    url = f"http://{('127.0.0.1' if host == '0.0.0.0' else host)}:{port}"
+    url = f"http://{('127.0.0.1' if host == '0.0.0.0' else host)}:{actual_port}"
     w(f"  UI:  {url}\n")
     browser_url = url
     if _in_wsl():
         vm_ip = _wsl_vm_ip()
         if vm_ip:
-            browser_url = f"http://{vm_ip}:{port}"
+            browser_url = f"http://{vm_ip}:{actual_port}"
             w(f"  Windows host:  {browser_url}  (your default browser opens here)\n")
         else:
             w("  Windows host:  use the 127.0.0.1 URL above (mirrored networking mode)\n")
@@ -3074,10 +3096,17 @@ def main():
           "(and from your LAN only in mirrored networking mode). Ctrl+C to stop.\n")
     else:
         w("\n  Local only — not exposed to your network. Ctrl+C to stop.\n")
-    sys.stdout.write(out.getvalue())
-    sys.stdout.flush()
+    _diag(out.getvalue())
 
-    server = start_http(host, port)
+    ipc_eof = None
+    if args.ipc:
+        # Import after the HTTP server is bound: this is one supervised child,
+        # with the compatibility HTTP transport and native transport sharing
+        # the same authoritative server functions.  The IPC reader signals
+        # EOF; the IPC-mode request loop below then stops the HTTP server.
+        from scm_workbench import ipc
+        ipc_eof = threading.Event()
+        ipc.start_thread(on_eof=ipc_eof.set)
 
     # Record this server's pid so a future launcher can spot (and stop) an
     # orphaned UI server left over from a previous launch.
@@ -3097,7 +3126,10 @@ def main():
         from scm_workbench import bootstrap as _first_boot
 
         def _first_boot_then() -> None:
-            _first_boot.run_first_boot(DATA_DIR)
+            _first_boot.run_first_boot(
+                DATA_DIR,
+                log=lambda message="": _diag(message),
+            )
             # The manifest cache was built at startup from whatever the repos
             # held then (nothing, on a true first boot), and the mtime signal
             # it uses can be older than every write the bootstrap just made —
@@ -3108,13 +3140,23 @@ def main():
             target=_first_boot_then, daemon=True, name="first-boot",
         ).start()
 
-    if not args.no_browser and settings.get("auto_open_browser", True):
+    if not args.ipc and not args.no_browser and settings.get("auto_open_browser", True):
         threading.Timer(0.4, _open_browser, args=(browser_url,)).start()
 
     try:
-        server.serve_forever()
+        if ipc_eof is None:
+            # Preserve the ordinary HTTP server path exactly.
+            server.serve_forever()
+        else:
+            # A short timeout keeps EOF responsive while retaining the normal
+            # ThreadingHTTPServer handler behavior, including SSE requests.
+            server.timeout = 0.2
+            while not ipc_eof.is_set():
+                server.handle_request()
     except KeyboardInterrupt:
-        print("\nBye.")
+        _diag("\nBye.")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
