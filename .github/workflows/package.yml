@@ -173,10 +173,10 @@ jobs:
               break
             fi
           done
+          # A *soft* kill here is deliberate for the smoke test: it exercises the
+          # normal CloseRequested path (the window closes cleanly). The separate
+          # "Reap check" step below is what proves the hard-kill path reaps too.
           kill "$app_pid" 2>/dev/null || true
-          # the worker is the window's child; the hard kill above orphans it,
-          # so collect the bundle's runtime explicitly
-          pkill -f "$app/Contents/runtime/python" 2>/dev/null || true
           if [ -z "$worker_ok" ]; then
             echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true

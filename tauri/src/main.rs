@@ -402,12 +402,13 @@ fn attach_worker_to_job(child: &Child) {
         fn CloseHandle(handle: isize) -> i32;
     }
 
-    // `as_raw_handle` is the worker's OS process handle; the `Child` guard still
-    // owns it, so we never close it here — the job object takes its own
-    // reference. Assigning a process to a job it was already in (or re-assigning
-    // after a failed attempt) is simply a no-op / failure we ignore.
+    // `as_raw_handle` is the worker's OS process handle (*mut c_void); the
+    // Win32 HANDLE the job APIs take is an isize, so cast it. The `Child`
+    // guard still owns the handle, so we never close *it* here — the job
+    // object takes its own reference. Assigning a process already in the job
+    // is a no-op / failure we ignore.
     unsafe {
-        let handle = child.as_raw_handle();
+        let handle = child.as_raw_handle() as isize;
         let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
         if job != 0 {
             // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: when the last handle to the
