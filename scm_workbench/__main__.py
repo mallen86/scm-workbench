@@ -1,5 +1,8 @@
-"""``python -m scm_workbench`` — the app's entry point (used by the bundle's
-stub binary, and available in a dev checkout if you fancy it)."""
+"""``python -m scm_workbench`` — the source-checkout entry point: run the UI
+server (and bootstrap the managed repo copies) from a plain terminal. The
+packaged app's window is the Tauri shell in ``tauri/``, not this; it simply
+spawns the bundled runtime running this same server module.
+"""
 from scm_workbench import main
 
 if __name__ == "__main__":
