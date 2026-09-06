@@ -29,6 +29,7 @@ import signal
 import subprocess
 import sys
 import queue
+import secrets
 import tempfile
 import threading
 import time
@@ -1166,7 +1167,124 @@ def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict]
 # Managed repo copies (see repo_sync.py)
 # ============================================================================
 
+# Ref metadata is shared by HTTP and native callers.  A per-key in-flight
+# event prevents two simultaneous requests from issuing duplicate GitHub calls.
 _refs_cache = {}
+_REFS_CACHE_LOCK = threading.Lock()
+_REFS_INFLIGHT = {}
+_REFS_CACHE_TTL = 3600
+
+# Native repository control operations are deliberately independent of the job
+# system: they have a tiny bounded registry, two daemon workers, and no
+# cancellation/timeout promise to expose to the shell.
+_REPO_OP_LOCK = threading.Lock()
+_REPO_OPS = {}
+_REPO_OP_QUEUE = queue.Queue(maxsize=16)
+_REPO_OP_WORKERS_STARTED = False
+_REPO_OP_ACTIVE_MAX = 16
+_REPO_OP_TOTAL_MAX = 32
+_REPO_OP_RESULT_MAX = 1024 * 1024
+_REPO_OP_TTL = 300
+
+
+def _bounded_error(value: Any) -> str:
+    text = " ".join(str(value or "operation failed").split())
+    return text[:256] or "operation failed"
+
+
+def _bounded_errors(errors: Any) -> list:
+    if isinstance(errors, (str, bytes)):
+        errors = [errors]
+    if not isinstance(errors, (list, tuple)):
+        errors = [errors]
+    return [_bounded_error(error) for error in list(errors)[:8]] or ["operation failed"]
+
+
+def _repo_result_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _prune_repo_operations_locked(now=None):
+    now = time.time() if now is None else now
+    for operation_id, operation in list(_REPO_OPS.items()):
+        if operation.get("status") == "done" and now - operation.get("ended", now) >= _REPO_OP_TTL:
+            _REPO_OPS.pop(operation_id, None)
+
+
+def _repo_operation_worker():
+    while True:
+        operation_id = _REPO_OP_QUEUE.get()
+        try:
+            with _REPO_OP_LOCK:
+                operation = _REPO_OPS.get(operation_id)
+            if operation is None:
+                continue
+            try:
+                result = operation["call"]()
+                if not isinstance(result, dict):
+                    result = {"ok": False, "errors": ["operation returned an invalid result"]}
+                if "errors" in result:
+                    result["errors"] = _bounded_errors(result["errors"])
+                if _repo_result_size(result) > _REPO_OP_RESULT_MAX:
+                    result = {"ok": False, "errors": ["operation result exceeds 1 MiB"]}
+            except Exception:
+                # Never put traceback/network details on the protocol and never
+                # let one worker exception kill the bounded operation service.
+                result = {"ok": False, "errors": ["operation failed"]}
+            with _REPO_OP_LOCK:
+                current = _REPO_OPS.get(operation_id)
+                if current is not None:
+                    current["status"] = "done"
+                    current["result"] = result
+                    current["ended"] = time.time()
+        finally:
+            _REPO_OP_QUEUE.task_done()
+
+
+def _ensure_repo_operation_workers_locked():
+    global _REPO_OP_WORKERS_STARTED
+    if _REPO_OP_WORKERS_STARTED:
+        return
+    _REPO_OP_WORKERS_STARTED = True
+    for number in range(2):
+        threading.Thread(target=_repo_operation_worker, daemon=True,
+                         name=f"repo-operation-{number + 1}").start()
+
+
+def _start_repo_operation(kind: str, args: dict) -> dict:
+    with _REPO_OP_LOCK:
+        _prune_repo_operations_locked()
+        active = sum(op.get("status") == "running" for op in _REPO_OPS.values())
+        if active >= _REPO_OP_ACTIVE_MAX or len(_REPO_OPS) >= _REPO_OP_TOTAL_MAX:
+            return {"ok": False, "errors": ["too many repository operations"]}
+        operation_id = secrets.token_urlsafe(24)[:64]
+        while operation_id in _REPO_OPS:
+            operation_id = secrets.token_urlsafe(24)[:64]
+        calls = {
+            "refs": lambda: repo_refs_result(args["repo"]),
+            "source.set": lambda: repo_source_result(args["repo"], args["source"]),
+            "check": lambda: repo_check_result(args["repo"], args["force"]),
+        }
+        operation = {"status": "running", "call": calls[kind], "result": None}
+        _REPO_OPS[operation_id] = operation
+        _ensure_repo_operation_workers_locked()
+        try:
+            _REPO_OP_QUEUE.put_nowait(operation_id)
+        except queue.Full:
+            _REPO_OPS.pop(operation_id, None)
+            return {"ok": False, "errors": ["too many repository operations"]}
+    return {"ok": True, "operation": {"id": operation_id, "status": "running"}}
+
+
+def poll_repo_operation(operation_id: str) -> dict:
+    with _REPO_OP_LOCK:
+        _prune_repo_operations_locked()
+        operation = _REPO_OPS.get(operation_id)
+        if operation is None:
+            return {"ok": False, "error": {"code": "bad_request", "message": "operation not found"}}
+        if operation["status"] == "running":
+            return {"ok": True, "status": "running"}
+        return {"ok": True, "status": "done", "result": operation["result"]}
 
 
 def repos_view(settings: dict) -> list:
@@ -1211,11 +1329,126 @@ def repos_view(settings: dict) -> list:
 
 
 def run_repo_check(key: str, force: bool = False) -> dict:
-    """In-process 'check for updates' (small API calls only). Results cache an hour."""
+    """In-process check implementation shared by HTTP and native control."""
     try:
         return repo_sync.check_repo(key, force=force)
     except repo_sync.RepoError as e:
-        return {"repo": key, "ok": False, "error": str(e)}
+        return {"repo": key, "ok": False, "error": _bounded_error(e)}
+    except Exception:
+        return {"repo": key, "ok": False, "error": "check failed"}
+
+
+def _invalidate_repo_views() -> None:
+    invalidate_manifest_cache()
+    _INFO_SNAP.clear()
+    _REPOS_MTIME.clear()
+
+
+def repo_check_result(key: str, force: bool = False) -> dict:
+    """Return the complete browser response body for a repository check."""
+    res = run_repo_check(key, force=force)
+    if res.get("ok"):
+        res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
+        _invalidate_repo_views()
+    body = {"ok": bool(res.get("ok")), **(
+        res if res.get("ok") else {"errors": _bounded_errors(res.get("error", "check failed"))}
+    ), "repos": repos_view(load_settings())}
+    return body
+
+
+def _repo_source_settings_mirror(key: str, source: str) -> None:
+    # This is intentionally a second phase.  State has already been committed
+    # as the canonical source, so a disk/settings failure cannot leave the
+    # effective source ambiguous.
+    with _SETTINGS_LOCK:
+        settings = load_settings()
+        repos = settings.setdefault("repos", {})
+        if not isinstance(repos, dict):
+            repos = {}
+            settings["repos"] = repos
+        config = repos.setdefault(key, {})
+        if not isinstance(config, dict):
+            config = {}
+            repos[key] = config
+        config["source"] = source if source in ("main", "latest-release") else "pinned"
+        config["pin"] = source if source not in ("main", "latest-release") else ""
+        save_settings(settings)
+
+
+def repo_source_result(key: str, source: str) -> dict:
+    """Set a source and return the complete browser response body.
+
+    The target resolution and canonical state publication are serialized with
+    init/update/check.  Settings are only a mirror and are written after the
+    state commit; if that mirror fails, state remains authoritative.
+    """
+    try:
+        key = repo_sync.validate_repo_key(key)
+        source = repo_sync.validate_source(source)
+        with repo_sync._repo_lock(key):
+            # Keep the settings-backed source stable while resolving it, and
+            # retain the established repo -> settings-source -> state order.
+            with repo_sync._settings_source_lock():
+                target = repo_sync.resolve_target(key, source)
+                repo_sync._record_source_and_check_locked(key, source, target)
+        _invalidate_repo_views()
+        try:
+            _repo_source_settings_mirror(key, source)
+        except Exception as exc:
+            return {"ok": False, "repo": key, "source": source, "target": target,
+                    "canonical": True,
+                    "errors": [f"source mirror failed: {_bounded_error(exc)}"],
+                    "repos": repos_view(load_settings())}
+        settings = load_settings()
+        return {"ok": True, "repo": key, "source": source, "target": target,
+                "repos": repos_view(settings)}
+    except repo_sync.RepoError as exc:
+        return {"ok": False, "repo": key, "errors": [_bounded_error(exc)],
+                "repos": repos_view(load_settings())}
+    except Exception:
+        return {"ok": False, "repo": key, "errors": ["source update failed"],
+                "repos": repos_view(load_settings())}
+
+
+def repo_refs_result(key: str) -> dict:
+    """Return refs through a bounded, per-repository single-flight cache."""
+    try:
+        key = repo_sync.validate_repo_key(key)
+        while True:
+            now = time.time()
+            with _REFS_CACHE_LOCK:
+                cached = _refs_cache.get(key)
+                if cached and now - cached[0] < _REFS_CACHE_TTL:
+                    refs = cached[1]
+                    return {"ok": True, "repo": key, "refs": refs}
+                flight = _REFS_INFLIGHT.get(key)
+                if flight is None:
+                    flight = threading.Event()
+                    _REFS_INFLIGHT[key] = flight
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                # HTTP callers may wait for the one network request. Native
+                # callers are already off the IPC reader in an operation.
+                flight.wait()
+                continue
+            try:
+                refs = repo_sync.list_refs(key)
+                if _repo_result_size(refs) > repo_sync.REFS_RESULT_CAP:
+                    raise repo_sync.RepoError("GitHub refs result is too large")
+                with _REFS_CACHE_LOCK:
+                    _refs_cache[key] = (time.time(), refs)
+                return {"ok": True, "repo": key, "refs": refs}
+            except repo_sync.RepoError as exc:
+                return {"ok": False, "repo": key, "errors": [_bounded_error(exc)]}
+            finally:
+                with _REFS_CACHE_LOCK:
+                    event = _REFS_INFLIGHT.pop(key, None)
+                    if event is not None:
+                        event.set()
+    except Exception:
+        return {"ok": False, "repo": key, "errors": ["could not load repository refs"]}
 
 
 def effective_dirs(settings: dict) -> Tuple[Optional[Path], Optional[Path]]:
@@ -4023,58 +4256,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/repos/save":
                 body = self._body()
-                key = str(body.get("repo") or "")
-                if key not in repo_sync.REPOS:
-                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
-                source = str(body.get("source") or "").strip()
-                if not source:
-                    return self._json({"ok": False, "errors": ["no source given"]}, 400)
-                # validate that the ref actually resolves before persisting it
+                key = body.get("repo") if isinstance(body, dict) else None
+                source = body.get("source") if isinstance(body, dict) else None
+                if not isinstance(key, str) or key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": ["unknown repository"]}, 400)
                 try:
-                    target = repo_sync.resolve_target(key, source)
-                except repo_sync.RepoError as e:
-                    return self._json({"ok": False, "errors": [str(e)]}, 400)
-                # This endpoint remains the sole writer for the excluded
-                # `repos` settings.  Keep its read-modify-write under the same
-                # lock as settings.set so concurrent updates cannot be lost.
-                with _SETTINGS_LOCK:
-                    settings = load_settings()
-                    settings.setdefault("repos", {}).setdefault(
-                        key, {"source": repo_sync.REPOS[key].get("default_source", "main")})
-                    settings["repos"][key]["source"] = source if source in ("main", "latest-release") else "pinned"
-                    settings["repos"][key]["pin"] = source if source not in ("main", "latest-release") else ""
-                    save_settings(settings)
-                # Record source and the already-resolved target through the
-                # repository operation/state lock; unrelated repo entries are
-                # merged, never replaced by a stale whole-state snapshot.
-                repo_sync.set_source_and_record_check(key, source, target)
-                return self._json({"ok": True, "repo": key, "source": source, "target": target,
-                                  "repos": repos_view(settings)})
+                    source = repo_sync.validate_source(source)
+                except repo_sync.RepoError as exc:
+                    return self._json({"ok": False, "errors": [_bounded_error(exc)]}, 400)
+                result = repo_source_result(key, source)
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/repos/check":
                 body = self._body()
-                key = str(body.get("repo") or "")
-                if key not in repo_sync.REPOS:
-                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
-                res = run_repo_check(key, force=bool(body.get("force")))
-                if res.get("ok"):
-                    res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
-                return self._json({"ok": res.get("ok", False), **(res if res.get("ok") else {"errors": [res.get("error", "check failed")]}),
-                                   "repos": repos_view(load_settings())})
+                key = body.get("repo") if isinstance(body, dict) else None
+                force = body.get("force") if isinstance(body, dict) else None
+                if not isinstance(key, str) or key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": ["unknown repository"]}, 400)
+                if not isinstance(force, bool):
+                    return self._json({"ok": False, "errors": ["force must be boolean"]}, 400)
+                result = repo_check_result(key, force)
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/repos/refs":
                 body = self._body()
-                key = str(body.get("repo") or "")
-                if key not in repo_sync.REPOS:
-                    return self._json({"ok": False, "errors": [f"unknown repo “{key}”"]}, 400)
-                try:
-                    cached = _refs_cache.get(key)
-                    if cached and time.time() - cached[0] < 3600:
-                        refs = cached[1]
-                    else:
-                        refs = repo_sync.list_refs(key)
-                        _refs_cache[key] = (time.time(), refs)
-                except repo_sync.RepoError as e:
-                    return self._json({"ok": False, "errors": [str(e)]}, 400)
-                return self._json({"ok": True, "repo": key, "refs": refs})
+                key = body.get("repo") if isinstance(body, dict) else None
+                if not isinstance(key, str) or key not in repo_sync.REPOS:
+                    return self._json({"ok": False, "errors": ["unknown repository"]}, 400)
+                result = repo_refs_result(key)
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/decklists/import":
                 body = self._body()
                 src = str(body.get("path") or "").strip()

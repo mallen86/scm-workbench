@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";
 /* In-app "What's new": the release notes live on GitHub, but the app's
    window can't open a browser tab in its webview, so the notes are fetched
    through the server (which also renders the markdown) and shown in the
@@ -54,18 +54,17 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
   const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";
   const pickSource = async (v) => {
     if (!v) return;
-    let r;
     try {
-      r = await api("/api/repos/save", { repo: row.key, source: v });
+      const r = await setRepoSource(row.key, v);
+      if (!r.ok) return toast("err", (r.errors || ["could not save the source"]).join("; "));
+      await refreshInfo({ keepForms: true });
+      const fresh = (S.info.repos || []).find(x => x.key === row.key) || row;
+      if (container) container.replaceChildren(repoCopyRow(fresh, container));
+      else rerender();
+      toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);
     } catch (e) {
-      return toast("err", e.message || "could not save the source");
+      toast("err", e.message || "could not save the source");
     }
-    if (!r.ok) return toast("err", (r.errors || ["could not save the source"]).join("; "));
-    await refreshInfo({ keepForms: true });
-    const fresh = (S.info.repos || []).find(x => x.key === row.key) || row;
-    if (container) container.replaceChildren(repoCopyRow(fresh, container));
-    else render();
-    toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);
   };
   const render = async () => {
     box.innerHTML = "";
@@ -86,7 +85,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
     const seg = el("div", { class: "seg" });
     const segBtns = {};
     for (const [v, lab] of [["main", "Latest (main)"], ["latest-release", "Latest release"], ["pinned", "Pinned"]]) {
-      const b = el("button", { type: "button", class: (mode === v || (v === "pinned" && selectingPinned)) ? "active" : "", onclick: () => { if (v === "pinned") { selectingPinned = true; render(); } else pickSource(v); } }, lab);
+      const b = el("button", { type: "button", class: (mode === v || (v === "pinned" && selectingPinned)) ? "active" : "", onclick: () => { if (v === "pinned") { selectingPinned = true; rerender(); } else pickSource(v); } }, lab);
       segBtns[v] = b;
       seg.append(b);
     }
@@ -96,7 +95,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
     // deployed version plus Check/Update, and the saved source keeps working
     // behind the scenes.
     if (!simple) {
-      api("/api/repos/refs", { repo: row.key }).then(r => {
+      listRepoRefs(row.key).then(r => {
         if (r.ok && !(r.refs.releases || []).length) {
           segBtns["latest-release"].disabled = true;
           segBtns["latest-release"].classList.add("off");
@@ -109,7 +108,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       if (showPicker) {
         box.append(el("div", { style: "margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap" },
           el("span", { class: "small faint" }, "track"), seg, pinWrap));
-        const r = await api("/api/repos/refs", { repo: row.key });
+        const r = await listRepoRefs(row.key);
         if (!r.ok) { toast("err", (r.errors || ["could not list tags — check your connection"]).join("; ")); return; }
         const known = [...r.refs.tags.map(t => t.name), ...r.refs.releases.filter(q => !q.prerelease).map(q => q.tag)];
         for (const name of known) pinSel.append(el("option", { value: name, selected: name === src ? "selected" : null }, name));
@@ -139,10 +138,15 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       const checkBtn = el("button", { class: "btn sm" }, ico("search"), "Check for updates");
       checkBtn.onclick = async () => {
         checkBtn.disabled = true;
-        const r = await api("/api/repos/check", { repo: row.key, force: true });
-        checkBtn.disabled = false;
-        if (r.ok) { row.last_check = r.last_check; await refreshInfo({ keepForms: true }); const fresh = (S.info.repos || []).find(x => x.key === row.key); if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container)); else render(); }
-        else toast("err", (r.errors || ["check failed"]).join("; "));
+        try {
+          const r = await checkRepo(row.key, true);
+          if (r.ok) { row.last_check = r.last_check; await refreshInfo({ keepForms: true }); const fresh = (S.info.repos || []).find(x => x.key === row.key); if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container)); else rerender(); }
+          else toast("err", (r.errors || ["check failed"]).join("; "));
+        } catch (error) {
+          toast("err", error?.message || "check failed");
+        } finally {
+          checkBtn.disabled = false;
+        }
       };
       const hasUpdate = lc && lc.ok && !lc.up_to_date;
       const upBtn = el("button", { class: `btn sm ${hasUpdate ? "primary" : ""}` }, ico("refresh"), hasUpdate ? "Update now" : "Update");
@@ -194,7 +198,10 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
     }
     box.append(acts);
   };
-  render();
+  const rerender = () => render().catch(error => {
+    toast("err", error?.message || "could not load repository information");
+  });
+  rerender();
   return box;
 }
 

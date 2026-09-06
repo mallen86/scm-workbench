@@ -23,8 +23,8 @@ Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
 reads, bounded settings and offset mutations, preview, packaged-Tauri job
 control/log operations, the read-only `template.resolve`/`file.list` metadata
-slice, and the bounded OS-action methods below. Other surfaces remain on their
-existing HTTP compatibility paths.
+slice, bounded repository metadata operations, and the bounded OS-action methods
+below. Other surfaces remain on their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -49,12 +49,13 @@ A request has this exact shape:
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
 below, and `params` must be a JSON object. The exact allowlist contains
-seventeen methods: `info`, `manifest`, `settings.get`, `settings.set`,
+twenty-one methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
-`file.open`, `file.reveal`, and `url.open`. The bootstrap read methods take
-`{}`; preview, job, artifact metadata, and offset methods use the parameter
-contracts below.
+`file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
+`repos.check`, and `repos.poll`. The bootstrap read methods take `{}`;
+preview, job, artifact metadata, offset, and repository methods use the
+parameter contracts below.
 
 | HTTP compatibility route | Native method | Python implementation |
 | --- | --- | --- |
@@ -75,6 +76,10 @@ contracts below.
 | `GET /api/file?...open=1` (regular file action) | `file.open` (packaged Tauri) | `server.file_open_action()` |
 | `POST /api/reveal` (file/directory action) | `file.reveal` (packaged Tauri) | `server.file_reveal_action()` |
 | `GET /api/file?...url=` (external URL action) | `url.open` (packaged Tauri) | `server.url_open_action()` |
+| `POST /api/repos/refs` | `repos.refs` (packaged Tauri) | `repo_sync.list_refs()` in a background operation |
+| `POST /api/repos/save` | `repos.source.set` (packaged Tauri) | `repo_sync.resolve_target()` and the settings/state transaction |
+| `POST /api/repos/check` | `repos.check` (packaged Tauri) | `run_repo_check()` in a background operation |
+| (operation registry) | `repos.poll` (packaged Tauri) | poll a repository metadata operation |
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
 a client transport choice, not their removal. The methods use these exact
@@ -128,6 +133,67 @@ state/projection transaction described below:
   Success is exactly `{"ok":true,"settings":<complete merged settings>}`.
   Validation happens before any write, so a rejected change cannot partially
   update settings.
+
+### Repository metadata operations
+
+Repository metadata has an asynchronous native contract because refs and update
+checks perform remote work. `repos.refs`, `repos.source.set`, and `repos.check`
+are **start** methods: after validating their exact parameter object they return
+immediately with `{"ok":true,"operation":{"id":"...","status":"running"}}`.
+They do not wait for GitHub and do not hold the serialized RPC call for network
+I/O. `repos.poll` is the only method that reads an operation:
+`{"operation_id":"..."}`. It returns immediately with
+`{"ok":true,"status":"running"}` or a terminal
+`{"ok":true,"status":"done","result":{...}}`. A missing or expired ID is
+an immediate bounded `worker error: bad_request` app failure; it never starts
+work and never falls back to HTTP.
+
+The exact start parameters are:
+
+* `repos.refs`: `{"repo":"scm"}` or `{"repo":"extras"}`.
+* `repos.source.set`: `{"repo":"scm","source":"<ref>"}`. `source` uses
+  the same bounded ref validation as the HTTP save route.
+* `repos.check`: `{"repo":"scm","force":false}`; `force` is required and
+  boolean.
+
+No other keys are accepted. Repository identity is fixed to the two entries in
+`repo_sync.REPOS` (`scm` = `Alan-Cha/silhouette-card-maker`, `extras` =
+`Alan-Cha/scm-extras`); callers cannot supply an owner, URL, path, or command.
+Invalid repo keys are rejected before any remote request or settings/state
+write. The in-memory operation registry has a queue of 16, at most 16 active
+records, and at most 32 retained records; two daemon workers perform the remote
+calls. A full registry returns an immediate bounded busy result. Terminal
+records are retained for 300 seconds and then become missing; a restart drops
+all records. Ref fetches also use a per-repository one-hour cache and a
+single-flight event, so HTTP and native callers do not duplicate a concurrent
+GitHub request.
+
+The refs result is the existing `{"ok":true,"repo":"...","refs":{...}}`
+shape and is capped at 512 KiB encoded JSON before entering the cache. Check
+and source-set results retain their HTTP response fields and every repository
+operation result is capped at 1 MiB; errors are bounded to eight sanitized
+messages of at most 256 characters each. `repos.poll` itself is limited to one
+operation ID. The 10-second `WorkerRpc` timeout therefore remains appropriate:
+starts and polls are local, immediate operations; remote work runs in the
+worker's two-thread background registry rather than occupying the serialized
+request.
+
+`repos-state.json` is the canonical repository source/deployment/check state;
+`settings.json` contains the mirrored UI source choice. A successful source
+operation resolves the fixed remote target first, then commits the canonical
+state under the repository locks and mirrors the source into settings. If the
+mirror fails, the result reports `canonical:true`: state remains authoritative
+and the UI can repair the settings mirror without guessing. A failed resolution
+leaves canonical state unchanged. Ref listing is read-only; a check updates
+only its repository's check metadata. Neither method changes the managed tree.
+`repo_init` and `repo_update` remain ordinary `jobs.start` kinds because they
+copy/deploy large trees and stream progress; this IPC slice does not turn them
+into metadata operations. These metadata starts also inherit the prior
+`repo_sync` hardening: fixed GitHub API/raw hosts, bounded ref and JSON results,
+validated ref/path forms, canonical no-symlink repository paths, per-repository
+locks, stale-source checks, and transactional deployment journals. Metadata IPC
+never accepts a local path or arbitrary remote URL and never bypasses the
+transactional init/update publication boundary.
 
 ### Offset state, projection, and jobs
 
@@ -285,7 +351,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the seventeen-method allowlist.
+* `unknown_method` — a method outside the twenty-one-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -370,19 +436,23 @@ framing and deadlock or mis-correlate the native caller.
 The UI keeps its existing transport seams. In a packaged Tauri window,
 `preview`, `settings.set`, `offset.set`, `offset.delete`, `jobs.list`,
 `jobs.start`, `jobs.log`, `jobs.kill`, aggregate `jobs.poll`, `template.resolve`,
-`file.list`, `file.open`, `file.reveal`, and `url.open`, as well as the three
-bootstrap reads, use native IPC when a callable Tauri `invoke` capability exists. In a normal browser there is no
-Tauri capability: preview, template resolution, directory metadata, OS actions,
+`file.list`, `file.open`, `file.reveal`, `url.open`, and the asynchronous
+`repos.refs`, `repos.source.set`, `repos.check`, and `repos.poll` methods, as
+well as the three bootstrap reads, use native IPC when a callable Tauri
+`invoke` capability exists. In a normal browser there is no Tauri capability:
+preview, template resolution, directory metadata, OS actions, repo metadata,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, image deletion, repo actions
-(including `/api/repos/save`), and the state-changing update-start operation
-remain HTTP. The packaged smoke test rejects WebView `POST /api/settings` and
+worker call. Binary file reads, save/copy, image deletion, and the
+state-changing update-start operation remain HTTP. The repository HTTP routes
+remain the browser fallback only; a packaged native failure never retries them.
+The packaged smoke test rejects WebView `POST /api/settings` and
 `POST /api/offset` after the WebKit marker; browser-mode HTTP fallback remains
 allowed, and native failure never retries over HTTP.
 
-The current migration ledger is:
+The current migration ledger is (21 native methods; the four repository
+methods are the latest entries):
 
 | Surface | Current transport | Status |
 | --- | --- | --- |
@@ -396,7 +466,7 @@ The current migration ledger is:
 | Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
 | Save/copy and image deletion (`/api/files/save`, `/api/fs`) | HTTP | Deferred: preserve user-selected destinations and destructive-operation guards |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
-| Repo sync/ref actions and `/api/repos/save` | HTTP | Deferred: preserve atomic state writes and ref resolution |
+| Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
 | Updates and update-start | HTTP | Deferred: update lifecycle and replacement remain HTTP |
 | Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
@@ -430,6 +500,7 @@ python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_jobs.py
+python scripts/check_ui_repos.py
 python scripts/check_ui_preview.py
 python scripts/check_ui_artifacts.py
 python scripts/check_ui_native_actions.py
@@ -442,8 +513,9 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
 webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
-native IPC, no bootstrap or migrated route was fetched over HTTP by the
-WebView, and the worker is reaped. The five existing startup markers remain
+native IPC, no bootstrap or migrated route (including repository metadata) was
+fetched over HTTP by the WebView, and the worker is reaped. The five existing
+startup markers remain
 exactly the contract (`info`, `manifest`, `settings.get`, `jobs.list`, and
 `preview`); settings and offset writes do not add a startup mutation or fake
 marker.
@@ -454,13 +526,14 @@ add fake UI calls or claim WebView markers for them. The executable facade
 contract, Python HTTP/native parity, and Rust real-worker coverage prove their
 behavior; the runtime smoke guard still rejects WebView HTTP requests to the
 migrated metadata routes and, after the WebKit marker, rejects `POST
-/api/settings`, `POST /api/offset`, `/api/reveal`, plus `/api/file` action
-queries containing the exact `open=1`, `reveal=1`, or `url=` keys in any
-reasonable query order. It deliberately
-allows raw `/api/file` reads, `images_only=1` metadata, save, and delete
-compatibility requests. No native-action marker is required: the five
-existing startup IPC markers remain the complete packaged smoke contract. The
-lower-layer Python, Rust, and Node contracts cover the remaining operations.
+/api/settings`, `POST /api/offset`, `POST /api/repos/refs`,
+`POST /api/repos/save`, `POST /api/repos/check`, `/api/reveal`, plus
+`/api/file` action queries containing the exact `open=1`, `reveal=1`, or `url=`
+keys in any reasonable query order. It deliberately allows raw `/api/file`
+reads, `images_only=1` metadata, and file save/delete compatibility requests.
+No repository startup marker is added: the five existing startup IPC markers
+remain the complete packaged smoke contract. The lower-layer Python, Rust, and
+Node contracts cover the asynchronous repository operations.
 Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical

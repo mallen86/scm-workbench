@@ -33,6 +33,7 @@ ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
+    "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "offset.set", "offset.delete",
 ))
 
@@ -45,6 +46,11 @@ def _string(value: Any, name: str) -> Optional[str]:
     if not isinstance(value, str) or not value:
         return None
     return value
+
+
+def _bounded_ipc_message(value: Any) -> str:
+    text = " ".join(str(value or "bad request").split())
+    return text[:256] or "bad request"
 
 
 def _nonnegative_int(value: Any) -> bool:
@@ -88,6 +94,41 @@ def dispatch(request: dict) -> dict:
             result = server.get_manifest()
         elif method == "settings.get":
             result = server.load_settings()
+        elif method == "repos.refs":
+            if set(params) != {"repo"} or not isinstance(params.get("repo"), str):
+                return _bad_params(request_id, "repos.refs requires exactly repo")
+            try:
+                repo = server.repo_sync.validate_repo_key(params["repo"])
+            except server.repo_sync.RepoError:
+                return _bad_params(request_id, "unknown repository")
+            result = server._start_repo_operation("refs", {"repo": repo})
+        elif method == "repos.source.set":
+            if set(params) != {"repo", "source"} or not isinstance(params.get("repo"), str):
+                return _bad_params(request_id, "repos.source.set requires exactly repo and source")
+            try:
+                repo = server.repo_sync.validate_repo_key(params["repo"])
+                source = server.repo_sync.validate_source(params["source"])
+            except server.repo_sync.RepoError as exc:
+                return _bad_params(request_id, _bounded_ipc_message(exc))
+            result = server._start_repo_operation("source.set", {"repo": repo, "source": source})
+        elif method == "repos.check":
+            if set(params) != {"repo", "force"} or not isinstance(params.get("repo"), str):
+                return _bad_params(request_id, "repos.check requires exactly repo and force")
+            if not isinstance(params.get("force"), bool):
+                return _bad_params(request_id, "repos.check force must be boolean")
+            try:
+                repo = server.repo_sync.validate_repo_key(params["repo"])
+            except server.repo_sync.RepoError:
+                return _bad_params(request_id, "unknown repository")
+            result = server._start_repo_operation("check", {"repo": repo, "force": params["force"]})
+        elif method == "repos.poll":
+            if set(params) != {"operation_id"} or not isinstance(params.get("operation_id"), str) \
+                    or not params["operation_id"] or len(params["operation_id"]) > 64:
+                return _bad_params(request_id, "repos.poll requires exactly operation_id")
+            result = server.poll_repo_operation(params["operation_id"])
+            if not result.get("ok"):
+                error = result.get("error") or {}
+                return _error(request_id, "bad_request", _bounded_ipc_message(error.get("message", "operation not found")))
         elif method == "settings.set":
             if set(params) != {"changes"}:
                 return _bad_params(request_id, "settings.set requires exactly changes")

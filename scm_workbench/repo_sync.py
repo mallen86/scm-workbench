@@ -1127,36 +1127,48 @@ def _source_snapshot(key: str, st: dict = None):
     return default, ("default", default)
 
 
-def set_source_and_record_check(key: str, source: str, target: dict) -> dict:
-    """Atomically update one repo's source and resolved check result.
+def _record_source_and_check_locked(key: str, source: str, target: dict) -> dict:
+    """Publish the canonical source/check state; caller holds repo lock.
 
-    Callers must not perform a load/modify/save state sequence themselves;
-    this helper preserves unrelated repository entries under repo->state locks.
+    This intentionally does not touch settings.  The repository state is the
+    canonical authority, and the server mirrors it to settings only after this
+    commit succeeds.  Keeping the small locked primitive here prevents callers
+    from accidentally doing an unlocked read/modify/write sequence.
     """
     key = validate_repo_key(key)
     source = validate_source(source)
     if not isinstance(target, dict) or not isinstance(target.get("sha"), str):
         raise RepoError("invalid repository check target")
     validate_sha(target["sha"], "target SHA")
+    with _state_lock():
+        st = _load_state_for_mutation()
+        entry = st.get(key) or {}
+        if not isinstance(entry, dict):
+            raise RepoError("invalid repository state entry")
+        entry["source"] = source
+        deployed = entry.get("deployed")
+        entry["last_check"] = {
+            "checked": {"repo": key, "ok": True, "cached": False,
+                         "target": target, "deployed": deployed,
+                         "source": source,
+                         "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])},
+            "checked_at": time.time(),
+        }
+        st[key] = entry
+        save_state(st)
+        return copy.deepcopy(entry)
+
+
+def set_source_and_record_check(key: str, source: str, target: dict) -> dict:
+    """Atomically update one repo's canonical source and resolved check result.
+
+    Callers must not perform a load/modify/save state sequence themselves;
+    this helper preserves unrelated repository entries under repo->state locks.
+    """
+    key = validate_repo_key(key)
     with _repo_lock(key):
         with _settings_source_lock():
-            with _state_lock():
-                st = _load_state_for_mutation()
-                entry = st.get(key) or {}
-                if not isinstance(entry, dict):
-                    raise RepoError("invalid repository state entry")
-                entry["source"] = source
-                deployed = entry.get("deployed")
-                entry["last_check"] = {
-                    "checked": {"repo": key, "ok": True, "cached": False,
-                                 "target": target, "deployed": deployed,
-                                 "source": source,
-                                 "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])},
-                    "checked_at": time.time(),
-                }
-                st[key] = entry
-                save_state(st)
-                return copy.deepcopy(entry)
+            return _record_source_and_check_locked(key, source, target)
 
 
 def set_source(key: str, source: str) -> None:

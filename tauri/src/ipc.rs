@@ -232,7 +232,8 @@ fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
         | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview"
-        | "template.resolve" | "file.list" | "file.open" | "file.reveal" | "url.open" => Ok(()),
+        | "template.resolve" | "file.list" | "file.open" | "file.reveal" | "url.open"
+        | "repos.refs" | "repos.source.set" | "repos.check" | "repos.poll" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -483,6 +484,10 @@ mod tests {
             "file.open",
             "file.reveal",
             "url.open",
+            "repos.refs",
+            "repos.source.set",
+            "repos.check",
+            "repos.poll",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -513,6 +518,21 @@ mod tests {
             "file.open.path",
             "file.reveal.path",
             "url.open.path",
+            "repos",
+            "repos.ref",
+            "repos.refs.extra",
+            "repos.refs/",
+            "repos.refs ",
+            "repos.source",
+            "repos.source.set.extra",
+            "repos.source.set/",
+            "repos.source.set ",
+            "repos.check.extra",
+            "repos.check/",
+            "repos.check ",
+            "repos.poll.extra",
+            "repos.poll/",
+            "repos.poll ",
             "server.shutdown",
             "__import__",
         ] {
@@ -761,6 +781,44 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn real_worker_rejects_invalid_repo_and_missing_poll_immediately() {
+        let data = std::env::temp_dir().join(format!(
+            "scm-workbench-repo-rpc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data).unwrap();
+
+        let mut child = real_python_worker_with_data(Some(&data));
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(2));
+        rpc.install(stdin, stdout).unwrap();
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            rpc.call(
+                "repos.check",
+                json!({"repo": "not-a-repository", "force": false}),
+            ),
+            Err("worker error: bad_request".into())
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            rpc.call("repos.poll", json!({"operation_id": "missing-operation"})),
+            Err("worker error: bad_request".into())
+        );
+
+        rpc.shutdown();
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[test]
