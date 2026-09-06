@@ -33,6 +33,7 @@ Exit codes: 0 ok, 1 failure (message on stdout, or {"error": ...} with --json).
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -42,6 +43,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -726,57 +728,181 @@ def manifest_file(key: str) -> Path:
     return data_dir() / f"repos-manifest-{validate_repo_key(key)}.json"
 
 
-def load_state() -> dict:
+def _atomic_write_json(path: Path, value) -> None:
+    """Replace JSON metadata without shared temporary names or torn writes."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, indent=1, ensure_ascii=False).encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                    dir=str(path.parent))
+    tmp = Path(tmp_name)
     try:
-        with open(state_file()) as f:
-            return json.load(f)
+        with os.fdopen(fd, "wb") as fh:
+            fd = None
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        # Directory fsync is not available on every supported platform/filesystem.
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except (AttributeError, OSError):
+            pass
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _load_json_object(path: Path, label: str, missing=None):
+    """Strict metadata reader used before any read-modify-write operation."""
+    try:
+        raw = Path(path).read_bytes()
+    except FileNotFoundError:
+        return missing
+    except OSError as exc:
+        raise RepoError(f"could not read {label}: {_brief(exc)}")
+    if len(raw) > GH_JSON_CAP:
+        raise RepoError(f"{label} is too large")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RepoError(f"malformed {label}")
+    if not isinstance(value, dict):
+        raise RepoError(f"invalid {label} shape")
+    return value
+
+
+def _validate_state_shape(st: dict) -> dict:
+    if not isinstance(st, dict):
+        raise RepoError("invalid repository state shape")
+    for key, value in st.items():
+        if key not in REPOS:
+            continue
+        if not isinstance(value, dict):
+            raise RepoError("invalid repository state entry")
+        deployed = value.get("deployed")
+        if deployed is not None and not isinstance(deployed, dict):
+            raise RepoError("invalid deployed state shape")
+        if deployed:
+            if not isinstance(deployed.get("sha"), str):
+                raise RepoError("invalid deployed SHA")
+            validate_sha(deployed["sha"], "deployed SHA")
+        checks = value.get("last_check")
+        if checks is not None and not isinstance(checks, dict):
+            raise RepoError("invalid repository check state shape")
+        if isinstance(checks, dict):
+            if checks.get("checked") is not None and not isinstance(checks["checked"], dict):
+                raise RepoError("invalid repository check result shape")
+            checked_at = checks.get("checked_at")
+            if checked_at is not None and (isinstance(checked_at, bool) or
+                                            not isinstance(checked_at, (int, float))):
+                raise RepoError("invalid repository check timestamp")
+    return st
+
+
+def _load_state_for_mutation() -> dict:
+    return _validate_state_shape(_load_json_object(state_file(), "repository state", {}))
+
+
+def load_state() -> dict:
+    # Read-only views remain deliberately tolerant: a damaged metadata file
+    # should be reportable in the UI, but must never be guessed over by a
+    # mutating operation.
+    try:
+        value = _load_json_object(state_file(), "repository state", {})
+        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
 
 def save_state(st: dict) -> None:
-    # atomic: write a sibling temp file and rename over the real one, so a
-    # crash (or a second process) can never leave a half-written state file
-    f = state_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(st, fh, indent=1)
-    os.replace(tmp, f)
+    _validate_state_shape(st)
+    _atomic_write_json(state_file(), st)
+
+
+def _acquire_windows_lock(fh):
+    """Acquire an msvcrt byte lock without LK_LOCK's short retry limit."""
+    import msvcrt
+    fh.seek(0, 2)
+    if fh.tell() == 0:
+        fh.write(" ")
+        fh.flush()
+    fh.seek(0)
+    # msvcrt reports a held byte as EACCES/EDEADLK (and on some Python/CRT
+    # combinations as ERROR_LOCK_VIOLATION).  Only those contention errors are
+    # retried; permission/I/O/etc. failures are real errors.
+    contention_errno = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+    contention_winerror = {32, 33, 36, 170, 212}
+    while True:
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return msvcrt
+        except Exception as exc:
+            if (not isinstance(exc, OSError) or
+                    (getattr(exc, "errno", None) not in contention_errno and
+                     getattr(exc, "winerror", None) not in contention_winerror)):
+                raise RepoError("could not acquire repository lock")
+            time.sleep(0.05)
 
 
 @contextlib.contextmanager
-def _state_lock():
-    """Process-wide (and cross-process) mutex around state read-modify-write
-    sections. The launcher and the UI server are separate processes that both
-    write repos-state.json; without this, two writers can interleave and one
-    loses the other's changes — which is exactly how a copy could lose its
-    'deployed' record and get silently re-inited next launch."""
-    lock_path = data_dir() / ".repos-lock"
+def _file_lock(lock_path: Path):
+    """Portable exclusive lock for one stable lock-file inode."""
+    lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "w")
+    fh = open(lock_path, "a+")
+    locked = False
+    msvcrt = None
     try:
         if sys.platform == "win32":
-            import msvcrt
-            fh.seek(0, 2)
-            if fh.tell() == 0:
-                fh.write(" ")
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            msvcrt = _acquire_windows_lock(fh)
+            locked = True
         else:
             import fcntl
             fcntl.flock(fh, fcntl.LOCK_EX)
+            locked = True
         yield
     finally:
         try:
-            if sys.platform == "win32":
-                import msvcrt
+            if locked and sys.platform == "win32":
+                fh.seek(0)
                 msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
+            elif locked:
                 import fcntl
                 fcntl.flock(fh, fcntl.LOCK_UN)
         finally:
             fh.close()
+
+
+@contextlib.contextmanager
+def _state_lock():
+    """Global state mutex. Operation locks must always be acquired first."""
+    with _file_lock(data_dir() / ".repos-lock"):
+        yield
+
+
+@contextlib.contextmanager
+def _repo_operation_lock(key: str):
+    """Serialize all mutating/checking work for one managed repository."""
+    key = validate_repo_key(key)
+    with _file_lock(data_dir() / f".repos-{key}-lock"):
+        yield
+
+
+# Short private name retained for focused callers and tests.
+_repo_lock = _repo_operation_lock
 
 
 # ----------------------------------------------------------------------------
@@ -852,7 +978,7 @@ def set_progress(key: str, **kw) -> None:
                     return
             row["ts"] = time.time()
             d[key] = row
-            progress_file().write_text(json.dumps(d), encoding="utf-8")
+            _atomic_write_json(progress_file(), d)
     except Exception:
         pass
 
@@ -864,7 +990,7 @@ def clear_progress(key: str) -> None:
             d = _read_progress()
             if key in d:
                 del d[key]
-                progress_file().write_text(json.dumps(d), encoding="utf-8")
+                _atomic_write_json(progress_file(), d)
     except Exception:
         pass
 
@@ -875,15 +1001,33 @@ def repo_dir(key: str) -> Path:
 
 def load_manifest(key: str) -> dict:
     try:
-        with open(manifest_file(key)) as f:
-            return json.load(f)
+        value = _load_json_object(manifest_file(key), "repository manifest", {})
+        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
 
+def _validate_manifest_shape(man: dict) -> dict:
+    if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
+        raise RepoError("invalid repository manifest shape")
+    for path, digest in man["files"].items():
+        validate_repo_path(path)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise RepoError("invalid repository manifest hash")
+    if man.get("sha") is not None:
+        validate_sha(man["sha"], "manifest SHA")
+    return man
+
+
+def _load_manifest_for_mutation(key: str):
+    value = _load_json_object(manifest_file(key), "repository manifest", None)
+    return None if value is None else _validate_manifest_shape(value)
+
+
 def save_manifest(key: str, man: dict) -> None:
-    with open(manifest_file(key), "w", encoding="utf-8") as f:
-        json.dump(man, f)
+    key = validate_repo_key(key)
+    _validate_manifest_shape(man)
+    _atomic_write_json(manifest_file(key), man)
 
 
 def load_source(key: str) -> str:
@@ -905,14 +1049,60 @@ def load_source(key: str) -> str:
     return validate_source(REPOS[key].get("default_source", "main"))
 
 
+def _settings_source(key: str):
+    """Return the explicit settings source, preserving load_source semantics."""
+    try:
+        settings = json.loads((data_dir() / "settings.json").read_text())
+        repos = settings.get("repos", {})
+        value = (repos.get(key) or {}).get("source") if isinstance(repos, dict) else None
+        return validate_source(value) if value is not None else None
+    except RepoError:
+        raise
+    except Exception:
+        return None
+
+
+def _source_snapshot(key: str, st: dict = None):
+    """Capture the effective source and only its currently relevant authority.
+
+    State is the higher-priority authority.  In particular, do not inspect a
+    malformed settings source when a valid state source already determines the
+    answer: an ignored lower-priority setting must not block an operation.
+    """
+    key = validate_repo_key(key)
+    if st is None:
+        st = load_state()
+    entry = st.get(key) or {}
+    state_source = entry.get("source")
+    if state_source is not None:
+        state_source = validate_source(state_source)
+        return state_source, ("state", state_source)
+    settings_source = _settings_source(key)
+    if settings_source is not None:
+        return settings_source, ("settings", settings_source)
+    default = validate_source(REPOS[key].get("default_source", "main"))
+    return default, ("default", default)
+
+
 def set_source(key: str, source: str) -> None:
     key = validate_repo_key(key)
     source = validate_source(source)
-    with _state_lock():
-        st = load_state()
-        r = st.setdefault(key, {})
-        r["source"] = source
-        save_state(st)
+    # The operation lock is deliberately outside the state lock: this is the
+    # repository -> global-state order used by init/update/check everywhere.
+    with _repo_lock(key):
+        with _state_lock():
+            st = _load_state_for_mutation()
+            r = st.get(key)
+            if r is None:
+                r = {}
+                st[key] = r
+            if not isinstance(r, dict):
+                raise RepoError("invalid repository state entry")
+            r["source"] = source
+            # A check is tied to the effective source; never serve its target
+            # after changing that source.
+            r.pop("last_check", None)
+            save_state(st)
 
 
 # ----------------------------------------------------------------------------
@@ -1501,29 +1691,63 @@ def apply_changes(key: str, man: dict, target: dict,
 # Commands
 # ----------------------------------------------------------------------------
 
+def _check_repo_locked(key: str, force: bool = False) -> dict:
+    """Check implementation; caller holds the per-repository operation lock."""
+    # A settings/state source can change while the network request is in flight
+    # (the settings editor is not part of this module). Retry once rather than
+    # caching a result for the wrong authority.
+    for attempt in range(2):
+        with _state_lock():
+            st = _load_state_for_mutation()
+            entry = st.get(key) or {}
+            source, source_sig = _source_snapshot(key, st)
+            deployed = entry.get("deployed")
+            lc = entry.get("last_check") or {}
+            if (not force and lc.get("checked") and
+                    time.time() - lc.get("checked_at", 0) < 3600):
+                checked = lc["checked"]
+                # Cache entries from before source binding are misses.  The
+                # effective source is sufficient here: ignored settings below
+                # a state source do not invalidate, while settings-backed
+                # changes do.
+                if checked.get("source") == source:
+                    return {"repo": key, "ok": True, "cached": True,
+                            "deployed": deployed, "target": checked.get("target"),
+                            "up_to_date": checked.get("up_to_date"),
+                            "source": source}
+        try:
+            target = resolve_target(key, source)
+        except RepoError as e:
+            return {"repo": key, "ok": False, "error": str(e), "deployed": deployed}
+
+        with _state_lock():
+            fresh = _load_state_for_mutation()
+            fresh_entry = fresh.get(key) or {}
+            fresh_source, fresh_sig = _source_snapshot(key, fresh)
+            if fresh_sig != source_sig or fresh_source != source:
+                if attempt == 0:
+                    continue
+                raise RepoError("repository source changed while checking; retry")
+            fresh_deployed = fresh_entry.get("deployed")
+            res = {"repo": key, "ok": True, "cached": False, "target": target,
+                   "deployed": fresh_deployed, "source": source,
+                   "up_to_date": bool(fresh_deployed and
+                                      fresh_deployed.get("sha") == target["sha"])}
+            if not fresh_deployed:
+                res["note"] = "no managed copy yet — run “Download latest” first."
+            r = fresh.setdefault(key, {})
+            old_check = r.get("last_check") if isinstance(r.get("last_check"), dict) else {}
+            r["last_check"] = {**old_check, "checked": res, "checked_at": time.time()}
+            save_state(fresh)
+            return res
+    raise RepoError("repository source changed while checking; retry")
+
+
 def check_repo(key: str, force: bool = False) -> dict:
-    """Resolve the asked-for ref and compare it with the deployed one. Caches the
-    remote answer for an hour (rate-limit friendly); force re-queries."""
+    """Resolve and cache a check while serializing it with init/update."""
     key = validate_repo_key(key)
-    st = load_state().get(key) or {}
-    deployed = st.get("deployed")
-    lc = st.get("last_check") or {}
-    if not force and lc.get("checked") and time.time() - lc.get("checked_at", 0) < 3600:
-        return {"repo": key, "ok": True, "cached": True, "deployed": deployed,
-                "target": lc["checked"].get("target"), "up_to_date": lc["checked"].get("up_to_date")}
-    try:
-        target = resolve_target(key, load_source(key))
-    except RepoError as e:
-        return {"repo": key, "ok": False, "error": str(e), "deployed": deployed}
-    res = {"repo": key, "ok": True, "cached": False, "target": target, "deployed": deployed,
-           "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])}
-    if not deployed:
-        res["note"] = "no managed copy yet — run “Download latest” first."
-    state = load_state()
-    r = state.setdefault(key, {})
-    r["last_check"] = {"checked": res, "checked_at": time.time()}
-    save_state(state)
-    return res
+    with _repo_lock(key):
+        return _check_repo_locked(key, force=force)
 
 
 def cmd_check(key: str, as_json: bool = False):
@@ -1709,12 +1933,16 @@ def verify_deployed(key: str) -> bool:
         return False
 
 
-def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
+def _cmd_init_locked(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
     key = validate_repo_key(key)
     meta = REPOS[key]
-    st = load_state()
-    rstate = st.get(key) or {}
-    source = load_source(key)
+    with _state_lock():
+        st = _load_state_for_mutation()
+        source, source_sig = _source_snapshot(key, st)
+        rstate = st.get(key) or {}
+        if not isinstance(rstate, dict):
+            raise RepoError("invalid repository state entry")
+        _load_manifest_for_mutation(key)
     if rstate.get("deployed") and not tarball and not force_redeploy:
         log(f"[init {key}] already deployed at {rstate['deployed']['ref']} — nothing to do.")
         return {"ok": True, "noop": True}
@@ -1758,13 +1986,18 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
             set_progress(key, stage="fingerprint", done=i, total=len(paths), unit="files")
         save_manifest(key, man)
         with _state_lock():
-            # reload inside the lock: another process (the UI server) may have
-            # written state while we were downloading
-            st = load_state()
+            # Reload inside the state lock. Preserve any source selected while
+            # the network/deploy work was in progress instead of resurrecting
+            # the captured source.
+            st = _load_state_for_mutation()
             rstate = st.get(key) or {}
+            if not isinstance(rstate, dict):
+                raise RepoError("invalid repository state entry")
+            current_source, current_sig = _source_snapshot(key, st)
             rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
             rstate["mode"] = "bundled"
-            rstate["source"] = source
+            if current_sig == source_sig and current_source == source:
+                rstate["source"] = source
             st[key] = rstate
             save_state(st)
         log(f"[init {key}] {REPOS[key]['name']} deployed at {target['ref']} ({target['sha'][:7]}) — "
@@ -1783,13 +2016,24 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
     return {"ok": True, "files": len(man["files"])}
 
 
-def cmd_update(key: str, force_full: bool = False, log=print):
+def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
+    key = validate_repo_key(key)
+    with _repo_lock(key):
+        return _cmd_init_locked(key, tarball=tarball, log=log,
+                                force_redeploy=force_redeploy)
+
+
+def _cmd_update_locked(key: str, force_full: bool = False, log=print):
     key = validate_repo_key(key)
     meta = REPOS[key]
-    st = load_state()
-    rstate = st.get(key) or {}
-    deployed = rstate.get("deployed")
-    source = load_source(key)
+    with _state_lock():
+        st = _load_state_for_mutation()
+        source, _source_sig = _source_snapshot(key, st)
+        rstate = st.get(key) or {}
+        if not isinstance(rstate, dict):
+            raise RepoError("invalid repository state entry")
+        deployed = rstate.get("deployed")
+        _load_manifest_for_mutation(key)
     if not deployed:
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
     log(f"[update {key}] resolving target “{source}” …")
@@ -1801,12 +2045,21 @@ def cmd_update(key: str, force_full: bool = False, log=print):
 
     return _run_update(key, meta, st, rstate, deployed, source, target, force_full, log)
 
+
+def cmd_update(key: str, force_full: bool = False, log=print):
+    key = validate_repo_key(key)
+    with _repo_lock(key):
+        return _cmd_update_locked(key, force_full=force_full, log=log)
+
+
 def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log):
     key = validate_repo_key(key)
     t0 = time.time()
     try:
-        man = load_manifest(key)
-        old_files = man.get("files") or {}
+        man = _load_manifest_for_mutation(key)
+        if man is None:
+            raise RepoError("repository manifest is missing")
+        old_files = man["files"]
         repo = safe_destination(repo_dir(key))
         mode = "full" if force_full else "diff"
 
@@ -1884,16 +2137,22 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
         # check/update handlers and the launcher both write this file)
         new_manifest = res["manifest"]
         with _state_lock():
-            st = load_state()
+            st = _load_state_for_mutation()
             rstate = st.get(key) or {}
+            if not isinstance(rstate, dict):
+                raise RepoError("invalid repository state entry")
             rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
             rstate["last_update"] = time.time()
             rstate["last_update_secs"] = round(time.time() - t0, 1)
-            # re-record the check against the *new* deployed commit — we just moved, so
-            # by construction the target is current (avoids a stale “update available” line)
-            rstate["last_check"] = {"checked": {"repo": key, "ok": True, "cached": False, "target": target,
-                                                "deployed": rstate["deployed"], "up_to_date": True},
-                                   "checked_at": time.time()}
+            # Re-record the check against the new deployed commit while
+            # retaining extension fields written by other state clients.
+            checked = {"repo": key, "ok": True, "cached": False, "target": target,
+                       "deployed": rstate["deployed"], "source": source,
+                       "up_to_date": True}
+            old_check = rstate.get("last_check") if isinstance(rstate.get("last_check"), dict) else {}
+            old_checked = old_check.get("checked") if isinstance(old_check.get("checked"), dict) else {}
+            rstate["last_check"] = {**old_check, "checked": {**old_checked, **checked},
+                                     "checked_at": time.time()}
             st[key] = rstate
             save_state(st)
         save_manifest(key, new_manifest)
