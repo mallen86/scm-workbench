@@ -443,9 +443,15 @@ the WebView treats that renderer as its sole remote HTML boundary and renders al
 release metadata as text nodes. Downloads have a 60-second total deadline, a 1 GiB
 ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
 and SHA-256 verification when GitHub supplies a digest. A completed download is
-published from a unique temporary file only after validation. ZIP extraction,
-transactional replacement, restart recovery, and Windows helper behavior remain a
-separate prerequisite before update-start can move to native IPC.
+published from a unique temporary file only after validation. ZIP extraction now preflights bounded names, sizes, types, collisions, local-record
+ranges, and symlink targets, then securely stages and atomically publishes only an
+absent destination with a platform no-replace rename. Release shapes are checked
+against the macOS `.app` and Windows `exe`/`app`/`runtime` workflows; unsupported
+permissions, links, compression, and encrypted or ambiguous records fail closed.
+HTTP update-start accepts only `{}` and admits one canonical newer state/token for the
+entire updater-thread lifetime, including failure cleanup; replacement, restart
+recovery, and the external Windows helper/journal remain the next prerequisite before
+update-start can move to native IPC.
 
 ## Browser fallback and migration boundary
 

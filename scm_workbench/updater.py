@@ -24,12 +24,16 @@ Standard library only — same rule as the rest of the Workbench.
 import hashlib
 import json
 import os
+import posixpath
 import re
+import struct
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +45,15 @@ METADATA_MAX_BYTES = 2 * 1024 * 1024
 TOTAL_DEADLINE_SECONDS = 30
 DOWNLOAD_DEADLINE_SECONDS = 60
 ASSET_MAX_BYTES = 1 << 30
+
+ARCHIVE_MEMBER_MAX = 20_000
+ARCHIVE_MAX_BYTES = 1 << 30
+ARCHIVE_UNCOMPRESSED_MAX = 4 << 30
+ARCHIVE_MEMBER_MAX_BYTES = 1 << 30
+ARCHIVE_SYMLINK_MAX_BYTES = 4 << 10
+ARCHIVE_NAME_MAX_BYTES = 4096
+ARCHIVE_COMPONENT_MAX_BYTES = 255
+ARCHIVE_COMPRESSION_RATIO_MAX = 200
 
 # These remain environment-overridable for test fixtures and forks.  They are
 # validated at request time: configuration must not turn the API path into a
@@ -562,113 +575,482 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
             pass
 
 
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically rename *source* to an absent destination, or fail closed."""
+    source = os.fspath(source)
+    destination = os.fspath(destination)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        move = kernel32.MoveFileExW
+        move.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
+        move.restype = wintypes.BOOL
+        # Omitting MOVEFILE_REPLACE_EXISTING is the no-replace operation.
+        if move(source, destination, 0x00000008):  # MOVEFILE_WRITE_THROUGH
+            return
+        error = ctypes.get_last_error()
+        if error in (2, 80, 183):  # FILE_NOT_FOUND, FILE_EXISTS, ALREADY_EXISTS
+            raise FileExistsError(error, "destination already exists", destination)
+        raise OSError(error, "MoveFileExW failed", destination)
+
+    import ctypes
+    import errno
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        renamex = getattr(libc, "renamex_np", None)
+        if renamex is None:
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+        renamex.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        renamex.restype = ctypes.c_int
+        result = renamex(os.fsencode(source), os.fsencode(destination), 0x00000004)
+    else:
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+        renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                              ctypes.c_char_p, ctypes.c_uint)
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in (errno.EEXIST, errno.ENOTEMPTY):
+        raise FileExistsError(error, "destination already exists", destination)
+    if error in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", -1)):
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    raise OSError(error, os.strerror(error), destination)
+
+
 def extract_app(zip_path: Path, dest_dir: Path, log=print) -> Path:
-    """Unzip a release into dest_dir and return the app folder it contains.
+    """Preflight a bounded ZIP, securely extract it, and publish atomically."""
+    from scm_workbench import repo_sync
 
-    macOS releases hold "SCM Workbench.app"; Windows releases hold
-    "SCM Workbench.exe" (+ src/) directly at the archive top level — the
-    returned path is the folder to swap in place of the current one.
+    zip_path, dest_dir = Path(zip_path), Path(dest_dir)
+    stage = None
 
-    The extract is symlink-aware, on purpose: `zipfile.extractall` *dereferences*
-    zip symlinks (the pbs runtime's bin/python → python3.13, the pkgconfig
-    aliases, the libpython version link, …) into small regular files holding
-    the target's *text*. The ad-hoc signature seals those entries **as links**,
-    so a dereferenced extract is a bundle that passes no seal and refuses to
-    launch on Apple silicon — and unlike a Gatekeeper gate, that refusal is
-    silent. (The pipeline's own `zip -y` exists for exactly this reason in
-    the other direction: to keep the links *inside* the archive.)
+    def bad(message):
+        raise UpdateError(f"the release archive is unsafe: {message}")
 
-    The same extract is mode-restoring: BSD `zip` records each entry's Unix
-    mode in its external-attr field, but Python's `extractall` ignores that
-    field and writes every file `0644` (the `unzip`/`ditto` CLIs do it
-    right - the same 0755 `python3.13` comes out of `extractall` as 0644).
-    A bundle whose main executable is not executable is a *spawn* failure on
-    the user's machine - `RBSRequestError 5` / `POSIX 111`, no dialog - so
-    each member is written through the documented extract-to-tmp-then-chmod
-    path instead, restoring the mode the archive's own metadata claims.
-    """
-    import stat
+    component_aliases = {}
+    reserved_stems = {"con", "prn", "aux", "nul"}
+    reserved_stems.update(f"com{i}" for i in range(1, 10))
+    reserved_stems.update(f"lpt{i}" for i in range(1, 10))
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        # path-traversal guard, same policy as the repo sync
-        infos = zf.infolist()
-        for i in infos:
-            if i.filename.startswith("/") or ".." in i.filename.split("/"):
-                raise UpdateError(f"the release archive has an unsafe entry ({i.filename}) — not installing it")
-
-        def _extract(i) -> None:
-            target = dest_dir / i.filename
-            if i.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                return
-            # extract to a sibling tmp name, then chmod to the mode the zip
-            # metadata claims (its low 12 bits), then rename into place -
-            # the workaround CPython itself documents, because extractall
-            # never applies the stored mode
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(target.name + ".wbtmp")
-            with zf.open(i) as src, open(tmp, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            attr = i.external_attr >> 16
-            mode = stat.S_IMODE(attr) if attr else 0o644
-            os.chmod(tmp, 0o777 & mode)
-            os.rename(tmp, target)
-        for i in infos:
-            _extract(i)
-        # restore the links extractall flattened (idempotent: a non-link
-        # entry's external_attr carries no S_IFLNK, so nothing moves)
-        fixed = 0
-        for i in zf.infolist():
-            if i.is_dir():
-                continue
-            mode = (i.external_attr >> 16) & 0o77777777
-            if not stat.S_ISLNK(mode):
-                continue
-            target = zf.read(i).decode("utf-8", "replace").rstrip("\n")
-            if not target:
-                continue
-            p = dest_dir / i.filename
+    def archive_name(raw):
+        if not isinstance(raw, str):
+            bad("entry name is invalid")
+        try:
+            if not raw.encode("utf-8") or len(raw.encode("utf-8")) > ARCHIVE_NAME_MAX_BYTES:
+                bad("entry name is empty or too long")
+        except UnicodeEncodeError:
+            bad("entry name is not valid UTF-8")
+        if ("\x00" in raw or "\\" in raw or raw.startswith("/") or
+                raw.startswith("//") or re.match(r"^[A-Za-z]:", raw)):
+            bad("entry name has an unsafe path form")
+        directory = raw.endswith("/")
+        value = raw[:-1] if directory else raw
+        parts = value.split("/")
+        if not value or any(not p or p in (".", "..") for p in parts):
+            bad("entry name has an empty or dot component")
+        normalized = []
+        parent_key = ""
+        for original in parts:
+            part = unicodedata.normalize("NFC", original)
             try:
-                # a previous (pre-fix) extract may have left the flattened
-                # text file where the link belongs: remove it, then link
-                if p.is_symlink():
-                    if os.readlink(p) == target:
-                        continue
-                    p.unlink()
-                elif p.is_file():
-                    p.unlink()
-                elif p.exists():
-                    continue  # a directory sits where a link should be — leave it
-                os.symlink(target, p)
-                fixed += 1
-            except OSError as e:
-                log(f"    ! could not restore the link {i.filename.split('/')[-1]}: {e}")
-        if fixed:
-            log(f"    (restored {fixed} symlink{'s' if fixed != 1 else ''} the plain extract had flattened)")
+                size = len(part.encode("utf-8"))
+            except UnicodeEncodeError:
+                bad("entry name is not valid UTF-8")
+            if not 1 <= size <= ARCHIVE_COMPONENT_MAX_BYTES or part in (".", ".."):
+                bad("entry name component is invalid")
+            # Windows aliases are unsafe even when the archive's complete
+            # paths are different: Foo/a and foo/b would share a directory.
+            folded = part.casefold()
+            aliases = component_aliases.setdefault(parent_key, {})
+            if folded in aliases and aliases[folded] != part:
+                bad("Unicode/case-fold-colliding path component")
+            aliases[folded] = part
+            stem = part.rstrip(". ").split(".", 1)[0].casefold()
+            if not stem or stem in reserved_stems or ":" in part or part.endswith((".", " ")):
+                bad("entry name has a Windows-unsafe component")
+            normalized.append(part)
+            parent_key = "/".join(normalized).casefold()
+        path = "/".join(normalized)
+        if len(path.encode("utf-8")) > ARCHIVE_NAME_MAX_BYTES:
+            bad("normalized entry name is too long")
+        return path, unicodedata.normalize("NFC", path).casefold(), directory
 
-    top = sorted(p for p in dest_dir.iterdir() if not p.name.startswith("."))
-    # 1) the normal shape: the bundle itself at the archive top level
-    for p in top:
-        if p.is_dir() and p.name.endswith(".app"):
-            if not (p / "Contents" / "MacOS").is_dir():
-                raise UpdateError(f"the archive’s “{p.name}” is not a macOS app bundle")
-            return p
-    for p in top:
-        if p.is_file() and p.suffix.lower() == ".exe":
-            if not (dest_dir / "src").is_dir():
-                raise UpdateError(f"the archive’s “{p.name}” is missing its src/ runtime — not installing it")
-            return dest_dir
-    # 2) a flat archive (GitHub-tarball style: the bundle's contents at top level)
-    if (dest_dir / "Contents" / "MacOS").is_dir():
-        return dest_dir
-    raise UpdateError("could not find the app inside the release archive")
+    def entry_mode(info):
+        mode = info.external_attr >> 16
+        if not isinstance(mode, int) or mode < 0:
+            bad("entry mode is invalid")
+        if mode & 0o7000:
+            bad("special permission bits are not supported")
+        return mode, stat.S_IMODE(mode)
+
+    if os.path.lexists(zip_path) and zip_path.is_symlink():
+        bad("archive path is a symbolic link")
+    try:
+        archive_size = zip_path.stat().st_size
+    except OSError as exc:
+        raise UpdateError(f"could not read release archive: {exc}") from exc
+    if not zip_path.is_file() or archive_size < 0 or archive_size > ARCHIVE_MAX_BYTES:
+        bad("archive is too large or not a regular file")
+    if os.path.lexists(dest_dir):
+        raise UpdateError(f"refusing to replace existing extraction directory {dest_dir}")
+    try:
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        repo_sync.safe_destination(dest_dir.parent)
+    except Exception as exc:
+        raise UpdateError(f"extraction destination is unsafe: {exc}") from exc
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            try:
+                infos = zf.infolist()
+            except (zipfile.BadZipFile, OSError, ValueError) as exc:
+                raise UpdateError(f"the release archive is malformed: {exc}") from exc
+            if len(infos) > ARCHIVE_MEMBER_MAX:
+                bad("too many members")
+
+            # Validate each local record before opening any payload. Data
+            # descriptors are accepted only in their unambiguous, bounded
+            # classic form and are included in the record range.
+            local_ranges = []
+            try:
+                with open(zip_path, "rb") as archive:
+                    for info in infos:
+                        has_descriptor = bool(info.flag_bits & 0x08)
+                        offset = info.header_offset
+                        if offset < 0 or offset + 30 > archive_size:
+                            bad("local record is outside the archive")
+                        archive.seek(offset)
+                        fixed = archive.read(30)
+                        if len(fixed) != 30 or fixed[:4] != b"PK\x03\x04":
+                            bad("local record is malformed")
+                        (_signature, _version, local_flags, local_method,
+                         _mtime, _mdate, local_crc, local_compressed,
+                         local_uncompressed, name_len, extra_len) = struct.unpack(
+                             "<4s5H3I2H", fixed)
+                        if local_flags != info.flag_bits or local_method != info.compress_type:
+                            bad("local record disagrees with its central entry")
+                        raw_name = archive.read(name_len)
+                        if len(raw_name) != name_len:
+                            bad("local record name is truncated")
+                        archive.seek(extra_len, os.SEEK_CUR)
+                        try:
+                            expected_name = info.orig_filename.encode(
+                                "utf-8" if (info.flag_bits & 0x800) else "cp437")
+                        except (AttributeError, UnicodeEncodeError):
+                            bad("local record name is invalid")
+                        if raw_name != expected_name:
+                            bad("local record name disagrees with its central entry")
+                        data_start = offset + 30 + name_len + extra_len
+                        data_end = data_start + info.compress_size
+                        if (data_start < offset or data_end < data_start or
+                                data_end > archive_size or data_end > zf.start_dir):
+                            bad("local record extends outside its archive area")
+                        record_end = data_end
+                        if has_descriptor:
+                            # A descriptor is safe only when its exact length,
+                            # signature, and all three values agree with the
+                            # central directory. ZIP64 descriptors are outside
+                            # the bounded archive format accepted here.
+                            archive.seek(data_end)
+                            descriptor = archive.read(16)
+                            if len(descriptor) < 12:
+                                bad("data descriptor is truncated")
+                            if descriptor[:4] == b"PK\x07\x08":
+                                if len(descriptor) < 16:
+                                    bad("data descriptor is truncated")
+                                descriptor_crc, descriptor_compressed, descriptor_uncompressed = struct.unpack(
+                                    "<III", descriptor[4:16])
+                                record_end += 16
+                            else:
+                                descriptor_crc, descriptor_compressed, descriptor_uncompressed = struct.unpack(
+                                    "<III", descriptor[:12])
+                                record_end += 12
+                            if (descriptor_crc != info.CRC or
+                                    descriptor_compressed != info.compress_size or
+                                    descriptor_uncompressed != info.file_size):
+                                bad("data descriptor is inconsistent")
+                            if local_crc not in (0, info.CRC) or local_compressed not in (0, info.compress_size) or local_uncompressed not in (0, info.file_size):
+                                bad("local data-descriptor fields are inconsistent")
+                        elif (local_crc != info.CRC or
+                              local_compressed != info.compress_size or
+                              local_uncompressed != info.file_size):
+                            bad("local record sizes or checksum are inconsistent")
+                        if record_end > archive_size or record_end > zf.start_dir:
+                            bad("local record extends outside its archive area")
+                        local_ranges.append((offset, record_end))
+            except UpdateError:
+                raise
+            except (OSError, struct.error, ValueError) as exc:
+                raise UpdateError(f"the release archive has malformed local records: {exc}") from exc
+            previous_end = -1
+            for start, end in sorted(local_ranges):
+                if start < previous_end:
+                    bad("overlapping local records")
+                previous_end = end
+
+            members, names, symlinks = [], {}, []
+            declared_total = 0
+            for info in infos:
+                if info.flag_bits & 0x41:  # traditional or strong ZIP encryption
+                    bad("encrypted members are not supported")
+                if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    bad("unsupported compression method")
+                for field in ("file_size", "compress_size", "header_offset"):
+                    value = getattr(info, field, None)
+                    if (isinstance(value, bool) or not isinstance(value, int) or
+                            value < 0 or value > ARCHIVE_MEMBER_MAX_BYTES):
+                        bad("member size or offset is invalid")
+                path, collision, named_dir = archive_name(info.filename)
+                raw_mode, mode = entry_mode(info)
+                file_type = stat.S_IFMT(raw_mode)
+                if named_dir or info.is_dir() or file_type == stat.S_IFDIR:
+                    if file_type not in (0, stat.S_IFDIR) or info.file_size:
+                        bad("directory metadata is invalid")
+                    kind = "dir"
+                elif file_type == stat.S_IFLNK:
+                    kind = "symlink"
+                elif file_type in (0, stat.S_IFREG):
+                    kind = "file"
+                else:
+                    bad("unsupported special file")
+                if collision in names:
+                    bad("duplicate or Unicode/case-fold-colliding path")
+                if kind != "dir":
+                    declared_total += info.file_size
+                    if declared_total > ARCHIVE_UNCOMPRESSED_MAX:
+                        bad("aggregate uncompressed size exceeds the limit")
+                    if info.file_size and (not info.compress_size or
+                            info.file_size > info.compress_size * ARCHIVE_COMPRESSION_RATIO_MAX):
+                        bad("member compression ratio exceeds the limit")
+                member = {"info": info, "path": path, "kind": kind,
+                          "mode": mode, "payload": None}
+                names[collision] = member
+                members.append(member)
+                if kind == "symlink":
+                    if info.file_size > ARCHIVE_SYMLINK_MAX_BYTES:
+                        bad("symlink payload is too large")
+                    try:
+                        with zf.open(info) as source:
+                            payload = source.read(ARCHIVE_SYMLINK_MAX_BYTES + 1)
+                    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                        raise UpdateError(f"could not read symlink payload: {exc}") from exc
+                    if len(payload) > ARCHIVE_SYMLINK_MAX_BYTES or len(payload) != info.file_size:
+                        bad("symlink payload size does not match its declaration")
+                    try:
+                        target = payload.decode("utf-8")
+                    except UnicodeDecodeError:
+                        bad("symlink payload is not UTF-8")
+                    if (not target or "\x00" in target or "\\" in target or
+                            target.startswith("/") or target.startswith("//") or
+                            re.match(r"^[A-Za-z]:", target) or
+                            any(ord(c) < 0x20 or ord(c) == 0x7f for c in target)):
+                        bad("symlink target is unsafe")
+                    resolved = unicodedata.normalize(
+                        "NFC", posixpath.normpath(posixpath.join(posixpath.dirname(path), target)))
+                    if resolved == ".." or resolved.startswith("../"):
+                        bad("symlink target escapes the extraction root")
+                    member["target_path"] = resolved
+                    member["payload"] = target
+                    symlinks.append(member)
+
+            path_members = {m["path"]: m for m in members}
+            for member in symlinks:
+                # Resolve against the normalized archive spelling, not a
+                # case-fold alias: a link that only works on a case-insensitive
+                # host would be dangling after extraction on macOS/Linux.
+                target = path_members.get(member["target_path"])
+                if target is None:
+                    bad("symlink target does not name a real archive member")
+                member["target_member"] = target
+
+            def resolve_link(member, chain=()):
+                if member["kind"] != "symlink":
+                    return member
+                if member["path"] in chain:
+                    bad("symlink target cycle")
+                return resolve_link(member["target_member"], chain + (member["path"],))
+
+            for member in symlinks:
+                resolve_link(member)
+            for member in members:
+                parts = member["path"].split("/")
+                for n in range(1, len(parts)):
+                    parent = path_members.get("/".join(parts[:n]))
+                    if parent is not None and parent["kind"] != "dir":
+                        bad("member is nested beneath a non-directory")
+            link_paths = {m["path"] for m in symlinks}
+            if any(any(m["path"].startswith(link + "/") for link in link_paths)
+                   for m in members):
+                bad("member is nested beneath a symlink")
+
+            dirs, dir_modes = set(), {}
+            for member in members:
+                parts = member["path"].split("/")
+                dirs.update("/".join(parts[:n]) for n in range(1, len(parts)))
+                if member["kind"] == "dir":
+                    dirs.add(member["path"])
+                    dir_modes[member["path"]] = member["mode"] or 0o755
+            try:
+                stage = Path(tempfile.mkdtemp(prefix=f".{dest_dir.name}.", dir=str(dest_dir.parent)))
+                repo_sync.safe_destination(stage)
+            except Exception as exc:
+                raise UpdateError(f"could not create extraction staging directory: {exc}") from exc
+
+            for relative in sorted(dirs, key=lambda p: (p.count("/"), p)):
+                try:
+                    repo_sync._secure_mkdir_relative(stage, relative, mode=0o700)
+                except Exception as exc:
+                    raise UpdateError(f"could not create archive directory {relative}: {exc}") from exc
+
+            actual_total = sum(len(m["payload"]) for m in symlinks)
+            if actual_total > ARCHIVE_UNCOMPRESSED_MAX:
+                bad("actual extracted bytes exceed the aggregate limit")
+            for member in members:
+                if member["kind"] != "file":
+                    continue
+                info, relative = member["info"], member["path"]
+                try:
+                    with repo_sync._secure_open_relative(stage, relative, write=True,
+                                                         create_parents=True, mode=0o600) as destination, \
+                         zf.open(info) as source:
+                        actual = 0
+                        while True:
+                            chunk = source.read(min(1 << 20, info.file_size - actual + 1))
+                            if not chunk:
+                                break
+                            actual += len(chunk)
+                            actual_total += len(chunk)
+                            if actual > info.file_size or actual_total > ARCHIVE_UNCOMPRESSED_MAX:
+                                bad("actual extracted bytes exceed the declared limits")
+                            destination.write(chunk)
+                        if actual != info.file_size:
+                            bad("member ended before its declared size")
+                        mode = member["mode"] or 0o644
+                        try:
+                            os.fchmod(destination.fileno(), mode)
+                        except (AttributeError, NotImplementedError, OSError) as exc:
+                            # Windows has limited chmod support. The archive
+                            # mode is already restricted to ordinary bits;
+                            # use the path operation only where it is safe.
+                            if os.name == "nt":
+                                try:
+                                    os.chmod(stage / relative, mode & 0o777)
+                                except (AttributeError, NotImplementedError, OSError):
+                                    pass
+                            elif not isinstance(exc, NotImplementedError):
+                                raise
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                except UpdateError:
+                    raise
+                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                    raise UpdateError(f"could not extract {relative}: {exc}") from exc
+
+            for member in symlinks:
+                relative = member["path"]
+                try:
+                    parts = relative.split("/")
+                    if getattr(repo_sync, "_DESCRIPTOR_IO", False) and os.name != "nt":
+                        parent_fd = repo_sync._open_dir_chain(stage, parts[:-1], create=True)
+                        try:
+                            os.symlink(member["payload"], parts[-1], dir_fd=parent_fd)
+                        finally:
+                            os.close(parent_fd)
+                    else:
+                        target = repo_sync.safe_path(stage, relative)
+                        if os.path.lexists(target):
+                            bad("duplicate extracted path")
+                        os.symlink(member["payload"], target)
+                except UpdateError:
+                    raise
+                except OSError as exc:
+                    raise UpdateError(f"could not create archive symlink {relative}: {exc}") from exc
+
+            top = list(stage.iterdir())
+            top_names = {p.name for p in top}
+            app = stage / "SCM Workbench.app"
+            contents = app / "Contents"
+            macos = contents / "MacOS"
+            mac_ok = (top_names == {app.name} and app.is_dir() and
+                      not app.is_symlink() and contents.is_dir() and
+                      not contents.is_symlink() and macos.is_dir() and
+                      not macos.is_symlink())
+            exe = stage / "SCM Workbench.exe"
+            app_dir = stage / "app"
+            runtime_dir = stage / "runtime"
+            windows_ok = (
+                top_names == {"SCM Workbench.exe", "app", "runtime"} and
+                exe.is_file() and not exe.is_symlink() and exe.stat().st_size > 0 and
+                app_dir.is_dir() and not app_dir.is_symlink() and
+                (app_dir / "scm_workbench").is_dir() and
+                not (app_dir / "scm_workbench").is_symlink() and
+                (app_dir / "ui").is_dir() and not (app_dir / "ui").is_symlink() and
+                runtime_dir.is_dir() and not runtime_dir.is_symlink())
+            if mac_ok == windows_ok:
+                bad("archive does not have one unambiguous app shape")
+            for relative, mode in dir_modes.items():
+                try:
+                    os.chmod(stage / relative, mode & 0o777, follow_symlinks=False)
+                except NotImplementedError:
+                    # The paths are controlled staging paths and have already
+                    # been checked as real directories. Windows can therefore
+                    # use its ordinary chmod operation when available.
+                    try:
+                        os.chmod(stage / relative, mode & 0o777)
+                    except (AttributeError, NotImplementedError, OSError):
+                        # The staging tree has no untrusted symlink path at
+                        # this point; inability to restore an ordinary mode is
+                        # non-fatal on platforms without no-follow chmod.
+                        pass
+                except OSError as exc:
+                    if os.name != "nt":
+                        raise UpdateError(f"could not restore mode for {relative}: {exc}") from exc
+
+            def fsync_dir(path):
+                try:
+                    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    pass
+            for directory in [stage] + [stage / p for p in dirs]:
+                fsync_dir(directory)
+            fsync_dir(stage.parent)
+            if os.path.lexists(dest_dir):
+                raise UpdateError(f"refusing to replace existing extraction directory {dest_dir}")
+            try:
+                _rename_noreplace(stage, dest_dir)
+            except FileExistsError as exc:
+                raise UpdateError(f"refusing to replace existing extraction directory {dest_dir}") from exc
+            except OSError as exc:
+                raise UpdateError(f"could not publish extracted app atomically: {exc}") from exc
+            fsync_dir(dest_dir.parent)
+            stage = None
+            return dest_dir / "SCM Workbench.app" if mac_ok else dest_dir
+    except UpdateError:
+        raise
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise UpdateError(f"the release archive is malformed or could not be extracted: {exc}") from exc
+    finally:
+        if stage is not None:
+            try:
+                shutil.rmtree(stage)
+            except Exception as exc:
+                try:
+                    log(f"    ! could not clean extraction staging directory: {exc}")
+                except Exception:
+                    pass
 
 
 def swap_bundle(new_bundle: Path, old_bundle: Path, log=print) -> Path:
-    """Replace old_bundle with new_bundle (same parent), keeping the old one
-    as a `.old-<stamp>` sibling until the next launch sweeps it. Returns the
-    backup path. Rolls the move back if the second one fails."""
+    """Replace old_bundle with new_bundle, retaining a rollback sibling."""
     parent = old_bundle.parent
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup = parent / (old_bundle.name + f".old-{stamp}")
@@ -759,8 +1141,8 @@ def run_job(job: dict, plan: dict, log_f) -> None:
     """Download + install a newer release, then hand over to the new app.
 
     plan keys: repo, current, latest, asset {name,url,size},
-    bundle (the app folder to replace, None when not packaged), work (the
-    scratch dir), force (allow same-version reinstalls).
+    bundle (the app folder to replace, None when not packaged), and work (the
+    scratch directory).
     """
     def emit(s: str) -> None:
         job["log_lines"].append(s)
@@ -805,7 +1187,7 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         # 1) re-verify (the state that started the job can be a few minutes old)
         rel = latest_release()
         same_release = (rel["tag"].lstrip("v") == plan.get("current"))
-        if (same_release or not is_newer(rel["tag"], plan.get("current"))) and not plan.get("force"):
+        if same_release or not is_newer(rel["tag"], plan.get("current")):
             if same_release:
                 # The running app *is* the newest release (a check that ran
                 # while the release it found was still unpublished, or a

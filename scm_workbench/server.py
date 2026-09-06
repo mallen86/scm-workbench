@@ -990,6 +990,11 @@ _UPDATE_CHECK_GENERATION = 0
 _UPDATE_CHECK_RESULT = None
 _UPDATE_STATE_LOCK = threading.Lock()
 _UPDATE_STATE_MAX_BYTES = 128 * 1024
+# Separate from job status: run_job publishes a terminal status before its
+# worker has finished closing/persisting, so status alone is not an admission
+# lease. Both this token and JOBS are guarded by JOBS_LOCK.
+_UPDATE_ADMISSION = False
+_UPDATE_ADMISSION_JOB = None
 
 
 def _default_update_state() -> dict:
@@ -1207,73 +1212,142 @@ def _update_daemon() -> None:
         time.sleep(1800)
 
 
-def start_update_job(requested_latest: str, force: bool) -> Tuple[Optional[dict], List[str]]:
-    """The in-process install job (download → swap → relaunch → quit)."""
-    st = load_update_state()
-    if st.get("status") != "update-available" and not force:
-        return None, ["No update is known to be available — press “Check for updates” first."]
-    latest = st.get("latest") or requested_latest or "the newest release"
-    job_id = uuid.uuid4().hex[:10]
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    job: dict = {
-        "id": job_id,
-        "ts": time.time(),
-        "kind": "update",
-        "title": f"Update the app to {latest}",
-        "cmd": f"workbench: self-update → {latest}",
-        "args": {},
-        "status": "running",
-        "exit_code": None,
-        "log_file": str(LOGS_DIR / f"{job_id}.log"),
-        "log_lines": [],
-        "first_seq": 0,
-        "subs": [],
-        "warnings": [],
-        "started": time.time(),
-        "ended": None,
-        "duration": None,
-        "proc": None,
-        "progress": None,
-    }
-    log_f = open(job["log_file"], "w", encoding="utf-8")
-    header = f"$ {job['cmd']}"
-    log_f.write(header + "\n\n")
-    log_f.flush()
-    job["log_lines"] = [header]
-    with JOBS_LOCK:
-        JOBS[job_id] = job
+def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List[str]]:
+    """Admit exactly one install from the canonical, checked update state."""
+    global _UPDATE_ADMISSION, _UPDATE_ADMISSION_JOB
 
-    def worker():
+    def error_text(exc: Exception) -> str:
+        text = str(exc).replace("\x00", " ").replace("\n", " ").strip()
+        return (text or exc.__class__.__name__)[:256]
+
+    # State validation, admission, log creation, insertion, and thread start
+    # are serialized. Caller values are intentionally ignored.
+    with JOBS_LOCK:
+        # A test/process teardown or recovery may have removed an abandoned
+        # record. Do not let that orphaned token permanently deny admission.
+        if _UPDATE_ADMISSION and _UPDATE_ADMISSION_JOB not in JOBS:
+            _UPDATE_ADMISSION = False
+            _UPDATE_ADMISSION_JOB = None
+        if _UPDATE_ADMISSION:
+            return None, ["an update is already running; try again later"]
+        st = load_update_state()
+        if (not _valid_update_state(st) or st.get("status") != "update-available" or
+                st.get("current") != SERVER_VERSION or
+                not updater.is_newer(st.get("latest"), SERVER_VERSION) or
+                not isinstance(st.get("asset"), dict) or
+                st["asset"].get("tag") != st.get("latest")):
+            return None, ["No newer update is available from the current checked state."]
+        latest = st["latest"]
+        if any(j.get("kind") == "update" and j.get("status") == "running"
+               for j in JOBS.values()):
+            return None, ["an update is already running; try again later"]
+        job_id = uuid.uuid4().hex[:10]
+        log_f = None
+        log_created = False
+        try:
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            job = {
+                "id": job_id, "ts": time.time(), "kind": "update",
+                "title": f"Update the app to {latest}",
+                "cmd": f"workbench: self-update → {latest}", "args": {},
+                "status": "running", "exit_code": None,
+                "log_file": str(LOGS_DIR / f"{job_id}.log"), "log_lines": [],
+                "first_seq": 0, "subs": [], "warnings": [],
+                "started": time.time(), "ended": None, "duration": None,
+                "proc": None, "progress": None,
+            }
+            # Exclusive creation prevents a fixed sibling path from replacing
+            # a symlink or a prior log if an ID collision ever occurs.
+            log_f = open(job["log_file"], "x", encoding="utf-8")
+            log_created = True
+            header = f"$ {job['cmd']}"
+            log_f.write(header + "\n\n")
+            log_f.flush()
+            job["log_lines"] = [header]
+            JOBS[job_id] = job
+            _UPDATE_ADMISSION = True
+            _UPDATE_ADMISSION_JOB = job_id
+        except Exception as exc:
+            if log_f is not None:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
+            if log_created:
+                try:
+                    (LOGS_DIR / f"{job_id}.log").unlink()
+                except OSError:
+                    pass
+            return None, [f"could not start update: {error_text(exc)}"]
+
         plan = {
             "repo": updater.UPDATE_REPO,
             "current": SERVER_VERSION,
-            "latest": st.get("latest"),
-            "asset": st.get("asset"),
+            "latest": st["latest"],
+            "asset": copy.deepcopy(st["asset"]),
             "bundle": _own_bundle(),
             "work": DATA_DIR / "update",
-            "force": bool(force),
         }
-        try:
-            updater.run_job(job, plan, log_f)
-        except Exception as e:
-            import traceback
-            job["log_lines"].append("    " + traceback.format_exc(limit=3).replace("\n", "\n    "))
-            job["status"] = "fail"
-            job["exit_code"] = 1
-            job["ended"] = time.time()
-            for q in list(job["subs"]):
+
+        def worker():
+            global _UPDATE_ADMISSION, _UPDATE_ADMISSION_JOB
+            try:
+                updater.run_job(job, plan, log_f)
+            except Exception as exc:
+                # Keep the failure bounded and do not expose a traceback or an
+                # arbitrary exception string to the job protocol.
+                message = f"    ! update worker failed: {error_text(exc)}"
                 try:
-                    q.put(("done", "fail", 1))
+                    log_f.write(message + "\n")
+                    log_f.flush()
                 except Exception:
                     pass
-        finally:
+                with JOBS_LOCK:
+                    job["log_lines"].append(message)
+                    job["status"] = "fail"
+                    job["exit_code"] = 1
+                    job["ended"] = time.time()
+                    job["duration"] = round(job["ended"] - job["started"], 2)
+                    subscribers = list(job.get("subs", []))
+                for subscriber in subscribers:
+                    try:
+                        subscriber.put(("done", "fail", 1))
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
+                try:
+                    _persist_jobs()
+                except Exception:
+                    pass
+                # Release only after updater.run_job, failure handling, log
+                # close, and persistence have all completed.
+                with JOBS_LOCK:
+                    if _UPDATE_ADMISSION_JOB == job_id:
+                        _UPDATE_ADMISSION = False
+                        _UPDATE_ADMISSION_JOB = None
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="update-install").start()
+        except Exception as exc:
+            # Thread construction/start failed: rollback every admission side
+            # effect while still holding JOBS_LOCK.
+            JOBS.pop(job_id, None)
+            _UPDATE_ADMISSION = False
+            _UPDATE_ADMISSION_JOB = None
             try:
                 log_f.close()
             except Exception:
                 pass
-            _persist_jobs()
-
-    threading.Thread(target=worker, daemon=True, name="update-install").start()
+            if log_created:
+                try:
+                    (LOGS_DIR / f"{job_id}.log").unlink()
+                except OSError:
+                    pass
+            return None, [f"could not start update: {error_text(exc)}"]
     return job, []
 
 
@@ -4260,14 +4334,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj: Any, code: int = 200):
         self._send(code, json.dumps(obj, default=str).encode("utf-8"))
 
-    def _body(self) -> dict:
+    def _body(self, *, strict: bool = False):
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
-            return {}
+            return None if strict else {}
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception:
-            return {}
+            return None if strict else {}
 
     # ---- GET ----
 
@@ -4400,8 +4474,11 @@ class Handler(BaseHTTPRequestHandler):
                             return self._json({"ok": True, "state": st})
                 return self._json({"ok": True, "state": run_update_check()})
             if path == "/api/updates/start":
-                body = self._body()
-                job, errors = start_update_job(str(body.get("latest") or ""), bool(body.get("force")))
+                body = self._body(strict=True)
+                if not isinstance(body, dict) or body != {}:
+                    return self._json({"ok": False, "errors": [
+                        "update start requires exactly an empty object"]}, 400)
+                job, errors = start_update_job()
                 if errors:
                     return self._json({"ok": False, "errors": errors}, 400)
                 return self._json({"ok": True, "job": {
