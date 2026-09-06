@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 mod ipc;
+mod update_helper;
 use ipc::WorkerRpc;
 
 #[cfg(windows)]
@@ -114,6 +115,13 @@ fn loading_page() -> WebviewUrl {
 }
 
 fn main() {
+    // The updater is an external, stdio-free mode.  It must be selected before
+    // Tauri setup creates windows, starts IPC, or touches the worker.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--update-helper") {
+        let _ = update_helper::run_cli(&args);
+        return;
+    }
     let worker_slot = WorkerSlot::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

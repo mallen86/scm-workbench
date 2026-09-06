@@ -449,9 +449,16 @@ absent destination with a platform no-replace rename. Release shapes are checked
 against the macOS `.app` and Windows `exe`/`app`/`runtime` workflows; unsupported
 permissions, links, compression, and encrypted or ambiguous records fail closed.
 HTTP update-start accepts only `{}` and admits one canonical newer state/token for the
-entire updater-thread lifetime, including failure cleanup; replacement, restart
-recovery, and the external Windows helper/journal remain the next prerequisite before
-update-start can move to native IPC.
+entire updater-thread lifetime, including failure cleanup. A native external helper
+engine is now available before Tauri startup: it validates a fixed token-bound journal,
+fences process identities, uses atomic no-replace sibling publication, requires an
+ephemeral-nonce health record, and restores only its authorized backup after interrupted
+phases. It supports the signed macOS `.app` shape (including safe internal runtime
+symlinks) and the flat Windows bundle shape without weakening the worker's kill-on-close
+job object. The engine remains intentionally inactive until the next integration slice
+supplies the shell-owned launch request, health/result lifecycle, and packaged smoke
+coverage. Update-start therefore remains HTTP and still uses the old in-process
+replacement path in this intermediate commit.
 
 ## Browser fallback and migration boundary
 
