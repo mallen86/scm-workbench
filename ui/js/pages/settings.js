@@ -61,7 +61,12 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       const fresh = (S.info.repos || []).find(x => x.key === row.key) || row;
       if (container) container.replaceChildren(repoCopyRow(fresh, container));
       else rerender();
-      toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);
+      const warnings = Array.isArray(r.warnings) ? r.warnings.filter(Boolean) : (r.warnings ? [r.warnings] : []);
+      if (warnings.length) {
+        for (const warning of warnings) toast("warn", warning, 5200);
+      } else {
+        toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);
+      }
     } catch (e) {
       toast("err", e.message || "could not save the source");
     }

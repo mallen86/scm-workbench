@@ -182,8 +182,9 @@ request.
 `settings.json` contains the mirrored UI source choice. A successful source
 operation resolves the fixed remote target first, then commits the canonical
 state under the repository locks and mirrors the source into settings. If the
-mirror fails, the result reports `canonical:true`: state remains authoritative
-and the UI can repair the settings mirror without guessing. A failed resolution
+mirror fails, the operation still succeeds with `canonical:true` and a bounded
+`warnings` list: state remains authoritative and the refreshed UI reports the
+repair warning without claiming the source change failed. A failed resolution
 leaves canonical state unchanged. Ref listing is read-only; a check updates
 only its repository's check metadata. Neither method changes the managed tree.
 `repo_init` and `repo_update` remain ordinary `jobs.start` kinds because they

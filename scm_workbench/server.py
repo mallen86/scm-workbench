@@ -1395,9 +1395,13 @@ def repo_source_result(key: str, source: str) -> dict:
         try:
             _repo_source_settings_mirror(key, source)
         except Exception as exc:
-            return {"ok": False, "repo": key, "source": source, "target": target,
+            # The state/check commit is authoritative and must not be reported
+            # as a failed source change merely because its optional settings
+            # mirror could not be persisted.  Keep the warning bounded; the
+            # browser and native transports receive this exact same body.
+            return {"ok": True, "repo": key, "source": source, "target": target,
                     "canonical": True,
-                    "errors": [f"source mirror failed: {_bounded_error(exc)}"],
+                    "warnings": [f"source mirror failed: {_bounded_error(exc)}"],
                     "repos": repos_view(load_settings())}
         settings = load_settings()
         return {"ok": True, "repo": key, "source": source, "target": target,

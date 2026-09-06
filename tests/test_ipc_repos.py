@@ -407,14 +407,37 @@ class RepoIpcTests(unittest.TestCase):
                 "sha": "b" * 40, "ref": "next", "date": None}), \
              mock.patch.object(server, "save_settings", side_effect=OSError("disk unavailable")):
             failed = server.repo_source_result("scm", "next")
-        self.assertEqual(failed["ok"], False)
+        self.assertEqual(failed["ok"], True)
         self.assertEqual(failed["repo"], "scm")
         self.assertEqual(failed["source"], "next")
         self.assertEqual(failed["canonical"], True)
-        self.assertEqual(failed["errors"], ["source mirror failed: disk unavailable"])
+        self.assertEqual(failed["warnings"], ["source mirror failed: disk unavailable"])
         self.assertEqual(repo_sync.load_source("scm"), "next")
         self.assertEqual(server.SETTINGS_FILE.read_bytes(), before_settings)
         self.assertEqual(repo_sync.load_state()["extras"], {"source": "main", "marker": "keep"})
+
+    def test_mirror_failure_is_success_warning_and_http_native_parity(self):
+        # Canonical state is committed first. A failed settings mirror is a
+        # successful source change with an explicit bounded warning, and both
+        # transports must expose the same final body/status.
+        repo_sync.save_state({})
+        with mock.patch.object(server.time, "time", return_value=1234.0), \
+             mock.patch.object(repo_sync.time, "time", return_value=1234.0), \
+             mock.patch.object(repo_sync, "resolve_target", return_value=TARGET), \
+             mock.patch.object(server, "save_settings", side_effect=OSError("disk unavailable")):
+            http_status, http_result = self.http_post(
+                "/api/repos/save", {"repo": "scm", "source": "feature/topic"})
+            operation_id = self.native_start(
+                "repos.source.set", {"repo": "scm", "source": "feature/topic"})
+            native_result = self.native_final(operation_id)
+
+        self.assertEqual(http_status, 200)
+        self.assertEqual(native_result, http_result)
+        self.assertTrue(http_result["ok"])
+        self.assertTrue(http_result["canonical"])
+        self.assertEqual(http_result["warnings"], [
+            "source mirror failed: disk unavailable"])
+        self.assertEqual(repo_sync.load_source("scm"), "feature/topic")
 
     def test_refs_singleflight_ttl_and_error_retry(self):
         entered = threading.Event()
