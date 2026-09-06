@@ -21,12 +21,14 @@ never part of the swap, so an update can never lose user data.
 Standard library only — same rule as the rest of the Workbench.
 """
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -35,14 +37,124 @@ import zipfile
 from pathlib import Path
 
 USER_AGENT = "scm-workbench-updater/0.1"
-# overridable for tests (point the checker at a stub API)
-API = os.environ.get("SCM_WORKBENCH_GITHUB_API") or "https://api.github.com"
+METADATA_MAX_BYTES = 2 * 1024 * 1024
+TOTAL_DEADLINE_SECONDS = 30
+DOWNLOAD_DEADLINE_SECONDS = 60
+ASSET_MAX_BYTES = 1 << 30
 
-# The repo this app's releases live in. Overridable for tests and for people
-# running a fork (point it at the fork and the checker follows it).
+# These remain environment-overridable for test fixtures and forks.  They are
+# validated at request time: configuration must not turn the API path into a
+# second URL or make a release check follow an untrusted origin.
+API = os.environ.get("SCM_WORKBENCH_GITHUB_API") or "https://api.github.com"
 UPDATE_REPO = os.environ.get("SCM_WORKBENCH_UPDATE_REPO") or "mallen86/scm-workbench"
 
 APP_NAME = "SCM Workbench"
+
+_REPO_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+
+
+def _repo_parts() -> tuple[str, str]:
+    if not isinstance(UPDATE_REPO, str) or UPDATE_REPO.count("/") != 1:
+        raise UpdateError("the configured update repository is invalid")
+    owner, name = UPDATE_REPO.split("/")
+    if not (_REPO_PART_RE.fullmatch(owner) and _REPO_PART_RE.fullmatch(name)):
+        raise UpdateError("the configured update repository is invalid")
+    return owner, name
+
+
+def _api_origin() -> tuple[str, str, int | None]:
+    if not isinstance(API, str):
+        raise UpdateError("the configured GitHub API is invalid")
+    try:
+        parsed = urllib.parse.urlsplit(API)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        host = port = None
+        parsed = None
+    if (parsed is None or parsed.scheme.lower() != "https" or not host or
+            parsed.username is not None or parsed.password is not None or
+            parsed.query or parsed.fragment):
+        raise UpdateError("the configured GitHub API must be an HTTPS host")
+    # A path is allowed for test reverse proxies, but it cannot affect the
+    # origin check and is always followed by the fixed API endpoint path.
+    return parsed.scheme.lower(), host.lower(), port
+
+
+def _same_origin(url: str, expected: str) -> bool:
+    """Require redirects to retain scheme, host, port, and no userinfo."""
+    try:
+        actual = urllib.parse.urlsplit(url)
+        want = urllib.parse.urlsplit(expected)
+        if (actual.username is not None or actual.password is not None or
+                actual.scheme.lower() != want.scheme.lower() or
+                (actual.hostname or "").lower() != (want.hostname or "").lower()):
+            return False
+        return actual.port == want.port
+    except ValueError:
+        return False
+
+
+def _text(value, field: str, maximum: int, *, required: bool = False,
+          allowed_controls: str = "") -> str:
+    if value is None and not required:
+        return ""
+    if not isinstance(value, str):
+        raise UpdateError(f"GitHub release field {field} is invalid")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise UpdateError(f"GitHub release field {field} is invalid")
+    if not value and required:
+        raise UpdateError(f"GitHub release field {field} is empty")
+    if size > maximum or any((ord(c) < 0x20 or ord(c) == 0x7f) and c not in allowed_controls
+                              for c in value):
+        raise UpdateError(f"GitHub release field {field} is invalid")
+    return value
+
+
+def _tag(value, field: str = "tag_name") -> str:
+    value = _text(value, field, 128, required=True)
+    if "/" in value or "\\" in value or value in (".", ".."):
+        raise UpdateError(f"GitHub release field {field} is invalid")
+    return value
+
+
+def _github_release_url(url: str, owner: str, repo: str, tag: str) -> str:
+    value = _text(url, "html_url", 2048, required=True)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        expected = f"/{owner}/{repo}/releases/tag/{urllib.parse.quote(tag, safe='') }"
+        if (parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com" or
+                parsed.port is not None or parsed.username is not None or parsed.password is not None or
+                parsed.query or parsed.fragment or urllib.parse.unquote(parsed.path) != expected):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise UpdateError("GitHub release html_url is invalid")
+    return value
+
+
+def _asset_name(value) -> str:
+    value = _text(value, "asset.name", 255, required=True)
+    if value in (".", "..") or "/" in value or "\\" in value:
+        raise UpdateError("GitHub release asset name is unsafe")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise UpdateError("GitHub release asset name is unsafe")
+    return value
+
+
+def _asset_url(value, owner: str, repo: str, tag: str, name: str) -> str:
+    value = _text(value, "asset.browser_download_url", 2048, required=True)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        expected = f"/{owner}/{repo}/releases/download/{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name, safe='') }"
+        if (parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com" or
+                parsed.port is not None or parsed.username is not None or parsed.password is not None or
+                parsed.query or parsed.fragment or urllib.parse.unquote(parsed.path) != expected):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise UpdateError("GitHub release asset URL is invalid")
+    return value
 
 
 class UpdateError(Exception):
@@ -87,44 +199,112 @@ def is_newer(latest, current) -> bool:
 # GitHub over plain HTTPS
 # ----------------------------------------------------------------------------
 
+def _set_response_timeout(response, seconds: float) -> None:
+    """Best-effort socket timeout update across urllib/test response shapes."""
+    seconds = max(0.001, float(seconds))
+    candidates = [response]
+    seen = set()
+    while candidates:
+        obj = candidates.pop(0)
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        setter = getattr(obj, "settimeout", None)
+        if callable(setter):
+            try:
+                setter(seconds)
+            except (OSError, ValueError):
+                pass
+        for attr in ("fp", "raw", "_sock", "sock", "socket"):
+            try:
+                child = getattr(obj, attr, None)
+            except Exception:
+                child = None
+            if child is not None and child is not obj:
+                candidates.append(child)
+
+
+def _response_read(response, size: int, deadline: float, *, label: str) -> bytes:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise UpdateError(f"GitHub {label} timed out")
+    _set_response_timeout(response, remaining)
+    try:
+        data = response.read(size)
+    except Exception as exc:
+        if isinstance(exc, (TimeoutError, OSError, urllib.error.URLError)):
+            raise UpdateError(f"GitHub {label} timed out") from exc
+        raise
+    # A read can return after its socket timeout or a maliciously slow test
+    # seam can return bytes late.  Do not accept those bytes.
+    if time.monotonic() > deadline:
+        raise UpdateError(f"GitHub {label} timed out")
+    return data
+
+
 def gh_request(path: str, method: str = "GET", timeout: int = 30,
               stream_to=None, progress=None):
-    """One API/download request. Returns (status, headers, body_bytes).
+    """Make a bounded API request and close every response.
 
-    stream_to: write the response body to this file instead of reading it
-    all into memory (big asset downloads); progress gets (done, total).
+    Metadata responses are capped at 2 MiB plus one byte so a server cannot
+    make the JSON parser consume unbounded memory.  ``timeout`` is a total
+    monotonic deadline, not a fresh socket timeout for every read.
     """
-    url = API + path if path.startswith("/") else path
+    owner, repo = _repo_parts()
+    scheme, host, port = _api_origin()
+    base = API.rstrip("/")
+    url = base + path if path.startswith("/") else path
+    if path.startswith("/"):
+        expected_origin = f"{scheme}://{host}" + (f":{port}" if port is not None else "")
+        parsed_base = urllib.parse.urlsplit(base)
+        if parsed_base.path:
+            # Keep a configured proxy prefix while still checking its origin.
+            expected_origin = urllib.parse.urlunsplit((scheme, parsed_base.netloc, "", "", ""))
+    else:
+        expected_origin = url
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     req = urllib.request.Request(url, headers=headers, method=method)
+    deadline = time.monotonic() + min(max(float(timeout), 0.0), TOTAL_DEADLINE_SECONDS)
     try:
-        r = urllib.request.urlopen(req, timeout=timeout)
+        remaining = max(0.001, deadline - time.monotonic())
+        r = urllib.request.urlopen(req, timeout=remaining)
     except urllib.error.HTTPError as e:
+        final_error_url = getattr(e, "geturl", lambda: url)()
+        if not _same_origin(final_error_url, expected_origin):
+            try:
+                e.close()
+            except Exception:
+                pass
+            raise UpdateError("GitHub redirected the release lookup to an untrusted host")
+        try:
+            e.close()
+        except Exception:
+            pass
         return e.code, e.headers, b""
     except Exception as e:
         raise UpdateError(f"could not reach GitHub ({urllib.parse.urlsplit(url).netloc}): {e}")
     try:
+        final_url = getattr(r, "geturl", lambda: url)()
+        if not _same_origin(final_url, expected_origin):
+            raise UpdateError("GitHub redirected the release lookup to an untrusted host")
         if stream_to is not None:
-            total = int(r.headers.get("Content-Length") or 0)
-            if total == 0:
-                # chunked download routes: a HEAD usually still carries the size
-                try:
-                    hr = urllib.request.urlopen(urllib.request.Request(url, method="HEAD",
-                                                                         headers=headers), timeout=15)
-                    total = int(hr.headers.get("Content-Length") or 0)
-                    hr.close()
-                except Exception:
-                    total = 0
+            raw_total = r.headers.get("Content-Length")
+            try:
+                total = int(raw_total or 0)
+            except (TypeError, ValueError):
+                raise UpdateError("GitHub returned an invalid Content-Length")
             done = 0
             if progress is not None:
                 progress(0, total)
             with open(stream_to, "wb") as f:
                 while True:
-                    b = r.read(1 << 20)
+                    remaining = deadline - time.monotonic()
+                    b = _response_read(r, min(1 << 20, max(1, int(max(0.001, remaining) * (1 << 20)))),
+                                       deadline, label="download")
                     if not b:
                         break
                     f.write(b)
@@ -132,36 +312,82 @@ def gh_request(path: str, method: str = "GET", timeout: int = 30,
                     if progress is not None:
                         progress(done, total)
             return r.status, r.headers, None
-        data = r.read()
-        return r.status, r.headers, data
+        raw_length = r.headers.get("Content-Length")
+        if raw_length is not None:
+            try:
+                if int(raw_length) > METADATA_MAX_BYTES:
+                    raise UpdateError("GitHub release metadata is too large")
+            except (TypeError, ValueError):
+                raise UpdateError("GitHub returned an invalid Content-Length")
+        chunks = []
+        size = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UpdateError("GitHub release lookup timed out")
+            b = _response_read(r, min(64 * 1024, METADATA_MAX_BYTES + 1 - size),
+                               deadline, label="release lookup")
+            if not b:
+                break
+            chunks.append(b)
+            size += len(b)
+            if size > METADATA_MAX_BYTES:
+                raise UpdateError("GitHub release metadata is too large")
+        return r.status, r.headers, b"".join(chunks)
     finally:
         r.close()
 
 
-def latest_release(timeout: int = 25) -> dict:
-    """The newest release of the Workbench repo, as a plain dict.
+def _validated_asset(raw: dict, owner: str, repo: str, tag: str) -> dict:
+    if not isinstance(raw, dict):
+        raise UpdateError("GitHub release asset is invalid")
+    asset_id = raw.get("id")
+    if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+        raise UpdateError("GitHub release asset id is invalid")
+    name = _asset_name(raw.get("name"))
+    url = _asset_url(raw.get("browser_download_url"), owner, repo, tag, name)
+    size = raw.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= ASSET_MAX_BYTES:
+        raise UpdateError("GitHub release asset size is invalid")
+    if "digest" in raw:
+        digest = raw["digest"]
+        if digest is not None and (not isinstance(digest, str) or
+                                   not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest)):
+            raise UpdateError("GitHub release asset digest is invalid")
+    else:
+        digest = None
+    return {"id": asset_id, "tag": tag, "name": name, "url": url,
+            "size": size, "digest": digest}
 
-    Raises AuthRequiredError when the release repo can't be seen anonymously
-    (it is still private) - once it is made public, the same call just works.
-    """
-    status, headers, body = gh_request(f"/repos/{UPDATE_REPO}/releases/latest", timeout=timeout)
+
+def latest_release(timeout: int = 25) -> dict:
+    """Fetch and strictly validate the newest release metadata."""
+    owner, repo = _repo_parts()
+    status, headers, body = gh_request(f"/repos/{owner}/{repo}/releases/latest", timeout=timeout)
     if status == 200:
-        rel = json.loads(body.decode("utf-8"))
-        if not rel.get("tag_name"):
-            raise UpdateError("GitHub answered, but the release data is empty.")
-        assets = [{
-            "name": a.get("name") or "",
-            "url": a.get("browser_download_url") or "",
-            "size": a.get("size") or 0,
-        } for a in (rel.get("assets") or [])]
-        return {
-            "tag": rel["tag_name"],
-            "name": rel.get("name") or rel["tag_name"],
-            "body": rel.get("body") or "",
-            "published": rel.get("published_at") or "",
-            "url": rel.get("html_url") or "",
-            "assets": assets,
-        }
+        try:
+            rel = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            raise UpdateError("GitHub returned invalid release metadata")
+        if not isinstance(rel, dict):
+            raise UpdateError("GitHub returned invalid release metadata")
+        tag = _tag(rel.get("tag_name"))
+        # GitHub currently calls these target_commitish; accepting the
+        # aliases makes the schema explicit for compatible API fixtures.
+        for field in ("version", "ref", "target_commitish"):
+            if field in rel and rel[field] is not None:
+                _text(rel[field], field, 256, required=True)
+        name = _text(rel.get("name"), "name", 512) or tag
+        body_text = _text(rel.get("body"), "body", 256 * 1024,
+                           allowed_controls="\n\r\t")
+        published = _text(rel.get("published_at"), "published_at", 64)
+        url = _github_release_url(rel.get("html_url"), owner, repo, tag)
+        raw_assets = rel.get("assets")
+        if not isinstance(raw_assets, list) or len(raw_assets) > 100:
+            raise UpdateError("GitHub release assets are invalid")
+        assets = [_validated_asset(a, owner, repo, tag) for a in raw_assets]
+        return {"tag": tag, "name": name, "body": body_text,
+                "published": published, "url": url, "assets": assets}
     if status == 404:
         raise AuthRequiredError(
             "the release repo can't be seen — it is still private; "
@@ -172,71 +398,168 @@ def latest_release(timeout: int = 25) -> dict:
 
 
 def pick_asset(release: dict, platform: str = None) -> dict:
-    """The zip for this platform among a release's assets ("" / None if absent)."""
+    """Select exactly the supported archive for one supported architecture."""
     platform = platform or (sys.platform if os.name != "nt" else "win32")
-    want = re.compile(r"macos|darwin" if platform == "darwin" else r"windows" if platform == "win32" else r"")
-    zips = [a for a in release.get("assets", []) if a["url"] and a["url"].lower().endswith(".zip")]
-    for a in zips:
-        if not want or want.search(a["name"].lower()):
-            return a
-    if zips and not want:
-        return zips[0]
-    names = ", ".join(a["name"] for a in release.get("assets", [])) or "none"
-    raise UpdateError(f"the release has no {platform} zip to install (assets: {names})")
+    if platform in ("darwin", "macos", "darwin-arm64", "macos-arm64"):
+        expected = "scm-workbench-macos.zip"
+        label = "darwin arm64"
+    elif platform in ("win32", "windows", "windows-x64", "win64"):
+        expected = "scm-workbench-windows.zip"
+        label = "windows x64"
+    else:
+        raise UpdateError(f"the release has no installable archive for {platform}")
+    assets = release.get("assets") if isinstance(release, dict) else None
+    matches = [a for a in (assets or []) if isinstance(a, dict) and a.get("name") == expected]
+    if len(matches) != 1:
+        names = ", ".join(str(a.get("name", "")) for a in (assets or []) if isinstance(a, dict)) or "none"
+        raise UpdateError(f"the release has no unambiguous {label} zip to install (assets: {names})")
+    return matches[0]
 
 
 # ----------------------------------------------------------------------------
 # Installing
 # ----------------------------------------------------------------------------
 
-def download(url: str, dest: Path, progress=None, timeout: int = 60) -> int:
-    """Stream a release asset to dest (via dest.part), returning its size."""
+# GitHub's documented release redirect hosts.  Keep this exact (no wildcard
+# subdomains): older GitHub deployments used objects.githubusercontent.com.
+_DOWNLOAD_HOSTS = frozenset(("github.com", "release-assets.githubusercontent.com",
+                             "objects.githubusercontent.com"))
+
+
+def _download_metadata(url, expected_asset):
+    if isinstance(url, dict):
+        if expected_asset is not None and url is not expected_asset:
+            raise UpdateError("download asset metadata does not match its URL")
+        expected_asset = url
+        url = expected_asset.get("url")
+    if not isinstance(expected_asset, dict):
+        raise UpdateError("download requires validated release asset metadata")
+    tag = expected_asset.get("tag")
+    name = expected_asset.get("name")
+    size = expected_asset.get("size")
+    digest = expected_asset.get("digest")
+    try:
+        tag = _tag(tag, "asset.tag")
+        name = _asset_name(name)
+    except UpdateError:
+        raise UpdateError("download asset metadata is invalid")
+    owner, repo = _repo_parts()
+    bound_url = _asset_url(expected_asset.get("url"), owner, repo, tag, name)
+    if url != bound_url:
+        raise UpdateError("download URL is not the validated release asset")
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= ASSET_MAX_BYTES:
+        raise UpdateError("download asset size is invalid")
+    if digest is not None and (not isinstance(digest, str) or
+                               not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest)):
+        raise UpdateError("download asset digest is invalid")
+    return bound_url, tag, name, size, digest
+
+
+def _approved_download_redirect(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return (parsed.scheme.lower() == "https" and
+                (parsed.hostname or "").lower() in _DOWNLOAD_HOSTS and
+                parsed.port is None and parsed.username is None and parsed.password is None)
+    except ValueError:
+        return False
+
+
+def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asset=None,
+             expected_size=None, expected_digest=None, expected_tag=None,
+             expected_name=None) -> int:
+    """Download one already-validated release asset without damaging ``dest``."""
+    if isinstance(url, dict) and expected_asset is None:
+        expected_asset = url
+        url = expected_asset.get("url")
+    if expected_asset is None and any(value is not None for value in
+                                      (expected_size, expected_digest, expected_tag, expected_name)):
+        expected_asset = {"url": url, "size": expected_size, "digest": expected_digest,
+                          "tag": expected_tag, "name": expected_name}
+    if expected_asset is not None:
+        for key, supplied in (("size", expected_size), ("digest", expected_digest),
+                              ("tag", expected_tag), ("name", expected_name)):
+            if supplied is not None and expected_asset.get(key) != supplied:
+                raise UpdateError(f"download {key} does not match expected metadata")
+    url, tag, name, expected_size, expected_digest = _download_metadata(url, expected_asset)
+    dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_suffix(dest.suffix + ".part")
+    fd, part_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part",
+                                     dir=str(dest.parent))
+    os.close(fd)
     headers = {"User-Agent": USER_AGENT}
     req = urllib.request.Request(url, headers=headers)
+    deadline = time.monotonic() + min(max(float(timeout), 0.0), DOWNLOAD_DEADLINE_SECONDS)
+    r = None
     try:
-        r = urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 404):
-            raise UpdateError("the download can't see the asset — the release "
-                               "repo is still private; once it is made public "
-                               "this works")
-        raise UpdateError(f"download failed with HTTP {e.code}")
-    except Exception as e:
-        raise UpdateError(f"download failed: {e}")
-    try:
-        total = int(r.headers.get("Content-Length") or 0)
-        if total == 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UpdateError("download timed out")
+        try:
+            r = urllib.request.urlopen(req, timeout=remaining)
+        except urllib.error.HTTPError as e:
             try:
-                hr = urllib.request.urlopen(urllib.request.Request(url, method="HEAD",
-                                                                     headers=headers), timeout=15)
-                total = int(hr.headers.get("Content-Length") or 0)
-                hr.close()
+                e.close()
             except Exception:
-                total = 0
+                pass
+            if e.code in (401, 404):
+                raise UpdateError("the download can't see the asset — the release "
+                                   "repo is still private; once it is made public "
+                                   "this works")
+            raise UpdateError(f"download failed with HTTP {e.code}")
+        except Exception as e:
+            raise UpdateError(f"download failed: {e}")
+        final_url = getattr(r, "geturl", lambda: url)()
+        if not _approved_download_redirect(final_url):
+            raise UpdateError("download redirected to an untrusted host")
+        raw_length = r.headers.get("Content-Length")
+        if raw_length is not None:
+            try:
+                declared = int(raw_length)
+            except (TypeError, ValueError):
+                raise UpdateError("download returned an invalid Content-Length")
+            if declared < 0 or declared > ASSET_MAX_BYTES or declared != expected_size:
+                raise UpdateError("download size does not match the release asset")
         done = 0
+        digest = hashlib.sha256()
         if progress is not None:
-            progress(0, total)
-        with open(part, "wb") as f:
+            progress(0, expected_size)
+        with open(part_name, "wb") as f:
             while True:
-                b = r.read(1 << 20)
+                remaining = deadline - time.monotonic()
+                read_size = min(1 << 20, expected_size - done + 1)
+                b = _response_read(r, read_size, deadline, label="download")
                 if not b:
                     break
-                f.write(b)
                 done += len(b)
+                if done > expected_size:
+                    raise UpdateError("download exceeded the release asset size")
+                f.write(b)
+                digest.update(b)
                 if progress is not None:
-                    progress(done, total)
-        r.close()
-        os.replace(str(part), str(dest))
+                    progress(done, expected_size)
+            if done != expected_size:
+                raise UpdateError("download ended before the release asset size")
+            if expected_digest and digest.hexdigest().lower() != expected_digest.split(":", 1)[1].lower():
+                raise UpdateError("download digest does not match the release asset")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(part_name, str(dest))
         return done
-    except BaseException:
-        try:
-            r.close()
-        except Exception:
-            pass
-        part.unlink(missing_ok=True)
+    except UpdateError:
         raise
+    except Exception as e:
+        raise UpdateError(f"download failed: {e}")
+    finally:
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
+        try:
+            os.unlink(part_name)
+        except FileNotFoundError:
+            pass
 
 
 def extract_app(zip_path: Path, dest_dir: Path, log=print) -> Path:
@@ -496,13 +819,14 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 return
             finish(True, f"Nothing to do — v{plan.get('current')} is the latest release ({rel['tag']}).")
             return
-        # 2) the right zip
+        # 2) the right zip.  Never fall back to the stale state asset: the
+        # reverified release and its tag must supply the install metadata.
         try:
-            asset = pick_asset({"assets": rel["assets"]})
-        except UpdateError:
-            asset = plan.get("asset")
-        if not asset:
-            fail("no installable zip is attached to the newest release")
+            asset = pick_asset({"tag": rel["tag"], "assets": rel["assets"]})
+            if asset.get("tag") != rel["tag"]:
+                raise UpdateError("the release asset is not bound to the release tag")
+        except (KeyError, TypeError, UpdateError) as exc:
+            fail(f"no installable zip is attached to the newest release ({exc})")
             return
         size_mb = asset.get("size", 0) / 1e6
         emit(f"Downloading {asset['name']} ({size_mb:.0f} MB) from the release …")
@@ -519,7 +843,7 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 # the client side has)
                 job["progress"] = {"stage": "download", "done": done, "total": total}
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
-        download(asset["url"], dest, progress=progress)
+        download(asset["url"], dest, progress=progress, expected_asset=asset)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")
         # 4) extract + verify (indeterminate: a zip of this shape has no
         # cheap per-file counter, and the stage label is the information)

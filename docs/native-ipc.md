@@ -432,6 +432,21 @@ quiet external helpers, or pipe and consume job output inside the worker. This
 also applies to future child-process additions; a stray print can corrupt
 framing and deadlock or mis-correlate the native caller.
 
+## Update hardening prerequisite
+
+Updates still use HTTP during this migration phase, but their remote-input boundary is
+hardened before native exposure. Release metadata is capped at 2 MiB and validated
+against the configured repository, fixed GitHub URL shapes, exact supported artifact
+names, and bounded asset fields. Concurrent checks share one locked lookup and publish
+strict, atomic state. Release notes are tag-bound, size-limited, HTML-escaped Markdown;
+the WebView treats that renderer as its sole remote HTML boundary and renders all other
+release metadata as text nodes. Downloads have a 60-second total deadline, a 1 GiB
+ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
+and SHA-256 verification when GitHub supplies a digest. A completed download is
+published from a unique temporary file only after validation. ZIP extraction,
+transactional replacement, restart recovery, and Windows helper behavior remain a
+separate prerequisite before update-start can move to native IPC.
+
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,

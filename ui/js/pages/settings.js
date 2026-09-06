@@ -1,18 +1,38 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, esc, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";
+
+// Update state is server-validated, but keep this boundary defensive before a
+// URL reaches the OS browser. A release link must remain on GitHub and have
+// the server's release URL shape; credentials, redirects, and extra data are
+// never accepted.
+function serverReleaseUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const u = new URL(value);
+    const part = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+    const path = u.pathname.split("/");
+    if (u.protocol !== "https:" || u.hostname !== "github.com" || u.port || u.username || u.password || u.search || u.hash ||
+        path.length !== 6 || !part.test(path[1]) || !part.test(path[2]) || path[3] !== "releases" || path[4] !== "tag" || !path[5]) return null;
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
 /* In-app "What's new": the release notes live on GitHub, but the app's
    window can't open a browser tab in its webview, so the notes are fetched
    through the server (which also renders the markdown) and shown in the
    app's own modal — same chrome as every other confirmation here. */
 function showWhatsNew(tag, releaseUrl) {
+  const safeReleaseUrl = serverReleaseUrl(releaseUrl);
   return (async () => {
     const root = $("#modal-root");
     const m = $(".modal", root);
     m.innerHTML = "";
     m.append(el("div", { class: "m-ico info" }, ico("info")));
-    m.append(el("h3", {}, `What's new in ${esc(tag)}`));
+    m.append(el("h3", {}, "What's new in ", String(tag ?? "")));
     m.append(el("div", { class: "m-loading" }, "Fetching the release notes…"));
     root.hidden = false;
     const close = () => { root.hidden = true; };
@@ -20,20 +40,21 @@ function showWhatsNew(tag, releaseUrl) {
       const r = await api("/api/release-notes");
       if (!r.ok) throw new Error(r.error || "the release notes couldn't be fetched");
       m.querySelectorAll(".m-ico, h3, .m-loading").forEach(n => n.remove());
-      m.append(el("h3", {}, `What's new in ${esc(r.tag)}`));
-      if (r.published) m.append(el("p", { class: "m-when" }, `Released ${esc(r.published)}`));
+      m.append(el("h3", {}, "What's new in ", String(r.tag ?? "")));
+      if (r.published) m.append(el("p", { class: "m-when" }, "Released ", String(r.published)));
       const body = el("div", { class: "notes" });
+      // The server's markdown renderer is the sole trusted HTML boundary.
       body.innerHTML = r.body || "<p>(no notes on this release)</p>";
       m.append(body);
       const actions = el("div", { class: "m-actions" },
         el("button", { class: "btn", onclick: close }, "Close"),
       );
-      if (releaseUrl) {
+      if (safeReleaseUrl) {
         // a raw <a> here would carry target="_blank" — the app's webview can't
         // spawn that (window.open is denied), and even href="#" bounces the
         // whole app to the dashboard on a mis-click. The OS browser is the
         // honest target, and the app already has a sanctioned door for it.
-        actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(releaseUrl, "the release page"); } }, "Open on GitHub"));
+        actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(safeReleaseUrl, "the release page"); } }, "Open on GitHub"));
       }
       m.append(actions);
       document.addEventListener("keydown", function onKey(e) {
@@ -379,11 +400,6 @@ PAGES.settings = (root) => {
       try { r = await api("/api/updates"); } catch { return; }
       const st = r.state || {};
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
-      if (st.checking) {   // a check is in flight (the daily daemon or another click)
-        setBtn("Checking…", null, true);
-        uStatus.textContent = "Asking GitHub for the newest release…";
-        return;
-      }
       const stale = st.checked_at != null && (Date.now() / 1000 - st.checked_at) > 86400;
       const setBtn = (label, onClick, disabled = false, title = "") => {
         uBtn.textContent = "";
@@ -392,6 +408,11 @@ PAGES.settings = (root) => {
         uBtn.onclick = disabled ? null : onClick;
         uBtn.title = title;
       };
+      if (st.checking) {   // a check is in flight (the daily daemon or another click)
+        setBtn("Checking…", null, true);
+        uStatus.textContent = "Asking GitHub for the newest release…";
+        return;
+      }
       switch (st.status) {
         case "never":
           setBtn("Check for updates", doCheck);
@@ -405,30 +426,37 @@ PAGES.settings = (root) => {
           setBtn("Check again", doCheck);
           uStatus.textContent = "The last check failed: " + (st.reason || "unknown error");
           break;
-        case "up-to-date":
+        case "up-to-date": {
+          const latest = vv(st.latest || r.current);
           if (!stale) {
             setBtn("Up to date", null, true, "Rechecked at start-up and once a day while the app is open");
-            uStatus.innerHTML = `You're on the latest version — <b>${vv(st.latest || r.current)}</b> is the newest release.`;
+            uStatus.replaceChildren("You're on the latest version — ", el("b", {}, latest), " is the newest release.");
           } else {
             setBtn("Check for updates", doCheck);
-            uStatus.innerHTML = `Last checked ${humanize(st.checked_at)} — you were on the latest (${vv(st.latest || r.current)}). The automatic recheck is due; press to check now.`;
+            uStatus.replaceChildren("Last checked ", humanize(st.checked_at), " — you were on the latest (", latest, "). The automatic recheck is due; press to check now.");
           }
           break;
-        case "update-available":
-          setBtn(`Download & install ${vv(st.latest)}`, startUpdate);
-          uStatus.innerHTML = `A newer version is out — <b>${vv(st.latest)}</b>` +
-            (st.published ? ` (released ${esc(new Date(st.published).toLocaleDateString())})` : "") +
-            ". The install replaces the app folder and reopens it; your decklists, images and settings stay put." +
-            (st.release_url ? ` <a class="linkish" href="${esc(st.release_url)}">What's new</a>` : "");
-          $$('.linkish', uStatus).forEach(a => {
-            a.onclick = () => showWhatsNew(st.latest, st.release_url);
+        }
+        case "update-available": {
+          const latest = vv(st.latest);
+          const releaseUrl = serverReleaseUrl(st.release_url);
+          setBtn(`Download & install ${latest}`, startUpdate);
+          const released = st.published ? ` (released ${new Date(st.published).toLocaleDateString()})` : "";
+          const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
+          uStatus.replaceChildren(
+            "A newer version is out — ", el("b", {}, latest), released,
+            ". The install replaces the app folder and reopens it; your decklists, images and settings stay put.",
+            whatsNew ? " " : "", whatsNew,
+          );
+          if (whatsNew) {
+            whatsNew.onclick = (e) => { e.preventDefault(); showWhatsNew(st.latest, releaseUrl); };
             // no href on purpose: this is a button styled as a link. A real
             // href (even "#") makes the browser navigate the whole app on a
             // mis-click, and the webview can't spawn the target="_blank" a
             // genuine one would want - the click does everything in-app.
-            a.removeAttribute("href");
-          });
+          }
           break;
+        }
         default:
           setBtn("Check for updates", doCheck);
           uStatus.textContent = "";

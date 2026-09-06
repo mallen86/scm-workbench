@@ -36,6 +36,9 @@ import time
 import uuid
 import webbrowser
 import unicodedata
+from collections import OrderedDict
+import copy
+import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -978,10 +981,84 @@ def update_settings(changes: Any) -> dict:
 # App updates (see updater.py)
 # ============================================================================
 
-# one in-flight release check at a time (the daily daemon and a manual button
-# press must not double-fire network calls)
-_UPDATE_CHECK_IN_FLIGHT = False
+# One in-flight release check at a time.  The condition and generation are
+# deliberately coupled: waiters receive the exact result of the check they
+# waited for, and an older worker cannot publish over a newer generation.
+_UPDATE_CHECK_CONDITION = threading.Condition()
+_UPDATE_CHECKING = False
+_UPDATE_CHECK_GENERATION = 0
+_UPDATE_CHECK_RESULT = None
 _UPDATE_STATE_LOCK = threading.Lock()
+_UPDATE_STATE_MAX_BYTES = 128 * 1024
+
+
+def _default_update_state() -> dict:
+    return {"status": "never", "current": SERVER_VERSION, "checked_at": None,
+            "latest": None, "asset": None, "reason": None, "release_url": None,
+            "published": None}
+
+
+def _valid_update_state(st: Any) -> bool:
+    if not isinstance(st, dict):
+        return False
+    fields = {"status", "current", "checked_at", "latest", "asset", "reason",
+              "release_url", "published"}
+    if set(st) != fields or st.get("status") not in {
+            "never", "up-to-date", "update-available", "auth-required", "error"}:
+        return False
+    try:
+        for field, maximum in (("current", 128), ("reason", 4096),
+                               ("release_url", 2048), ("published", 64)):
+            value = st[field]
+            if value is not None:
+                if not isinstance(value, str) or len(value.encode("utf-8")) > maximum:
+                    return False
+                if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+                    return False
+        if not isinstance(st["current"], str) or not st["current"]:
+            return False
+        if st["checked_at"] is not None and (
+                isinstance(st["checked_at"], bool) or
+                not isinstance(st["checked_at"], (int, float)) or
+                not math.isfinite(float(st["checked_at"])) or
+                not 0 <= st["checked_at"] <= 1_000_000_000_000):
+            return False
+        latest = st["latest"]
+        if latest is not None:
+            if not isinstance(latest, str) or len(latest.encode("utf-8")) > 128:
+                return False
+            updater._tag(latest, "latest")
+        asset = st["asset"]
+        if asset is not None:
+            if not isinstance(asset, dict) or set(asset) != {"id", "tag", "name", "url", "size", "digest"}:
+                return False
+            if (isinstance(asset["id"], bool) or not isinstance(asset["id"], int) or
+                    asset["id"] <= 0 or asset["tag"] != latest):
+                return False
+            name = updater._asset_name(asset["name"])
+            if (isinstance(asset["size"], bool) or not isinstance(asset["size"], int) or
+                    not 1 <= asset["size"] <= updater.ASSET_MAX_BYTES):
+                return False
+            digest = asset["digest"]
+            if digest is not None and (not isinstance(digest, str) or
+                                       not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest)):
+                return False
+            owner, repo = updater._repo_parts()
+            updater._asset_url(asset["url"], owner, repo, latest, name)
+        if st["release_url"]:
+            owner, repo = updater._repo_parts()
+            updater._github_release_url(st["release_url"], owner, repo, latest or "")
+        if st["status"] == "update-available" and (not latest or asset is None):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _invalid_update_state() -> dict:
+    st = _default_update_state()
+    st.update(status="error", reason="saved update state is invalid")
+    return st
 
 
 def _own_bundle() -> str:
@@ -1009,37 +1086,64 @@ def _own_bundle() -> str:
 
 
 def load_update_state() -> dict:
-    st = _try_read_json(UPDATE_STATE_FILE)
-    return st or {"status": "never", "current": SERVER_VERSION, "checked_at": None,
-                  "latest": None, "asset": None, "reason": None, "release_url": None,
-                  "published": None}
+    """Read only a complete, bounded state document; never repair it in place."""
+    try:
+        if UPDATE_STATE_FILE.is_symlink() or not UPDATE_STATE_FILE.is_file():
+            return _default_update_state()
+        if UPDATE_STATE_FILE.stat().st_size > _UPDATE_STATE_MAX_BYTES:
+            return _invalid_update_state()
+        with open(UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        return st if _valid_update_state(st) else _invalid_update_state()
+    except Exception:
+        return _invalid_update_state()
 
 
 def save_update_state(st: dict) -> None:
-    # atomic, like settings — a torn state file must never read as “checked”
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = UPDATE_STATE_FILE.with_name(UPDATE_STATE_FILE.name + ".tmp")
+    """Publish state with a unique fsynced temporary file and symlink guard."""
+    if not _valid_update_state(st):
+        raise ValueError("invalid update state")
     with _UPDATE_STATE_LOCK:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(st, f, indent=2)
-        os.replace(tmp, UPDATE_STATE_FILE)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if UPDATE_STATE_FILE.is_symlink():
+            raise OSError("refusing to replace symlinked update state")
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{UPDATE_STATE_FILE.name}.",
+                                        suffix=".tmp", dir=str(DATA_DIR))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(st, f, separators=(",", ":"), ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, UPDATE_STATE_FILE)
+            try:
+                dir_fd = os.open(DATA_DIR, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
 
 
 def run_update_check() -> dict:
-    """One network check of the newest release of the Workbench repo.
+    """Run one lookup; concurrent callers share one network result."""
+    global _UPDATE_CHECKING, _UPDATE_CHECK_GENERATION, _UPDATE_CHECK_RESULT
+    with _UPDATE_CHECK_CONDITION:
+        if _UPDATE_CHECKING:
+            generation = _UPDATE_CHECK_GENERATION
+            while _UPDATE_CHECKING and generation == _UPDATE_CHECK_GENERATION:
+                _UPDATE_CHECK_CONDITION.wait()
+            if _UPDATE_CHECK_RESULT is not None:
+                return copy.deepcopy(_UPDATE_CHECK_RESULT)
+        _UPDATE_CHECKING = True
+        generation = _UPDATE_CHECK_GENERATION
 
-    The state it produces (and persists) drives the Settings card: when it is
-    fresh (< UPDATE_CHECK_INTERVAL) and says up-to-date, a check is a no-op.
-    """
-    global _UPDATE_CHECK_IN_FLIGHT
-    st = {"status": "never", "current": SERVER_VERSION, "checked_at": None,
-           "latest": None, "asset": None, "reason": None, "release_url": None,
-           "published": None}
-    if _UPDATE_CHECK_IN_FLIGHT:
-        st = load_update_state()
-        st["checking"] = True
-        return st
-    _UPDATE_CHECK_IN_FLIGHT = True
+    st = _default_update_state()
     try:
         try:
             rel = updater.latest_release()
@@ -1048,16 +1152,8 @@ def run_update_check() -> dict:
         except updater.UpdateError as e:
             st.update(status="error", reason=str(e), checked_at=time.time())
         else:
-            if rel.get("tag") and (
-                updater.is_newer(rel["tag"], SERVER_VERSION)
-                or rel["tag"].lstrip("v") == SERVER_VERSION
-        ):
-            # The second arm: the check found a release equal to the running
-            # version - a check that ran while the release it saw was still
-            # unpublished, or a manual re-check. The card treats this as
-            # "update-available" (the user pressed a button and expects the
-            # install flow), and the install's re-verification closes it out
-            # cleanly instead of dead-ending on "Nothing to do".
+            if rel.get("tag") and (updater.is_newer(rel["tag"], SERVER_VERSION) or
+                                    rel["tag"].lstrip("v") == SERVER_VERSION):
                 try:
                     asset = updater.pick_asset(rel)
                 except updater.UpdateError as e:
@@ -1070,10 +1166,29 @@ def run_update_check() -> dict:
             else:
                 st.update(status="up-to-date", latest=rel.get("tag") or None,
                           checked_at=time.time())
-    finally:
-        _UPDATE_CHECK_IN_FLIGHT = False
-    save_update_state(st)
-    return st
+    except Exception as exc:
+        st = _default_update_state()
+        st.update(status="error", reason=f"release lookup failed: {exc}",
+                  checked_at=time.time())
+    with _UPDATE_CHECK_CONDITION:
+        # Publish only if this worker still owns the generation it started.
+        # Keeping the compare-and-set next to the atomic file replacement also
+        # prevents a future overlapping implementation from clobbering newer
+        # state with a slow, older lookup.
+        if generation == _UPDATE_CHECK_GENERATION:
+            try:
+                save_update_state(st)
+            except Exception as exc:
+                st = _default_update_state()
+                st.update(status="error", reason=f"could not save update state: {exc}",
+                          checked_at=time.time())
+            _UPDATE_CHECK_GENERATION += 1
+            _UPDATE_CHECK_RESULT = copy.deepcopy(st)
+        else:
+            st = copy.deepcopy(_UPDATE_CHECK_RESULT or st)
+        _UPDATE_CHECKING = False
+        _UPDATE_CHECK_CONDITION.notify_all()
+        return copy.deepcopy(st)
 
 
 def _update_daemon() -> None:
@@ -2071,106 +2186,149 @@ def _bootstrapping() -> bool:
     return _bootstrap_state()["active"]
 
 
-def release_notes_view() -> dict:
-    """The newest release's notes, fetched fresh from GitHub for the
-    in-app "What's new" view: the app itself renders them (release notes
-    live on GitHub, not in the bundle, so the running app shows the
-    release it was built for, even after the release page has moved on).
-    Falls back to the stored update state when the network can't confirm."""
+_RELEASE_NOTES_CACHE = OrderedDict()
+_RELEASE_NOTES_CACHE_LOCK = threading.Lock()
+_RELEASE_NOTES_CACHE_TTL = 300
+_RELEASE_NOTES_CACHE_MAX = 8
+_RELEASE_NOTES_SOURCE_MAX = 256 * 1024
+_RELEASE_NOTES_RENDERED_MAX = 512 * 1024
 
-    import re as _re
 
+def _render_release_notes(src: str) -> str:
+    """Render a deliberately tiny Markdown subset; never pass source HTML through."""
+    if not isinstance(src, str):
+        raise updater.UpdateError("release notes are invalid")
     try:
-        rel = updater.latest_release(timeout=15)
-        tag, body, url = rel.get("tag") or "", rel.get("body") or "", rel.get("url") or ""
-        published = rel.get("published") or ""
-        name = rel.get("name") or tag
-    except Exception:
-        st = load_update_state()
-        tag = st.get("latest") or ""
-        body, url = "", st.get("release_url") or ""
-        published = st.get("published") or ""
-        name = tag
+        source_size = len(src.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise updater.UpdateError("release notes are invalid")
+    if source_size > _RELEASE_NOTES_SOURCE_MAX:
+        raise updater.UpdateError("release notes are too large")
+    token = re.compile(
+        r"`([^`\n]{1,4096})`|\[([^\]\n]{1,4096})\]\(([^)\s]{1,2048})\)"
+        r"|\*\*([^*\n]{1,4096})\*\*|(?<![\w*])\*([^*\n]{1,4096})\*(?![\w*])")
 
-    if not tag:
-        return {"ok": False, "error": "no release is known yet"}
-
-    # Minimal, conservative markdown → html for release notes: headings,
-    # paragraphs (with soft-wrap), bold, italic, code, links, lists, and
-    # fenced code blocks. The notes are written by us, so this is
-    # display-only, not a general renderer. Structure comes from blocks:
-    # consecutive text lines merge into one <p> (markdown soft-wrap),
-    # consecutive list lines into one <ul> — a <p> per raw line is what
-    # made an earlier revision of this view read like broken prose.
-    def inline(s: str) -> str:
-        s = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
-                    lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>', s)
-        s = _re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-        s = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
-        s = _re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
-        return s
-
-    def md(src: str) -> str:
-        if not src:
-            return ""
-        out = []
-        para = []
-        items = []
-        fence = False
-        code = []
-
-        def flush_para():
-            if para:
-                out.append("<p>" + inline(" ".join(para)) + "</p>")
-                para.clear()
-
-        def flush_list():
-            if items:
-                out.append("<ul>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ul>")
-                items.clear()
-
-        for raw in src.split("\n"):
-            line = raw.rstrip()
-            stripped = line.strip()
-            if stripped.startswith("```"):
-                if fence:
-                    out.append("<pre><code>" + _re.sub(r"<[^>]+>", "", "\n".join(code)) + "</code></pre>")
-                    code.clear()
-                    fence = False
-                else:
-                    flush_para(); flush_list(); fence = True
-                continue
-            if fence:
-                code.append(line)
-                continue
-            if not stripped:
-                flush_para(); flush_list()
-                continue
-            if _re.match(r"^#{1,4}\s", stripped):
-                flush_para(); flush_list()
-                lvl = len(stripped) - len(stripped.lstrip("#"))
-                out.append(f"<h{min(lvl + 1, 5)}>{inline(stripped.lstrip('#').strip())}</h{min(lvl + 1, 5)}>")
-                continue
-            m = _re.match(r"^[-*+]\s+(.*)$", stripped)
-            if m:
-                flush_para(); items.append(m.group(1)); continue
-            flush_list(); para.append(stripped)
-        if fence:  # an unclosed fence still shows its code
-            out.append("<pre><code>" + _re.sub(r"<[^>]+>", "", "\n".join(code)) + "</code></pre>")
-        flush_para(); flush_list()
+    def inline(value: str) -> str:
+        out, pos = [], 0
+        for match in token.finditer(value):
+            out.append(html.escape(value[pos:match.start()], quote=True))
+            if match.group(1) is not None:
+                out.append("<code>" + html.escape(match.group(1), quote=True) + "</code>")
+            elif match.group(2) is not None:
+                try:
+                    link = urlsplit(match.group(3))
+                    valid = (link.scheme.lower() == "https" and bool(link.hostname) and
+                             link.username is None and link.password is None)
+                    if valid:
+                        _ = link.port  # reject malformed ports
+                except ValueError:
+                    valid = False
+                # Links are inert text.  In particular, never interpolate an
+                # attacker-controlled destination into HTML attributes.
+                out.append(html.escape(match.group(2), quote=True) if valid else
+                           html.escape(match.group(0), quote=True))
+            elif match.group(4) is not None:
+                out.append("<b>" + html.escape(match.group(4), quote=True) + "</b>")
+            else:
+                out.append("<i>" + html.escape(match.group(5), quote=True) + "</i>")
+            pos = match.end()
+        out.append(html.escape(value[pos:], quote=True))
         return "".join(out)
 
+    out, para, items, code = [], [], [], []
+    fence = False
+
+    def flush_para():
+        if para:
+            out.append("<p>" + inline(" ".join(para)) + "</p>")
+            para.clear()
+
+    def flush_list():
+        if items:
+            out.append("<ul>" + "".join("<li>" + inline(x) + "</li>" for x in items) + "</ul>")
+            items.clear()
+
+    for raw in src.splitlines():
+        line = raw.rstrip(); stripped = line.strip()
+        if stripped.startswith("```"):
+            if fence:
+                out.append("<pre><code>" + html.escape("\n".join(code), quote=True) + "</code></pre>")
+                code.clear(); fence = False
+            else:
+                flush_para(); flush_list(); fence = True
+            continue
+        if fence:
+            code.append(line); continue
+        if not stripped:
+            flush_para(); flush_list(); continue
+        heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+        if heading:
+            flush_para(); flush_list()
+            level = len(heading.group(1))
+            out.append(f"<h{level}>" + inline(heading.group(2)) + f"</h{level}>")
+            continue
+        item = re.match(r"^[-*+]\s+(.*)$", stripped)
+        if item:
+            flush_para(); items.append(item.group(1)); continue
+        flush_list(); para.append(stripped)
+    if fence:
+        out.append("<pre><code>" + html.escape("\n".join(code), quote=True) + "</code></pre>")
+    flush_para(); flush_list()
+    rendered = "".join(out)
+    if len(rendered.encode("utf-8")) > _RELEASE_NOTES_RENDERED_MAX:
+        raise updater.UpdateError("rendered release notes are too large")
+    return rendered
+
+
+def release_notes_view(expected_tag: Optional[str] = None) -> dict:
+    """Return safe notes for the tag recorded by the completed update check."""
+    st = load_update_state()
+    bound_tag = st.get("latest")
+    if expected_tag is not None and expected_tag != bound_tag:
+        return {"ok": False, "error": "release tag is not the checked release"}
+    if not isinstance(bound_tag, str) or not bound_tag:
+        return {"ok": False, "error": "no release is known yet"}
+    now = time.monotonic()
+    with _RELEASE_NOTES_CACHE_LOCK:
+        cached = _RELEASE_NOTES_CACHE.get(bound_tag)
+        if cached and now - cached[0] < _RELEASE_NOTES_CACHE_TTL:
+            _RELEASE_NOTES_CACHE.move_to_end(bound_tag)
+            return copy.deepcopy(cached[1])
+        if cached:
+            _RELEASE_NOTES_CACHE.pop(bound_tag, None)
+
+    body, url = "", st.get("release_url") or ""
+    published, name = st.get("published") or "", bound_tag
+    try:
+        rel = updater.latest_release(timeout=15)
+        if rel.get("tag") != bound_tag:
+            raise updater.UpdateError("release changed while loading notes")
+        body = rel.get("body") or ""
+        url = rel.get("url") or url
+        published = rel.get("published") or published
+        name = rel.get("name") or bound_tag
+    except Exception:
+        body = ""  # state metadata is safe, but its fallback note body is empty
+    try:
+        rendered = _render_release_notes(body)
+    except updater.UpdateError:
+        rendered = ""
     when = ""
     if published:
         try:
-            # "2026-09-03T21:03:21Z" -> (2026, 9, 3, 0, 0, 0, 0, 0, 0) for strftime
-            p = published.split("T")
-            d = p[0].split("-")
+            p = published.split("T"); d = p[0].split("-")
             t = p[1][:2].lstrip("0") or "0"
             when = time.strftime("%b %-d, %Y", (int(d[0]), int(d[1]), int(d[2]), int(t), 0, 0, 0, 0, 0))
         except Exception:
-            when = published
-    return {"ok": True, "tag": tag, "name": name, "published": when, "url": url, "body": md(body)}
+            when = html.escape(str(published), quote=True)
+    result = {"ok": True, "tag": bound_tag, "name": name, "published": when,
+              "url": url, "body": rendered}
+    with _RELEASE_NOTES_CACHE_LOCK:
+        _RELEASE_NOTES_CACHE[bound_tag] = (time.monotonic(), copy.deepcopy(result))
+        _RELEASE_NOTES_CACHE.move_to_end(bound_tag)
+        while len(_RELEASE_NOTES_CACHE) > _RELEASE_NOTES_CACHE_MAX:
+            _RELEASE_NOTES_CACHE.popitem(last=False)
+    return result
 
 
 def get_info() -> dict:
