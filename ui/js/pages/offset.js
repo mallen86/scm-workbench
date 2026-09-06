@@ -1,7 +1,7 @@
 /* pages/offset — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
+import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { setOffset, deleteOffset } from "../offset-transport.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
@@ -24,8 +24,14 @@ PAGES.offset = (root) => {
     el("div", { class: "field w-quarter" }, el("label", {}, "Angle (°)"), el("span", { class: "numwrap" }, aI, numSteppers(aI, 0.1))),
     el("div", { class: "field w-quarter" }, el("label", {}, "\u00A0"), el("div", {},
       el("button", { class: "btn primary", onclick: async () => {
-        const r = await api("/api/offset", { x: xI.value, y: yI.value, angle: aI.value });
-        if (r.ok) { toast("ok", "Global offset saved — create_pdf can now apply it."); await refreshInfo(); go("offset"); }
+        try {
+          await setOffset({ x: xI.value, y: yI.value, angle: aI.value });
+          toast("ok", "Global offset saved — create_pdf can now apply it.");
+          await refreshInfo();
+          go("offset");
+        } catch (error) {
+          toast("err", error?.message || "Couldn't save the global offset.");
+        }
       } }, ico("check"), "Save"),
       el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "Zero"),
     )),
@@ -97,8 +103,15 @@ export function offsetsBySizeCard() {
       el("div", {},
         el("button", { class: "btn primary", onclick: async () => {
           if (!sel.value) return toast("err", "Pick a paper size first.");
-          const r = await api("/api/offset", { size: sel.value, x: xI.value, y: yI.value, angle: aI.value });
-          if (r.ok) { toast("ok", `Saved for “${sel.value}” — staged into SCM's shared file and applied automatically to that paper.`); await refreshInfo(); go("offset"); }
+          const size = sel.value;
+          try {
+            await setOffset({ size, x: xI.value, y: yI.value, angle: aI.value });
+            toast("ok", `Saved for “${size}” — staged into SCM's shared file and applied automatically to that paper.`);
+            await refreshInfo();
+            go("offset");
+          } catch (error) {
+            toast("err", error?.message || `Couldn't save the offset for “${size}”.`);
+          }
         } }, ico("check"), "Save for this size"),
         el("button", { class: "btn btn-ghost", style: "margin-left:6px", onclick: () => { xI.value = 0; yI.value = 0; aI.value = 0; } }, "Zero"),
       )),
@@ -114,8 +127,14 @@ export function offsetsBySizeCard() {
       el("span", { class: "pso-actions" },
         el("button", { class: "btn sm", onclick: () => { sel.value = size; xI.value = o.x; yI.value = o.y; aI.value = o.angle; } }, "load"),
         el("button", { class: "btn sm btn-ghost", onclick: async () => {
-          const r = await api("/api/offset", { size, delete: true });
-          if (r.ok) { toast("ok", `Removed the “${size}” row.`); await refreshInfo(); go("offset"); }
+          try {
+            await deleteOffset(size);
+            toast("ok", `Removed the “${size}” row.`);
+            await refreshInfo();
+            go("offset");
+          } catch (error) {
+            toast("err", error?.message || `Couldn't remove the “${size}” row.`);
+          }
         } }, "delete"),
       ),
     ));

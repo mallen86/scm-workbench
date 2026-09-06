@@ -29,10 +29,12 @@ import signal
 import subprocess
 import sys
 import queue
+import tempfile
 import threading
 import time
 import uuid
 import webbrowser
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -220,13 +222,30 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
             for p in sorted(cal.glob("*.pdf"))
         ]
 
-    offset = _try_read_json(scm / "data" / "offset_data.json")
+    offset = None
+    try:
+        _, data_dir, path_error = _safe_offset_paths(scm)
+        if not path_error:
+            raw_offset = _try_read_json(data_dir / "offset_data.json")
+            if isinstance(raw_offset, dict):
+                offset = _offset_row({"x": raw_offset.get("x_offset"),
+                                      "y": raw_offset.get("y_offset"),
+                                      "angle": raw_offset.get("angle_offset", 0.0)})
+    except Exception:
+        offset = None
     if offset:
-        info["saved_offset"] = {
-            "x": offset.get("x_offset", 0),
-            "y": offset.get("y_offset", 0),
-            "angle": offset.get("angle_offset", 0),
-        }
+        info["saved_offset"] = offset
+    # A canonical state, when present, is authoritative for the baseline;
+    # never let a staged upstream projection masquerade as that baseline.
+    try:
+        state_path = _offset_state_path()
+        if state_path.exists() or state_path.is_symlink():
+            try:
+                info["saved_offset"] = _load_offset_state_strict().get("global")
+            except OffsetStateError:
+                info["saved_offset"] = None
+    except Exception:
+        pass
 
     dl = scm / "game" / "decklist"
     if dl.is_dir():
@@ -1226,37 +1245,543 @@ def effective_dirs(settings: dict) -> Tuple[Optional[Path], Optional[Path]]:
 # it just reads the one file it always knew about.
 # ============================================================================
 
-OFFSET_STAGE_LOCK = threading.Lock()
+# Offset state is Workbench-owned.  The upstream file is only a projection
+# because SCM itself has one (global) offset slot.  Keep the old name around as
+# a migration source for installations made before this state file existed.
+OFFSET_STATE_FILE = DATA_DIR / "offset_state.json"
+_INITIAL_OFFSET_DATA_DIR = DATA_DIR
+
+def _offset_state_path() -> Path:
+    # Tests and embedders historically replace DATA_DIR without knowing about
+    # this newer file; keep that isolation while honoring an explicit path.
+    if OFFSET_STATE_FILE == _INITIAL_OFFSET_DATA_DIR / "offset_state.json" and DATA_DIR != _INITIAL_OFFSET_DATA_DIR:
+        return DATA_DIR / "offset_state.json"
+    return OFFSET_STATE_FILE
+
+OFFSET_STAGE_LOCK = threading.Lock()       # compatibility for embedders
+OFFSET_LEASE = threading.Lock()
+OFFSET_NAME_MAX_BYTES = 128
+OFFSET_MAX_ERRORS = 8
+
+
+def _finite_angle(value: Any) -> Optional[float]:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        angle = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return angle if math.isfinite(angle) and -360 <= angle <= 360 else None
+
+
+def _offset_row(value: Any, *, strict: bool = False) -> Optional[dict]:
+    if not isinstance(value, dict):
+        return None
+    if strict and set(value) != {"x", "y", "angle"}:
+        return None
+    x, y, angle = value.get("x"), value.get("y"), value.get("angle")
+    clean_angle = _finite_angle(angle)
+    if (not isinstance(x, int) or isinstance(x, bool) or not -100000 <= x <= 100000 or
+            not isinstance(y, int) or isinstance(y, bool) or not -100000 <= y <= 100000 or
+            clean_angle is None):
+        return None
+    return {"x": x, "y": y, "angle": clean_angle}
+
+
+def _offset_name(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        if len(value.encode("utf-8")) > OFFSET_NAME_MAX_BYTES:
+            return None
+    except UnicodeEncodeError:
+        return None
+    if any(unicodedata.category(c) == "Cc" for c in value):
+        return None
+    return value
+
+
+def _offset_errors(errors: Any) -> list:
+    return [str(e)[:256] for e in list(errors)[:OFFSET_MAX_ERRORS]]
+
+
+def _safe_offset_paths(scm: Optional[Path]) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """Return root/data/file only when the projection cannot escape root."""
+    if scm is None:
+        return None, None, "SCM repo not found — set it in Settings."
+    try:
+        root = Path(scm)
+        if not root.is_dir() or root.is_symlink():
+            return None, None, "SCM repo is not a safe directory."
+        root_real = root.resolve(strict=True)
+        data = root / "data"
+        if data.is_symlink():
+            return None, None, "SCM data directory is a symlink."
+        if data.exists() and not data.is_dir():
+            return None, None, "SCM data path is not a directory."
+        data_real = data.resolve(strict=False)
+        data_real.relative_to(root_real)
+        target = data / "offset_data.json"
+        if target.is_symlink():
+            return None, None, "SCM offset file is a symlink."
+        target.resolve(strict=False).relative_to(root_real)
+        return root, data, None
+    except (OSError, ValueError):
+        return None, None, "SCM offset paths are not safe."
+
+
+def _atomic_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+        try:
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except OSError:
+            pass
+    except Exception:
+        try: os.unlink(name)
+        except OSError: pass
+        raise
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    _atomic_bytes(path, json.dumps(value, ensure_ascii=False, indent=1).encode("utf-8"))
+
+
+def _legacy_rows() -> dict:
+    raw = _try_read_json(PER_SIZE_OFFSETS_FILE)
+    if not isinstance(raw, dict):
+        return {}
+    rows = {}
+    for name, value in raw.items():
+        clean_name, row = _offset_name(name), _offset_row(value)
+        if clean_name and row:
+            rows[clean_name] = row
+    return rows
+
+
+class OffsetStateError(Exception):
+    """A present canonical state file failed its structural safety contract."""
+
+
+class OffsetRecoveryError(Exception):
+    """A pending upstream save cannot be reconciled without guessing."""
+
+
+def _read_upstream_offset(scm: Optional[Path]) -> Optional[dict]:
+    _, _, error = _safe_offset_paths(scm)
+    if error:
+        return None
+    try:
+        o = json.loads((Path(scm) / "data" / "offset_data.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(o, dict):
+        return None
+    # Older SCM versions omitted angle_offset when it was zero.  That is a
+    # valid legacy baseline, not malformed state.
+    return _offset_row({"x": o.get("x_offset"), "y": o.get("y_offset"),
+                        "angle": o.get("angle_offset", 0.0)})
+
+
+def _validate_offset_state(raw: Any) -> dict:
+    """Validate canonical state without repairing or dropping any bytes."""
+    if not isinstance(raw, dict):
+        raise OffsetStateError("canonical offset state must be an object")
+    required = {"version", "global", "rows", "staged_size"}
+    if not required.issubset(raw) or set(raw) - required - {"pending"}:
+        raise OffsetStateError("canonical offset state has an invalid schema")
+    if raw.get("version") != 1 or isinstance(raw.get("version"), bool):
+        raise OffsetStateError("canonical offset state version is unsupported")
+    global_row = raw.get("global")
+    if global_row is not None:
+        global_row = _offset_row(global_row, strict=True)
+        if global_row is None:
+            raise OffsetStateError("canonical global offset is malformed")
+    raw_rows = raw.get("rows")
+    if not isinstance(raw_rows, dict):
+        raise OffsetStateError("canonical offset rows must be an object")
+    rows = {}
+    for name, value in raw_rows.items():
+        clean_name = _offset_name(name)
+        row = _offset_row(value, strict=True)
+        if clean_name is None or row is None:
+            raise OffsetStateError("canonical offset row is malformed")
+        rows[clean_name] = row
+    staged = raw.get("staged_size")
+    if staged is not None and (_offset_name(staged) is None or staged not in rows):
+        raise OffsetStateError("canonical staged offset name is invalid")
+    pending = raw.get("pending")
+    clean_pending = None
+    if pending is not None:
+        if not isinstance(pending, dict) or set(pending) != {"target", "intended", "prior_projection"}:
+            raise OffsetStateError("canonical pending offset record is malformed")
+        target = pending.get("target")
+        if target != "global" and (_offset_name(target) is None):
+            raise OffsetStateError("canonical pending offset target is invalid")
+        intended = _offset_row(pending.get("intended"), strict=True)
+        prior = pending.get("prior_projection")
+        if intended is None or (prior is not None and _offset_row(prior, strict=True) is None):
+            raise OffsetStateError("canonical pending offset values are malformed")
+        clean_pending = {"target": target, "intended": intended,
+                         "prior_projection": _offset_row(prior, strict=True) if prior is not None else None}
+    out = {"version": 1, "global": global_row, "rows": rows, "staged_size": staged}
+    if clean_pending is not None:
+        out["pending"] = clean_pending
+    return out
+
+
+def _load_offset_state_strict() -> dict:
+    state_path = _offset_state_path()
+    if state_path.exists() or state_path.is_symlink():
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise OffsetStateError(f"canonical offset state is unreadable: {exc}")
+        return _validate_offset_state(raw)
+    return {"version": 1, "global": _read_upstream_offset(effective_dirs(load_settings())[0]),
+            "rows": _legacy_rows(), "staged_size": None}
+
+
+def load_offset_state() -> dict:
+    """Read state safely; direct inspection sanitizes, mutations use strict load."""
+    try:
+        return _load_offset_state_strict()
+    except OffsetStateError:
+        raw = _try_read_json(_offset_state_path()) or {}
+        # Inspection is allowed to omit unusable rows, but this repaired view
+        # is never written back and all mutation paths use the strict loader.
+        global_row = _offset_row(raw.get("global")) if isinstance(raw, dict) else None
+        rows = {}
+        raw_rows = raw.get("rows") if isinstance(raw, dict) else {}
+        if isinstance(raw_rows, dict):
+            for name, value in raw_rows.items():
+                clean_name, row = _offset_name(name), _offset_row(value)
+                if clean_name and row:
+                    rows[clean_name] = row
+        staged = raw.get("staged_size") if isinstance(raw, dict) else None
+        if not isinstance(staged, str) or staged not in rows:
+            staged = None
+        return {"version": 1, "global": global_row, "rows": rows, "staged_size": staged}
 
 
 def load_per_size_offsets() -> dict:
-    data = _try_read_json(PER_SIZE_OFFSETS_FILE)
-    return data if isinstance(data, dict) else {}
+    try:
+        return dict(load_offset_state().get("rows") or {})
+    except OffsetStateError:
+        return {}
 
 
 def save_per_size_offsets(table: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(PER_SIZE_OFFSETS_FILE, "w", encoding="utf-8") as f:
-        json.dump(table, f, indent=1)
+    # Compatibility helper: new callers should use offset_set.  It still writes
+    # the canonical file, never the old table, and sanitizes untrusted rows.
+    state = _load_offset_state_strict()
+    rows = {}
+    for name, value in (table or {}).items():
+        clean_name, row = _offset_name(name), _offset_row(value)
+        if clean_name and row:
+            rows[clean_name] = row
+    state["rows"] = rows
+    _atomic_json(_offset_state_path(), state)
 
 
 def write_global_offset(scm: Optional[Path], x: int, y: int, angle: float) -> None:
-    """Write SCM's shared data/offset_data.json (same shape SCM's own save_offset writes)."""
-    if not scm:
-        return
-    d = scm / "data"
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / "offset_data.json", "w", encoding="utf-8") as f:
-        json.dump({"x_offset": int(x), "y_offset": int(y), "angle_offset": float(angle)}, f, indent=4)
+    """Atomically project the shared SCM offset file after safety checks."""
+    _, data, error = _safe_offset_paths(scm)
+    if error:
+        raise OSError(error)
+    _atomic_json(data / "offset_data.json", {"x_offset": int(x), "y_offset": int(y), "angle_offset": float(angle)})
 
 
 def read_global_offset(scm: Optional[Path]) -> Optional[dict]:
-    if not scm:
+    return _read_upstream_offset(scm)
+
+
+def _offset_projection(state: dict) -> Optional[dict]:
+    staged = state.get("staged_size")
+    row = state.get("rows", {}).get(staged) if staged else None
+    return row or state.get("global")
+
+
+def _read_upstream_projection(scm: Optional[Path]) -> Tuple[Optional[dict], Optional[str]]:
+    target, _, error = _projection_snapshot(scm)
+    if error:
+        return None, error
+    if not target.is_file():
+        return None, None
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"upstream offset projection is unreadable: {exc}"
+    if not isinstance(raw, dict):
+        return None, "upstream offset projection is malformed"
+    # Legacy files may omit angle_offset; normalize that historical shape.
+    row = _offset_row({"x": raw.get("x_offset"), "y": raw.get("y_offset"),
+                       "angle": raw.get("angle_offset", 0.0)})
+    return (row, None) if row is not None else (None, "upstream offset projection is malformed")
+
+
+def _reconcile_pending_locked(scm: Optional[Path], state: dict) -> Optional[str]:
+    pending = state.get("pending")
+    if pending is None:
         return None
-    o = _try_read_json(scm / "data" / "offset_data.json")
-    if not o:
+    current, error = _read_upstream_projection(scm)
+    if error:
+        return error
+    intended = pending["intended"]
+    prior = pending["prior_projection"]
+    if current == intended:
+        target = pending["target"]
+        if target == "global":
+            state["global"], state["staged_size"] = intended, None
+        else:
+            state["rows"][target], state["staged_size"] = intended, target
+        state.pop("pending", None)
+        return _commit_offset_state(state, scm, project=True)
+    if current == prior:
+        state.pop("pending", None)
+        # The upstream file already contains the old projection, so clearing
+        # the durable intent does not need to rewrite it.
+        return _commit_offset_state(state, scm, project=False)
+    return "pending offset save cannot be reconciled safely; upstream offset changed unexpectedly"
+
+
+def _projection_snapshot(scm: Optional[Path]) -> Tuple[Optional[Path], Optional[bytes], Optional[str]]:
+    _, data, error = _safe_offset_paths(scm)
+    if error:
+        return None, None, error
+    target = data / "offset_data.json"
+    try:
+        return target, target.read_bytes() if target.is_file() else None, None
+    except OSError as exc:
+        return None, None, f"could not read SCM offset file: {exc}"
+
+
+def _restore_file(path: Path, content: Optional[bytes]) -> None:
+    if content is None:
+        try: path.unlink()
+        except FileNotFoundError: pass
+    else:
+        _atomic_bytes(path, content)
+
+
+def _commit_offset_state(state: dict, scm: Optional[Path], *, project: bool = True) -> Optional[str]:
+    """Canonical-first transaction with projection rollback on failure."""
+    try:
+        state = _validate_offset_state(state)
+    except OffsetStateError as exc:
+        return str(exc)[:256]
+    state_path = _offset_state_path()
+    old_state_exists = state_path.is_file()
+    try:
+        old_state_bytes = state_path.read_bytes() if old_state_exists else None
+    except OSError as exc:
+        return f"could not read offset state: {exc}"
+    target = old_projection = None
+    if project:
+        target, old_projection, error = _projection_snapshot(scm)
+        if error:
+            return error
+    try:
+        _atomic_json(state_path, state)
+        if project:
+            projection = _offset_projection(state)
+            if projection is None:
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                _atomic_json(target, {"x_offset": projection["x"], "y_offset": projection["y"],
+                                      "angle_offset": projection["angle"]})
+    except Exception as exc:
+        # Best effort rollback is important here: canonical-first is safe on a
+        # crash, but a normal second-write failure must be invisible to callers.
+        try:
+            _restore_file(state_path, old_state_bytes)
+            if project:
+                _restore_file(target, old_projection)
+        except Exception:
+            pass
+        return f"could not save offset: {exc}"
+    _INFO_SNAP.clear()
+    MANIFEST_CACHE.clear()
+    return None
+
+
+def _known_paper_names() -> set:
+    try:
+        scm, extras = effective_dirs(load_settings())
+        if not scm:
+            return set()
+        info = read_scm_info(scm, extras)
+        return {p["name"] for p in info.get("paper_sizes", []) if _offset_name(p.get("name"))}
+    except Exception:
+        return set()
+
+
+def _recover_offset_projection_locked(scm: Optional[Path]) -> Optional[str]:
+    if not (_offset_state_path().exists() or _offset_state_path().is_symlink()):
         return None
-    return {"x": o.get("x_offset", 0), "y": o.get("y_offset", 0), "angle": o.get("angle_offset", 0)}
+    try:
+        state = _load_offset_state_strict()
+    except OffsetStateError as exc:
+        return str(exc)[:256]
+    had_pending = state.get("pending") is not None
+    pending_error = _reconcile_pending_locked(scm, state)
+    if pending_error:
+        return str(pending_error)[:256]
+    if had_pending:
+        return None
+    projection = _offset_projection(state)
+    target, _, error = _projection_snapshot(scm)
+    if error:
+        return error
+    try:
+        if projection is None:
+            try: target.unlink()
+            except FileNotFoundError: pass
+        else:
+            _atomic_json(target, {"x_offset": projection["x"], "y_offset": projection["y"],
+                                  "angle_offset": projection["angle"]})
+    except Exception as exc:
+        return f"could not recover offset projection: {exc}"
+    return None
+
+
+def recover_offset_projection(scm: Optional[Path] = None) -> Optional[str]:
+    """Roll forward a canonical commit left ahead of its SCM projection."""
+    with OFFSET_LEASE:
+        if scm is None:
+            scm = effective_dirs(load_settings())[0]
+        return _recover_offset_projection_locked(scm)
+
+
+def _busy_offset_result() -> dict:
+    return {"ok": False, "errors": ["offset operations are busy; try again after the running offset job finishes"]}
+
+
+def _validate_offset_domain(size: Any, x: Any, y: Any, angle: Any, *, require_size: bool = False) -> list:
+    errors = []
+    if require_size and _offset_name(size) is None:
+        errors.append("paper size must be a non-empty valid UTF-8 name")
+    if size is not None and _offset_name(size) is None:
+        errors.append("paper size must be a non-empty valid UTF-8 name")
+    if not isinstance(x, int) or isinstance(x, bool) or not -100000 <= x <= 100000:
+        errors.append("x must be an integer from -100000 through 100000")
+    if not isinstance(y, int) or isinstance(y, bool) or not -100000 <= y <= 100000:
+        errors.append("y must be an integer from -100000 through 100000")
+    if _finite_angle(angle) is None:
+        errors.append("angle must be finite and from -360 through 360")
+    return _offset_errors(errors)
+
+
+def offset_set(size: Any, x: Any, y: Any, angle: Any) -> dict:
+    """Set one global or named offset and atomically project its selection."""
+    errors = _validate_offset_domain(size, x, y, angle)
+    if errors:
+        return {"ok": False, "errors": errors}
+    if size is not None and size not in _known_paper_names():
+        return {"ok": False, "errors": [f"unknown paper size: “{size}”"]}
+    if not OFFSET_LEASE.acquire(blocking=False):
+        return _busy_offset_result()
+    try:
+        settings = load_settings()
+        scm, _ = effective_dirs(settings)
+        if not scm:
+            return {"ok": False, "errors": ["SCM repo not found — set it in Settings."]}
+        error = _recover_offset_projection_locked(scm)
+        if error:
+            return {"ok": False, "errors": _offset_errors([error])}
+        state = _load_offset_state_strict()
+        row = {"x": x, "y": y, "angle": float(angle)}
+        if size is None:
+            state["global"], state["staged_size"] = row, None
+            body = {"ok": True, "offset": {"x_offset": x, "y_offset": y, "angle_offset": float(angle)}}
+        else:
+            state["rows"][size], state["staged_size"] = row, size
+            body = {"ok": True, "size": size, "staged": True,
+                    "offset": {"x_offset": x, "y_offset": y, "angle_offset": float(angle)}}
+        error = _commit_offset_state(state, scm)
+        return body if error is None else {"ok": False, "errors": _offset_errors([error])}
+    except OffsetStateError as exc:
+        return {"ok": False, "errors": _offset_errors([str(exc)])}
+    finally:
+        OFFSET_LEASE.release()
+
+
+def offset_delete(size: Any) -> dict:
+    """Delete a named row; deleting the selected row restores the baseline."""
+    if _offset_name(size) is None:
+        return {"ok": False, "errors": ["paper size must be a non-empty valid UTF-8 name"]}
+    if not OFFSET_LEASE.acquire(blocking=False):
+        return _busy_offset_result()
+    try:
+        state = _load_offset_state_strict()
+        if size not in _known_paper_names() and size not in state.get("rows", {}):
+            return {"ok": False, "errors": [f"unknown paper size: “{size}”"]}
+        if size not in state["rows"]:
+            return {"ok": True, "removed": size}
+        was_staged = state.get("staged_size") == size
+        del state["rows"][size]
+        if was_staged:
+            state["staged_size"] = None
+        # A non-selected delete changes no upstream bytes and deliberately does
+        # not require an SCM checkout (useful while a managed repo is absent).
+        project = was_staged
+        scm = effective_dirs(load_settings())[0] if project else None
+        if project:
+            error = _recover_offset_projection_locked(scm)
+            if error:
+                return {"ok": False, "errors": _offset_errors([error])}
+        error = _commit_offset_state(state, scm, project=project)
+        return {"ok": True, "removed": size} if error is None else {"ok": False, "errors": _offset_errors([error])}
+    except OffsetStateError as exc:
+        return {"ok": False, "errors": _offset_errors([str(exc)])}
+    finally:
+        OFFSET_LEASE.release()
+
+
+# Public names used by both transports; aliases keep the domain API pleasant
+# for embedders that do not know the wire method names.
+def set_offset(size: Any, x: Any, y: Any, angle: Any) -> dict:
+    return offset_set(size, x, y, angle)
+
+
+def delete_offset(size: Any) -> dict:
+    return offset_delete(size)
+
+
+def stage_per_size_offset(scm: Optional[Path], paper: Optional[str]) -> Optional[dict]:
+    """Compatibility staging API; callers that need errors use the lease path."""
+    if not paper or not scm:
+        return None
+    acquired = OFFSET_LEASE.acquire(blocking=False)
+    if not acquired:
+        return None
+    try:
+        if _recover_offset_projection_locked(scm):
+            return None
+        try:
+            state = _load_offset_state_strict()
+        except OffsetStateError:
+            return None
+        entry = state.get("rows", {}).get(paper)
+        desired = paper if entry else None
+        if state.get("staged_size") != desired:
+            state["staged_size"] = desired
+            if _commit_offset_state(state, scm):
+                return None
+        return {"size": paper, **entry} if entry else None
+    finally:
+        OFFSET_LEASE.release()
 
 
 def effective_paper(info: dict, kind: str, args: dict, settings: dict) -> Optional[str]:
@@ -1271,18 +1796,6 @@ def effective_paper(info: dict, kind: str, args: dict, settings: dict) -> Option
     if kind == "offset_pdf":
         return str(args.get("paper_size") or "") or None
     return None
-
-
-def stage_per_size_offset(scm: Optional[Path], paper: Optional[str]) -> Optional[dict]:
-    """Stage the per-size row for `paper` into SCM's shared offset file. Returns the row, or None."""
-    if not paper or not scm:
-        return None
-    entry = load_per_size_offsets().get(paper)
-    if not entry:
-        return None
-    with OFFSET_STAGE_LOCK:
-        write_global_offset(scm, entry.get("x", 0), entry.get("y", 0), entry.get("angle", 0))
-    return {"size": paper, "x": entry.get("x", 0), "y": entry.get("y", 0), "angle": entry.get("angle", 0)}
 
 
 def _bootstrap_state() -> dict:
@@ -1408,6 +1921,20 @@ def get_info() -> dict:
 
     settings = load_settings()
     scm, extras = effective_dirs(settings)
+    scm_info = read_scm_info(scm, extras)
+    # Once offset state exists, its baseline is authoritative even while a
+    # per-paper row is projected into SCM's single shared file.
+    canonical_exists = _offset_state_path().exists() or _offset_state_path().is_symlink()
+    try:
+        offset_state = load_offset_state()
+    except OffsetStateError:
+        offset_state = {"global": None, "rows": {}, "staged_size": None}
+    if canonical_exists:
+        # None is meaningful: a per-size-only state must not expose its staged
+        # projection as the global baseline.
+        scm_info["saved_offset"] = offset_state.get("global")
+    elif offset_state.get("global") is not None:
+        scm_info["saved_offset"] = offset_state["global"]
     return {
         "server": {
             "version": SERVER_VERSION,
@@ -1423,7 +1950,7 @@ def get_info() -> dict:
         # the window host's state, when it is not the app's own window
         # (browser fallback): <data>/window.json, written by the launcher
         "window": _try_read_json(DATA_DIR / "window.json") or {},
-        "scm": read_scm_info(scm, extras),
+        "scm": scm_info,
         "extras": read_extras_info(extras),
         "per_size_offsets": load_per_size_offsets(),
         "repos": repos_view(settings),
@@ -2395,6 +2922,20 @@ def build_preview(kind: str, raw_args: dict) -> dict:
     }
 
 
+def _offset_sensitive_job(kind: str, args: dict) -> bool:
+    return (kind == "offset_pdf") or (kind == "create_pdf" and bool(args.get("load_offset")))
+
+
+def _offset_save_intended(args: dict, prior: Optional[dict]) -> Optional[dict]:
+    base = prior or {"x": 0, "y": 0, "angle": 0.0}
+    values = {
+        "x": base["x"] if args.get("x_offset") in (None, "") else args.get("x_offset"),
+        "y": base["y"] if args.get("y_offset") in (None, "") else args.get("y_offset"),
+        "angle": base["angle"] if args.get("angle") in (None, "") else args.get("angle"),
+    }
+    return _offset_row(values)
+
+
 def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     spec = get_manifest().get(kind)
     if not spec:
@@ -2411,17 +2952,74 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     if errors:
         return None, errors
 
-    # Stage the per-paper-size offset into SCM's shared file before the process
-    # starts: SCM reads data/offset_data.json mid-run (its only supported shape),
-    # so “per size” is realized by the Workbench picking which value goes in it.
+    # The lease is deliberately acquired only after validation/building and
+    # immediately before staging/spawn.  Never wait here: callers have a finite
+    # RPC timeout and a deterministic busy result is safer than a stuck call.
+    offset_lease = False
     staged = None
-    if kind == "create_pdf" and args.get("load_offset"):
-        staged = stage_per_size_offset(cwd, effective_paper(info, kind, args, load_settings()))
-    elif kind == "offset_pdf" and args.get("paper_size"):
-        staged = stage_per_size_offset(cwd, str(args["paper_size"]))
+    if _offset_sensitive_job(kind, args):
+        if not OFFSET_LEASE.acquire(blocking=False):
+            return None, ["offset operations are busy; try again after the running offset job finishes"]
+        offset_lease = True
+        try:
+            error = _recover_offset_projection_locked(cwd)
+            if error:
+                OFFSET_LEASE.release(); offset_lease = False
+                return None, _offset_errors([error])
+            paper = effective_paper(info, kind, args, load_settings())
+            if paper:
+                state = _load_offset_state_strict()
+                entry = state.get("rows", {}).get(paper)
+                desired = paper if entry else None
+                if state.get("staged_size") != desired:
+                    state["staged_size"] = desired
+                    error = _commit_offset_state(state, cwd)
+                    if error:
+                        OFFSET_LEASE.release(); offset_lease = False
+                        return None, _offset_errors([error])
+                if entry:
+                    staged = {"size": paper, **entry}
+            elif kind == "offset_pdf":
+                # Blank paper means global, never "whatever row happened to be
+                # projected by the previous job". Commit this selection before
+                # reading the prior value used by pending-save reconciliation.
+                state = _load_offset_state_strict()
+                state["staged_size"] = None
+                error = _commit_offset_state(state, cwd)
+                if error:
+                    OFFSET_LEASE.release(); offset_lease = False
+                    return None, _offset_errors([error])
+            if kind == "offset_pdf" and args.get("save"):
+                state = _load_offset_state_strict()
+                prior, error = _read_upstream_projection(cwd)
+                if error:
+                    OFFSET_LEASE.release(); offset_lease = False
+                    return None, _offset_errors([error])
+                intended = _offset_save_intended(args, prior)
+                if intended is None:
+                    OFFSET_LEASE.release(); offset_lease = False
+                    return None, ["offset save values are outside the allowed bounds"]
+                target = str(args["paper_size"]) if args.get("paper_size") else "global"
+                state["pending"] = {"target": target, "intended": intended,
+                                    "prior_projection": prior}
+                error = _commit_offset_state(state, cwd, project=False)
+                if error:
+                    OFFSET_LEASE.release(); offset_lease = False
+                    return None, _offset_errors([error])
+        except OffsetStateError as exc:
+            OFFSET_LEASE.release(); offset_lease = False
+            return None, _offset_errors([str(exc)])
+        except Exception as exc:
+            OFFSET_LEASE.release(); offset_lease = False
+            return None, _offset_errors([f"could not prepare offset job: {exc}"])
 
     job_id = uuid.uuid4().hex[:10]
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        if offset_lease:
+            OFFSET_LEASE.release()
+        return None, _offset_errors([f"could not create job log: {exc}"])
     job: dict = {
         "id": job_id,
         "ts": time.time(),
@@ -2441,19 +3039,35 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "duration": None,
         "proc": None,
         "pump_thread": None,
+        "scm_path": str(cwd) if cwd else None,
+        "offset_lease": offset_lease,
     }
-    if kind == "offset_pdf" and args.get("save") and args.get("paper_size"):
+    if kind == "offset_pdf" and args.get("save"):
         # SCM's own -s writes the shared file with the values just used;
-        # _pump mirrors them back into this row once the job has finished.
-        job["offset_sync"] = str(args["paper_size"])
-    log_f = open(job["log_file"], "w", encoding="utf-8")
+        # _pump mirrors them back into the selected row (or global baseline).
+        job["offset_sync"] = str(args["paper_size"]) if args.get("paper_size") else None
+        job["offset_save"] = True
+    try:
+        log_f = open(job["log_file"], "w", encoding="utf-8")
+    except Exception as exc:
+        if offset_lease:
+            OFFSET_LEASE.release()
+        return None, _offset_errors([f"could not create job log: {exc}"])
     header = [f"$ {job['cmd']}", f"(cwd: {cwd})",
               f"(started {time.strftime('%Y-%m-%d %H:%M:%S')})"]
     if staged:
         header.append(f"(offset: staged “{staged['size']}” — x {staged['x']}, y {staged['y']}, {staged['angle']}° → data/offset_data.json)")
-    log_f.write("\n".join(header) + "\n\n")
-    log_f.flush()
-    job["log_lines"] = header
+    try:
+        log_f.write("\n".join(header) + "\n\n")
+        log_f.flush()
+        job["log_lines"] = header
+    except Exception as exc:
+        try: log_f.close()
+        except Exception: pass
+        if offset_lease:
+            OFFSET_LEASE.release()
+        return None, _offset_errors([f"could not write job log: {exc}"])
+    proc = None
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **_proc_kwargs())
@@ -2467,55 +3081,135 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
             JOBS[job_id] = job
         pump_thread.start()
     except Exception as e:
+        if proc is not None:
+            _terminate_and_reap(proc)
+        if job.get("offset_save"):
+            try:
+                state = _load_offset_state_strict()
+                state.pop("pending", None)
+                _commit_offset_state(state, Path(job["scm_path"]), project=False)
+            except Exception:
+                pass
         log_f.write(f"failed to start: {e}\n")
         log_f.close()
         job["status"] = "fail"
         job["log_lines"].append(f"failed to start: {e}")
+        if offset_lease:
+            OFFSET_LEASE.release()
+            job["offset_lease"] = False
         with JOBS_LOCK:
             JOBS[job_id] = job
     return job, []
 
 
+def _terminate_and_reap(proc: subprocess.Popen) -> None:
+    """Stop a child after pump failure, and wait before releasing its lease."""
+    try:
+        if proc.poll() is None:
+            if os.name != "nt":
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception:
+                    proc.terminate()
+            else:
+                proc.terminate()
+    except Exception:
+        try: proc.terminate()
+        except Exception: pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        try: proc.wait(timeout=1)
+        except Exception: pass
+
+
 def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
-    for line in iter(proc.stdout.readline, b""):
-        s = line.decode("utf-8", "replace").rstrip("\r\n")
-        _append_job_line(job, s, log_f=log_f)
-    rc = proc.wait()
-    with JOBS_LOCK:
-        kill_requested = bool(job.get("kill_requested"))
-        pump_lines = list(job.get("log_lines") or [])
-    if kill_requested:
-        status = "killed"
-    elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in pump_lines):
-        # most fetch plugins report a missing decklist this way and still exit
-        # cleanly — a clean exit containing that line is a failed run
-        status = "fail"
-    elif rc == 0:
-        status = "ok"
-    else:
-        status = "fail"
-    with JOBS_LOCK:
-        job["status"] = status
-        job["exit_code"] = rc
-        job["ended"] = time.time()
-        job["duration"] = round(job["ended"] - job["started"], 2)
-    if job.get("offset_sync"):
-        # The run saved via SCM's own -s: mirror the shared file's new values
-        # into this paper size's row in the Workbench's table.
-        g = read_global_offset(effective_dirs(load_settings())[0])
-        if g:
-            table = load_per_size_offsets()
-            table[job["offset_sync"]] = {"x": g["x"], "y": g["y"], "angle": g["angle"]}
-            save_per_size_offsets(table)
-            s = f"(offset: recorded the saved values in the “{job['offset_sync']}” row — x {g['x']}, y {g['y']}, {g['angle']}°)"
+    rc = 1
+    status = "fail"
+    try:
+        for line in iter(proc.stdout.readline, b""):
+            s = line.decode("utf-8", "replace").rstrip("\r\n")
             _append_job_line(job, s, log_f=log_f)
-    log_f.close()
-    with JOBS_LOCK:
-        subscribers = list(job.get("subs", []))
-    _notify_subscribers(job, subscribers, ("done", status, rc), terminal=True)
-    if job.get("kind", "").startswith("fetch:"):
-        invalidate_manifest_cache()
-    _persist_jobs()
+        rc = proc.wait()
+        with JOBS_LOCK:
+            kill_requested = bool(job.get("kill_requested"))
+            pump_lines = list(job.get("log_lines") or [])
+        if kill_requested:
+            status = "killed"
+        elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in pump_lines):
+            status = "fail"
+        elif rc == 0:
+            status = "ok"
+
+        # SCM writes its shared file before rendering.  A nonzero render exit
+        # therefore does not discard a valid -s result; only malformed data is
+        # ignored.  Use the job's snapshotted checkout, never current Settings.
+        if job.get("offset_save"):
+            scm_path = Path(job["scm_path"])
+            state = _load_offset_state_strict()
+            pending = state.get("pending")
+            error = _reconcile_pending_locked(scm_path, state)
+            if error:
+                status = "fail"
+                _append_job_line(job, f"(offset: could not reconcile saved values: {error})", log_f=log_f)
+            else:
+                current = _read_upstream_offset(scm_path)
+                # Jobs created before durable pending records still get the
+                # historical save behavior; new jobs always take the guarded
+                # reconciliation branch above.
+                if pending is None and current is not None:
+                    paper = job.get("offset_sync")
+                    if paper:
+                        state["rows"][paper], state["staged_size"] = current, paper
+                    else:
+                        state["global"], state["staged_size"] = current, None
+                    error = _commit_offset_state(state, scm_path)
+                    if error:
+                        status = "fail"
+                        _append_job_line(job, f"(offset: could not record saved values: {error})", log_f=log_f)
+                if current is not None:
+                    paper = job.get("offset_sync")
+                    target = f"the “{paper}” row" if paper else "the global baseline"
+                    _append_job_line(job, f"(offset: recorded the saved values in {target} — x {current['x']}, y {current['y']}, {current['angle']}°)", log_f=log_f)
+
+        with JOBS_LOCK:
+            job["status"] = status
+            job["exit_code"] = rc
+            job["ended"] = time.time()
+            job["duration"] = round(job["ended"] - job["started"], 2)
+    except Exception as exc:
+        # A logging/decoding/persistence failure must never release the lease
+        # while the child can still read or write the shared SCM projection.
+        _terminate_and_reap(proc)
+        try:
+            _append_job_line(job, f"job pump failed: {exc}", log_f=log_f)
+        except Exception:
+            pass
+        with JOBS_LOCK:
+            job["status"] = "fail"
+            job["exit_code"] = rc
+            job["ended"] = time.time()
+            job["duration"] = round(job["ended"] - job["started"], 2)
+        status = "fail"
+    finally:
+        try:
+            log_f.close()
+        except Exception:
+            pass
+        with JOBS_LOCK:
+            subscribers = list(job.get("subs", []))
+        _notify_subscribers(job, subscribers, ("done", status, rc), terminal=True)
+        if job.get("kind", "").startswith("fetch:"):
+            invalidate_manifest_cache()
+        if job.get("offset_lease"):
+            job["offset_lease"] = False
+            try:
+                OFFSET_LEASE.release()
+            except RuntimeError:
+                pass
+        _persist_jobs()
 
 
 def kill_job(job_id: str) -> bool:
@@ -3399,37 +4093,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "name": target.name, "decklists": decklists})
             if path == "/api/offset":
                 body = self._body()
-                size = str(body.get("size") or "").strip()
-                try:
-                    x = int(float(body.get("x", 0) or 0))
-                    y = int(float(body.get("y", 0) or 0))
-                    angle = float(float(body.get("angle", 0) or 0))
-                except (TypeError, ValueError):
-                    return self._json({"ok": False, "errors": ["offset values must be numbers"]}, 400)
-                settings = load_settings()
-                scm, _ = effective_dirs(settings)
-                if not scm:
-                    return self._json({"ok": False, "errors": ["SCM repo not found — set it in Settings."]}, 400)
+                if not isinstance(body, dict):
+                    return self._json({"ok": False, "errors": ["offset body must be an object"]}, 400)
+                size = body.get("size") if "size" in body else None
                 if body.get("delete"):
-                    if not size:
+                    if set(body) != {"size", "delete"} or not isinstance(size, str) or not size.strip():
                         return self._json({"ok": False, "errors": ["no paper size to remove"]}, 400)
-                    table = load_per_size_offsets()
-                    if size in table:
-                        del table[size]
-                        save_per_size_offsets(table)
-                    return self._json({"ok": True, "removed": size})
-                if size:
-                    # per-paper-size row: store it in the Workbench's own table,
-                    # then stage it into SCM's shared file so plain --load_offset
-                    # / saved-offset runs pick it up without any SCM-side change.
-                    table = load_per_size_offsets()
-                    table[size] = {"x": x, "y": y, "angle": angle}
-                    save_per_size_offsets(table)
-                    write_global_offset(scm, x, y, angle)
-                    return self._json({"ok": True, "size": size, "staged": True,
-                                       "offset": {"x_offset": x, "y_offset": y, "angle_offset": angle}})
-                write_global_offset(scm, x, y, angle)
-                return self._json({"ok": True, "offset": {"x_offset": x, "y_offset": y, "angle_offset": angle}})
+                    result = delete_offset(size.strip())
+                else:
+                    if set(body) - {"size", "x", "y", "angle"} or not {"x", "y", "angle"}.issubset(body):
+                        return self._json({"ok": False, "errors": ["offset requires exactly size, x, y, and angle"]}, 400)
+                    def http_number(value, integer=False):
+                        if isinstance(value, bool):
+                            raise ValueError
+                        if isinstance(value, (int, float)):
+                            number = value
+                        elif isinstance(value, str) and value.strip():
+                            number = float(value.strip())
+                        else:
+                            number = 0
+                        if integer:
+                            if not math.isfinite(float(number)) or float(number) != int(float(number)):
+                                raise ValueError
+                            return int(number)
+                        number = float(number)
+                        if not math.isfinite(number):
+                            raise ValueError
+                        return number
+                    try:
+                        x = http_number(body.get("x", 0), integer=True)
+                        y = http_number(body.get("y", 0), integer=True)
+                        angle = http_number(body.get("angle", 0))
+                    except (TypeError, ValueError, OverflowError):
+                        return self._json({"ok": False, "errors": ["offset values must be numbers"]}, 400)
+                    result = set_offset(size.strip() if isinstance(size, str) else size, x, y, angle)
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/files/save":
                 body = self._body()
                 src = os.path.expanduser(str(body.get("src") or "").strip())
@@ -3796,6 +4494,11 @@ def main():
                 pass
 
     settings = load_settings()
+    # A process may have died after replacing canonical state but before its
+    # SCM projection.  Roll that projection forward before serving requests.
+    recovery_error = recover_offset_projection()
+    if recovery_error:
+        _diag(f"[offset] recovery deferred: {recovery_error}", error=True)
     port = args.port if args.port is not None else int(settings.get("port") or DEFAULT_PORT)
     scm, extras = effective_dirs(settings)
 

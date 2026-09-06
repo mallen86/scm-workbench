@@ -29,6 +29,7 @@ jobs:
           python scripts/check_ui_artifacts.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_settings.py
+          python scripts/check_ui_offsets.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
@@ -234,13 +235,19 @@ jobs:
           # back to HTTP once the actual WebView has loaded. Match query keys
           # as complete pairs so raw reads and images_only metadata remain
           # allowed, while query order does not matter for the action keys.
-          # Settings writes must use settings.set in the packaged WebView;
-          # browser-mode GET/POST fallback remains a compatibility path, and
-          # /api/repos/save remains HTTP by design.
+          # Settings and offset writes must use native IPC in the packaged
+          # WebView; browser-mode GET/POST fallback remains a compatibility
+          # path, and /api/repos/save remains HTTP by design.
           if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
               | grep -Eq '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'; then
             echo "---- server log ----"; cat "$data/server-tauri.log" >&2
             echo "smoke FAILED: the WebView wrote settings over HTTP instead of native IPC" >&2
+            exit 1
+          fi
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView wrote offsets over HTTP instead of native IPC" >&2
             exit 1
           fi
           if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
@@ -267,7 +274,7 @@ jobs:
             echo "smoke FAILED: the WebView fetched a directory image listing over HTTP" >&2
             exit 1
           fi
-          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; template and image-list HTTP routes were not used"
+          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset HTTP routes were not used"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -412,6 +419,7 @@ jobs:
           python scripts/check_ui_artifacts.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_settings.py
+          python scripts/check_ui_offsets.py
       - name: Node syntax check — every UI module
         shell: pwsh
         run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
@@ -508,6 +516,7 @@ jobs:
               $revealActionPattern = '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'
               $fileActionPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?(open=1|reveal=1|url=[^& ]*)(&[^\"]*)? HTTP/'
               $settingsWritePattern = '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'
+              $offsetWritePattern = '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'
               $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
@@ -516,16 +525,17 @@ jobs:
               $revealActionHttp = $webviewRequests | Select-String -Pattern $revealActionPattern
               $fileActionHttp = $webviewRequests | Select-String -Pattern $fileActionPattern
               $settingsWriteHttp = $webviewRequests | Select-String -Pattern $settingsWritePattern
+              $offsetWriteHttp = $webviewRequests | Select-String -Pattern $offsetWritePattern
               # Raw file reads, images_only metadata, save, delete, and
               # /api/repos/save remain HTTP. Browser GET fallback is outside
-              # this packaged-WebView check; native settings writes are not.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp) {
+              # this packaged-WebView check; native settings/offset writes are not.
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp) {
                 Get-Content $log
                 throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
               }
             }
           }
-          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, and preview used native IPC, no migrated WebView route used HTTP"
+          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, and preview used native IPC; no migrated metadata/action/settings/offset route used HTTP"
           $proc | Stop-Process -Force
           $proc.WaitForExit()
           Start-Sleep -Seconds 2

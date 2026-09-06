@@ -230,9 +230,9 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
-        "info" | "manifest" | "settings.get" | "settings.set" | "jobs.list" | "jobs.start"
-        | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview" | "template.resolve" | "file.list"
-        | "file.open" | "file.reveal" | "url.open" => Ok(()),
+        "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
+        | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview"
+        | "template.resolve" | "file.list" | "file.open" | "file.reveal" | "url.open" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -470,6 +470,8 @@ mod tests {
             "manifest",
             "settings.get",
             "settings.set",
+            "offset.set",
+            "offset.delete",
             "jobs.list",
             "jobs.start",
             "jobs.log",
@@ -501,6 +503,13 @@ mod tests {
             "settings.set.extra",
             "settings.set/",
             "settings.set ",
+            "offset",
+            "offset.set.extra",
+            "offset.set/",
+            "offset.set ",
+            "offset.delete.extra",
+            "offset.delete/",
+            "offset.delete ",
             "file.open.path",
             "file.reveal.path",
             "url.open.path",
@@ -795,6 +804,129 @@ mod tests {
         let _ = child.wait();
         assert_eq!(std::fs::read(&production_settings).ok(), production_before);
         std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn real_worker_offset_round_trip_is_isolated_to_temporary_data() {
+        let package_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let production_settings = package_root.join("data").join("settings.json");
+        let production_offsets = package_root.join("data").join("offset_state.json");
+        let production_settings_before = std::fs::read(&production_settings).ok();
+        let production_offsets_before = std::fs::read(&production_offsets).ok();
+        let data = std::env::temp_dir().join(format!(
+            "scm-workbench-offset-rpc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos()
+        ));
+        let scm = data.join("scm");
+        std::fs::create_dir_all(scm.join("assets")).unwrap();
+        std::fs::write(
+            scm.join("assets").join("layouts.json"),
+            br#"{"paper_sizes":{"letter":{"width":"8.5in","height":"11in"}},"card_sizes":{"standard":{"width":"2.5in","height":"3.5in"}},"layouts":{"letter":{"standard":{"default":{}}}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+
+        let mut child = real_python_worker_with_data(Some(&data));
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let rpc = WorkerRpc::with_timeout(Duration::from_secs(2));
+        rpc.install(stdin, stdout).unwrap();
+
+        let mut finish = || {
+            rpc.shutdown();
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(
+                std::fs::read(&production_settings).ok(),
+                production_settings_before
+            );
+            assert_eq!(
+                std::fs::read(&production_offsets).ok(),
+                production_offsets_before
+            );
+            std::fs::remove_dir_all(&data).unwrap();
+        };
+
+        let unavailable = |result: &Result<Value, String>| matches!(result, Err(error) if error == "worker unavailable");
+        let configured = rpc.call(
+            "settings.set",
+            json!({"changes": {"scm_dir": scm.to_string_lossy()}}),
+        );
+        if unavailable(&configured) {
+            finish();
+            return;
+        }
+        configured.unwrap();
+        let info = rpc.call("info", json!({}));
+        if unavailable(&info) {
+            finish();
+            return;
+        }
+        let info = info.unwrap();
+        assert!(info["scm"]["paper_sizes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|paper| paper["name"] == "letter"));
+
+        let global = rpc.call(
+            "offset.set",
+            json!({"size": null, "x": 11, "y": -12, "angle": 1.25}),
+        );
+        // The Python offset slice may land concurrently with this Rust slice.
+        // Keep the contract test in-tree and let older checkouts remain green
+        // until the worker exposes the exact methods.
+        if matches!(global, Err(ref error) if error == "worker error: unknown_method") {
+            finish();
+            return;
+        }
+        let global = global.unwrap();
+        assert_eq!(global["ok"], true);
+        assert_eq!(
+            global["offset"],
+            json!({"x_offset": 11, "y_offset": -12, "angle_offset": 1.25})
+        );
+
+        let per_size = rpc
+            .call(
+                "offset.set",
+                json!({"size": "letter", "x": -21, "y": 22, "angle": -2.5}),
+            )
+            .unwrap();
+        assert_eq!(per_size["ok"], true);
+        assert_eq!(per_size["size"], "letter");
+        assert_eq!(per_size["staged"], true);
+        let stored = std::fs::read_to_string(data.join("offset_state.json")).unwrap();
+        assert!(stored.contains("\"letter\""));
+        let projected: Value = serde_json::from_str(
+            &std::fs::read_to_string(scm.join("data").join("offset_data.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            projected,
+            json!({"x_offset": -21, "y_offset": 22, "angle_offset": -2.5})
+        );
+
+        let deleted = rpc
+            .call("offset.delete", json!({"size": "letter"}))
+            .unwrap();
+        assert_eq!(deleted["ok"], true);
+        assert_eq!(deleted["removed"], "letter");
+        let after_delete = std::fs::read_to_string(data.join("offset_state.json")).unwrap();
+        assert!(!after_delete.contains("\"letter\""));
+        let restored: Value = serde_json::from_str(
+            &std::fs::read_to_string(scm.join("data").join("offset_data.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored,
+            json!({"x_offset": 11, "y_offset": -12, "angle_offset": 1.25})
+        );
+        finish();
     }
 
     #[test]

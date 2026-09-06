@@ -8,6 +8,7 @@ methods below are the complete child-process RPC surface for the native slice.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import traceback
@@ -32,6 +33,7 @@ ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
+    "offset.set", "offset.delete",
 ))
 
 
@@ -192,6 +194,44 @@ def dispatch(request: dict) -> dict:
                 result = server.build_preview(kind, args)
             except server.PreviewError as error:
                 return _error(request_id, error.ipc_code, error.message)
+        elif method == "offset.set":
+            if set(params) != {"size", "x", "y", "angle"}:
+                return _bad_params(request_id, "offset.set requires exactly size, x, y, and angle")
+            size = params["size"]
+            if size is not None and not isinstance(size, str):
+                return _bad_params(request_id, "offset.set size must be null or a string")
+            if size is not None:
+                try:
+                    size_bytes = len(size.encode("utf-8"))
+                except UnicodeEncodeError:
+                    return _bad_params(request_id, "offset.set size must be valid UTF-8")
+                if server._offset_name(size) is None:
+                    return _bad_params(request_id, "offset.set size is empty, too long, or contains controls")
+            x, y, angle = params["x"], params["y"], params["angle"]
+            if (not isinstance(x, int) or isinstance(x, bool) or not -100000 <= x <= 100000 or
+                    not isinstance(y, int) or isinstance(y, bool) or not -100000 <= y <= 100000):
+                return _bad_params(request_id, "offset.set x and y must be integers from -100000 through 100000")
+            try:
+                clean_angle = float(angle)
+            except (TypeError, ValueError, OverflowError):
+                clean_angle = math.nan
+            if (not isinstance(angle, (int, float)) or isinstance(angle, bool) or
+                    not math.isfinite(clean_angle) or not -360 <= clean_angle <= 360):
+                return _bad_params(request_id, "offset.set angle must be finite and from -360 through 360")
+            result = server.set_offset(size, x, y, angle)
+        elif method == "offset.delete":
+            if set(params) != {"size"}:
+                return _bad_params(request_id, "offset.delete requires exactly size")
+            size = params["size"]
+            if not isinstance(size, str):
+                return _bad_params(request_id, "offset.delete size must be a string")
+            try:
+                size_bytes = len(size.encode("utf-8"))
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "offset.delete size must be valid UTF-8")
+            if server._offset_name(size) is None:
+                return _bad_params(request_id, "offset.delete size is empty, too long, or contains controls")
+            result = server.delete_offset(size)
         elif method == "jobs.start":
             if set(params) != {"kind", "args"} or not _string(params.get("kind"), "kind"):
                 return _bad_params(request_id, "jobs.start requires string kind and object args")

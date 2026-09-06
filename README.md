@@ -42,7 +42,7 @@ Everything runs as a tracked job: a live log, a stop button, a persistent histor
 
 ## Behaviors worth knowing
 
-* **Offsets are per paper size.** silhouette-card-maker keeps one shared X/Y/angle correction, but the value you need depends on the paper you feed it. The Workbench keeps its own per-paper table and, before any run that uses an offset, stages the matching row into the repo's file — the repo's code is never modified.
+* **Offsets are per paper size.** silhouette-card-maker keeps one shared X/Y/angle correction, but the value you need depends on the paper you feed it. The Workbench keeps a canonical global baseline plus per-paper rows in its data folder and projects the matching row into the repo's `data/offset_data.json` under the serialized offset lease — the repo's code is never modified. Atomic replacement and rollback recover the projection after a crash; deleting the staged row restores the global baseline.
 * **Front pages only** refuses to work while the double-sided folder still holds images. Flipping the toggle with images present warns you and offers to clear the folder in one click (non-image files such as `README.md` are left alone).
 * **Decklists.** Pasted text is saved into the repo's decklist folder under a sanitized name. You can also pick an existing decklist from anywhere on disk with the OS file dialog; it's copied in for you.
 * **One deliberate gap.** The repos' Silhouette Studio automation script (`dxf_to_studio3.py`) drives a Windows-only GUI and is not wrapped. Open the `.studio3` files the app generates and runs instead.
@@ -50,4 +50,4 @@ Everything runs as a tracked job: a live log, a stop button, a persistent histor
 
 ## Development
 
-Running from source, packaging the app, and cutting releases are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The current transitional native boundary, including bounded `settings.set`, `file.open`, `file.reveal`, and `url.open` OS actions, is documented in [docs/native-ipc.md](docs/native-ipc.md); browser settings fallback, raw bytes, save/delete, repos (including `/api/repos/save`), offsets, and updates remain HTTP and HTTP has not been removed.
+Running from source, packaging the app, and cutting releases are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The current transitional native boundary, including bounded `settings.set`, `offset.set`, `offset.delete`, `file.open`, `file.reveal`, and `url.open` OS actions, is documented in [docs/native-ipc.md](docs/native-ipc.md); browser fallback, raw bytes, save/delete, repos (including `/api/repos/save`), and updates remain HTTP and HTTP has not been removed.

@@ -21,10 +21,10 @@ It continues to own Workbench behavior and binds its existing loopback HTTP
 server so that the rest of the UI remains functional during migration. The
 Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads, the bounded `settings.set` write, preview, packaged-Tauri job control/log
-operations, the read-only `template.resolve`/`file.list` metadata slice, and the
-bounded OS-action methods below. Other surfaces remain on their existing HTTP
-compatibility paths.
+reads, bounded settings and offset mutations, preview, packaged-Tauri job
+control/log operations, the read-only `template.resolve`/`file.list` metadata
+slice, and the bounded OS-action methods below. Other surfaces remain on their
+existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -48,9 +48,13 @@ A request has this exact shape:
 ```
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
-below, and `params` must be a JSON object. The bootstrap read methods take
-`{}`; preview, job, and artifact metadata methods use the parameter contracts
-below.
+below, and `params` must be a JSON object. The exact allowlist contains
+seventeen methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
+`jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
+`file.open`, `file.reveal`, and `url.open`. The bootstrap read methods take
+`{}`; preview, job, artifact metadata, and offset methods use the parameter
+contracts below.
 
 | HTTP compatibility route | Native method | Python implementation |
 | --- | --- | --- |
@@ -58,6 +62,8 @@ below.
 | `GET /api/manifest` | `manifest` | `server.get_manifest()` |
 | `GET /api/settings` | `settings.get` | `server.load_settings()` |
 | `POST /api/settings` | `settings.set` | `server.update_settings()` |
+| `POST /api/offset` (global/per-size) | `offset.set` | `server.offset_set()` |
+| `POST /api/offset` (per-size delete) | `offset.delete` | `server.offset_delete()` |
 | `GET /api/jobs` | `jobs.list` | `server.list_jobs()` |
 | `POST /api/jobs` | `jobs.start` | `server.start_job()` |
 | `GET /api/jobs/<id>/log` | `jobs.log` | `server.get_job_log()` |
@@ -78,7 +84,8 @@ atomic commit. It writes a sibling temporary file and replaces `settings.json`
 with `os.replace`; a failed validation or write leaves the previous file intact.
 After a successful commit it invalidates the manifest cache, so the returned
 settings and the next `settings.get` agree. It never writes repos state or the
-per-size offset table:
+offset state. Offset mutations use their own serialized, atomic
+state/projection transaction described below:
 
 * `preview`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). `kind` is at most 128 UTF-8 bytes. The JSON encoding of the `args`
@@ -86,6 +93,23 @@ per-size offset table:
   /api/preview` (`cmd`, `cwd`, `env`, `warnings`, `errors`, and
   `no_front_images`) and its encoded JSON is at most 512 KiB.
 * `settings.get`: params `{}`. Result is the complete merged settings object.
+* `offset.set`: params exactly `{"size":null,"x":<integer>,"y":<integer>,"angle":<number>}`
+  for the global baseline, or the same object with `size` set to a known SCM
+  paper-size name for a per-size row. `size` is either JSON null or a non-empty
+  UTF-8 string of at most 128 bytes with no C0 or DEL controls. `x` and `y`
+  are non-boolean JSON integers in `-100000..100000`; `angle` is a non-boolean
+  finite JSON number in `-360..360`. No other keys are accepted. Success is
+  exactly `{"ok":true,"offset":{"x_offset":x,"y_offset":y,"angle_offset":angle}}`
+  for the global baseline and adds `"size":"<name>","staged":true` for a
+  per-size row. Validation failures are successful RPC results with
+  `{"ok":false,"errors":["..."]}`; malformed parameter envelopes are
+  `bad_request`.
+* `offset.delete`: params exactly `{"size":"<known paper-size name>"}`.
+  It removes that canonical per-size row; deletion is idempotent and returns
+  exactly `{"ok":true,"removed":"<name>"}`. If the deleted row was staged,
+  the global baseline is projected back to SCM's shared file (or the shared
+  projection is removed when no baseline exists). Validation and filesystem
+  failures use the same bounded `ok:false` result shape.
 * `settings.set`: params exactly `{"changes":{...}}`. The `changes` object
   must be valid JSON, non-empty, and at most **64 KiB (65,536 bytes)** when
   encoded as compact UTF-8 JSON. Only these top-level keys are accepted:
@@ -104,6 +128,45 @@ per-size offset table:
   Success is exactly `{"ok":true,"settings":<complete merged settings>}`.
   Validation happens before any write, so a rejected change cannot partially
   update settings.
+
+### Offset state, projection, and jobs
+
+Offsets have one canonical Workbench state and one disposable upstream
+projection. `data/offset_state.json` stores the global baseline, per-paper
+rows, and the currently staged paper; SCM's `data/offset_data.json`
+is only the projection consumed by `--load_offset`. A global `offset.set`
+updates the baseline and projection. A per-size `offset.set` updates its row,
+records it as staged, and projects that row. `offset.delete` removes the row
+and, when it was staged, restores the baseline projection; with no baseline it
+removes the upstream projection. The SCM repository code is never changed.
+
+Both files are committed with sibling temporary files and `os.replace` while
+the offset lease is held. The canonical file is committed before projection;
+if projection or replacement fails, the previous canonical bytes and previous
+projection are restored (or the failed temporary files are removed), and the
+RPC returns `ok:false`. Directory `fsync` is best effort on platforms including
+Windows, so this is an atomic application-level transaction, not an absolute
+power-loss guarantee. A corrupt or incomplete canonical file is rejected
+without guessing or overwriting it. This makes restart recovery deterministic:
+load canonical state, inspect `staged_size`, and repair only the projection
+before serving jobs. The canonical baseline is authoritative; a staged row is
+never folded into the baseline implicitly. There is no partial-success response.
+
+The same lease is held while an offset-sensitive job stages its row and for the
+child's lifetime. Offset mutations and offset-sensitive job starts fail fast
+with the bounded busy result when the lease is held; they do not wait. A job
+cannot restage a different row concurrently with a mutation. This prevents a
+completed mutation from being silently overwritten by an older PDF process;
+normal job process-group/setpgid teardown still applies.
+
+An `offset_pdf --save` job records a durable pending-save intent before its
+child starts. On startup, reconciliation adopts the intended upstream value
+only when the child demonstrably wrote a valid value; otherwise it restores the
+prior projection from canonical state. An ambiguous or corrupt intent/state
+blocks reconciliation and reports an error rather than guessing. This keeps a
+crash between the child write and the job completion from silently changing the
+baseline or losing a user save.
+
 * `jobs.list`: params `{}`. Result is `{"jobs":[...]}`. Each live row contains
   `id`, `ts`, `kind`, `title`, `status`, `exit_code`, `cmd`, `warnings`, and
   `outputs`; `progress` is present while progress is available. Persisted
@@ -222,7 +285,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the fifteen-method allowlist.
+* `unknown_method` — a method outside the seventeen-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -305,19 +368,19 @@ framing and deadlock or mis-correlate the native caller.
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
-`preview`, `settings.set`, `jobs.list`, `jobs.start`, `jobs.log`, `jobs.kill`,
-aggregate `jobs.poll`, `template.resolve`, `file.list`, `file.open`,
-`file.reveal`, and `url.open`, as well as the three bootstrap reads, use native IPC when a
-callable Tauri `invoke` capability exists. In a normal browser there is no
+`preview`, `settings.set`, `offset.set`, `offset.delete`, `jobs.list`,
+`jobs.start`, `jobs.log`, `jobs.kill`, aggregate `jobs.poll`, `template.resolve`,
+`file.list`, `file.open`, `file.reveal`, and `url.open`, as well as the three
+bootstrap reads, use native IPC when a callable Tauri `invoke` capability exists. In a normal browser there is no
 Tauri capability: preview, template resolution, directory metadata, OS actions,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, delete, repo actions (including
-`/api/repos/save`), offsets, and the state-changing update-start operation remain
-HTTP. The packaged smoke test rejects a WebView `POST /api/settings` after the
-WebKit marker; it does not reject browser-mode GET fallback or the compatibility
-`/api/repos/save` route.
+worker call. Binary file reads, save/copy, image deletion, repo actions
+(including `/api/repos/save`), and the state-changing update-start operation
+remain HTTP. The packaged smoke test rejects WebView `POST /api/settings` and
+`POST /api/offset` after the WebKit marker; browser-mode HTTP fallback remains
+allowed, and native failure never retries over HTTP.
 
 The current migration ledger is:
 
@@ -332,9 +395,9 @@ The current migration ledger is:
 | `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
 | Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
 | Save/copy and image deletion (`/api/files/save`, `/api/fs`) | HTTP | Deferred: preserve user-selected destinations and destructive-operation guards |
-| Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos`, offsets, and unknown schema keys are excluded |
+| Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
 | Repo sync/ref actions and `/api/repos/save` | HTTP | Deferred: preserve atomic state writes and ref resolution |
-| Per-size offsets | HTTP | Deferred: preserve offset-table semantics; never part of `settings.set` |
+| Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
 | Updates and update-start | HTTP | Deferred: update lifecycle and replacement remain HTTP |
 | Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
 
@@ -371,6 +434,7 @@ python scripts/check_ui_preview.py
 python scripts/check_ui_artifacts.py
 python scripts/check_ui_native_actions.py
 python scripts/check_ui_settings.py
+python scripts/check_ui_offsets.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
@@ -381,7 +445,8 @@ webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
 native IPC, no bootstrap or migrated route was fetched over HTTP by the
 WebView, and the worker is reaped. The five existing startup markers remain
 exactly the contract (`info`, `manifest`, `settings.get`, `jobs.list`, and
-`preview`); settings writes do not add a startup mutation or fake marker.
+`preview`); settings and offset writes do not add a startup mutation or fake
+marker.
 They intentionally do not require
 `template.resolve` or `file.list` markers: these methods are read-only metadata
 facades and are not deterministically invoked during startup, so CI does not
@@ -389,8 +454,9 @@ add fake UI calls or claim WebView markers for them. The executable facade
 contract, Python HTTP/native parity, and Rust real-worker coverage prove their
 behavior; the runtime smoke guard still rejects WebView HTTP requests to the
 migrated metadata routes and, after the WebKit marker, rejects `POST
-/api/settings`, `/api/reveal`, plus `/api/file` action queries containing the exact `open=1`,
-`reveal=1`, or `url=` keys in any reasonable query order. It deliberately
+/api/settings`, `POST /api/offset`, `/api/reveal`, plus `/api/file` action
+queries containing the exact `open=1`, `reveal=1`, or `url=` keys in any
+reasonable query order. It deliberately
 allows raw `/api/file` reads, `images_only=1` metadata, save, and delete
 compatibility requests. No native-action marker is required: the five
 existing startup IPC markers remain the complete packaged smoke contract. The
