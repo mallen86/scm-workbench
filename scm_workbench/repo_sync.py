@@ -33,6 +33,7 @@ Exit codes: 0 ok, 1 failure (message on stdout, or {"error": ...} with --json).
 
 import argparse
 import contextlib
+import copy
 import errno
 import hashlib
 import json
@@ -49,6 +50,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import unicodedata
+import uuid
 from pathlib import Path, PurePosixPath
 
 USER_AGENT = "scm-workbench/1.1"
@@ -59,6 +61,11 @@ GH_JSON_CAP = 8 * 1024 * 1024
 RAW_FILE_CAP = 256 * 1024 * 1024
 TARBALL_CAP = 1024 * 1024 * 1024
 TAR_MEMBER_CAP = TARBALL_CAP
+# A managed tree is deliberately bounded independently of the archive cap.  The
+# bounds protect the clone/fingerprint phase as well as tar extraction.
+TREE_FILE_CAP = 200_000
+TREE_BYTES_CAP = TARBALL_CAP
+TAR_MEMBER_COUNT_CAP = TREE_FILE_CAP * 2 + 1
 REFS_RESULT_CAP = 512 * 1024
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _GH_API_HOST = "api.github.com"
@@ -589,6 +596,9 @@ def _secure_open_absolute(path: Path, write=False, create_parents=False,
 def _secure_write_bytes(path: Path, data: bytes):
     with _secure_open_absolute(path, write=True, create_parents=True) as fh:
         fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    _fsync_dir(Path(path).parent)
 
 
 def _secure_copy_file(source: Path, root: Path, relative: str):
@@ -597,10 +607,13 @@ def _secure_copy_file(source: Path, root: Path, relative: str):
         with _secure_open_relative(root, relative, write=True,
                                    create_parents=True, mode=mode) as dst:
             shutil.copyfileobj(src, dst, length=1 << 20)
+            dst.flush()
+            os.fsync(dst.fileno())
             try:
                 os.fchmod(dst.fileno(), mode)
             except (AttributeError, OSError):
                 pass
+    _fsync_dir(Path(root))
 
 
 def _secure_mkdir_relative(root: Path, relative: str, mode=0o755):
@@ -626,6 +639,7 @@ def _secure_mkdir_relative(root: Path, relative: str, mode=0o755):
             os.fchmod(fd, mode & 0o777)
         finally:
             os.close(fd)
+        _fsync_dir(root)
         return
     if _WINDOWS_FALLBACK:
         for index in range(1, len(parts) + 1):
@@ -636,6 +650,7 @@ def _secure_mkdir_relative(root: Path, relative: str, mode=0o755):
                 pass
             _windows_open_checked(target, expected_root=root, expected_path=target,
                                   directory=True)
+        _fsync_dir(root)
         return
     target = safe_path(root, relative)
     target.mkdir(parents=True, exist_ok=True)
@@ -646,6 +661,7 @@ def _secure_mkdir_relative(root: Path, relative: str, mode=0o755):
         target.chmod(mode & 0o777)
     except OSError:
         pass
+    _fsync_dir(root)
 
 
 def _secure_unlink_relative(root: Path, relative: str):
@@ -728,11 +744,16 @@ def manifest_file(key: str) -> Path:
     return data_dir() / f"repos-manifest-{validate_repo_key(key)}.json"
 
 
-def _atomic_write_json(path: Path, value) -> None:
-    """Replace JSON metadata without shared temporary names or torn writes."""
+def _json_payload(value) -> bytes:
+    return json.dumps(value, indent=1, ensure_ascii=False).encode("utf-8")
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Atomically replace a file, retaining the exact bytes supplied."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=1, ensure_ascii=False).encode("utf-8")
+    if os.path.lexists(path) and path.is_symlink():
+        raise RepoError("refusing a symbolic link in metadata")
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
                                     dir=str(path.parent))
     tmp = Path(tmp_name)
@@ -743,7 +764,6 @@ def _atomic_write_json(path: Path, value) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
-        # Directory fsync is not available on every supported platform/filesystem.
         try:
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -763,6 +783,11 @@ def _atomic_write_json(path: Path, value) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_write_json(path: Path, value) -> None:
+    """Replace JSON metadata without shared temporary names or torn writes."""
+    _atomic_write_bytes(Path(path), _json_payload(value))
 
 
 def _load_json_object(path: Path, label: str, missing=None):
@@ -884,6 +909,13 @@ def _file_lock(lock_path: Path):
                 fcntl.flock(fh, fcntl.LOCK_UN)
         finally:
             fh.close()
+
+
+@contextlib.contextmanager
+def _settings_source_lock():
+    """Cross-process lock shared with server.save_settings source writes."""
+    with _file_lock(data_dir() / ".repos-settings-source-lock"):
+        yield
 
 
 @contextlib.contextmanager
@@ -1010,10 +1042,21 @@ def load_manifest(key: str) -> dict:
 def _validate_manifest_shape(man: dict) -> dict:
     if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
         raise RepoError("invalid repository manifest shape")
+    if len(man["files"]) > TREE_FILE_CAP:
+        raise RepoError("repository manifest has too many files")
     for path, digest in man["files"].items():
         validate_repo_path(path)
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
             raise RepoError("invalid repository manifest hash")
+    edits = man.get("local_edits", [])
+    if not isinstance(edits, list) or len(edits) > TREE_FILE_CAP:
+        raise RepoError("invalid repository local-edit list")
+    seen = set()
+    for path in edits:
+        path = validate_repo_path(path)
+        if path in seen or path not in man["files"]:
+            raise RepoError("invalid repository local-edit path")
+        seen.add(path)
     if man.get("sha") is not None:
         validate_sha(man["sha"], "manifest SHA")
     return man
@@ -1084,25 +1127,58 @@ def _source_snapshot(key: str, st: dict = None):
     return default, ("default", default)
 
 
+def set_source_and_record_check(key: str, source: str, target: dict) -> dict:
+    """Atomically update one repo's source and resolved check result.
+
+    Callers must not perform a load/modify/save state sequence themselves;
+    this helper preserves unrelated repository entries under repo->state locks.
+    """
+    key = validate_repo_key(key)
+    source = validate_source(source)
+    if not isinstance(target, dict) or not isinstance(target.get("sha"), str):
+        raise RepoError("invalid repository check target")
+    validate_sha(target["sha"], "target SHA")
+    with _repo_lock(key):
+        with _settings_source_lock():
+            with _state_lock():
+                st = _load_state_for_mutation()
+                entry = st.get(key) or {}
+                if not isinstance(entry, dict):
+                    raise RepoError("invalid repository state entry")
+                entry["source"] = source
+                deployed = entry.get("deployed")
+                entry["last_check"] = {
+                    "checked": {"repo": key, "ok": True, "cached": False,
+                                 "target": target, "deployed": deployed,
+                                 "source": source,
+                                 "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])},
+                    "checked_at": time.time(),
+                }
+                st[key] = entry
+                save_state(st)
+                return copy.deepcopy(entry)
+
+
 def set_source(key: str, source: str) -> None:
     key = validate_repo_key(key)
     source = validate_source(source)
-    # The operation lock is deliberately outside the state lock: this is the
-    # repository -> global-state order used by init/update/check everywhere.
+    # Operation lock -> shared settings-source lock -> global state is the
+    # order used by all mutating repository operations.
     with _repo_lock(key):
-        with _state_lock():
-            st = _load_state_for_mutation()
-            r = st.get(key)
-            if r is None:
-                r = {}
-                st[key] = r
-            if not isinstance(r, dict):
-                raise RepoError("invalid repository state entry")
-            r["source"] = source
-            # A check is tied to the effective source; never serve its target
-            # after changing that source.
-            r.pop("last_check", None)
-            save_state(st)
+        with _settings_source_lock():
+            with _state_lock():
+                st = _load_state_for_mutation()
+                r = st.get(key)
+                if r is None:
+                    r = {}
+                    st[key] = r
+                if not isinstance(r, dict):
+                    raise RepoError("invalid repository state entry")
+                r["source"] = source
+                # A check is tied to the effective source; never serve its target
+                # after changing that source.
+                r.pop("last_check", None)
+                save_state(st)
 
 
 # ----------------------------------------------------------------------------
@@ -1241,6 +1317,72 @@ def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
         return b"".join(chunks)
     finally:
         r.close()
+
+
+def gh_download_to(url: str, dest: Path, timeout: int = 120,
+                   progress_cb=None, max_bytes: int = RAW_FILE_CAP) -> int:
+    """Stream to a unique sibling and publish only after a complete fsync."""
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise RepoError("invalid download size limit")
+    dest = safe_destination(Path(dest))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    safe_destination(dest.parent)
+    if os.path.lexists(dest) and dest.is_symlink():
+        raise RepoError("refusing a symbolic-link download destination")
+    initial_host = _validate_https_host(url, {_GH_API_HOST, _GH_RAW_HOST})
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except (TypeError, ValueError):
+        raise RepoError("refusing download from an untrusted host")
+    allowed = {initial_host}
+    if initial_host == _GH_API_HOST and "/tarball/" in parsed.path:
+        allowed.add(_GH_CODELOAD_HOST)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        response = urllib.request.urlopen(req, timeout=timeout)
+    except Exception as exc:
+        raise RepoError(f"download failed: {_brief(exc)}")
+    tmp = None
+    done = 0
+    try:
+        _validate_https_host(_response_url(response, url), allowed)
+        header = response.headers.get("Content-Length")
+        try:
+            total = int(header) if header is not None else 0
+        except (TypeError, ValueError):
+            raise RepoError("download returned an invalid content length")
+        if total < 0 or total > max_bytes:
+            raise RepoError("download exceeds its size limit")
+        fd, name = tempfile.mkstemp(prefix=f".{dest.name}.download-", dir=str(dest.parent))
+        tmp = Path(name)
+        if progress_cb is not None:
+            progress_cb(0, total)
+        with os.fdopen(fd, "wb") as out:
+            fd = None
+            while True:
+                chunk = response.read(min(1 << 20, max_bytes + 1 - done))
+                if not chunk:
+                    break
+                done += len(chunk)
+                if done > max_bytes:
+                    raise RepoError("download exceeds its size limit")
+                out.write(chunk)
+                if progress_cb is not None:
+                    progress_cb(done, total)
+            out.flush()
+            os.fsync(out.fileno())
+        safe_destination(tmp)
+        os.replace(tmp, dest)
+        tmp = None
+        _fsync_dir(dest.parent)
+        return done
+    finally:
+        response.close()
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def repo_api(key: str) -> dict:
@@ -1448,6 +1590,9 @@ def safe_members(members: list):
     _text(root_name, "tarball path", 256)
     root = root_name + "/"
     seen = set()
+    total_size = 0
+    if len(members) > TAR_MEMBER_COUNT_CAP:
+        raise RepoError("tarball has too many members")
     for i, m in enumerate(members):
         if not isinstance(m.name, str) or (i == 0 and m.name not in (root_name, root)) or (i != 0 and not m.name.startswith(root)):
             raise RepoError("unexpected tarball layout")
@@ -1455,6 +1600,10 @@ def safe_members(members: list):
             raise RepoError("unsafe tarball member type")
         if m.isfile() and (m.size < 0 or m.size > TAR_MEMBER_CAP):
             raise RepoError("tarball member is too large")
+        if m.isfile():
+            total_size += m.size
+            if total_size > TARBALL_CAP:
+                raise RepoError("tarball contents are too large")
         rel = m.name[len(root):]
         if i == 0 and not rel:
             m.name = ""
@@ -1477,16 +1626,35 @@ def safe_members(members: list):
     return root
 
 
+def _validated_tarball_path(path: Path) -> Path:
+    path = safe_destination(Path(path))
+    if os.path.lexists(path) and path.is_symlink():
+        raise RepoError("refusing a symbolic-link tarball")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise RepoError(f"could not inspect tarball: {_brief(exc)}")
+    if not stat.S_ISREG(info.st_mode):
+        raise RepoError("tarball is not a regular file")
+    if info.st_size < 0 or info.st_size > TARBALL_CAP:
+        raise RepoError("tarball exceeds its size limit")
+    return path
+
+
 def extract_tarball(tar_path: Path, dest: Path, log=print):
     """Extract a GitHub tarball through descriptor-relative safe writes."""
-    tar_path = safe_destination(Path(tar_path))
+    tar_path = _validated_tarball_path(Path(tar_path))
     dest = safe_destination(Path(dest))
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = safe_destination(dest)
     dest.mkdir(exist_ok=True)
     safe_destination(dest)
     with tarfile.open(tar_path, "r:*") as tf:
-        members = tf.getmembers()
+        members = []
+        for member in tf:
+            members.append(member)
+            if len(members) > TAR_MEMBER_COUNT_CAP:
+                raise RepoError("tarball has too many members")
         safe_members(members)
         if members and members[0].name == "":
             members = members[1:]
@@ -1494,6 +1662,7 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
             name = validate_repo_path(member.name)
             mode = stat.S_IMODE(member.mode) or (0o755 if member.isdir() else 0o644)
             if member.isdir():
+                mode |= 0o111
                 _secure_mkdir_relative(dest, name, mode)
                 continue
             if not member.isfile() or member.size < 0 or member.size > TAR_MEMBER_CAP:
@@ -1511,27 +1680,92 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
                         raise RepoError("truncated tarball member")
                     target.write(chunk)
                     remaining -= len(chunk)
+                target.flush()
+                os.fsync(target.fileno())
                 try:
                     os.fchmod(target.fileno(), mode & 0o777)
                 except (AttributeError, OSError):
                     pass
+    _fsync_tree_dirs(dest)
+
+
+def _validate_tree(tree_dir: Path, require_dir=True):
+    """Walk a managed tree without following links or special files."""
+    tree_dir = Path(tree_dir)
+    _ensure_no_symlink_components(tree_dir)
+    if not tree_dir.exists():
+        if require_dir:
+            raise RepoError("managed repository tree is missing")
+        return []
+    if tree_dir.is_symlink() or not tree_dir.is_dir():
+        raise RepoError("managed repository tree is not a directory")
+    files, total = [], 0
+    stack = [(tree_dir, "")]
+    while stack:
+        current, prefix = stack.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise RepoError("refusing a symbolic link in repository tree")
+                rel = f"{prefix}/{entry.name}" if prefix else entry.name
+                rel = validate_repo_path(rel.replace(os.sep, "/"))
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    stack.append((Path(entry.path), rel))
+                elif stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+                    if total > TREE_BYTES_CAP:
+                        raise RepoError("managed repository tree is too large")
+                    files.append(rel)
+                    if len(files) > TREE_FILE_CAP:
+                        raise RepoError("managed repository tree has too many files")
+                else:
+                    raise RepoError("refusing a special file in repository tree")
+    return sorted(files)
 
 
 def tracked_paths(tree_dir: Path) -> list:
-    tree_input = Path(tree_dir)
-    _ensure_no_symlink_components(tree_input)
-    tree_dir = tree_input.resolve()
-    _ensure_no_symlink_components(tree_dir)
-    out = []
-    for p in sorted(tree_dir.rglob("*")):
-        rel = str(p.relative_to(tree_dir)).replace(os.sep, "/")
-        rel = validate_repo_path(rel)
-        safe_path(tree_dir, rel)
-        if p.is_symlink():
-            raise RepoError("refusing a symbolic link in repository tree")
-        if p.is_file():
-            out.append(rel)
-    return out
+    return _validate_tree(tree_dir)
+
+
+def _remove_tree(path: Path):
+    """Remove only a previously validated, generated directory."""
+    path = Path(path)
+    if not path.exists():
+        return
+    _validate_tree(path)
+    shutil.rmtree(path)
+
+
+def _clone_tree(source: Path, dest: Path):
+    files = _validate_tree(source)
+    dest = Path(dest)
+    safe_destination(dest)
+    dest.mkdir(parents=True, exist_ok=False)
+    for rel in files:
+        _secure_copy_file(safe_path(source, rel), dest, rel)
+    return files
+
+
+def _copy_authorized_user_data(source: Path, dest: Path, log=print):
+    """Copy only documented user-data slots; never copy arbitrary live files."""
+    source, dest = Path(source), Path(dest)
+    saved = 0
+    for base in USER_DATA_PATHS:
+        directory = safe_path(source, base)
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise RepoError("refusing unsafe user data")
+        for rel in _validate_tree(directory):
+            full_rel = f"{base}/{rel}"
+            if Path(rel).name in _PRISTINE_NAMES:
+                continue
+            _secure_copy_file(safe_path(source, full_rel), dest, full_rel)
+            saved += 1
+    if saved:
+        log(f"[repos] staged {saved} authorized user file(s) from the old tree")
+    return saved
 
 
 # ----------------------------------------------------------------------------
@@ -1567,7 +1801,7 @@ def _decide(local: Path, old_hash, new_pristine: Path):
 
 def apply_changes(key: str, man: dict, target: dict,
                   apply_ops: dict, delete_paths: list,
-                  pristine_for, log=print) -> dict:
+                  pristine_for, log=print, repo_root: Path = None) -> dict:
     """Validate the complete plan and all staging files before live mutation."""
     key = validate_repo_key(key)
     if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
@@ -1611,7 +1845,8 @@ def apply_changes(key: str, man: dict, target: dict,
     if apply_paths & previous_paths:
         raise RepoError("conflicting update paths")
 
-    repo = safe_destination(repo_dir(key))
+    repo = safe_destination(repo_root if repo_root is not None else repo_dir(key))
+    _validate_tree(repo)
     # Resolve every local path before asking for staging content.  This makes
     # malformed later entries fail before any repository mutation is possible.
     for path in apply_paths | previous_paths | delete_set:
@@ -1642,11 +1877,18 @@ def apply_changes(key: str, man: dict, target: dict,
             # warn when the user edited it (their copy would otherwise strand silently)
             old_local = safe_path(repo, prev)
             if old_local.exists():
-                if sha256_file(old_local) == old_files.get(prev):
+                if _is_authorized_user_path(prev):
+                    # User-data slots are never removed by an upstream rename.
+                    pass
+                elif sha256_file(old_local) == old_files.get(prev):
                     _secure_unlink_relative(repo, prev)
                 else:
                     conflicts.append(prev)
-            new_manifest.pop(prev, None)
+            if old_local.exists() and (_is_authorized_user_path(prev) or
+                                       sha256_file(old_local) != old_files.get(prev)):
+                new_manifest[prev] = old_files.get(prev)
+            else:
+                new_manifest.pop(prev, None)
         pristine = pristine_by_path[path]
         local = safe_path(repo, path)
         d = _decide(local, old_files.get(path), pristine)
@@ -1677,10 +1919,13 @@ def apply_changes(key: str, man: dict, target: dict,
             continue
         if sha256_file(local) == old_files.get(path):
             _secure_unlink_relative(repo, path)
+            new_manifest.pop(path, None)
             deleted += 1
         else:
             conflicts.append(path)
-        new_manifest.pop(path, None)
+            # Keep a pristine baseline for the retained local edit so the
+            # final manifest can explicitly record it in local_edits.
+            new_manifest[path] = old_files.get(path)
 
     man2 = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"),
             "files": new_manifest}
@@ -1933,255 +2178,1024 @@ def verify_deployed(key: str) -> bool:
         return False
 
 
-def _cmd_init_locked(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
+# ---------------------------------------------------------------------------
+# Transactional deployment
+# ---------------------------------------------------------------------------
+
+_TXN_RE = re.compile(r"^\.repos-txn-(scm|extras)-[0-9a-f]{32}$")
+_CANDIDATE_RE = re.compile(r"^\.repos-candidate-(scm|extras)-[0-9a-f]{32}$")
+_BACKUP_RE = re.compile(r"^\.repos-backup-(scm|extras)-[0-9a-f]{32}$")
+
+
+def _fsync_dir(path: Path):
+    """Best-effort directory durability barrier (including Windows).
+
+    This supports ordinary process-crash recovery; it is not an absolute
+    power-loss durability guarantee on every filesystem/platform.
+    """
+    try:
+        fd = os.open(Path(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (AttributeError, OSError):
+        pass
+
+
+def _fsync_tree_dirs(root: Path):
+    """Fsync every trusted directory bottom-up before publication."""
+    root = Path(root)
+    _validate_tree(root)
+    def visit(directory):
+        children = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise RepoError("refusing a symbolic link during fsync")
+                if entry.is_dir(follow_symlinks=False):
+                    children.append(Path(entry.path))
+        for child in children:
+            visit(child)
+        _fsync_dir(directory)
+    visit(root)
+
+
+def _raw_metadata(path):
+    """Read bounded metadata through the descriptor-relative safe-I/O layer."""
+    path = Path(path)
+    if os.path.lexists(path) and path.is_symlink():
+        raise RepoError("refusing a symbolic link in repository metadata")
+    try:
+        with _secure_open_absolute(path, write=False) as fh:
+            chunks, total = [], 0
+            while True:
+                chunk = fh.read(min(1 << 16, GH_JSON_CAP + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > GH_JSON_CAP:
+                    raise RepoError("repository metadata is too large")
+            return b"".join(chunks)
+    except FileNotFoundError:
+        return None
+    except RepoError:
+        raise
+    except OSError as exc:
+        raise RepoError(f"could not read repository metadata: {_brief(exc)}")
+
+
+def _meta_hash(raw):
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
+
+
+def _state_entry(raw, key):
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepoError("malformed repository state during transaction recovery") from exc
+    value = _validate_state_shape(value)
+    return copy.deepcopy(value.get(key)) if key in value else None
+
+
+def _state_with_entry(raw, key, entry):
+    if raw is None:
+        value = {}
+    else:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RepoError("malformed repository state during transaction recovery") from exc
+        value = _validate_state_shape(value)
+    if entry is None:
+        value.pop(key, None)
+    else:
+        value[key] = copy.deepcopy(entry)
+    return _json_payload(value)
+
+
+def _write_exact_or_merged_state(tx, current_raw, before_raw):
+    """Restore only this repo key, preserving unrelated concurrent fields."""
+    if current_raw == before_raw:
+        return
+    if current_raw == tx.get("state_after_raw"):
+        _write_exact_metadata(state_file(), before_raw)
+        return
+    merged = _state_with_entry(current_raw, tx["key"], tx.get("state_before_entry"))
+    _write_exact_metadata(state_file(), merged)
+
+
+def _write_exact_metadata(path, raw):
+    path = Path(path)
+    if raw is None:
+        if os.path.lexists(path):
+            if path.is_symlink() or not path.is_file():
+                raise RepoError("refusing unsafe repository metadata")
+            _secure_unlink_absolute(path)
+    else:
+        _atomic_write_bytes(path, raw)
+
+
+def _remove_transaction(root: Path):
+    root = Path(root)
+    if not root.exists():
+        return
+    if root.is_symlink() or not _TXN_RE.fullmatch(root.name):
+        raise RepoError("refusing an unsafe deployment transaction")
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                raise RepoError("refusing a symbolic link in transaction")
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                _validate_tree(Path(entry.path))
+            elif not stat.S_ISREG(info.st_mode):
+                raise RepoError("refusing a special transaction file")
+    shutil.rmtree(root)
+
+
+def _tx_paths(key):
     key = validate_repo_key(key)
-    meta = REPOS[key]
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    _ensure_no_symlink_components(d)
+    token = uuid.uuid4().hex
+    root = d / f".repos-txn-{key}-{token}"
+    root.mkdir()
+    repo = safe_destination(repo_dir(key))
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    safe_destination(repo.parent)
+    return {"root": root, "repo": repo,
+            "candidate": repo.parent / f".repos-candidate-{key}-{token}",
+            "backup": repo.parent / f".repos-backup-{key}-{token}",
+            "journal": d / f".repos-journal-{key}.json",
+            "token": token, "had_live": bool(os.path.lexists(repo)),
+            "backup_created": False}
+
+
+def _tx_snapshot(tx, name, raw):
+    marker = tx["root"] / name
+    _atomic_write_bytes(marker, b"" if raw is None else raw)
+    return {"file": name, "present": raw is not None, "sha256": _meta_hash(raw)}
+
+
+def _tx_read_snapshot(tx, spec):
+    if not isinstance(spec, dict) or not isinstance(spec.get("file"), str):
+        raise RepoError("invalid deployment journal metadata reference")
+    name = spec["file"]
+    if name not in {"state-before.bin", "manifest-before.bin", "state-after.bin", "manifest-after.bin"}:
+        raise RepoError("invalid deployment journal metadata path")
+    snapshot_path = tx["root"] / name
+    if os.path.lexists(snapshot_path) and snapshot_path.is_symlink():
+        raise RepoError("refusing a symbolic-link metadata snapshot")
+    try:
+        with _secure_open_absolute(snapshot_path, write=False) as fh:
+            chunks, total = [], 0
+            while True:
+                chunk = fh.read(min(1 << 16, GH_JSON_CAP + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > GH_JSON_CAP:
+                    raise RepoError("deployment metadata snapshot is too large")
+            raw = b"".join(chunks)
+    except FileNotFoundError:
+        raise RepoError("deployment metadata snapshot is missing")
+    if not spec.get("present"):
+        value = None
+    else:
+        value = raw
+    if _meta_hash(value) != spec.get("sha256"):
+        raise RepoError("deployment journal metadata check failed")
+    return value
+
+
+def _journal_write(tx, phase, extra=None):
+    if phase in {"backup_renamed", "live_published", "manifest_committed", "state_committed"}:
+        tx["backup_created"] = True if tx.get("had_live") else bool(tx.get("backup_created"))
+    payload = {"version": 1, "key": tx["key"], "phase": phase,
+               "txn": tx["root"].name, "candidate": tx["candidate"].name,
+               "backup": tx["backup"].name, "had_live": bool(tx.get("had_live")),
+               "backup_created": bool(tx.get("backup_created")),
+               "state_before": tx["state_before"],
+               "manifest_before": tx["manifest_before"],
+               "state_after": tx["state_after"],
+               "manifest_after": tx["manifest_after"],
+               "state_before_entry": tx.get("state_before_entry"),
+               "state_after_entry": tx.get("state_after_entry")}
+    if extra:
+        payload.update(extra)
+    _atomic_write_json(tx["journal"], payload)
+
+
+def _journal_remove(tx):
+    p = tx["journal"]
+    if os.path.lexists(p):
+        if p.is_symlink() or not p.is_file():
+            raise RepoError("refusing an unsafe deployment journal")
+        _secure_unlink_absolute(p)
+
+
+def _tx_cleanup(tx, remove_backup=True):
+    """Idempotent cleanup: validated trees, journal, then snapshot root."""
+    if os.path.lexists(tx["backup"]) and not tx.get("backup_created"):
+        raise RepoError("unexpected deployment backup")
+    if remove_backup and tx.get("backup_created") and os.path.lexists(tx["backup"]):
+        if not tx["repo"].exists() or tx["repo"].is_symlink():
+            raise RepoError("refusing to delete the only good repository copy")
+        _validate_tree(tx["repo"])
+    for p in (tx["candidate"], tx["backup"] if remove_backup and tx.get("backup_created") else None):
+        if p is not None and os.path.lexists(p):
+            if p.is_symlink():
+                raise RepoError("refusing a symbolic-link transaction tree")
+            _remove_tree(p)
+    # Keep snapshots available until the journal itself is gone.  A crash at
+    # any point leaves a deterministic recovery record.
+    _journal_remove(tx)
+    _remove_transaction(tx["root"])
+
+
+def _tx_from_journal(key, payload):
+    key = validate_repo_key(key)
+    if not isinstance(payload, dict) or payload.get("version") != 1 or payload.get("key") != key:
+        raise RepoError("invalid deployment journal")
+    txn_name = payload.get("txn")
+    candidate_name, backup_name = payload.get("candidate"), payload.get("backup")
+    if not isinstance(txn_name, str) or not _TXN_RE.fullmatch(txn_name):
+        raise RepoError("invalid deployment journal transaction path")
+    if not isinstance(candidate_name, str) or not _CANDIDATE_RE.fullmatch(candidate_name):
+        raise RepoError("invalid deployment journal candidate path")
+    if not isinstance(backup_name, str) or not _BACKUP_RE.fullmatch(backup_name):
+        raise RepoError("invalid deployment journal backup path")
+    token = txn_name.rsplit("-", 1)[-1]
+    if (candidate_name != f".repos-candidate-{key}-{token}" or
+            backup_name != f".repos-backup-{key}-{token}"):
+        raise RepoError("deployment journal paths do not match requested key/token")
+    d = data_dir()
+    root = d / txn_name
+    repo = safe_destination(repo_dir(key))
+    tx = {"key": key, "root": root, "repo": repo,
+          "candidate": repo.parent / candidate_name,
+          "backup": repo.parent / backup_name,
+          "journal": d / f".repos-journal-{key}.json"}
+    root_missing = not root.exists()
+    if root.is_symlink() or (not root_missing and not root.is_dir()):
+        raise RepoError("deployment journal transaction is unsafe")
+    if root_missing and payload.get("phase") != "state_committed":
+        raise RepoError("deployment journal transaction is missing")
+    tx["root_missing"] = root_missing
+    tx["had_live"] = payload.get("had_live")
+    if not isinstance(tx["had_live"], bool):
+        raise RepoError("invalid deployment journal live-tree marker")
+    tx["backup_created"] = payload.get("backup_created", bool(payload.get("had_live")) and payload.get("phase") in {
+        "backup_renamed", "live_published", "manifest_committed", "state_committed"})
+    if not isinstance(tx["backup_created"], bool):
+        raise RepoError("invalid deployment journal backup marker")
+    tx["state_before"] = payload.get("state_before")
+    tx["manifest_before"] = payload.get("manifest_before")
+    tx["state_after"] = payload.get("state_after")
+    tx["manifest_after"] = payload.get("manifest_after")
+    tx["state_before_entry"] = payload.get("state_before_entry")
+    tx["state_after_entry"] = payload.get("state_after_entry")
+    for entry in (tx["state_before_entry"], tx["state_after_entry"]):
+        if entry is not None and not isinstance(entry, dict):
+            raise RepoError("invalid deployment journal state entry")
+    # Snapshot files are fixed names and must live directly in this transaction.
+    if not root_missing:
+        for spec in (tx["state_before"], tx["manifest_before"], tx["state_after"], tx["manifest_after"]):
+            _tx_read_snapshot(tx, spec)
+    return tx
+
+
+def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
+    """Rename a directory through verified Windows handles.
+
+    FILE_RENAME_INFO's RootDirectory makes the destination relative to the
+    already-open parent handle, rather than resolving a second path.  This is
+    intentionally kept as a separate seam so Windows packaging tests can mock
+    the API calls without running on Windows.
+    """
+    if os.name != "nt":
+        raise RepoError("Windows sibling rename called on a non-Windows host")
+    if (not src_name or not dst_name or src_name in (".", "..") or
+            dst_name in (".", "..") or any(c in src_name + dst_name for c in ("/", "\\"))):
+        raise RepoError("invalid Windows sibling rename names")
+    parent = safe_destination(Path(parent))
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    HANDLE = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, HANDLE]
+    kernel32.CreateFileW.restype = HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [HANDLE, wintypes.LPVOID]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFinalPathNameByHandleW.argtypes = [HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.SetFileInformationByHandle.argtypes = [HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.FlushFileBuffers.argtypes = [HANDLE]
+    kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    GENERIC_READ, DELETE = 0x80000000, 0x00010000
+    SHARE = 1 | 2 | 4
+    OPEN_EXISTING = 3
+    OPEN_REPARSE = 0x00200000
+    BACKUP = 0x02000000
+    DIRECTORY = 0x10
+    REPARSE = 0x400
+    FILE_RENAME_INFO = 3
+    INVALID = ctypes.c_void_p(-1).value
+
+    class _Info(ctypes.Structure):
+        _fields_ = [("attrs", wintypes.DWORD), ("creation", wintypes.FILETIME),
+                    ("access", wintypes.FILETIME), ("write", wintypes.FILETIME),
+                    ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                    ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                    ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+
+    def create(path, access):
+        handle = kernel32.CreateFileW(str(path), access, SHARE, None, OPEN_EXISTING,
+                                     OPEN_REPARSE | BACKUP, None)
+        value = handle.value if hasattr(handle, "value") else handle
+        if value in (None, INVALID):
+            return None, ctypes.get_last_error()
+        return handle, 0
+
+    def validate(handle, expected, require_dir):
+        info = _Info()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise RepoError("could not inspect Windows rename handle")
+        if info.attrs & REPARSE or bool(info.attrs & DIRECTORY) != require_dir:
+            raise RepoError("refusing a Windows reparse or non-directory rename path")
+        final = _windows_final_path(kernel32, handle)
+        if final != os.path.normcase(os.path.normpath(str(expected))):
+            raise RepoError("Windows rename handle escaped its trusted path")
+
+    parent = Path(parent)
+    safe_destination(parent)
+    parent_handle, error = create(parent, GENERIC_READ)
+    if parent_handle is None:
+        raise RepoError("could not open Windows rename parent")
+    source_handle = None
+    try:
+        validate(parent_handle, parent, True)
+        source_handle, error = create(parent / src_name, GENERIC_READ | DELETE)
+        if source_handle is None:
+            raise RepoError("could not open Windows rename source")
+        validate(source_handle, parent / src_name, True)
+        destination_handle, destination_error = create(parent / dst_name, GENERIC_READ)
+        if destination_handle is not None:
+            kernel32.CloseHandle(destination_handle)
+            raise RepoError("deployment destination already exists")
+        if destination_error not in (2, 3):
+            raise RepoError("could not verify Windows rename destination")
+        encoded = dst_name.encode("utf-16-le")
+        class _RenameHeader(ctypes.Structure):
+            _fields_ = [("replace", wintypes.BOOL), ("root", HANDLE),
+                        ("length", wintypes.DWORD), ("name", wintypes.WCHAR * 1)]
+        name_offset = _RenameHeader.name.offset
+        buffer = ctypes.create_string_buffer(name_offset + len(encoded))
+        header = ctypes.cast(buffer, ctypes.POINTER(_RenameHeader)).contents
+        header.replace = False
+        header.root = parent_handle
+        header.length = len(encoded)
+        ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
+        if not kernel32.SetFileInformationByHandle(source_handle, FILE_RENAME_INFO,
+                                                   buffer, ctypes.sizeof(buffer)):
+            raise RepoError("Windows handle-relative directory rename failed")
+        if not kernel32.FlushFileBuffers(parent_handle):
+            # FlushFileBuffers can be unsupported for some filesystem handles;
+            # publication remains process-crash safe, not power-loss absolute.
+            pass
+    finally:
+        if source_handle is not None:
+            kernel32.CloseHandle(source_handle)
+        kernel32.CloseHandle(parent_handle)
+
+
+def _secure_rename_sibling(parent: Path, src_name: str, dst_name: str):
+    """Rename one generated directory beside another without path races."""
+    if os.name == "nt":
+        return _windows_rename_sibling(parent, src_name, dst_name)
+    parent = safe_destination(Path(parent))
+    if not parent.is_dir() or any(x in src_name + dst_name for x in ("/", "\\")):
+        raise RepoError("invalid sibling rename")
+    if src_name in ("", ".", "..") or dst_name in ("", ".", ".."):
+        raise RepoError("invalid sibling rename")
+    if (not _DESCRIPTOR_IO or
+            os.rename not in getattr(os, "supports_dir_fd", set())):
+        raise RepoError("safe sibling rename is unavailable on this platform")
+    try:
+        root, parent_parts = _absolute_parts(parent)
+        # Hold the final descriptor from a nofollow walk starting at the
+        # canonical filesystem root; never path-open the checked parent again.
+        parent_fd = _open_dir_chain(root, parent_parts, create=False)
+    except OSError as exc:
+        raise RepoError(f"could not open rename parent: {_brief(exc)}") from exc
+    try:
+        try:
+            source_info = os.stat(src_name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RepoError("deployment source directory is missing") from exc
+        if stat.S_ISLNK(source_info.st_mode) or not stat.S_ISDIR(source_info.st_mode):
+            raise RepoError("deployment source is not a real directory")
+        try:
+            os.stat(dst_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RepoError("deployment destination already exists")
+        os.rename(src_name, dst_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except RepoError:
+        raise
+    except OSError as exc:
+        raise RepoError(f"secure sibling rename failed: {_brief(exc)}") from exc
+    finally:
+        os.close(parent_fd)
+
+
+def _restore_tx_tree(tx):
+    repo, backup, candidate = tx["repo"], tx["backup"], tx["candidate"]
+    if backup.exists() and not tx.get("backup_created"):
+        raise RepoError("unexpected deployment backup")
+    if backup.exists():
+        _validate_tree(backup)
+        if repo.exists():
+            _remove_tree(repo)
+        _secure_rename_sibling(repo.parent, backup.name, repo.name)
+    elif not tx.get("had_live") and repo.exists():
+        # Init had no prior live copy; a crash after publishing the candidate
+        # must not leave that candidate presented as a successful deployment.
+        _remove_tree(repo)
+    elif candidate.exists() and not repo.exists():
+        # There was no prior live tree (init).  The candidate is the only copy
+        # and is safe to discard after metadata has been restored.
+        _remove_tree(candidate)
+    elif candidate.exists() and repo.exists():
+        _remove_tree(candidate)
+
+
+def _rollback_tx(tx, state_raw, manifest_raw):
+    try:
+        with _settings_source_lock():
+            with _state_lock():
+                current_state = _raw_metadata(state_file())
+                current_manifest = _raw_metadata(manifest_file(tx["key"]))
+                before_entry = tx.get("state_before_entry")
+                after_entry = tx.get("state_after_entry")
+                current_entry = _state_entry(current_state, tx["key"])
+                if (current_entry != before_entry and current_entry != after_entry):
+                    raise RepoError("repository state entry changed during rollback")
+                if current_manifest not in (manifest_raw, tx.get("manifest_after_raw")):
+                    raise RepoError("repository manifest changed during rollback")
+                _restore_tx_tree(tx)
+                _write_exact_or_merged_state(tx, current_state, state_raw)
+                if current_manifest == tx.get("manifest_after_raw"):
+                    _write_exact_metadata(manifest_file(tx["key"]), manifest_raw)
+                _tx_cleanup(tx)
+    except Exception as exc:
+        raise RepoError(f"deployment rollback failed: {_brief(exc)}") from exc
+
+
+def _recover_locked_unlocked(key):
+    """Recover one journal; ambiguous states fail closed rather than guessing."""
+    key = validate_repo_key(key)
+    journal = data_dir() / f".repos-journal-{key}.json"
+    if os.path.lexists(journal):
+        if journal.is_symlink():
+            raise RepoError("refusing a symbolic link deployment journal")
+        try:
+            if journal.stat().st_size > GH_JSON_CAP:
+                raise RepoError("deployment journal is too large")
+            raw_journal = _raw_metadata(journal)
+            payload = json.loads(raw_journal.decode("utf-8"))
+        except Exception as exc:
+            raise RepoError(f"malformed deployment journal: {_brief(exc)}")
+        tx = _tx_from_journal(key, payload)
+        phase = payload.get("phase")
+        if tx.get("root_missing"):
+            def matches_spec(path, spec):
+                if not isinstance(spec, dict) or not isinstance(spec.get("sha256"), (str, type(None))):
+                    raise RepoError("invalid deployment journal metadata check")
+                raw = _raw_metadata(path)
+                return (_meta_hash(raw) == spec.get("sha256") and
+                        (raw is not None) == bool(spec.get("present")))
+            if (phase == "state_committed" and
+                    matches_spec(state_file(), tx["state_after"]) and
+                    matches_spec(manifest_file(key), tx["manifest_after"])):
+                if (not tx["repo"].exists() or tx["repo"].is_symlink() or
+                        os.path.lexists(tx["backup"]) and not tx["repo"].exists()):
+                    raise RepoError("committed deployment has no safe live tree")
+                _validate_tree(tx["repo"])
+                try:
+                    committed_manifest = json.loads(_raw_metadata(manifest_file(key)).decode("utf-8"))
+                    _validate_manifest_shape(committed_manifest)
+                    committed_state = _state_entry(_raw_metadata(state_file()), key) or {}
+                    if (committed_state.get("deployed") or {}).get("sha") != committed_manifest.get("sha"):
+                        raise RepoError("committed state and manifest disagree")
+                    for rel in committed_manifest["files"]:
+                        if not safe_path(tx["repo"], rel).is_file():
+                            raise RepoError("committed manifest path is missing")
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RepoError("committed metadata is malformed") from exc
+                if os.path.lexists(tx["backup"]) and not tx["repo"].exists():
+                    raise RepoError("refusing to delete the only good repository copy")
+                for leftover in (tx["candidate"], tx["backup"]):
+                    if os.path.lexists(leftover):
+                        if leftover.is_symlink():
+                            raise RepoError("refusing a symbolic-link committed leftover")
+                        _remove_tree(leftover)
+                _journal_remove(tx)
+            else:
+                raise RepoError("deployment journal metadata is not safely finalized")
+            return
+        before_state = _tx_read_snapshot(tx, tx["state_before"])
+        before_manifest = _tx_read_snapshot(tx, tx["manifest_before"])
+        after_state = _tx_read_snapshot(tx, tx["state_after"])
+        after_manifest = _tx_read_snapshot(tx, tx["manifest_after"])
+        actual_before_entry = _state_entry(before_state, key)
+        actual_after_entry = _state_entry(after_state, key)
+        if (tx.get("state_before_entry") is not None and
+                tx["state_before_entry"] != actual_before_entry):
+            raise RepoError("deployment journal before-entry check failed")
+        if (tx.get("state_after_entry") is not None and
+                tx["state_after_entry"] != actual_after_entry):
+            raise RepoError("deployment journal after-entry check failed")
+        tx["state_before_entry"] = actual_before_entry
+        tx["state_after_entry"] = actual_after_entry
+        allowed_phases = {"prepared", "backup_move_started", "backup_renamed",
+                          "candidate_publish_started", "live_published",
+                          "manifest_committed", "state_committed"}
+        if phase not in allowed_phases:
+            raise RepoError("invalid deployment journal phase")
+        live = bool(os.path.lexists(tx["repo"]))
+        candidate = bool(os.path.lexists(tx["candidate"]))
+        backup = bool(os.path.lexists(tx["backup"]))
+        if any(p.is_symlink() for p in (tx["repo"], tx["candidate"], tx["backup"])
+               if os.path.lexists(p)):
+            raise RepoError("refusing a symbolic-link deployment path")
+        if phase == "prepared":
+            valid = candidate and not backup and (live == bool(tx["had_live"]))
+        elif phase == "backup_move_started":
+            valid = bool(tx["had_live"]) and candidate and ((live and not backup) or (backup and not live))
+        elif phase == "backup_renamed":
+            valid = bool(tx["had_live"]) and candidate and backup and not live
+        elif phase == "candidate_publish_started":
+            valid = candidate != live and (backup == bool(tx["had_live"]))
+        elif phase == "live_published":
+            valid = live and not candidate and (backup == bool(tx["had_live"]))
+        else:
+            valid = live and not candidate and (backup == bool(tx["had_live"]))
+        if not valid:
+            raise RepoError("deployment journal has an unsafe path combination")
+        if backup:
+            tx["backup_created"] = True
+        if phase in {"prepared", "backup_move_started", "backup_renamed",
+                     "candidate_publish_started", "live_published"}:
+            current_state = _raw_metadata(state_file())
+            current_manifest = _raw_metadata(manifest_file(key))
+            current_entry = _state_entry(current_state, key)
+            if current_entry != tx.get("state_before_entry"):
+                raise RepoError("deployment target state changed during recovery")
+            if current_manifest != before_manifest:
+                raise RepoError("deployment target manifest changed during recovery")
+            _restore_tx_tree(tx)
+            _tx_cleanup(tx)
+        else:
+            current_state, current_manifest = _raw_metadata(state_file()), _raw_metadata(manifest_file(key))
+            before_entry = tx.get("state_before_entry")
+            after_entry = tx.get("state_after_entry")
+            if before_entry is None and after_entry is None:
+                # Compatibility with journals created by the previous schema.
+                state_before_match = current_state == before_state
+                state_after_match = current_state == after_state
+            else:
+                current_entry = _state_entry(current_state, key)
+                state_before_match = current_entry == before_entry
+                state_after_match = current_entry == after_entry
+            if current_manifest == after_manifest and state_after_match:
+                _tx_cleanup(tx)
+            elif current_manifest == after_manifest and state_before_match:
+                desired = _state_with_entry(current_state, key, after_entry)
+                if current_state == before_state:
+                    desired = after_state
+                _write_exact_metadata(state_file(), desired)
+                _tx_cleanup(tx)
+            elif current_manifest == before_manifest and state_before_match:
+                _restore_tx_tree(tx)
+                _tx_cleanup(tx)
+            elif current_manifest == before_manifest and state_after_match:
+                # State publication must not survive a manifest that is still
+                # pristine; merge only this repo key back to its before value.
+                desired = _state_with_entry(current_state, key, before_entry)
+                _write_exact_metadata(state_file(), desired)
+                _restore_tx_tree(tx)
+                _tx_cleanup(tx)
+            else:
+                # A third-party target-entry/manifest edit makes the outcome
+                # ambiguous. Keep all copies and the journal.
+                raise RepoError("deployment journal state is ambiguous")
+    # Orphaned generated transaction roots are safe to clean, but only after a
+    # journal has been dealt with.  Never touch arbitrary dot directories.
+    d = data_dir()
+    for root in d.glob(f".repos-txn-{key}-*"):
+        if not _TXN_RE.fullmatch(root.name):
+            continue
+        if root.is_symlink():
+            raise RepoError("refusing a symbolic link transaction")
+        _remove_transaction(root)
+
+
+def _recover_locked(key):
+    # Recovery mutates metadata and therefore uses the same lock order as
+    # publication: repo-operation (caller) -> settings-source -> state.
+    with _settings_source_lock():
+        with _state_lock():
+            return _recover_locked_unlocked(key)
+
+
+def _copy_existing_local_edits(source: Path, dest: Path, old_manifest: dict, log=print):
+    """Preserve every differing tracked file during forced redeploy."""
+    _validate_manifest_shape(old_manifest)
+    copied = 0
+    for rel, pristine in old_manifest["files"].items():
+        src = safe_path(source, rel)
+        if not src.exists():
+            continue  # missing tracked files retain normal reconciliation semantics
+        if src.is_symlink() or not src.is_file():
+            raise RepoError("tracked local edit is missing or unsafe")
+        if sha256_file(src) != pristine:
+            _secure_copy_file(src, dest, rel)
+            copied += 1
+    if copied:
+        log(f"[repos] preserved {copied} differing tracked local file(s) during redeploy")
+    return copied
+
+
+def _fingerprint_tree(key, target, tree, progress=False):
+    files = _validate_tree(tree)
+    man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
+    for i, rel in enumerate(files, 1):
+        man["files"][rel] = sha256_file(safe_path(tree, rel))
+        if progress:
+            set_progress(key, stage="fingerprint", done=i, total=len(files), unit="files")
+    return man
+
+
+def _is_authorized_user_path(path):
+    path = validate_repo_path(path)
+    return any(path == base or path.startswith(base + "/") for base in USER_DATA_PATHS)
+
+
+def _with_local_edits(tree, man):
+    """Record candidate paths whose bytes differ from pristine hashes."""
+    _validate_manifest_shape(man)
+    edits = set(man.get("local_edits", []))
+    for rel, pristine in man["files"].items():
+        path = safe_path(tree, rel)
+        if path.is_file() and sha256_file(path) != pristine:
+            edits.add(rel)
+    if len(edits) > TREE_FILE_CAP:
+        raise RepoError("too many local edits")
+    man["local_edits"] = sorted(edits)
+    return man
+
+
+def _validate_final_manifest(tree, man):
+    """Validate presence while retaining pristine hashes for local edits."""
+    _validate_manifest_shape(man)
+    _validate_tree(tree)
+    for rel in man["files"]:
+        path = safe_path(tree, rel)
+        if not path.is_file() or path.is_symlink():
+            raise RepoError("candidate is missing a manifest file")
+
+
+def _build_tx(key, old_state_raw, old_manifest_raw, target, source, source_sig):
+    """Use the exact metadata snapshot captured under the initial state lock."""
+    # Keep the focused private helper compatible with older embedders/tests
+    # that supplied decoded objects; production callers pass exact bytes.
+    if old_state_raw is not None and not isinstance(old_state_raw, bytes):
+        old_state_raw = _json_payload(old_state_raw)
+    if old_manifest_raw is not None and not isinstance(old_manifest_raw, bytes):
+        old_manifest_raw = _json_payload(old_manifest_raw)
+    tx = _tx_paths(key)
+    tx["key"], tx["source"], tx["source_sig"] = key, source, source_sig
+    tx["old_state_raw"] = old_state_raw
+    tx["old_manifest_raw"] = old_manifest_raw
+    tx["state_before"] = _tx_snapshot(tx, "state-before.bin", old_state_raw)
+    tx["manifest_before"] = _tx_snapshot(tx, "manifest-before.bin", old_manifest_raw)
+    tx["state_before_entry"] = _state_entry(old_state_raw, key)
+    tx["state_after_entry"] = None
+    return tx
+
+
+def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, target_sha):
+    new_manifest_raw = _json_payload(new_manifest)
+    new_state_raw = _json_payload(new_state)
+    tx["state_after"] = _tx_snapshot(tx, "state-after.bin", new_state_raw)
+    tx["manifest_after"] = _tx_snapshot(tx, "manifest-after.bin", new_manifest_raw)
+    tx["state_after_raw"] = new_state_raw
+    tx["manifest_after_raw"] = new_manifest_raw
+    tx["state_after_entry"] = _state_entry(new_state_raw, tx["key"])
+    _journal_write(tx, "prepared", {"target_sha": target_sha})
+    mutated = False
+    try:
+        # Lock order is repo-operation -> settings-source -> global state.  The
+        # settings lock is shared with server.save_settings, so a settings-
+        # backed source cannot change after this final fence.
+        with _settings_source_lock():
+            with _state_lock():
+                # This is the stale-target fence.  It also prevents an
+                # unrelated state client from being overwritten by the merge.
+                if (_raw_metadata(state_file()) != old_state_raw or
+                        _raw_metadata(manifest_file(tx["key"])) != old_manifest_raw):
+                    raise RepoError("repository metadata changed during deployment; retry")
+                current_source, _ = _source_snapshot(tx["key"], _load_state_for_mutation())
+                if current_source != tx["source"]:
+                    raise RepoError("repository source changed during deployment; retry")
+                _validate_tree(tx["candidate"])
+                if os.path.lexists(tx["candidate"]) and tx["candidate"].is_symlink():
+                    raise RepoError("refusing a symbolic link candidate")
+                if os.path.lexists(tx["backup"]):
+                    raise RepoError("deployment backup path already exists")
+                _fsync_tree_dirs(tx["candidate"])
+                _fsync_dir(tx["repo"].parent)
+                if tx["repo"].exists():
+                    _validate_tree(tx["repo"])
+                    if tx["repo"].is_symlink():
+                        raise RepoError("refusing a symbolic link live tree")
+                    _journal_write(tx, "backup_move_started", {"target_sha": target_sha})
+                    _secure_rename_sibling(tx["repo"].parent, tx["repo"].name, tx["backup"].name)
+                    tx["backup_created"] = True
+                    mutated = True
+                    _fsync_dir(tx["repo"].parent)
+                    _journal_write(tx, "backup_renamed", {"target_sha": target_sha})
+                _journal_write(tx, "candidate_publish_started", {"target_sha": target_sha})
+                _secure_rename_sibling(tx["repo"].parent, tx["candidate"].name, tx["repo"].name)
+                mutated = True
+                _fsync_dir(tx["repo"].parent)
+                _journal_write(tx, "live_published", {"target_sha": target_sha})
+                save_manifest(tx["key"], new_manifest)
+                if _raw_metadata(manifest_file(tx["key"])) != new_manifest_raw:
+                    raise RepoError("manifest commit did not produce expected bytes")
+                _journal_write(tx, "manifest_committed", {"target_sha": target_sha})
+                save_state(new_state)
+                if _raw_metadata(state_file()) != new_state_raw:
+                    raise RepoError("state commit did not produce expected bytes")
+                _journal_write(tx, "state_committed", {"target_sha": target_sha})
+    except Exception as exc:
+        try:
+            if mutated:
+                _rollback_tx(tx, old_state_raw, old_manifest_raw)
+            else:
+                _tx_cleanup(tx)
+        except Exception:
+            raise
+        if isinstance(exc, RepoError):
+            raise
+        raise RepoError(f"deployment failed: {_brief(exc)}") from exc
+    _tx_cleanup(tx)
+
+
+def _new_state_for_init(st, key, source, source_sig, target):
+    result = copy.deepcopy(st)
+    entry = result.get(key) or {}
+    current_source, current_sig = _source_snapshot(key, result)
+    entry["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
+    entry["mode"] = "bundled"
+    if current_source == source and current_sig == source_sig:
+        entry["source"] = source
+    result[key] = entry
+    return result
+
+
+def _new_state_for_update(st, key, source, target, started, result):
+    out = copy.deepcopy(st)
+    entry = out.get(key) or {}
+    entry["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
+    entry["last_update"] = time.time()
+    entry["last_update_secs"] = round(time.time() - started, 1)
+    checked = {"repo": key, "ok": True, "cached": False, "target": target,
+               "deployed": entry["deployed"], "source": source, "up_to_date": True}
+    old_check = entry.get("last_check") if isinstance(entry.get("last_check"), dict) else {}
+    old_checked = old_check.get("checked") if isinstance(old_check.get("checked"), dict) else {}
+    entry["last_check"] = {**old_check, "checked": {**old_checked, **checked}, "checked_at": time.time()}
+    out[key] = entry
+    return out
+
+
+def _prepare_initial_state(key):
+    _recover_locked(key)
     with _state_lock():
+        raw_state, raw_manifest = _raw_metadata(state_file()), _raw_metadata(manifest_file(key))
         st = _load_state_for_mutation()
-        source, source_sig = _source_snapshot(key, st)
-        rstate = st.get(key) or {}
-        if not isinstance(rstate, dict):
-            raise RepoError("invalid repository state entry")
-        _load_manifest_for_mutation(key)
-    if rstate.get("deployed") and not tarball and not force_redeploy:
-        log(f"[init {key}] already deployed at {rstate['deployed']['ref']} — nothing to do.")
+        source, sig = _source_snapshot(key, st)
+        entry = st.get(key) or {}
+        old_manifest = _load_manifest_for_mutation(key)
+    return st, source, sig, raw_state, raw_manifest, entry, old_manifest
+
+
+def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
+    key = validate_repo_key(key)
+    st, source, source_sig, old_state_raw, old_manifest_raw, entry, old_manifest = _prepare_initial_state(key)
+    repo = safe_destination(repo_dir(key))
+    if entry.get("deployed") and not tarball and not force_redeploy:
+        if old_manifest is None:
+            raise RepoError("repository manifest is missing")
+        _validate_tree(repo)
+        log(f"[init {key}] already deployed at {entry['deployed']['ref']} — nothing to do.")
         return {"ok": True, "noop": True}
-    log(f"[init {key}] resolving target “{source}” …")
     target = resolve_target(key, source)
     log(f"[init {key}] target: {target['ref']} @ {target['sha'][:7]}")
-    repo = safe_destination(repo_dir(key))
-    stash_dir = safe_destination(data_dir() / f".repos-stash-{key}-{int(time.time())}")
-    saved = []
+    tx = _build_tx(key, old_state_raw, old_manifest_raw, target, source, source_sig)
     try:
-        if repo.exists():
-            log(f"[init {key}] replacing existing copy at {repo}")
-            saved = stash_user_data(repo, stash_dir, log)
-            shutil.rmtree(repo, ignore_errors=True)
         if tarball:
             tp = safe_destination(Path(tarball))
-            log(f"[init {key}] extracting local tarball {tp.name} ({tp.stat().st_size / 1e6:.0f} MB) …")
-            extract_tarball(tp, repo, log)
+            extract_tarball(tp, tx["candidate"], log)
         else:
-            tmp = data_dir() / f".repos-download-{key}.tar.gz"
+            archive = tx["root"] / "archive.tar.gz"
             set_progress(key, stage="download", done=0, total=0, label="full snapshot")
-            log(f"[init {key}] downloading full snapshot from GitHub …")
-            data = gh_get_bytes(f"{API}/repos/{meta['owner']}/{meta['repo']}/tarball/{target['sha']}",
-                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t),
-                                  max_bytes=TARBALL_CAP)
-            _secure_write_bytes(tmp, data)
-            log(f"[init {key}] {len(data) / 1e6:.0f} MB received — extracting to {repo} …")
+            gh_download_to(f"{API}/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/tarball/{target['sha']}", archive,
+                           timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t), max_bytes=TARBALL_CAP)
             set_progress(key, stage="extract", done=0, total=0)
-            extract_tarball(tmp, repo, log)
-            if tmp.exists():
-                _secure_unlink_absolute(tmp)
-            set_progress(key, stage="fingerprint", done=0, total=0, unit="files")
-        restore_user_data(saved, repo, log)
-        man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
-        paths = tracked_paths(repo)
-        for i, p in enumerate(paths, 1):
-            man["files"][p] = sha256_file(repo / p)
-            # one heartbeat per file: the stage now shows a real count instead
-            # of sitting on “fingerprinting the files” for minutes (writes are
-            # throttled to ~2% of the file count by set_progress)
-            set_progress(key, stage="fingerprint", done=i, total=len(paths), unit="files")
-        save_manifest(key, man)
-        with _state_lock():
-            # Reload inside the state lock. Preserve any source selected while
-            # the network/deploy work was in progress instead of resurrecting
-            # the captured source.
-            st = _load_state_for_mutation()
-            rstate = st.get(key) or {}
-            if not isinstance(rstate, dict):
-                raise RepoError("invalid repository state entry")
-            current_source, current_sig = _source_snapshot(key, st)
-            rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
-            rstate["mode"] = "bundled"
-            if current_sig == source_sig and current_source == source:
-                rstate["source"] = source
-            st[key] = rstate
-            save_state(st)
-        log(f"[init {key}] {REPOS[key]['name']} deployed at {target['ref']} ({target['sha'][:7]}) — "
-            f"{len(man['files'])} tracked files fingerprinted")
-        try:
-            _sync_deps(key, log)
-        except Exception as e:
-            log(f"  ! dependency sync failed: {e}")
+            extract_tarball(archive, tx["candidate"], log)
+        # Fingerprint upstream before overlaying preserved local content so
+        # the manifest continues to record pristine hashes.
+        pristine = _fingerprint_tree(key, target, tx["candidate"], progress=True)
+        if repo.exists():
+            _validate_tree(repo)
+            _copy_authorized_user_data(repo, tx["candidate"], log)
+            if old_manifest is not None:
+                _copy_existing_local_edits(repo, tx["candidate"], old_manifest, log)
+        man = pristine
+        candidate_paths = set(_validate_tree(tx["candidate"]))
+        if old_manifest is not None:
+            for rel, digest in old_manifest["files"].items():
+                if rel in candidate_paths and rel not in man["files"]:
+                    man["files"][rel] = digest
+        for rel in candidate_paths - set(man["files"]):
+            man["files"][rel] = sha256_file(safe_path(tx["candidate"], rel))
+        if old_manifest is not None:
+            man["local_edits"] = [rel for rel in old_manifest.get("local_edits", [])
+                                   if rel in man["files"]]
+        man = _with_local_edits(tx["candidate"], man)
+        new_state = _new_state_for_init(st, key, source, source_sig, target)
+        _publish_tx(tx, man, new_state, old_state_raw, old_manifest_raw, target["sha"])
+        log(f"[init {key}] {REPOS[key]['name']} deployed at {target['ref']} ({target['sha'][:7]}) — {len(man['files'])} tracked files fingerprinted")
+        return {"ok": True, "files": len(man["files"])}
+    except Exception:
+        if tx["journal"].exists():
+            _recover_locked(key)
+        else:
+            for p in (tx["candidate"], tx["backup"]):
+                if p.exists():
+                    _remove_tree(p)
+            _remove_transaction(tx["root"])
+        raise
     finally:
-        try:
-            if stash_dir.exists():
-                shutil.rmtree(stash_dir, ignore_errors=True)
-        except Exception:
-            pass
         clear_progress(key)
-    return {"ok": True, "files": len(man["files"])}
 
 
-def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
+def _cmd_update_locked(key, force_full=False, log=print):
     key = validate_repo_key(key)
-    with _repo_lock(key):
-        return _cmd_init_locked(key, tarball=tarball, log=log,
-                                force_redeploy=force_redeploy)
-
-
-def _cmd_update_locked(key: str, force_full: bool = False, log=print):
-    key = validate_repo_key(key)
-    meta = REPOS[key]
+    _recover_locked(key)
     with _state_lock():
+        old_state_raw, old_manifest_raw = _raw_metadata(state_file()), _raw_metadata(manifest_file(key))
         st = _load_state_for_mutation()
-        source, _source_sig = _source_snapshot(key, st)
-        rstate = st.get(key) or {}
-        if not isinstance(rstate, dict):
-            raise RepoError("invalid repository state entry")
-        deployed = rstate.get("deployed")
-        _load_manifest_for_mutation(key)
+        source, source_sig = _source_snapshot(key, st)
+        entry = st.get(key) or {}
+        deployed = entry.get("deployed")
+        man = _load_manifest_for_mutation(key)
     if not deployed:
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
-    log(f"[update {key}] resolving target “{source}” …")
+    repo = safe_destination(repo_dir(key))
+    _validate_tree(repo)
     target = resolve_target(key, source)
-    log(f"[update {key}] target: {target['ref']} @ {target['sha'][:7]} ({(target.get('date') or '?')[:10]})")
     if deployed["sha"] == target["sha"]:
-        log(f"[update {key}] already at {target['ref']} ({target['sha'][:7]}) — nothing to do.")
         return {"ok": True, "noop": True}
+    tx = _build_tx(key, old_state_raw, old_manifest_raw, target, source, source_sig)
+    started = time.time()
+    staging = tx["root"] / "staging"
+    try:
+        _clone_tree(repo, tx["candidate"])
+        mode = "full" if force_full else "diff"
+        if mode == "diff":
+            try:
+                cmp = compare(key, deployed["sha"], target["sha"])
+                if cmp["status"] != "ahead" or cmp["too_many"]:
+                    mode = "full"
+            except RepoError as exc:
+                log(f"[update {key}] diff unavailable ({_brief(exc)}) — switching to full-tarball sync.")
+        if mode == "diff":
+            staging.mkdir()
+            count = [0]
+            def pristine_for(path):
+                dest = safe_path(staging, path)
+                try:
+                    downloaded = download_to(key, target["sha"], path, dest, log)
+                    if isinstance(downloaded, bool) or not isinstance(downloaded, int) or downloaded < 0:
+                        raise RepoError("download returned an invalid byte count")
+                    count[0] += 1
+                    set_progress(key, done=count[0])
+                    return dest
+                except RepoError as exc:
+                    log(f"    ! could not fetch {_brief(path)}: {_brief(exc)}")
+                    raise RepoError(f"could not fetch pristine {_brief(path)}") from exc
+            ops, deletes = {}, []
+            for item in cmp["files"]:
+                if item["status"] == "removed":
+                    if not _is_authorized_user_path(item["path"]):
+                        deletes.append(item["path"])
+                else:
+                    ops[item["path"]] = item.get("previous")
+            result = apply_changes(key, man, target, ops, deletes, pristine_for, log, repo_root=tx["candidate"])
+        else:
+            archive = tx["root"] / "archive.tar.gz"
+            gh_download_to(f"{API}/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/tarball/{target['sha']}", archive,
+                           timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t), max_bytes=TARBALL_CAP)
+            extract_tarball(archive, staging, log)
+            upstream = {p: staging / p for p in tracked_paths(staging)}
+            ops = {p: None for p in upstream}
+            deletes = [p for p in man["files"] if p not in upstream and not _is_authorized_user_path(p)]
+            result = apply_changes(key, man, target, ops, deletes, lambda p: upstream.get(p), log, repo_root=tx["candidate"])
+        _validate_tree(tx["candidate"])
+        result["manifest"] = _with_local_edits(tx["candidate"], result["manifest"])
+        _validate_final_manifest(tx["candidate"], result["manifest"])
+        new_state = _new_state_for_update(st, key, source, target, started, result)
+        _publish_tx(tx, result["manifest"], new_state, old_state_raw, old_manifest_raw, target["sha"])
+        for p in result["conflicts"][:10]:
+            log(f"  ! kept your local version of {_brief(p)} (upstream also changed it — merge manually if needed)")
+        return {"ok": True, "applied": result["applied"], "deleted": result["deleted"], "conflicts": result["conflicts"]}
+    except Exception:
+        if tx["journal"].exists():
+            _recover_locked(key)
+        else:
+            for p in (tx["candidate"], tx["backup"]):
+                if p.exists():
+                    _remove_tree(p)
+            _remove_transaction(tx["root"])
+        raise
+    finally:
+        clear_progress(key)
 
-    return _run_update(key, meta, st, rstate, deployed, source, target, force_full, log)
+
+def cmd_init(key, tarball=None, log=print, force_redeploy=False):
+    key = validate_repo_key(key)
+    with _repo_lock(key):
+        return _cmd_init_locked(key, tarball=tarball, log=log, force_redeploy=force_redeploy)
 
 
-def cmd_update(key: str, force_full: bool = False, log=print):
+def cmd_update(key, force_full=False, log=print):
     key = validate_repo_key(key)
     with _repo_lock(key):
         return _cmd_update_locked(key, force_full=force_full, log=log)
 
 
-def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log):
+def verify_deployed(key):
     key = validate_repo_key(key)
-    t0 = time.time()
-    try:
-        man = _load_manifest_for_mutation(key)
-        if man is None:
-            raise RepoError("repository manifest is missing")
-        old_files = man["files"]
-        repo = safe_destination(repo_dir(key))
-        mode = "full" if force_full else "diff"
-
-        if mode == "diff":
-            try:
-                cmp = compare(key, deployed["sha"], target["sha"])
-                if cmp["status"] != "ahead":
-                    # the target is older than (behind) or unrelated to (diverged) the deployed
-                    # commit — GitHub's merge-base diff can't express that, so swap full snapshots
-                    log(f"[update {key}] moving to an older/diverged ref — using full-tarball sync.")
-                    mode = "full"
-                elif cmp["too_many"]:
-                    log(f"[update {key}] {DIFF_FILE_CAP}+ files changed — switching to full-tarball sync.")
-                    mode = "full"
-                else:
-                    log(f"[update {key}] {len(cmp['files'])} file(s) changed across {cmp['commits']} commit(s)")
-            except RepoError as e:
-                log(f"[update {key}] diff unavailable ({e}) — switching to full-tarball sync.")
-                mode = "full"
-
-        if mode == "diff":
-            staging = safe_destination(data_dir() / f".repos-diff-{key}-{int(time.time())}")
-            staging.mkdir(parents=True, exist_ok=True)
-            safe_destination(staging)
-
-            set_progress(key, stage="update", done=0, total=len(cmp["files"]))
-
-            _count = [0]
-
-            def pristine_for(path):
-                """Fetch the new pristine content into staging; return its path (or None on failure)."""
-                sp = safe_path(staging, path)
-                try:
-                    download_to(key, target["sha"], path, sp, log)
-                    _count[0] += 1
-                    set_progress(key, done=_count[0])
-                    return sp
-                except RepoError as e:
-                    log(f"    ! could not fetch {_brief(path)}: {_brief(e)}")
-                    return None
-
-            apply_ops, delete_paths = {}, []
-            for f in cmp["files"]:
-                if f["status"] == "removed":
-                    delete_paths.append(f["path"])
-                else:
-                    apply_ops[f["path"]] = f.get("previous")
-            res = apply_changes(key, man, target, apply_ops, delete_paths, pristine_for, log)
-            shutil.rmtree(staging, ignore_errors=True)
-        else:
-            log(f"[update {key}] downloading full snapshot of {target['ref']} …")
-            set_progress(key, stage="download", done=0, total=0, label="full snapshot")
-            tmp = data_dir() / f".repos-download-{key}.tar.gz"
-            data = gh_get_bytes(f"{API}/repos/{meta['owner']}/{meta['repo']}/tarball/{target['sha']}",
-                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t),
-                                  max_bytes=TARBALL_CAP)
-            _secure_write_bytes(tmp, data)
-            log(f"[update {key}] {len(data) / 1e6:.0f} MB received — extracting & reconciling …")
-            staging = safe_destination(data_dir() / f".repos-staging-{key}-{int(time.time())}")
-            staging.mkdir(parents=True, exist_ok=True)
-            safe_destination(staging)
-            set_progress(key, stage="extract", done=0, total=0)
-            extract_tarball(tmp, staging, log)
-            set_progress(key, stage="apply", done=0, total=0)
-            new_tree = {p: staging / p for p in tracked_paths(staging)}
-            apply_ops = {p: None for p in new_tree}
-            delete_paths = [p for p in old_files if p not in new_tree]
-            res = apply_changes(key, man, target, apply_ops, delete_paths,
-                                 lambda p: new_tree.get(p), log)
-            shutil.rmtree(staging, ignore_errors=True)
-            if tmp.exists():
-                _secure_unlink_absolute(tmp)
-
-        # state write under the lock, with a fresh reload (the UI server's
-        # check/update handlers and the launcher both write this file)
-        new_manifest = res["manifest"]
-        with _state_lock():
-            st = _load_state_for_mutation()
-            rstate = st.get(key) or {}
-            if not isinstance(rstate, dict):
-                raise RepoError("invalid repository state entry")
-            rstate["deployed"] = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date")}
-            rstate["last_update"] = time.time()
-            rstate["last_update_secs"] = round(time.time() - t0, 1)
-            # Re-record the check against the new deployed commit while
-            # retaining extension fields written by other state clients.
-            checked = {"repo": key, "ok": True, "cached": False, "target": target,
-                       "deployed": rstate["deployed"], "source": source,
-                       "up_to_date": True}
-            old_check = rstate.get("last_check") if isinstance(rstate.get("last_check"), dict) else {}
-            old_checked = old_check.get("checked") if isinstance(old_check.get("checked"), dict) else {}
-            rstate["last_check"] = {**old_check, "checked": {**old_checked, **checked},
-                                     "checked_at": time.time()}
-            st[key] = rstate
-            save_state(st)
-        save_manifest(key, new_manifest)
-
-        for p in res["conflicts"][:10]:
-            log(f"  ! kept your local version of {_brief(p)} (upstream also changed it — merge manually if needed)")
-        log(f"[update {key}] done in {res['applied']} applied, {res['deleted']} removed, "
-            f"{len(res['conflicts'])} conflict(s) kept — {meta['name']} now at "
-            f"{target['ref']} ({target['sha'][:7]})")
+    with _repo_lock(key):
+        _recover_locked(key)
+        st = load_state().get(key) or {}
+        deployed = st.get("deployed") or {}
+        if not deployed.get("sha"):
+            return False
+        man = load_manifest(key)
         try:
-            _sync_deps(key, log)
-        except Exception as e:
-            log(f"  ! dependency sync failed: {e}")
-        return {"ok": True, "applied": res["applied"], "deleted": res["deleted"],
-                 "conflicts": res["conflicts"]}
-    finally:
-        clear_progress(key)
-
+            _validate_manifest_shape(man)
+        except Exception:
+            return False
+        files = man.get("files") or {}
+        if not files or man.get("sha") not in (None, deployed["sha"]):
+            return False
+        try:
+            _validate_tree(repo_dir(key))
+            edits = set(man.get("local_edits", []))
+            pristine = [rel for rel in sorted(files) if rel not in edits]
+            probes = pristine[:1] if pristine else []
+            if probes:
+                return sha256_file(safe_path(repo_dir(key), probes[0])) == files[probes[0]]
+            # All recorded paths are local edits: validate structure and
+            # presence, but deliberately do not compare them to pristine hashes.
+            return all(safe_path(repo_dir(key), rel).is_file() for rel in files)
+        except Exception:
+            return False
 
 
 def main():
     ap = argparse.ArgumentParser(description="Workbench repo sync")
     ap.add_argument("cmd", choices=["init", "update", "check", "refs"])
     ap.add_argument("--repo", required=True, choices=list(REPOS))
-    ap.add_argument("--tarball", default=None,
-                    help="local tarball to extract instead of downloading (init only)")
-    ap.add_argument("--force-full", action="store_true",
-                    help="update via full tarball instead of the file diff")
-    ap.add_argument("--json", action="store_true", help="machine-readable output for check/refs")
+    ap.add_argument("--tarball", default=None)
+    ap.add_argument("--force-full", action="store_true")
+    ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     try:
         if a.cmd == "init":

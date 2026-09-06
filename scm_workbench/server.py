@@ -811,13 +811,32 @@ def load_settings() -> dict:
 
 
 def save_settings(s: dict) -> None:
-    # atomic: write to a sibling temp file and rename over the real one, so a
-    # crash (or a second writer) can never leave a half-written settings.json
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(s, f, indent=2)
-    os.replace(tmp, SETTINGS_FILE)
+    # Share a stable cross-process source lock with repo_sync publication.
+    # The caller's in-process _SETTINGS_LOCK still protects read/modify/write
+    # callers; this lock protects the file against a deployment in another
+    # process.
+    with repo_sync._settings_source_lock():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(s, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, SETTINGS_FILE)
+            try:
+                fd = os.open(DATA_DIR, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 # The server is threaded; two settings writers in flight would otherwise
@@ -4025,17 +4044,10 @@ class Handler(BaseHTTPRequestHandler):
                     settings["repos"][key]["source"] = source if source in ("main", "latest-release") else "pinned"
                     settings["repos"][key]["pin"] = source if source not in ("main", "latest-release") else ""
                     save_settings(settings)
-                repo_sync.set_source(key, source)
-                # record a check immediately — we already know the target, so the UI
-                # can show “new version available” without a second round-trip
-                state = repo_sync.load_state()
-                r = state.setdefault(key, {})
-                deployed = r.get("deployed")
-                r["last_check"] = {"checked": {"repo": key, "ok": True, "cached": False, "target": target,
-                                                 "deployed": deployed,
-                                                 "up_to_date": bool(deployed and deployed.get("sha") == target["sha"])},
-                                  "checked_at": time.time()}
-                repo_sync.save_state(state)
+                # Record source and the already-resolved target through the
+                # repository operation/state lock; unrelated repo entries are
+                # merged, never replaced by a stale whole-state snapshot.
+                repo_sync.set_source_and_record_check(key, source, target)
                 return self._json({"ok": True, "repo": key, "source": source, "target": target,
                                   "repos": repos_view(settings)})
             if path == "/api/repos/check":
