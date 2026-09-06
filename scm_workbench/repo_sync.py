@@ -36,7 +36,9 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -44,12 +46,22 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath
 
 USER_AGENT = "scm-workbench/1.1"
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
 DIFF_FILE_CAP = 300          # GitHub's compare API returns at most this many files
+GH_JSON_CAP = 8 * 1024 * 1024
+RAW_FILE_CAP = 256 * 1024 * 1024
+TARBALL_CAP = 1024 * 1024 * 1024
+TAR_MEMBER_CAP = TARBALL_CAP
+REFS_RESULT_CAP = 512 * 1024
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_GH_API_HOST = "api.github.com"
+_GH_RAW_HOST = "raw.githubusercontent.com"
+_GH_CODELOAD_HOST = "codeload.github.com"
 
 REPOS = {
     "scm": {
@@ -74,6 +86,625 @@ class RepoError(Exception):
     pass
 
 
+def _text(value, label, limit=256, allow_empty=False):
+    """Validate externally supplied text without ever echoing unbounded input."""
+    if not isinstance(value, str):
+        raise RepoError(f"invalid {label}")
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise RepoError(f"invalid {label} encoding")
+    if (not allow_empty and not raw) or len(raw) > limit:
+        raise RepoError(f"invalid {label} length")
+    if any(ord(c) < 32 or ord(c) == 127 or unicodedata.category(c) == "Cc" for c in value):
+        raise RepoError(f"invalid {label} control character")
+    return value
+
+
+def _brief(value, limit=120):
+    """A bounded, single-line representation suitable for logs/errors."""
+    s = value if isinstance(value, str) else repr(value)
+    s = " ".join(s.split())
+    return s[:limit] + ("…" if len(s) > limit else "")
+
+
+def validate_repo_key(key: str) -> str:
+    _text(key, "repository key", 32)
+    if key not in REPOS:
+        raise RepoError("unknown repository")
+    return key
+
+
+def validate_source(source: str) -> str:
+    """Validate a conservative ``git check-ref-format``-like ref selector."""
+    source = _text(source, "source")
+    if source != source.strip() or any(c.isspace() for c in source):
+        raise RepoError("source must not contain whitespace")
+    if source.startswith(("/", "\\", "-", ".")) or source.endswith(("/", ".")):
+        raise RepoError("invalid source form")
+    if re.match(r"^[A-Za-z]:", source) or "\\" in source:
+        raise RepoError("invalid source form")
+    if ".." in source or "@{" in source:
+        raise RepoError("invalid source form")
+    if any(c in source for c in "~^:?*[%#[]") or "://" in source:
+        raise RepoError("invalid source form")
+    parts = source.split("/")
+    if any(not part or part in (".", "..") or part.startswith(".") or
+           part.endswith(".") or part.lower().endswith(".lock")
+           for part in parts):
+        raise RepoError("invalid source path")
+    # PurePosixPath documents the intended ref/path interpretation without
+    # accepting platform-specific absolute or drive paths.
+    if not isinstance(PurePosixPath(source), PurePosixPath):  # pragma: no cover
+        raise RepoError("invalid source")
+    return source
+
+
+def validate_sha(value: str, label="SHA") -> str:
+    _text(value, label, 40)
+    if not _SHA_RE.fullmatch(value):
+        raise RepoError(f"invalid {label}")
+    return value
+
+
+def validate_repo_path(path: str) -> str:
+    """Validate a portable, repository-relative POSIX path."""
+    path = _text(path, "repository path", 4096)
+    if path.startswith("/") or path.startswith("\\") or "\\" in path:
+        raise RepoError("invalid repository path")
+    if re.match(r"^[A-Za-z]:", path) or path.startswith("//"):
+        raise RepoError("invalid repository path")
+    parts = path.split("/")
+    if not 1 <= len(parts) <= 64 or any(p in ("", ".", "..") for p in parts):
+        raise RepoError("invalid repository path")
+    for part in parts:
+        if len(part.encode("utf-8")) > 255:
+            raise RepoError("repository path component too long")
+    # Keep this explicitly POSIX: PurePosixPath never treats a Windows drive
+    # or backslash as a portable repository path.
+    PurePosixPath(path)
+    return path
+
+
+def _ensure_no_symlink_components(path: Path) -> Path:
+    """Reject symlinks in an I/O path, including a symlink at the leaf."""
+    p = Path(os.path.abspath(os.fspath(path)))
+    current = Path(p.anchor) if p.anchor else Path()
+    for part in p.parts[1:] if p.anchor else p.parts:
+        current = current / part
+        if current.is_symlink():
+            # macOS exposes /tmp and /var as aliases into /private; these are
+            # platform roots, not an application-controlled escape.
+            resolved = current.resolve(strict=False)
+            if current.parent == Path(current.anchor) and resolved.parts[:2] == (current.anchor, "private"):
+                current = resolved
+                continue
+            raise RepoError("refusing a path containing a symbolic link")
+    return p
+
+
+def safe_path(root: Path, relative: str) -> Path:
+    """Return a repository path with canonical containment and no symlinks."""
+    relative = validate_repo_path(relative)
+    root_input = Path(root)
+    _ensure_no_symlink_components(root_input)
+    root = root_input if _WINDOWS_FALLBACK else root_input.resolve()
+    _ensure_no_symlink_components(root)
+    candidate = root.joinpath(*relative.split("/"))
+    _ensure_no_symlink_components(candidate)
+    canonical = candidate.resolve(strict=False)
+    try:
+        canonical.relative_to(root)
+    except ValueError:
+        raise RepoError("path escapes repository")
+    return candidate
+
+
+def safe_destination(path: Path) -> Path:
+    """Check an arbitrary destination before creating or writing it."""
+    p = _ensure_no_symlink_components(Path(path))
+    canonical = p.resolve(strict=False)
+    # A symlink component has already been rejected; this containment check
+    # catches unusual path spellings such as a parent containing '..'.
+    try:
+        canonical.relative_to(Path(p.anchor).resolve())
+    except ValueError:
+        raise RepoError("destination path escapes its root")
+    return p
+
+
+# Descriptor-relative operations are the write boundary.  The POSIX path uses
+# openat-style traversal so a checked parent cannot be swapped for a symlink
+# between validation and the final open.  Windows lacks the corresponding
+# dir_fd/O_NOFOLLOW primitives; its fallback rechecks every component around
+# each operation and is only used for the platform's own staging paths.
+_DESCRIPTOR_IO = (
+    os.name != "nt" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and
+    os.open in getattr(os, "supports_dir_fd", set()) and
+    os.mkdir in getattr(os, "supports_dir_fd", set()) and
+    os.unlink in getattr(os, "supports_dir_fd", set())
+)
+# Tests may force this abstraction on non-Windows with a mocked
+# _windows_open_checked implementation; production only selects it on Windows.
+_WINDOWS_FALLBACK = os.name == "nt"
+
+
+def _windows_final_path(kernel32, handle):
+    import ctypes
+    size = 512
+    while size <= 32768:
+        buf = ctypes.create_unicode_buffer(size)
+        got = kernel32.GetFinalPathNameByHandleW(handle, buf, size, 0)
+        if got == 0:
+            raise RepoError("could not resolve Windows file handle")
+        if got < size - 1:
+            value = buf.value
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+            return os.path.normcase(os.path.normpath(value))
+        size *= 2
+    raise RepoError("Windows file handle path is too long")
+
+
+def _windows_open_checked(path: Path, write=False, create_parents=False,
+                          mode=0o644, expected_root=None, expected_path=None,
+                          directory=False, delete=False):
+    """Open a Windows file only after CreateFileW handle validation.
+
+    FILE_FLAG_OPEN_REPARSE_POINT makes the handle refer to the reparse point
+    itself.  We reject that handle and every reparse parent before a writable
+    handle is truncated.  A same-user process can still replace an ancestor
+    after this final check; Windows has no portable openat equivalent here, so
+    callers fail closed on every check but cannot claim immunity from that
+    post-check race.
+    """
+    if os.name != "nt":
+        raise RepoError("Windows safe I/O is unavailable on this platform")
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                                                    wintypes.DWORD, wintypes.DWORD]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong,
+                                           ctypes.POINTER(ctypes.c_longlong), wintypes.DWORD]
+    kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    kernel32.SetEndOfFile.argtypes = [wintypes.HANDLE]
+    kernel32.SetEndOfFile.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                     wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    GENERIC_READ, GENERIC_WRITE, DELETE = 0x80000000, 0x40000000, 0x00010000
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE = 1, 2, 4
+    OPEN_EXISTING, CREATE_NEW = 3, 1
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    FILE_ATTRIBUTE_DIRECTORY = 0x10
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    FILE_BEGIN = 0
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attrs", wintypes.DWORD),
+            ("creation", wintypes.FILETIME),
+            ("last_access", wintypes.FILETIME),
+            ("last_write", wintypes.FILETIME),
+            ("volume", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    def create(candidate, access, disposition, directory=False):
+        flags = FILE_FLAG_OPEN_REPARSE_POINT
+        if directory:
+            flags |= FILE_FLAG_BACKUP_SEMANTICS
+        handle = kernel32.CreateFileW(
+            str(candidate), access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None, disposition, flags, None)
+        handle_value = handle.value if hasattr(handle, "value") else handle
+        if handle_value in (None, INVALID_HANDLE_VALUE):
+            return None, ctypes.get_last_error()
+        return handle, 0
+
+    def check(handle, root_final=None, exact=None, directory=False):
+        info = _FileInfo()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise RepoError("could not inspect Windows file handle")
+        if info.attrs & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise RepoError("refusing a Windows reparse point")
+        is_dir = bool(info.attrs & FILE_ATTRIBUTE_DIRECTORY)
+        if is_dir != directory:
+            raise RepoError("refusing an unexpected Windows file type")
+        final = _windows_final_path(kernel32, handle)
+        if root_final is not None:
+            prefix = root_final.rstrip("\\") + "\\"
+            if final != root_final and not final.startswith(prefix):
+                raise RepoError("Windows handle escaped its trusted root")
+        if exact is not None and final != os.path.normcase(os.path.normpath(str(exact))):
+            raise RepoError("Windows handle resolved to an unexpected path")
+
+    candidate = Path(path)
+    checked = safe_destination(candidate)
+    # Do not resolve through a Windows reparse point before CreateFileW gets a
+    # chance to inspect it.  abspath normalizes .. without following links.
+    expected = (Path(os.path.abspath(os.fspath(expected_path)))
+                if expected_path is not None else Path(os.path.abspath(os.fspath(checked))))
+    root = (Path(os.path.abspath(os.fspath(expected_root)))
+            if expected_root is not None else Path(expected.anchor))
+    # Walk/create every parent using checked directory handles before opening
+    # the leaf.  This rejects reparse parents instead of following them.
+    parent = expected.parent
+    parent_parts = []
+    drive_root = Path(expected.anchor)
+    try:
+        parent_parts = list(parent.relative_to(drive_root).parts)
+    except ValueError:
+        raise RepoError("invalid Windows path root")
+    root_handle, root_error = create(root, GENERIC_READ, OPEN_EXISTING, directory=True)
+    if root_handle is None:
+        raise RepoError("could not open the trusted Windows root")
+    try:
+        check(root_handle, None, directory=True)
+        root_final = _windows_final_path(kernel32, root_handle)
+    finally:
+        kernel32.CloseHandle(root_handle)
+
+    current = drive_root
+    for part in parent_parts:
+        current = current / part
+        if create_parents:
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise RepoError(f"could not create Windows parent: {_brief(exc)}")
+        handle, error = create(current, GENERIC_READ, OPEN_EXISTING, directory=True)
+        if handle is None:
+            raise RepoError("could not open a Windows parent directory")
+        try:
+            check(handle, None, directory=True)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    access = GENERIC_READ | (GENERIC_WRITE if write else 0) | (DELETE if delete else 0)
+    handle, error = create(expected, access, OPEN_EXISTING, directory=directory)
+    new_file = False
+    if handle is None and write and error in (2, 3):  # file/path not found
+        handle, error = create(expected, access, CREATE_NEW, directory=directory)
+        new_file = handle is not None
+    if handle is None:
+        raise RepoError("could not open Windows file safely")
+    try:
+        check(handle, root_final, exact=expected, directory=directory)
+        if directory:
+            return None
+        if delete:
+            class _Disposition(ctypes.Structure):
+                _fields_ = [("DeleteFile", wintypes.BOOL)]
+            disposition = _Disposition(True)
+            if not kernel32.SetFileInformationByHandle(
+                    handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+                raise RepoError("could not delete Windows file handle")
+            return None
+        if write and not new_file:
+            if not kernel32.SetFilePointerEx(handle, ctypes.c_longlong(0), None, FILE_BEGIN):
+                raise RepoError("could not position Windows file handle")
+            if not kernel32.SetEndOfFile(handle):
+                raise RepoError("could not truncate Windows file handle")
+        fd_flags = getattr(os, "O_BINARY", 0)
+        handle_value = handle.value if hasattr(handle, "value") else handle
+        fd = msvcrt.open_osfhandle(handle_value, (os.O_RDWR if write else os.O_RDONLY) | fd_flags)
+        handle = None  # ownership transferred to the CRT descriptor
+        return os.fdopen(fd, "wb" if write else "rb")
+    except Exception:
+        # CREATE_NEW may have made an empty file before a final-handle check
+        # failed.  Remove it through that same handle; never path-delete it.
+        if handle is not None and new_file:
+            try:
+                class _Disposition(ctypes.Structure):
+                    _fields_ = [("DeleteFile", wintypes.BOOL)]
+                disposition = _Disposition(True)
+                kernel32.SetFileInformationByHandle(
+                    handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition))
+            except Exception:
+                pass
+        raise
+    finally:
+        if handle is not None:
+            kernel32.CloseHandle(handle)
+
+
+def _open_dir_chain(root: Path, parts, create=False):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(os.fspath(root), flags)
+    try:
+        for part in parts:
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _absolute_parts(path: Path):
+    checked = safe_destination(Path(path))
+    canonical = checked.resolve(strict=False)
+    root = Path(canonical.anchor)
+    rel = canonical.relative_to(root)
+    parts = list(rel.parts)
+    if not parts:
+        raise RepoError("refusing to operate on a filesystem root")
+    return root, parts
+
+
+def _secure_open_relative(root: Path, relative: str, write=False,
+                          create_parents=False, mode=0o644):
+    relative = validate_repo_path(relative)
+    root_input = Path(root)
+    safe_destination(root_input)
+    root = root_input if _WINDOWS_FALLBACK else root_input.resolve()
+    safe_destination(root)
+    parts = relative.split("/")
+    leaf = parts[-1]
+    if _DESCRIPTOR_IO and not _WINDOWS_FALLBACK:
+        parent_fd = _open_dir_chain(root, parts[:-1], create=create_parents)
+        try:
+            if write:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+                fd = os.open(leaf, flags, mode, dir_fd=parent_fd)
+            else:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RepoError("refusing a non-regular repository file")
+            return os.fdopen(fd, "wb" if write else "rb")
+        except Exception:
+            os.close(fd)
+            raise
+    if _WINDOWS_FALLBACK:
+        target = root.joinpath(*parts)
+        return _windows_open_checked(target, write=write,
+                                     create_parents=create_parents, mode=mode,
+                                     expected_root=root, expected_path=target)
+    target = safe_path(root, relative)
+    if write:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safe_destination(target)
+        try:
+            fh = open(target, "wb")
+        except OSError as exc:
+            raise RepoError(f"could not open repository file: {_brief(exc)}")
+        try:
+            safe_destination(target)
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise RepoError("refusing a non-regular repository file")
+            return fh
+        except Exception:
+            fh.close()
+            raise
+    safe_destination(target)
+    try:
+        fh = open(target, "rb")
+    except OSError as exc:
+        raise RepoError(f"could not open repository file: {_brief(exc)}")
+    try:
+        safe_destination(target)
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise RepoError("refusing a non-regular repository file")
+        return fh
+    except Exception:
+        fh.close()
+        raise
+
+
+def _secure_open_absolute(path: Path, write=False, create_parents=False,
+                          mode=0o644):
+    if _WINDOWS_FALLBACK:
+        return _windows_open_checked(Path(path), write=write,
+                                     create_parents=create_parents, mode=mode,
+                                     expected_path=Path(path))
+    root, parts = _absolute_parts(Path(path))
+    if _DESCRIPTOR_IO:
+        parent_fd = _open_dir_chain(root, parts[:-1], create=create_parents)
+        leaf = parts[-1]
+        try:
+            if write:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+                fd = os.open(leaf, flags, mode, dir_fd=parent_fd)
+            else:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RepoError("refusing a non-regular file")
+            return os.fdopen(fd, "wb" if write else "rb")
+        except Exception:
+            os.close(fd)
+            raise
+    target = Path(path)
+    if write:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safe_destination(target)
+        try:
+            fh = open(target, "wb")
+        except OSError as exc:
+            raise RepoError(f"could not open file: {_brief(exc)}")
+        try:
+            safe_destination(target)
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise RepoError("refusing a non-regular file")
+            return fh
+        except Exception:
+            fh.close()
+            raise
+    safe_destination(target)
+    try:
+        fh = open(target, "rb")
+    except OSError as exc:
+        raise RepoError(f"could not open file: {_brief(exc)}")
+    try:
+        safe_destination(target)
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise RepoError("refusing a non-regular file")
+        return fh
+    except Exception:
+        fh.close()
+        raise
+
+
+def _secure_write_bytes(path: Path, data: bytes):
+    with _secure_open_absolute(path, write=True, create_parents=True) as fh:
+        fh.write(data)
+
+
+def _secure_copy_file(source: Path, root: Path, relative: str):
+    with _secure_open_absolute(Path(source), write=False) as src:
+        mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+        with _secure_open_relative(root, relative, write=True,
+                                   create_parents=True, mode=mode) as dst:
+            shutil.copyfileobj(src, dst, length=1 << 20)
+            try:
+                os.fchmod(dst.fileno(), mode)
+            except (AttributeError, OSError):
+                pass
+
+
+def _secure_mkdir_relative(root: Path, relative: str, mode=0o755):
+    relative = validate_repo_path(relative)
+    root_input = Path(root)
+    safe_destination(root_input)
+    root = root_input if _WINDOWS_FALLBACK else root_input.resolve()
+    safe_destination(root)
+    parts = relative.split("/")
+    if _DESCRIPTOR_IO and not _WINDOWS_FALLBACK:
+        parent_fd = _open_dir_chain(root, parts[:-1], create=True)
+        leaf = parts[-1]
+        try:
+            try:
+                os.mkdir(leaf, mode, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                         dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        try:
+            os.fchmod(fd, mode & 0o777)
+        finally:
+            os.close(fd)
+        return
+    if _WINDOWS_FALLBACK:
+        for index in range(1, len(parts) + 1):
+            target = root.joinpath(*parts[:index])
+            try:
+                target.mkdir()
+            except FileExistsError:
+                pass
+            _windows_open_checked(target, expected_root=root, expected_path=target,
+                                  directory=True)
+        return
+    target = safe_path(root, relative)
+    target.mkdir(parents=True, exist_ok=True)
+    safe_destination(target)
+    if target.is_symlink() or not target.is_dir():
+        raise RepoError("refusing an unsafe directory")
+    try:
+        target.chmod(mode & 0o777)
+    except OSError:
+        pass
+
+
+def _secure_unlink_relative(root: Path, relative: str):
+    relative = validate_repo_path(relative)
+    root_input = Path(root)
+    safe_destination(root_input)
+    root = root_input if _WINDOWS_FALLBACK else root_input.resolve()
+    safe_destination(root)
+    parts = relative.split("/")
+    if _DESCRIPTOR_IO and not _WINDOWS_FALLBACK:
+        parent_fd = _open_dir_chain(root, parts[:-1], create=False)
+        try:
+            info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise RepoError("refusing to unlink a symbolic link")
+            os.unlink(parts[-1], dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        return
+    if _WINDOWS_FALLBACK:
+        target = root.joinpath(*parts)
+        _windows_open_checked(target, delete=True, expected_root=root,
+                              expected_path=target)
+        return
+    target = safe_path(root, relative)
+    safe_destination(target)
+    if target.is_symlink():
+        raise RepoError("refusing to unlink a symbolic link")
+    target.unlink()
+
+
+def _secure_unlink_absolute(path: Path):
+    path = Path(path)
+    if _WINDOWS_FALLBACK:
+        _windows_open_checked(path, delete=True, expected_path=path)
+        return
+    root, parts = _absolute_parts(path)
+    if _DESCRIPTOR_IO and not _WINDOWS_FALLBACK:
+        parent_fd = _open_dir_chain(root, parts[:-1], create=False)
+        try:
+            info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise RepoError("refusing to unlink a symbolic link")
+            os.unlink(parts[-1], dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        return
+    target = safe_destination(path)
+    if target.is_symlink():
+        raise RepoError("refusing to unlink a symbolic link")
+    target.unlink()
+
+
+def _secure_hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with _secure_open_absolute(Path(path), write=False) as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 # ----------------------------------------------------------------------------
 # Locations & state
 # ----------------------------------------------------------------------------
@@ -92,7 +723,7 @@ def state_file() -> Path:
 
 
 def manifest_file(key: str) -> Path:
-    return data_dir() / f"repos-manifest-{key}.json"
+    return data_dir() / f"repos-manifest-{validate_repo_key(key)}.json"
 
 
 def load_state() -> dict:
@@ -239,7 +870,7 @@ def clear_progress(key: str) -> None:
 
 
 def repo_dir(key: str) -> Path:
-    return data_dir() / REPOS[key]["rel"]
+    return data_dir() / REPOS[validate_repo_key(key)]["rel"]
 
 
 def load_manifest(key: str) -> dict:
@@ -257,19 +888,26 @@ def save_manifest(key: str, man: dict) -> None:
 
 def load_source(key: str) -> str:
     """Which ref the user asked for: 'main' | 'latest-release' | a tag/sha (pinned)."""
+    key = validate_repo_key(key)
     st = load_state().get(key) or {}
-    if st.get("source"):
-        return str(st["source"])
+    if st.get("source") is not None:
+        return validate_source(st["source"])
     settings_file = data_dir() / "settings.json"
     try:
         settings = json.loads(settings_file.read_text())
-        return str((settings.get("repos", {}).get(key) or {}).get("source")
-                   or REPOS[key].get("default_source", "main"))
+        source = (settings.get("repos", {}).get(key) or {}).get("source")
+        if source is not None:
+            return validate_source(source)
+    except RepoError:
+        raise
     except Exception:
-        return REPOS[key].get("default_source", "main")
+        pass
+    return validate_source(REPOS[key].get("default_source", "main"))
 
 
 def set_source(key: str, source: str) -> None:
+    key = validate_repo_key(key)
+    source = validate_source(source)
     with _state_lock():
         st = load_state()
         r = st.setdefault(key, {})
@@ -281,7 +919,42 @@ def set_source(key: str, source: str) -> None:
 # GitHub over plain HTTPS
 # ----------------------------------------------------------------------------
 
+def _validate_https_host(url: str, allowed_hosts) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise RepoError("GitHub response used an invalid URL")
+    if (parsed.scheme.lower() != "https" or not hostname or
+            hostname.lower() not in set(allowed_hosts) or port is not None or
+            parsed.username is not None or parsed.password is not None or
+            parsed.netloc.lower() != hostname.lower()):
+        raise RepoError("GitHub response used an untrusted URL")
+    return hostname.lower()
+
+
+def _response_url(response, initial_url: str) -> str:
+    geturl = getattr(response, "geturl", None)
+    if callable(geturl):
+        try:
+            final = geturl()
+        except Exception:
+            raise RepoError("GitHub response URL was unavailable")
+        if final is None:
+            return initial_url
+        if not isinstance(final, str):
+            raise RepoError("GitHub response URL was invalid")
+        return final
+    # urllib responses always provide geturl(); this fallback keeps small local
+    # test doubles and older embedders compatible without weakening real checks.
+    return initial_url
+
+
 def gh_json(path: str, params: dict = None):
+    path = _text(path, "API path", 2048)
+    if not path.startswith("/") or "://" in path or "\\" in path:
+        raise RepoError("invalid GitHub API path")
     url = API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -292,73 +965,138 @@ def gh_json(path: str, params: dict = None):
     })
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode("utf-8"))
+            _validate_https_host(_response_url(r, url), {_GH_API_HOST})
+            length = r.headers.get("Content-Length")
+            if length is not None:
+                try:
+                    declared = int(length)
+                except (TypeError, ValueError):
+                    raise RepoError("GitHub API returned an invalid content length")
+                if declared < 0:
+                    raise RepoError("GitHub API returned an invalid content length")
+                if declared > GH_JSON_CAP:
+                    raise RepoError("GitHub API response is too large")
+            chunks, total = [], 0
+            while True:
+                b = r.read(min(1 << 16, GH_JSON_CAP + 1 - total))
+                if not b:
+                    break
+                chunks.append(b)
+                total += len(b)
+                if total > GH_JSON_CAP:
+                    raise RepoError("GitHub API response is too large")
+            try:
+                value = json.loads(b"".join(chunks).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise RepoError("GitHub API returned malformed JSON")
+            if not isinstance(value, (dict, list)):
+                raise RepoError("GitHub API returned an invalid JSON shape")
+            return value
     except urllib.error.HTTPError as e:
         if e.code in (403, 429):
             raise RepoError("GitHub API rate limit or permission error — try again shortly.")
         if e.code == 404:
             return None
-        raise RepoError(f"GitHub API error {e.code} for {path}")
+        raise RepoError(f"GitHub API error {e.code}")
+    except RepoError:
+        raise
     except Exception as e:
-        raise RepoError(f"could not reach GitHub ({path}): {e}")
+        raise RepoError(f"could not reach GitHub ({_brief(path)}): {_brief(e)}")
 
 
-def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None):
+def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
+                 max_bytes: int = RAW_FILE_CAP):
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise RepoError("invalid download size limit")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except (TypeError, ValueError):
+        raise RepoError("refusing download from an untrusted host")
+    initial_host = _validate_https_host(url, {_GH_API_HOST, _GH_RAW_HOST})
+    allowed_final = {initial_host}
+    if (initial_host == _GH_API_HOST and "/tarball/" in parsed.path):
+        allowed_final.add(_GH_CODELOAD_HOST)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
     except Exception as e:
-        raise RepoError(f"download failed: {e}")
+        raise RepoError(f"download failed: {_brief(e)}")
     try:
-        if progress_cb is None:
-            return r.read()
-        total = int(r.headers.get("Content-Length") or 0)
-        if total == 0:
-            # Some of GitHub's download routes stream chunked (no
-            # Content-Length) — a HEAD against the same URL usually still
-            # carries the size, so ask for it before we lose the chance.
+        _validate_https_host(_response_url(r, url), allowed_final)
+        header = r.headers.get("Content-Length")
+        if header is not None:
             try:
-                hr = urllib.request.urlopen(
-                    urllib.request.Request(url, method="HEAD",
-                                           headers={"User-Agent": USER_AGENT}),
-                    timeout=15)
-                total = int(hr.headers.get("Content-Length") or 0)
-                hr.close()
-            except Exception:
-                total = 0
+                total = int(header)
+            except (TypeError, ValueError):
+                raise RepoError("download returned an invalid content length")
+            if total < 0:
+                raise RepoError("download returned an invalid content length")
+        else:
+            total = 0
+        if total > max_bytes:
+            raise RepoError("download exceeds its size limit")
         chunks, done = [], 0
-        progress_cb(0, total)
+        if progress_cb is not None:
+            progress_cb(0, total)
         while True:
-            b = r.read(1 << 20)
+            b = r.read(min(1 << 20, max_bytes + 1 - done))
             if not b:
                 break
             chunks.append(b)
             done += len(b)
-            progress_cb(done, total)
+            if done > max_bytes:
+                raise RepoError("download exceeds its size limit")
+            if progress_cb is not None:
+                progress_cb(done, total)
         return b"".join(chunks)
     finally:
         r.close()
 
 
 def repo_api(key: str) -> dict:
-    return gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}") or {}
+    key = validate_repo_key(key)
+    d = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}")
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise RepoError("GitHub repository response has an invalid shape")
+    return d
 
 
 def commit_info(key: str, ref: str):
+    key = validate_repo_key(key)
+    ref = validate_source(ref)
     d = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/commits/{urllib.parse.quote(ref, safe='')}")
-    if not d or not d.get("sha"):
+    if d is None:
         return None
-    c = d.get("commit") or {}
+    if not isinstance(d, dict) or not d.get("sha"):
+        return None
+    sha = validate_sha(d["sha"])
+    c = d.get("commit")
+    if c is not None and not isinstance(c, dict):
+        raise RepoError("GitHub commit response has an invalid shape")
+    c = c or {}
+    committer = c.get("committer") or {}
+    author = c.get("author") or {}
+    if not isinstance(committer, dict) or not isinstance(author, dict):
+        raise RepoError("GitHub commit response has an invalid shape")
+    date = committer.get("date") or author.get("date")
+    if date is not None:
+        date = _text(date, "commit date", 128)
+    message = c.get("message") or ""
+    if not isinstance(message, str):
+        message = ""
     return {
-        "sha": d["sha"],
+        "sha": sha,
         "ref": ref,
-        "date": (c.get("committer") or {}).get("date") or (c.get("author") or {}).get("date"),
-        "message": ((c.get("message") or "").splitlines() or [""])[0][:100],
+        "date": date,
+        "message": message.splitlines()[0][:100] if message.splitlines() else "",
     }
 
 
 def _source_is_builtin_default(key: str) -> bool:
     """True when no user-chosen source is on record (state or settings)."""
+    key = validate_repo_key(key)
     if (load_state().get(key) or {}).get("source"):
         return False
     try:
@@ -370,14 +1108,19 @@ def _source_is_builtin_default(key: str) -> bool:
 
 def resolve_target(key: str, source: str) -> dict:
     """Turn the user's source choice into a concrete {sha, ref, date}."""
+    key = validate_repo_key(key)
+    source = validate_source(source)
     if source == "latest-release":
         rel = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/releases/latest")
+        if rel is not None and not isinstance(rel, dict):
+            raise RepoError("GitHub release response has an invalid shape")
         if rel and rel.get("tag_name"):
-            tag = rel["tag_name"]
+            tag = validate_source(rel["tag_name"])
             info = commit_info(key, f"refs/tags/{tag}") or commit_info(key, tag)
             if info:
                 info["ref"] = tag
-                info["release_name"] = rel.get("name")
+                name = rel.get("name")
+                info["release_name"] = _text(name, "release name", 256, allow_empty=True) if isinstance(name, str) else None
                 return info
         if _source_is_builtin_default(key):
             # built-in default but no releases published (yet) — track the
@@ -385,99 +1128,219 @@ def resolve_target(key: str, source: str) -> dict:
             source = "main"
         else:
             raise RepoError(f"no GitHub releases are published for {REPOS[key]['name']} yet — use “Latest (main)” or a pinned ref.")
-    ref = source if source != "main" else (repo_api(key).get("default_branch") or "main")
+    ref = source if source != "main" else validate_source(repo_api(key).get("default_branch") or "main")
     info = commit_info(key, ref)
     if not info:
-        raise RepoError(f"could not resolve ref “{ref}” for {REPOS[key]['name']}.")
+        raise RepoError(f"could not resolve ref “{_brief(ref)}” for {REPOS[key]['name']}.")
     return info
 
 
 def list_refs(key: str) -> dict:
-    meta = {
-        "default_branch": repo_api(key).get("default_branch") or "main",
-        "tags": [], "releases": [],
-    }
-    tags = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/tags", {"per_page": 100}) or []
-    for t in tags:
-        meta["tags"].append({"name": t.get("name"), "sha": (t.get("commit") or {}).get("sha")})
-    rels = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/releases", {"per_page": 30}) or []
-    for r in rels:
-        meta["releases"].append({
-            "tag": r.get("tag_name"), "name": r.get("name"),
-            "date": r.get("published_at"), "prerelease": bool(r.get("prerelease")),
-        })
+    key = validate_repo_key(key)
+    api = repo_api(key)
+    default = api.get("default_branch") or "main"
+    try:
+        default = validate_source(default)
+    except RepoError:
+        raise RepoError("GitHub repository returned an invalid default branch")
+    meta = {"default_branch": default, "tags": [], "releases": []}
+    tags = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/tags", {"per_page": 100})
+    if tags is None:
+        tags = []
+    if not isinstance(tags, list):
+        raise RepoError("GitHub tags response has an invalid shape")
+    for t in tags[:100]:
+        if not isinstance(t, dict):
+            continue
+        commit = t.get("commit")
+        if not isinstance(commit, dict):
+            continue
+        try:
+            name = validate_source(t.get("name"))
+            sha = validate_sha(commit.get("sha"))
+        except RepoError:
+            continue
+        meta["tags"].append({"name": name, "sha": sha})
+    rels = gh_json(f"/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/releases", {"per_page": 30})
+    if rels is None:
+        rels = []
+    if not isinstance(rels, list):
+        raise RepoError("GitHub releases response has an invalid shape")
+    for r in rels[:30]:
+        if not isinstance(r, dict):
+            continue
+        try:
+            tag = validate_source(r.get("tag_name"))
+            name = r.get("name")
+            date = r.get("published_at")
+            if name is not None:
+                name = _text(name, "release name", 256, allow_empty=True)
+            if date is not None:
+                date = _text(date, "release date", 128, allow_empty=True)
+            prerelease = r.get("prerelease")
+            if not isinstance(prerelease, bool):
+                raise RepoError("invalid prerelease")
+        except RepoError:
+            continue
+        meta["releases"].append({"tag": tag, "name": name, "date": date,
+                                 "prerelease": prerelease})
+    if len(json.dumps(meta, ensure_ascii=False).encode("utf-8")) > REFS_RESULT_CAP:
+        raise RepoError("GitHub refs result is too large")
     return meta
 
 
 def compare(key: str, base_sha: str, head_sha: str) -> dict:
+    key = validate_repo_key(key)
+    base_sha = validate_sha(base_sha, "base SHA")
+    head_sha = validate_sha(head_sha, "head SHA")
     o, r = REPOS[key]["owner"], REPOS[key]["repo"]
     d = gh_json(f"/repos/{o}/{r}/compare/{base_sha}...{head_sha}")
-    if not d:
-        raise RepoError("compare API returned nothing — falling back to a full sync.")
-    files = [{
-        "path": f.get("filename"),
-        "status": f.get("status"),
-        "previous": f.get("previous_filename"),
-    } for f in d.get("files", [])]
+    if d is None or not isinstance(d, dict):
+        raise RepoError("compare API returned an invalid response")
+    status = d.get("status")
+    if not isinstance(status, str) or status not in {"ahead", "behind", "identical", "diverged"}:
+        raise RepoError("compare API returned an invalid status")
+    if "total_commits" not in d:
+        raise RepoError("compare API returned no commit count")
+    commits = d["total_commits"]
+    if isinstance(commits, bool) or not isinstance(commits, int) or commits < 0:
+        raise RepoError("compare API returned an invalid commit count")
+    raw_files = d.get("files")
+    if not isinstance(raw_files, list) or len(raw_files) > DIFF_FILE_CAP:
+        raise RepoError("compare API returned too many files")
+    files = []
+    for f in raw_files:
+        if not isinstance(f, dict):
+            raise RepoError("compare API returned an invalid file entry")
+        path = validate_repo_path(f.get("filename"))
+        previous = f.get("previous_filename")
+        if previous is not None:
+            previous = validate_repo_path(previous)
+        file_status = f.get("status")
+        if not isinstance(file_status, str) or file_status not in {"added", "modified", "removed", "renamed", "copied", "changed"}:
+            raise RepoError("compare API returned an invalid file status")
+        files.append({"path": path, "status": file_status, "previous": previous})
     return {"files": files, "too_many": len(files) >= DIFF_FILE_CAP,
-            "commits": d.get("total_commits", 0), "status": d.get("status")}
+            "commits": commits, "status": status}
 
 
 def download_to(key: str, sha: str, path: str, dest: Path, log=print) -> int:
-    data = gh_get_bytes(f"{RAW}/{REPOS[key]['owner']}/{REPOS[key]['repo']}/{sha}/{urllib.parse.quote(path)}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
+    key = validate_repo_key(key)
+    sha = validate_sha(sha)
+    path = validate_repo_path(path)
+    dest = safe_destination(Path(dest))
+    data = gh_get_bytes(f"{RAW}/{REPOS[key]['owner']}/{REPOS[key]['repo']}/{sha}/{urllib.parse.quote(path, safe='/')}")
+    _secure_write_bytes(dest, data)
     n = len(data)
     if n >= 1024 * 1024:
-        log(f"    ↓ {path} ({n / 1e6:.1f} MB)")
+        log(f"    ↓ {_brief(path)} ({n / 1e6:.1f} MB)")
     elif n >= 10 * 1024:
-        log(f"    ↓ {path} ({n // 1024} KB)")
+        log(f"    ↓ {_brief(path)} ({n // 1024} KB)")
     return n
 
 
 def sha256_file(p: Path) -> str:
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return _secure_hash_file(Path(p))
 
 
 def safe_members(members: list):
-    """Strip the {owner}-{repo}-{sha}/ wrapper so the tree extracts flat. Returns the wrapper's name."""
-    root = None
-    for m in members:
-        if root is None:
-            root = m.name.split("/", 1)[0] + "/"
-            continue
-        if not m.name.startswith(root):
-            raise RepoError(f"unexpected tarball layout: {m.name}")
+    """Strip the {owner}-{repo}-{sha}/ wrapper after strict tar validation."""
+    if not members:
+        raise RepoError("empty tarball")
+    first = members[0]
+    if not isinstance(first.name, str) or not first.isdir():
+        raise RepoError("unexpected tarball layout")
+    root_name = first.name.rstrip("/")
+    if first.name not in (root_name, root_name + "/"):
+        raise RepoError("unexpected tarball layout")
+    if "/" in root_name or "\\" in root_name or re.match(r"^[A-Za-z]:", root_name) or root_name in ("", ".", ".."):
+        raise RepoError("unsafe tarball wrapper")
+    _text(root_name, "tarball path", 256)
+    root = root_name + "/"
+    seen = set()
+    for i, m in enumerate(members):
+        if not isinstance(m.name, str) or (i == 0 and m.name not in (root_name, root)) or (i != 0 and not m.name.startswith(root)):
+            raise RepoError("unexpected tarball layout")
+        if m.issym() or m.islnk() or m.isdev() or not (m.isdir() or m.isfile()):
+            raise RepoError("unsafe tarball member type")
+        if m.isfile() and (m.size < 0 or m.size > TAR_MEMBER_CAP):
+            raise RepoError("tarball member is too large")
         rel = m.name[len(root):]
-        parts = [p for p in rel.split("/") if p not in ("", ".")]
-        if not parts or any(p == ".." for p in parts):
-            raise RepoError(f"unsafe path in tarball: {m.name}")
+        if i == 0 and not rel:
+            m.name = ""
+            continue
+        if not rel:
+            raise RepoError("duplicate tarball path")
+        had_trailing_slash = rel.endswith("/")
+        if had_trailing_slash:
+            if not m.isdir():
+                raise RepoError("unsafe tarball member path")
+            rel = rel[:-1]
+        try:
+            rel = validate_repo_path(rel)
+        except RepoError:
+            raise RepoError("unsafe path in tarball")
+        if rel in seen:
+            raise RepoError("duplicate path in tarball")
+        seen.add(rel)
         m.name = rel  # strip the {owner}-{repo}-{sha}/ prefix
     return root
 
 
 def extract_tarball(tar_path: Path, dest: Path, log=print):
-    """Extract a GitHub tarball into dest (flat tree, wrapper dir dropped)."""
+    """Extract a GitHub tarball through descriptor-relative safe writes."""
+    tar_path = safe_destination(Path(tar_path))
+    dest = safe_destination(Path(dest))
     dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = safe_destination(dest)
     dest.mkdir(exist_ok=True)
+    safe_destination(dest)
     with tarfile.open(tar_path, "r:*") as tf:
         members = tf.getmembers()
         safe_members(members)
-        # drop the (now-empty) wrapper dir — only if it really is a directory entry
-        if members and (members[0].isdir() or members[0].name.endswith("/")):
+        if members and members[0].name == "":
             members = members[1:]
-        tf.extractall(dest, members=members, filter="data")
+        for member in members:
+            name = validate_repo_path(member.name)
+            mode = stat.S_IMODE(member.mode) or (0o755 if member.isdir() else 0o644)
+            if member.isdir():
+                _secure_mkdir_relative(dest, name, mode)
+                continue
+            if not member.isfile() or member.size < 0 or member.size > TAR_MEMBER_CAP:
+                raise RepoError("unsafe tarball member")
+            source = tf.extractfile(member)
+            if source is None:
+                raise RepoError("tarball member has no data")
+            with source, _secure_open_relative(dest, name, write=True,
+                                                create_parents=True,
+                                                mode=mode) as target:
+                remaining = member.size
+                while remaining:
+                    chunk = source.read(min(1 << 20, remaining))
+                    if not chunk:
+                        raise RepoError("truncated tarball member")
+                    target.write(chunk)
+                    remaining -= len(chunk)
+                try:
+                    os.fchmod(target.fileno(), mode & 0o777)
+                except (AttributeError, OSError):
+                    pass
 
 
 def tracked_paths(tree_dir: Path) -> list:
+    tree_input = Path(tree_dir)
+    _ensure_no_symlink_components(tree_input)
+    tree_dir = tree_input.resolve()
+    _ensure_no_symlink_components(tree_dir)
     out = []
     for p in sorted(tree_dir.rglob("*")):
+        rel = str(p.relative_to(tree_dir)).replace(os.sep, "/")
+        rel = validate_repo_path(rel)
+        safe_path(tree_dir, rel)
+        if p.is_symlink():
+            raise RepoError("refusing a symbolic link in repository tree")
         if p.is_file():
-            out.append(str(p.relative_to(tree_dir)))
+            out.append(rel)
     return out
 
 
@@ -495,6 +1358,9 @@ def tracked_paths(tree_dir: Path) -> list:
 #           local user-edited -> KEEP local, warn (it becomes the user's file)
 
 def _decide(local: Path, old_hash, new_pristine: Path):
+    local = _ensure_no_symlink_components(Path(local))
+    if new_pristine is not None:
+        new_pristine = _ensure_no_symlink_components(Path(new_pristine))
     if not local.exists():
         return "place"
     new_hash = sha256_file(new_pristine) if new_pristine is not None else None
@@ -512,35 +1378,97 @@ def _decide(local: Path, old_hash, new_pristine: Path):
 def apply_changes(key: str, man: dict, target: dict,
                   apply_ops: dict, delete_paths: list,
                   pristine_for, log=print) -> dict:
-    """apply_ops: {path: prev_path_or_None} ; pristine_for(path)->Path|None resolves
-    the new pristine content (a staging file in full mode, a temp download in diff)."""
-    repo = repo_dir(key)
-    new_manifest = dict(man.get("files") or {})
-    old_files = man.get("files") or {}
+    """Validate the complete plan and all staging files before live mutation."""
+    key = validate_repo_key(key)
+    if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
+        raise RepoError("invalid repository manifest shape")
+    old_files = dict(man["files"])
+    for path, digest in old_files.items():
+        validate_repo_path(path)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise RepoError("invalid repository manifest hash")
+    if not isinstance(target, dict) or "sha" not in target:
+        raise RepoError("invalid update target")
+    validate_sha(target["sha"], "target SHA")
+    if not isinstance(apply_ops, dict) or not isinstance(delete_paths, list):
+        raise RepoError("invalid repository update plan")
+
+    validated_ops = []
+    apply_paths = set()
+    previous_paths = set()
+    for path, prev in apply_ops.items():
+        path = validate_repo_path(path)
+        if path in apply_paths:
+            raise RepoError("duplicate update path")
+        apply_paths.add(path)
+        if prev is not None:
+            prev = validate_repo_path(prev)
+            if prev in previous_paths:
+                raise RepoError("conflicting rename source")
+            previous_paths.add(prev)
+        validated_ops.append((path, prev))
+
+    validated_deletes = []
+    delete_set = set()
+    for path in delete_paths:
+        path = validate_repo_path(path)
+        if path in delete_set:
+            raise RepoError("duplicate delete path")
+        if path in apply_paths or path in previous_paths:
+            raise RepoError("conflicting update and delete paths")
+        delete_set.add(path)
+        validated_deletes.append(path)
+    if apply_paths & previous_paths:
+        raise RepoError("conflicting update paths")
+
+    repo = safe_destination(repo_dir(key))
+    # Resolve every local path before asking for staging content.  This makes
+    # malformed later entries fail before any repository mutation is possible.
+    for path in apply_paths | previous_paths | delete_set:
+        safe_path(repo, path)
+
+    pristine_by_path = {}
+    staging_paths = set()
+    for path, _prev in validated_ops:
+        pristine = pristine_for(path)
+        if pristine is not None:
+            pristine = Path(pristine)
+            safe_destination(pristine)
+            if pristine.is_symlink() or not pristine.is_file():
+                raise RepoError("invalid pristine staging file")
+            canonical = str(pristine.resolve())
+            if canonical in staging_paths:
+                raise RepoError("duplicate pristine staging file")
+            staging_paths.add(canonical)
+        pristine_by_path[path] = pristine
+
+    new_manifest = dict(old_files)
     applied = replaced = deleted = 0
     conflicts = []
 
-    for path, prev in apply_ops.items():
-        if prev and prev != path:
+    for path, prev in validated_ops:
+        if prev is not None and prev != path:
             # upstream rename: drop the old local slot when it's still pristine,
             # warn when the user edited it (their copy would otherwise strand silently)
-            old_local = repo / prev
+            old_local = safe_path(repo, prev)
             if old_local.exists():
-                if old_files.get(prev) and sha256_file(old_local) == old_files[prev]:
-                    old_local.unlink()
+                if sha256_file(old_local) == old_files.get(prev):
+                    _secure_unlink_relative(repo, prev)
                 else:
                     conflicts.append(prev)
             new_manifest.pop(prev, None)
-            old_files.pop(prev, None)
-        pristine = pristine_for(path)
-        local = repo / path
+        pristine = pristine_by_path[path]
+        local = safe_path(repo, path)
         d = _decide(local, old_files.get(path), pristine)
         if pristine is None:
             if d in ("place", "replace"):
-                log(f"    ! skipped {path} (new content could not be fetched)")
+                log(f"    ! skipped {_brief(path)} (new content could not be fetched)")
             continue
         if d in ("place", "replace"):
-            shutil.copy2(pristine, local)
+            # The descriptor-relative copy recreates missing parents and
+            # revalidates the destination at the final open boundary.
+            safe_destination(local)
+            _secure_copy_file(pristine, repo, path)
             new_manifest[path] = sha256_file(local)
             if d == "replace":
                 replaced += 1
@@ -552,13 +1480,13 @@ def apply_changes(key: str, man: dict, target: dict,
         else:  # noop or keep-user: local already matches (or is the user's own edit of)
             new_manifest[path] = sha256_file(pristine)
 
-    for path in delete_paths:
-        local = repo / path
+    for path in validated_deletes:
+        local = safe_path(repo, path)
         if not local.exists():
             new_manifest.pop(path, None)
             continue
-        if old_files.get(path) and sha256_file(local) == old_files[path]:
-            local.unlink()
+        if sha256_file(local) == old_files.get(path):
+            _secure_unlink_relative(repo, path)
             deleted += 1
         else:
             conflicts.append(path)
@@ -576,6 +1504,7 @@ def apply_changes(key: str, man: dict, target: dict,
 def check_repo(key: str, force: bool = False) -> dict:
     """Resolve the asked-for ref and compare it with the deployed one. Caches the
     remote answer for an hour (rate-limit friendly); force re-queries."""
+    key = validate_repo_key(key)
     st = load_state().get(key) or {}
     deployed = st.get("deployed")
     lc = st.get("last_check") or {}
@@ -598,6 +1527,7 @@ def check_repo(key: str, force: bool = False) -> dict:
 
 
 def cmd_check(key: str, as_json: bool = False):
+    key = validate_repo_key(key)
     res = check_repo(key, force=True)
     if as_json:
         print(json.dumps(res))
@@ -616,6 +1546,7 @@ def cmd_check(key: str, as_json: bool = False):
 
 
 def cmd_refs(key: str, as_json: bool = False):
+    key = validate_repo_key(key)
     meta = list_refs(key)
     if as_json:
         print(json.dumps(meta))
@@ -674,7 +1605,7 @@ def _sync_deps(key: str, log=print) -> None:
     src = (repo / req).read_text(encoding="utf-8", errors="replace")
     patched = apply_bad_pin_fixes(src.splitlines())
     work = repo / ".wb-requirements.txt"
-    work.write_text("\n".join(patched) + "\n", encoding="utf-8")
+    _secure_write_bytes(work, ("\n".join(patched) + "\n").encode("utf-8"))
     run_kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
     try:
         # pip is a console app on Windows: CREATE_NO_WINDOW keeps the one-time
@@ -684,7 +1615,8 @@ def _sync_deps(key: str, log=print) -> None:
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace", **run_kw)
     finally:
-        work.unlink(missing_ok=True)
+        if work.exists():
+            _secure_unlink_absolute(work)
     if r.returncode == 0:
         log("  dependencies ok (installed into the app's private runtime)")
     else:
@@ -705,18 +1637,31 @@ _PRISTINE_NAMES = {"README.md", "EMPTY.md"}
 def stash_user_data(repo: Path, dest: Path, log=print) -> list:
     """Copy user files out of a tree that is about to be replaced.
     Returns [(relpath, staged_path), …]."""
+    repo = safe_destination(repo)
+    dest = safe_destination(dest)
+    if not _WINDOWS_FALLBACK:
+        repo, dest = repo.resolve(), dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    safe_destination(dest)
     saved = []
-    for rel in USER_DATA_PATHS:
-        d = repo / rel
+    for base_rel in USER_DATA_PATHS:
+        rel = validate_repo_path(base_rel)
+        d = safe_path(repo, rel)
+        if d.is_symlink():
+            raise RepoError("refusing a symbolic link in user data")
         if not d.is_dir():
             continue
         for f in sorted(d.rglob("*")):
+            rel = str(f.relative_to(repo)).replace(os.sep, "/")
+            rel = validate_repo_path(rel)
+            safe_path(repo, rel)
+            if f.is_symlink():
+                raise RepoError("refusing a symbolic link in user data")
             if not f.is_file() or f.name in _PRISTINE_NAMES:
                 continue
-            sp = dest / str(f.relative_to(repo))
-            sp.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, sp)
-            saved.append((str(f.relative_to(repo)), sp))
+            sp = safe_destination(dest / rel)
+            _secure_copy_file(f, dest, rel)
+            saved.append((rel, sp))
     if saved:
         log(f"[repos] staged {len(saved)} user file(s) from the old tree "
             f"(decklists/images/output/offsets) — they will be restored after the re-deploy")
@@ -726,10 +1671,13 @@ def stash_user_data(repo: Path, dest: Path, log=print) -> list:
 def restore_user_data(saved: list, repo: Path, log=print) -> None:
     """Put staged user files back into (a freshly replaced) tree. User data
     wins over any same-named upstream file."""
+    repo = safe_destination(repo)
+    if not _WINDOWS_FALLBACK:
+        repo = repo.resolve()
     for rel, sp in saved:
-        rp = repo / rel
-        rp.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(sp, rp)
+        rel = validate_repo_path(rel)
+        safe_path(repo, rel)
+        _secure_copy_file(Path(sp), repo, rel)
     if saved:
         log(f"[repos] restored {len(saved)} user file(s) into the new tree")
 
@@ -752,7 +1700,7 @@ def verify_deployed(key: str) -> bool:
         return False
     repo = repo_dir(key)
     probe = sorted(files)[0]
-    p = repo / probe
+    p = safe_path(repo, probe)
     if not p.is_file():
         return False
     try:
@@ -762,6 +1710,7 @@ def verify_deployed(key: str) -> bool:
 
 
 def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = False):
+    key = validate_repo_key(key)
     meta = REPOS[key]
     st = load_state()
     rstate = st.get(key) or {}
@@ -772,8 +1721,8 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
     log(f"[init {key}] resolving target “{source}” …")
     target = resolve_target(key, source)
     log(f"[init {key}] target: {target['ref']} @ {target['sha'][:7]}")
-    repo = repo_dir(key)
-    stash_dir = data_dir() / f".repos-stash-{key}-{int(time.time())}"
+    repo = safe_destination(repo_dir(key))
+    stash_dir = safe_destination(data_dir() / f".repos-stash-{key}-{int(time.time())}")
     saved = []
     try:
         if repo.exists():
@@ -781,7 +1730,7 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
             saved = stash_user_data(repo, stash_dir, log)
             shutil.rmtree(repo, ignore_errors=True)
         if tarball:
-            tp = Path(tarball)
+            tp = safe_destination(Path(tarball))
             log(f"[init {key}] extracting local tarball {tp.name} ({tp.stat().st_size / 1e6:.0f} MB) …")
             extract_tarball(tp, repo, log)
         else:
@@ -789,12 +1738,14 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
             set_progress(key, stage="download", done=0, total=0, label="full snapshot")
             log(f"[init {key}] downloading full snapshot from GitHub …")
             data = gh_get_bytes(f"{API}/repos/{meta['owner']}/{meta['repo']}/tarball/{target['sha']}",
-                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t))
-            tmp.write_bytes(data)
+                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t),
+                                  max_bytes=TARBALL_CAP)
+            _secure_write_bytes(tmp, data)
             log(f"[init {key}] {len(data) / 1e6:.0f} MB received — extracting to {repo} …")
             set_progress(key, stage="extract", done=0, total=0)
             extract_tarball(tmp, repo, log)
-            tmp.unlink(missing_ok=True)
+            if tmp.exists():
+                _secure_unlink_absolute(tmp)
             set_progress(key, stage="fingerprint", done=0, total=0, unit="files")
         restore_user_data(saved, repo, log)
         man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
@@ -833,6 +1784,7 @@ def cmd_init(key: str, tarball: str = None, log=print, force_redeploy: bool = Fa
 
 
 def cmd_update(key: str, force_full: bool = False, log=print):
+    key = validate_repo_key(key)
     meta = REPOS[key]
     st = load_state()
     rstate = st.get(key) or {}
@@ -850,11 +1802,12 @@ def cmd_update(key: str, force_full: bool = False, log=print):
     return _run_update(key, meta, st, rstate, deployed, source, target, force_full, log)
 
 def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log):
+    key = validate_repo_key(key)
     t0 = time.time()
     try:
         man = load_manifest(key)
         old_files = man.get("files") or {}
-        repo = repo_dir(key)
+        repo = safe_destination(repo_dir(key))
         mode = "full" if force_full else "diff"
 
         if mode == "diff":
@@ -875,8 +1828,9 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
                 mode = "full"
 
         if mode == "diff":
-            staging = data_dir() / f".repos-diff-{key}-{int(time.time())}"
+            staging = safe_destination(data_dir() / f".repos-diff-{key}-{int(time.time())}")
             staging.mkdir(parents=True, exist_ok=True)
+            safe_destination(staging)
 
             set_progress(key, stage="update", done=0, total=len(cmp["files"]))
 
@@ -884,14 +1838,14 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
 
             def pristine_for(path):
                 """Fetch the new pristine content into staging; return its path (or None on failure)."""
-                sp = staging / path
+                sp = safe_path(staging, path)
                 try:
                     download_to(key, target["sha"], path, sp, log)
                     _count[0] += 1
                     set_progress(key, done=_count[0])
                     return sp
                 except RepoError as e:
-                    log(f"    ! could not fetch {path}: {e}")
+                    log(f"    ! could not fetch {_brief(path)}: {_brief(e)}")
                     return None
 
             apply_ops, delete_paths = {}, []
@@ -907,10 +1861,13 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
             set_progress(key, stage="download", done=0, total=0, label="full snapshot")
             tmp = data_dir() / f".repos-download-{key}.tar.gz"
             data = gh_get_bytes(f"{API}/repos/{meta['owner']}/{meta['repo']}/tarball/{target['sha']}",
-                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t))
-            tmp.write_bytes(data)
+                                  timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t),
+                                  max_bytes=TARBALL_CAP)
+            _secure_write_bytes(tmp, data)
             log(f"[update {key}] {len(data) / 1e6:.0f} MB received — extracting & reconciling …")
-            staging = data_dir() / f".repos-staging-{key}-{int(time.time())}"
+            staging = safe_destination(data_dir() / f".repos-staging-{key}-{int(time.time())}")
+            staging.mkdir(parents=True, exist_ok=True)
+            safe_destination(staging)
             set_progress(key, stage="extract", done=0, total=0)
             extract_tarball(tmp, staging, log)
             set_progress(key, stage="apply", done=0, total=0)
@@ -920,7 +1877,8 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
             res = apply_changes(key, man, target, apply_ops, delete_paths,
                                  lambda p: new_tree.get(p), log)
             shutil.rmtree(staging, ignore_errors=True)
-            tmp.unlink(missing_ok=True)
+            if tmp.exists():
+                _secure_unlink_absolute(tmp)
 
         # state write under the lock, with a fresh reload (the UI server's
         # check/update handlers and the launcher both write this file)
@@ -941,7 +1899,7 @@ def _run_update(key, meta, st, rstate, deployed, source, target, force_full, log
         save_manifest(key, new_manifest)
 
         for p in res["conflicts"][:10]:
-            log(f"  ! kept your local version of {p} (upstream also changed it — merge manually if needed)")
+            log(f"  ! kept your local version of {_brief(p)} (upstream also changed it — merge manually if needed)")
         log(f"[update {key}] done in {res['applied']} applied, {res['deleted']} removed, "
             f"{len(res['conflicts'])} conflict(s) kept — {meta['name']} now at "
             f"{target['ref']} ({target['sha'][:7]})")
