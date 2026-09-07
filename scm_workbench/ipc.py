@@ -31,7 +31,10 @@ MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 # Private methods are accepted by the child protocol for narrow native
 # helpers, but are deliberately absent from Rust's public wb_rpc allowlist.
-PRIVATE_METHODS = frozenset(("files.export_selected", "files.export_poll", "files.export_cancel"))
+PRIVATE_METHODS = frozenset((
+    "files.export_selected", "files.export_poll", "files.export_cancel",
+    "fs.delete_images_start", "fs.delete_images_poll",
+))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
     "file.open", "file.reveal", "url.open",
@@ -303,6 +306,27 @@ def dispatch(request: dict) -> dict:
                     not math.isfinite(clean_angle) or not -360 <= clean_angle <= 360):
                 return _bad_params(request_id, "offset.set angle must be finite and from -360 through 360")
             result = server.set_offset(size, x, y, angle)
+        elif method == "fs.delete_images_start":
+            if set(params) != {"path"} or not isinstance(params.get("path"), str) or not params["path"]:
+                return _bad_params(request_id, "fs.delete_images_start requires exactly path string")
+            try:
+                if len(params["path"].encode("utf-8")) > server.IMAGE_DELETE_MAX_PATH_BYTES:
+                    return _bad_params(request_id, "fs.delete_images path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "fs.delete_images path must be valid UTF-8")
+            if server.has_forbidden_action_controls(params["path"]):
+                return _bad_params(request_id, "fs.delete_images path contains control characters")
+            result = server.start_image_delete_operation(params["path"])
+        elif method == "fs.delete_images_poll":
+            if set(params) != {"operation_id"} or not isinstance(params.get("operation_id"), str):
+                return _bad_params(request_id, "fs.delete_images_poll requires exactly operation_id")
+            operation_id = params["operation_id"]
+            if len(operation_id) != 32 or not all(c in "0123456789abcdef" for c in operation_id):
+                return _bad_params(request_id, "invalid image deletion operation id")
+            result = server.poll_image_delete_operation(operation_id)
+            if result.get("ok") is False:
+                error = result.get("error") or {}
+                return _error(request_id, "bad_request", _bounded_ipc_message(error.get("message", "operation not found")))
         elif method == "offset.delete":
             if set(params) != {"size"}:
                 return _bad_params(request_id, "offset.delete requires exactly size")

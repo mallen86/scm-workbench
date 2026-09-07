@@ -138,7 +138,50 @@ impl WorkerRpc {
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         validate_method(method)?;
+        if method == "fs.delete_images" {
+            return self.delete_images(params);
+        }
         self.call_unchecked(method, params)
+    }
+
+    /// Start/poll the bounded deletion worker without holding the serialized
+    /// pipe call across the filesystem scan. The public facade remains one
+    /// synchronous Tauri command, while each JSON-lines request is immediate.
+    fn delete_images(&self, params: Value) -> Result<Value, String> {
+        let started = self.call_unchecked("fs.delete_images_start", params)?;
+        if started.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Ok(started);
+        }
+        let operation_id = started
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .filter(|id| {
+                id.len() == 32
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            })
+            .ok_or_else(|| "malformed image deletion response".to_string())?;
+        // Python owns the cooperative 300-second deadline. Keep polling until
+        // that worker reports terminal cleanup; a Rust-side timeout must never
+        // abandon a destructive operation that is still unwinding.
+        loop {
+            let polled = self.call_unchecked(
+                "fs.delete_images_poll",
+                json!({"operation_id": operation_id}),
+            )?;
+            let done = polled
+                .get("done")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "malformed image deletion response".to_string())?;
+            if done {
+                return polled
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| "malformed image deletion response".to_string());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Private protocol edge owned by the native picker command. The caller
@@ -318,10 +361,11 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
-        | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview"
-        | "template.resolve" | "file.list" | "file.open" | "file.reveal" | "url.open"
-        | "repos.refs" | "repos.source.set" | "repos.check" | "repos.poll" | "updates.get"
-        | "updates.check" | "updates.notes" | "updates.poll" | "updates.start" => Ok(()),
+        | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll"
+        | "fs.delete_images" | "preview" | "template.resolve" | "file.list" | "file.open"
+        | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set" | "repos.check"
+        | "repos.poll" | "updates.get" | "updates.check" | "updates.notes" | "updates.poll"
+        | "updates.start" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -566,6 +610,7 @@ mod tests {
             "jobs.log",
             "jobs.kill",
             "jobs.poll",
+            "fs.delete_images",
             "preview",
             "template.resolve",
             "file.list",
@@ -595,6 +640,9 @@ mod tests {
             "template.resolve.extra",
             "file.list.extra",
             "file.list.open",
+            "fs.delete_images.extra",
+            "fs.delete_images/",
+            "fs.delete_images ",
             "file.open.extra",
             "file.reveal.extra",
             "url.open.extra",
@@ -630,6 +678,8 @@ mod tests {
             "files.export_selected",
             "files.export_poll",
             "files.export_cancel",
+            "fs.delete_images_start",
+            "fs.delete_images_poll",
             "server.shutdown",
             "__import__",
         ] {

@@ -1,7 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
@@ -153,10 +153,9 @@ export function patchPdfForm(kind) {
       }
       let j = {};
       try {
-        const r = await fetch("/api/fs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op: "delete_images", path: dir }) });
-        j = await r.json().catch(() => ({}));
-        if (!r.ok || !j.ok) {
-          toast("err", (j.errors || ["Could not remove the images."]).join("; "), 7000);
+        j = await deleteImages(dir);
+        if (!j?.ok) {
+          toast("err", (j?.errors || ["Could not remove the images."]).join("; "), 7000);
           return;
         }
       } catch {

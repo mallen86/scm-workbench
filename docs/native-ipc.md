@@ -24,7 +24,9 @@ calls use relative HTTP URLs. The native protocol covers the three bootstrap
 reads, bounded settings and offset mutations, preview, packaged-Tauri job
 control/log operations, the read-only `template.resolve`/`file.list` metadata
 slice, bounded repository metadata operations, app update/release-note
-operations, and the bounded OS-action methods below. Decklist import is a
+operations, the bounded OS-action methods below, and secure image deletion.
+Image deletion is public `fs.delete_images` RPC with exact `{path}` params; its
+only browser fallback is explicit POST `/api/fs`. Decklist import is a
 separate native command (`wb_decklist_import`), not a public `wb_rpc` method:
 the command owns the fixed single-file picker and sends one validated private
 `decklists.import_selected` frame to the worker. Other surfaces remain on their
@@ -51,14 +53,17 @@ A request has this exact shape:
 {"id":"rpc-1","method":"info","params":{}}
 ```
 
-`id` must be a non-empty string. `method` must be a string in the allowlist
-below, and `params` must be a JSON object. The exact allowlist contains
-twenty-six methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`id` must be a non-empty string, `method` must be an allowed string, and
+`params` must be a JSON object. The exact public `wb_rpc` allowlist contains
+twenty-seven methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
-`updates.poll`, and `updates.start`. The bootstrap read methods take `{}`;
+`updates.poll`, `updates.start`, and the virtual Rust facade
+`fs.delete_images`. That facade is validated publicly but translates into
+private worker `fs.delete_images_start`/`fs.delete_images_poll` frames; the
+worker rejects a direct public-name frame. The bootstrap read methods take `{}`;
 preview, job, artifact metadata, offset, and repository methods use the
 parameter contracts below.
 
@@ -78,6 +83,7 @@ parameter contracts below.
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
 | `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
 | `GET /api/file?...images_only=1` (directory metadata) | `file.list` (packaged Tauri) | `server.list_files()` |
+| `POST /api/fs` (`delete_images`) | virtual `fs.delete_images` facade (packaged Tauri) | private bounded start/poll around SCM-only stable-handle deletion |
 | `GET /api/file?...open=1` (regular file action) | `file.open` (packaged Tauri) | `server.file_open_action()` |
 | `POST /api/reveal` (file/directory action) | `file.reveal` (packaged Tauri) | `server.file_reveal_action()` |
 | `GET /api/file?...url=` (external URL action) | `url.open` (packaged Tauri) | `server.url_open_action()` |
@@ -416,7 +422,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the twenty-six-method allowlist.
+* `unknown_method` — a method outside the twenty-seven-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -540,8 +546,10 @@ preview, template resolution, directory metadata, OS actions, repo metadata,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, image deletion, and raw state-changing
-file operations remain HTTP. Browser update routes remain compatibility endpoints.
+worker call. Binary file reads, save/copy, and raw state-changing file operations remain
+HTTP. Image deletion is native in packaged windows and retains only POST
+`/api/fs` for standalone browsers. Browser update routes remain compatibility
+endpoints.
 The repository HTTP routes
 remain the browser fallback only; a packaged native failure never retries them.
 The packaged smoke test rejects WebView `POST /api/settings`,
@@ -575,8 +583,25 @@ Native errors never retry through HTTP. Browser routes remain compatibility
 endpoints and support an optional encoded `tag` query parameter; omitting it
 binds the current checked release.
 
-The current migration ledger is (26 native methods; the five update
-methods are the latest entries):
+The deletion facade is one public `fs.delete_images` call. Rust starts and
+polls private `fs.delete_images_start`/`fs.delete_images_poll` operations so
+filesystem work never occupies the worker's serialized request while running.
+Python owns a cooperative 300-second operation deadline, those private methods
+are not accepted by public `wb_rpc`, and Rust keeps polling for terminal cleanup
+rather than abandoning a live deletion. The operation registry is bounded to
+four active and eight
+retained records with 600-second terminal retention. An in-process
+shared/exclusive lease prevents deletion from racing
+any managed job without serializing jobs against each other; the existing
+cross-process SCM repository lock also excludes Workbench repository writers.
+Preflight scans at most 8192 entries and 1024 image candidates and rejects any
+truncation or result/name/path budget overflow before deletion. Relative paths
+bind directly to the initiating SCM checkout snapshot. POSIX candidates move
+through an unpredictable atomic no-replace quarantine name and are revalidated
+there before unlink; Windows deletes the revalidated object by stable handle.
+
+The current migration ledger is (27 native methods; image deletion is the
+latest entry):
 
 | Surface | Current transport | Status |
 | --- | --- | --- |
@@ -589,7 +614,7 @@ methods are the latest entries):
 | `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
 | Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
 | Artifact export (`files.export_*` / `/api/files/save`) | Native grant + parented dialog; standalone HTTP compatibility only | Packaged IPC rejects the HTTP route. Grants are 64-hex, one-use after success, TTL 300 s, max 32; source is a successful create/offset/calibration PDF snapshot below that job's pinned SCM root (regular, stable, <=4 GiB). Copies use 64 KiB chunks, 2 workers, 8 active operations, 32 retained results, no overwrite/mkdir, and bounded collision suffixes. Browser mode has no picker; its explicit compatibility route requires an existing destination parent. |
-| Image deletion (`/api/fs`) | HTTP/native existing action | Destructive repository action remains separately guarded |
+| Image deletion (`fs.delete_images` / `/api/fs`) | Tauri JSON-lines in packaged windows; POST `/api/fs` in standalone browsers | SCM-only, bounded preflight, stable POSIX dirfds or Windows handles; packaged HTTP rejects before path work |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
@@ -632,6 +657,7 @@ python scripts/check_ui_native_actions.py
 python scripts/check_ui_settings.py
 python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
+python scripts/check_ui_fs_delete.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```

@@ -41,6 +41,7 @@ from collections import OrderedDict
 import copy
 import errno
 import html
+import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -5183,6 +5184,20 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         if offset_lease:
             OFFSET_LEASE.release()
         return None, _offset_errors([f"could not write job log: {exc}"])
+    if not _acquire_image_job_lease():
+        try:
+            log_f.close()
+        except Exception:
+            pass
+        if offset_lease:
+            OFFSET_LEASE.release()
+        try:
+            Path(job["log_file"]).unlink()
+        except OSError:
+            pass
+        return None, ["image deletion is using the SCM checkout; try again when it finishes"]
+    job["image_lease"] = True
+
     proc = None
     try:
         # Keep the final admission check and publication under the same lock as
@@ -5212,6 +5227,12 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                     OFFSET_LEASE.release()
                 except RuntimeError:
                     pass
+            if job.get("image_lease"):
+                job["image_lease"] = False
+                try:
+                    _release_image_job_lease()
+                except RuntimeError:
+                    pass
             try:
                 Path(job["log_file"]).unlink()
             except OSError:
@@ -5233,6 +5254,12 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         if offset_lease:
             OFFSET_LEASE.release()
             job["offset_lease"] = False
+        if job.get("image_lease"):
+            job["image_lease"] = False
+            try:
+                _release_image_job_lease()
+            except RuntimeError:
+                pass
         with JOBS_LOCK:
             JOBS[job_id] = job
     return job, []
@@ -5355,6 +5382,12 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             job["offset_lease"] = False
             try:
                 OFFSET_LEASE.release()
+            except RuntimeError:
+                pass
+        if job.get("image_lease"):
+            job["image_lease"] = False
+            try:
+                _release_image_job_lease()
             except RuntimeError:
                 pass
         _persist_jobs()
@@ -5665,29 +5698,743 @@ def is_image_file(p: Path) -> bool:
             head = f.read(16)
     except Exception:
         return False
+    return _image_header_is_image(head)
+
+
+# Image deletion is a separate destructive operation.  It intentionally has
+# tighter bounds and a narrower root than the read-only file sandbox above.
+IMAGE_DELETE_MAX_SCANNED = 8192
+IMAGE_DELETE_MAX_CANDIDATES = 1024
+IMAGE_DELETE_MAX_RESULT_BYTES = 512 * 1024
+IMAGE_DELETE_MAX_PATH_BYTES = 4096
+IMAGE_DELETE_MAX_NAME_BYTES = 255
+_IMAGE_DELETE_LOCK = threading.Lock()
+_IMAGE_JOB_STATE_LOCK = threading.Lock()
+_IMAGE_JOB_USERS = 0
+
+
+def _acquire_image_job_lease() -> bool:
+    """Admit jobs concurrently, but never while image deletion owns the fence."""
+    global _IMAGE_JOB_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _IMAGE_DELETE_LOCK.locked():
+            return False
+        _IMAGE_JOB_USERS += 1
+        return True
+
+
+def _release_image_job_lease() -> None:
+    global _IMAGE_JOB_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _IMAGE_JOB_USERS <= 0:
+            raise RuntimeError("image job lease is not held")
+        _IMAGE_JOB_USERS -= 1
+
+
+class ImageDeleteError(Exception):
+    def __init__(self, message: str, status: int = 400, *, deleted=None, names=None, directory=None):
+        super().__init__(message)
+        self.message = " ".join(str(message).split())[:256] or "image deletion failed"
+        self.status = status
+        self.deleted = int(deleted or 0)
+        self.names = list(names or [])[:IMAGE_DELETE_MAX_CANDIDATES]
+        self.directory = directory
+
+    def body(self) -> dict:
+        result = {"ok": False, "errors": [self.message], "deleted": self.deleted,
+                  "names": self.names}
+        if self.directory is not None:
+            result["dir"] = str(self.directory)
+        return result
+
+
+def _image_delete_error(message: str, status: int = 400, **kw):
+    return ImageDeleteError(message, status, **kw)
+
+
+def _image_delete_lock():
+    """Take both mutation fences without waiting on either one.
+
+    The lock file is the same SCM repository lock used by repo_sync.  A
+    deletion is small and bounded, so waiting here would only turn a user
+    action into an unbounded serialized IPC request; contention is reported as
+    a normal application result instead.
+    """
+    @contextlib.contextmanager
+    def locked():
+        if not _IMAGE_DELETE_LOCK.acquire(blocking=False):
+            raise _image_delete_error("image deletion is busy", 409)
+        with _IMAGE_JOB_STATE_LOCK:
+            jobs_active = _IMAGE_JOB_USERS > 0
+        if jobs_active:
+            _IMAGE_DELETE_LOCK.release()
+            raise _image_delete_error("a job is using the SCM checkout", 409)
+        fh = None
+        acquired = False
+        try:
+            lock_path = repo_sync.data_dir() / ".repos-scm-lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(lock_path, "a+")
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0, 2)
+                if fh.tell() == 0:
+                    fh.write(" ")
+                    fh.flush()
+                fh.seek(0)
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                except OSError as exc:
+                    if getattr(exc, "errno", None) in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or \
+                            getattr(exc, "winerror", None) in {32, 33, 36, 170, 212}:
+                        raise _image_delete_error("repository is busy", 409) from exc
+                    raise _image_delete_error("could not acquire repository lock", 400) from exc
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except (BlockingIOError, OSError) as exc:
+                    if isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in (errno.EACCES, errno.EAGAIN):
+                        raise _image_delete_error("repository is busy", 409) from exc
+                    raise _image_delete_error("could not acquire repository lock", 400) from exc
+            yield
+        finally:
+            if fh is not None:
+                try:
+                    if acquired:
+                        if os.name == "nt":
+                            import msvcrt
+                            fh.seek(0)
+                            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(fh, fcntl.LOCK_UN)
+                finally:
+                    fh.close()
+            _IMAGE_DELETE_LOCK.release()
+    return locked()
+
+
+def _image_header_is_image(head: bytes) -> bool:
     if len(head) < 4:
         return False
-    if head[:3] == b"\xff\xd8\xff":                        # JPEG
-        return True
-    if head[:8] == b"\x89PNG\r\n\x1a\n":                # PNG / APNG
-        return True
-    if head[:4] == b"GIF8":                               # GIF
-        return True
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":    # WebP
-        return True
-    if head[:4] in (b"II\x2a\x00", b"MM\x00\x2a"):      # TIFF
-        return True
-    if head[:2] == b"BM":                                 # BMP
-        return True
-    if head[4:8] == b"ftyp" and head[8:12] in (b"av01", b"avif", b"heif", b"hevc", b"mif1"):
-        return True                                       # AVIF / HEIF
-    if head[:4] == b"qoif":                               # QOI
-        return True
-    if head[:8] == b"DDS <wal":                           # Direct3D surface
-        return True
-    if head[:12] == b"\x00\x00\x00\x0cJP\x20\x31\x31\x0a\x0d\x08":  # JP2 (JPEG 2000)
-        return True
-    return False
+    return (head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n" or
+            head[:4] == b"GIF8" or (head[:4] == b"RIFF" and head[8:12] == b"WEBP") or
+            head[:4] in (b"II\x2a\x00", b"MM\x00\x2a") or head[:2] == b"BM" or
+            (head[4:8] == b"ftyp" and head[8:12] in (b"av01", b"avif", b"heif", b"hevc", b"mif1")) or
+            head[:4] == b"qoif" or head[:8] == b"DDS <wal" or
+            head[:12] == b"\x00\x00\x00\x0cJP\x20\x31\x31\x0a\x0d\x08")
+
+
+def _image_delete_result_size(directory: Path, names: list) -> int:
+    try:
+        value = {"ok": True, "deleted": len(names), "names": names, "dir": str(directory)}
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise _image_delete_error("could not encode deletion result") from exc
+
+
+def _delete_images_target(raw: str, settings: Optional[dict]) -> Tuple[Path, Path, dict]:
+    try:
+        encoded = raw.encode("utf-8")
+    except (AttributeError, UnicodeEncodeError) as exc:
+        raise _image_delete_error("path must be valid UTF-8") from exc
+    if not isinstance(raw, str) or not raw or len(encoded) > IMAGE_DELETE_MAX_PATH_BYTES:
+        raise _image_delete_error("path must be a non-empty string of at most 4096 UTF-8 bytes")
+    if has_forbidden_action_controls(raw):
+        raise _image_delete_error("path contains control characters")
+    settings = settings if settings is not None else load_settings()
+    scm, _extras = effective_dirs(settings)
+    if not scm:
+        raise _image_delete_error("SCM checkout is not configured", 403)
+    root_alias = Path(os.path.abspath(os.fspath(scm)))
+    try:
+        root = root_alias.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _image_delete_error("SCM checkout is unavailable", 403) from exc
+    try:
+        root_stat = os.lstat(root)
+    except OSError as exc:
+        raise _image_delete_error("SCM checkout is unavailable", 403) from exc
+    if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+        raise _image_delete_error("SCM checkout is not a safe directory", 403)
+    # Deletion is intentionally narrower than read-only file listing:
+    # relative paths always bind to the initiating settings snapshot's SCM
+    # checkout, never DATA_DIR, UI_DIR, or the extras checkout.
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root_alias / candidate
+    candidate = Path(os.path.abspath(os.fspath(candidate)))
+    try:
+        # Keep the lexical components below the configured SCM alias so a
+        # symlink there is still rejected by dirfd traversal.  Only the fixed
+        # platform alias above the checkout (notably macOS /var -> /private/var)
+        # is replaced with the pinned canonical root.
+        if os.path.commonpath((os.fspath(root_alias), os.fspath(candidate))) == os.fspath(root_alias):
+            candidate = root / candidate.relative_to(root_alias)
+        elif os.path.commonpath((os.fspath(root), os.fspath(candidate))) != os.fspath(root):
+            resolved_candidate = candidate.resolve(strict=False)
+            if os.path.commonpath((os.fspath(root), os.fspath(resolved_candidate))) != os.fspath(root):
+                raise _image_delete_error("path is outside the SCM checkout", 403)
+            candidate = resolved_candidate
+    except ValueError as exc:
+        raise _image_delete_error("path is outside the SCM checkout", 403) from exc
+    if candidate == root:
+        raise _image_delete_error("the SCM checkout itself cannot be deleted", 403)
+    try:
+        if len(os.fspath(candidate).encode("utf-8")) > IMAGE_DELETE_MAX_PATH_BYTES:
+            raise _image_delete_error("path exceeds 4096 UTF-8 bytes")
+    except UnicodeEncodeError as exc:
+        raise _image_delete_error("path must be valid UTF-8") from exc
+    return root, candidate, _artifact_identity(root_stat)
+
+
+def _open_delete_directory_posix(root: Path, candidate: Path, root_identity_expected: dict):
+    if os.name == "nt" or not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+        raise _image_delete_error("secure image deletion is unavailable on this platform")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    root_fd = None
+    current_fd = None
+    try:
+        root_fd = os.open(os.fspath(root), flags)
+        current_fd = root_fd
+        root_identity = os.fstat(root_fd)
+        if (_is_reparse_or_symlink(root_identity) or
+                not stat.S_ISDIR(root_identity.st_mode) or
+                _artifact_identity(root_identity) != root_identity_expected):
+            raise _image_delete_error("SCM checkout changed before deletion", 403)
+        relative = candidate.relative_to(root)
+        parts = relative.parts
+        if not parts:
+            raise _image_delete_error("the SCM checkout itself cannot be deleted", 403)
+        for index, part in enumerate(parts):
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if index == len(parts) - 1:
+                    if current_fd != root_fd:
+                        os.close(current_fd)
+                    return root_fd, None, candidate
+                raise _image_delete_error("path contains a missing intermediate directory")
+            except NotADirectoryError:
+                try:
+                    leaf = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    if index == len(parts) - 1:
+                        if current_fd != root_fd:
+                            os.close(current_fd)
+                        return root_fd, None, candidate
+                    raise _image_delete_error("path contains a missing intermediate directory")
+                if _is_reparse_or_symlink(leaf):
+                    raise _image_delete_error(
+                        "path is outside the SCM checkout or contains a symlink/reparse point", 403)
+                if index == len(parts) - 1:
+                    if current_fd != root_fd:
+                        os.close(current_fd)
+                    return root_fd, None, candidate
+                raise _image_delete_error("path contains a non-directory component")
+            except OSError as exc:
+                if getattr(exc, "errno", None) == errno.ELOOP:
+                    raise _image_delete_error(
+                        "path is outside the SCM checkout or contains a symlink/reparse point", 403) from exc
+                if index == len(parts) - 1 and getattr(exc, "errno", None) in (errno.ENOENT, errno.ENOTDIR):
+                    try:
+                        leaf = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        if current_fd != root_fd:
+                            os.close(current_fd)
+                        return root_fd, None, candidate
+                    if _is_reparse_or_symlink(leaf):
+                        raise _image_delete_error(
+                            "path is outside the SCM checkout or contains a symlink/reparse point", 403) from exc
+                    if current_fd != root_fd:
+                        os.close(current_fd)
+                    return root_fd, None, candidate
+                raise _image_delete_error("path contains an unsafe component") from exc
+            st = os.fstat(next_fd)
+            if _is_reparse_or_symlink(st) or not stat.S_ISDIR(st.st_mode):
+                os.close(next_fd)
+                if index == len(parts) - 1 and stat.S_ISREG(st.st_mode):
+                    if current_fd != root_fd:
+                        os.close(current_fd)
+                    return root_fd, None, candidate
+                raise _image_delete_error("path contains a symlink or non-directory component", 403)
+            if current_fd != root_fd:
+                os.close(current_fd)
+            current_fd = next_fd
+        return root_fd, current_fd, candidate
+    except Exception:
+        if current_fd is not None and current_fd != root_fd:
+            try: os.close(current_fd)
+            except OSError: pass
+        if root_fd is not None:
+            try: os.close(root_fd)
+            except OSError: pass
+        raise
+
+
+def _close_delete_fds(root_fd, directory_fd):
+    if directory_fd is not None and directory_fd != root_fd:
+        try: os.close(directory_fd)
+        except OSError: pass
+    if root_fd is not None:
+        try: os.close(root_fd)
+        except OSError: pass
+
+
+def _check_image_delete_cancelled(cancelled, *, deleted=0, names=None,
+                                  directory=None) -> None:
+    if cancelled is not None and cancelled():
+        raise _image_delete_error("image deletion cancelled", deleted=deleted,
+                                  names=names or [], directory=directory)
+
+
+def _scan_delete_posix(directory_fd: int, directory: Path, cancelled=None) -> list:
+    candidates = []
+    scanned = 0
+    iterator = None
+    try:
+        iterator = os.scandir(directory_fd)
+        for entry in iterator:
+            _check_image_delete_cancelled(cancelled, directory=directory)
+            if scanned >= IMAGE_DELETE_MAX_SCANNED:
+                raise _image_delete_error("directory scan is too large; no images were deleted")
+            scanned += 1
+            name = entry.name
+            try:
+                if len(name.encode("utf-8")) > IMAGE_DELETE_MAX_NAME_BYTES:
+                    raise _image_delete_error("directory entry name is too long; no images were deleted")
+            except UnicodeEncodeError as exc:
+                raise _image_delete_error("directory entry name is not valid UTF-8") from exc
+            st = entry.stat(follow_symlinks=False)
+            if _is_reparse_or_symlink(st):
+                # A reparse/symlink candidate is never treated as an absent
+                # image.  Failing the preflight also prevents partial deletion.
+                raise _image_delete_error("directory contains a symlink or reparse point")
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            fd = None
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory_fd)
+                stable = os.fstat(fd)
+                if _is_reparse_or_symlink(stable) or not stat.S_ISREG(stable.st_mode):
+                    raise _image_delete_error("directory entry changed to a symlink or non-file")
+                if stable.st_dev != st.st_dev or stable.st_ino != st.st_ino:
+                    raise _image_delete_error("directory entry changed during scan")
+                if not _image_header_is_image(os.read(fd, 16)):
+                    continue
+                candidates.append({"name": name, "dev": stable.st_dev, "ino": stable.st_ino,
+                                   "size": stable.st_size, "mtime_ns": stable.st_mtime_ns,
+                                   "ctime_ns": stable.st_ctime_ns})
+                if len(candidates) > IMAGE_DELETE_MAX_CANDIDATES:
+                    raise _image_delete_error("too many image candidates; no images were deleted")
+            except FileNotFoundError:
+                raise _image_delete_error("directory changed during preflight; no images were deleted")
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        if scanned >= IMAGE_DELETE_MAX_SCANNED:
+            raise _image_delete_error("directory scan is too large; no images were deleted")
+    except StopIteration:
+        pass
+    finally:
+        if iterator is not None:
+            iterator.close()
+    candidates.sort(key=lambda item: item["name"])
+    if _image_delete_result_size(directory, [item["name"] for item in candidates]) > IMAGE_DELETE_MAX_RESULT_BYTES:
+        raise _image_delete_error("deletion result is too large; no images were deleted")
+    return candidates
+
+
+def _rename_delete_candidate(directory_fd: int, source: str, destination: str) -> None:
+    """Atomically quarantine one POSIX name without replacing another name."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_raw = os.fsencode(source)
+    destination_raw = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        rename = libc.renameatx_np
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                           ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(directory_fd, source_raw, directory_fd,
+                        destination_raw, 0x00000004)  # RENAME_EXCL
+    elif hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                           ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(directory_fd, source_raw, directory_fd,
+                        destination_raw, 0x00000001)  # RENAME_NOREPLACE
+    else:
+        raise _image_delete_error("secure no-replace deletion is unavailable")
+    if result != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value), destination)
+
+
+def _delete_images_posix(root: Path, directory_fd: int, directory: Path,
+                         cancelled=None) -> dict:
+    candidates = _scan_delete_posix(directory_fd, directory, cancelled)
+    deleted = []
+    for item in candidates:
+        fd = None
+        quarantine_fd = None
+        quarantine_name = None
+        moved = False
+        try:
+            _check_image_delete_cancelled(cancelled, deleted=len(deleted), names=deleted,
+                                          directory=directory)
+            fd = os.open(item["name"], os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory_fd)
+            stable = os.fstat(fd)
+            if (_is_reparse_or_symlink(stable) or not stat.S_ISREG(stable.st_mode) or
+                    stable.st_dev != item["dev"] or stable.st_ino != item["ino"] or
+                    stable.st_size != item["size"] or stable.st_mtime_ns != item["mtime_ns"] or
+                    stable.st_ctime_ns != item["ctime_ns"] or
+                    not _image_header_is_image(os.read(fd, 16))):
+                raise _image_delete_error("an image changed before deletion", deleted=len(deleted), names=deleted, directory=directory)
+            # Move the checked name to an unpredictable private name with an
+            # atomic no-replace primitive. Verify that the moved object is the
+            # already-open inode before unlinking the quarantine name.
+            for _ in range(16):
+                quarantine_name = f".wb-image-delete-{secrets.token_hex(16)}.tmp"
+                try:
+                    _rename_delete_candidate(directory_fd, item["name"], quarantine_name)
+                    moved = True
+                    break
+                except FileExistsError:
+                    continue
+            if not moved:
+                raise _image_delete_error("could not reserve image quarantine", deleted=len(deleted), names=deleted, directory=directory)
+            quarantine_fd = os.open(quarantine_name, os.O_RDONLY | os.O_NOFOLLOW |
+                                    getattr(os, "O_CLOEXEC", 0), dir_fd=directory_fd)
+            quarantined = os.fstat(quarantine_fd)
+            if (quarantined.st_dev != item["dev"] or quarantined.st_ino != item["ino"] or
+                    quarantined.st_size != item["size"] or
+                    not _image_header_is_image(os.read(quarantine_fd, 16))):
+                try:
+                    _rename_delete_candidate(directory_fd, quarantine_name, item["name"])
+                    moved = False
+                except Exception as restore_error:
+                    raise _image_delete_error("an image changed and could not be restored", deleted=len(deleted), names=deleted, directory=directory) from restore_error
+                raise _image_delete_error("an image changed before deletion", deleted=len(deleted), names=deleted, directory=directory)
+            os.unlink(quarantine_name, dir_fd=directory_fd)
+            moved = False
+            deleted.append(item["name"])
+        except ImageDeleteError:
+            raise
+        except FileNotFoundError as exc:
+            raise _image_delete_error("an image disappeared before deletion", deleted=len(deleted), names=deleted, directory=directory) from exc
+        except OSError as exc:
+            raise _image_delete_error("could not delete image", deleted=len(deleted), names=deleted, directory=directory) from exc
+        finally:
+            if moved and quarantine_name is not None:
+                try:
+                    _rename_delete_candidate(directory_fd, quarantine_name, item["name"])
+                except Exception:
+                    pass
+            if quarantine_fd is not None:
+                os.close(quarantine_fd)
+            if fd is not None:
+                os.close(fd)
+    return {"ok": True, "deleted": len(deleted), "names": deleted, "dir": str(directory)}
+
+
+def _delete_images_windows(root: Path, candidate: Path, root_identity_expected: dict,
+                           cancelled=None) -> dict:
+    """Delete through pinned Win32 handles; there is intentionally no unlink fallback."""
+    if os.name != "nt":
+        raise _image_delete_error("secure image deletion is unavailable on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [("attrs", wintypes.DWORD), ("created", wintypes.FILETIME),
+                    ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
+                    ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                    ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                    ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+
+    class _DispositionEx(ctypes.Structure):
+        _fields_ = [("flags", wintypes.DWORD)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_FileInfo)]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                     wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                                  ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    invalid = ctypes.c_void_p(-1).value
+    # READ_ATTRIBUTES/LIST_DIRECTORY, DELETE; share delete so disposition is
+    # permitted even while an opened handle pins the object.
+    access_dir = 0x0080 | 0x0001
+    access_file = 0x0080 | 0x0001 | 0x00010000
+    # Parent directory handles deliberately do not share DELETE, pinning every
+    # component against rename while the operation uses path spelling to open
+    # the next stable handle. File handles still delete by disposition.
+    share = 0x00000001 | 0x00000002
+    flags_dir = 0x02000000 | 0x00200000  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+    flags_file = 0x02000000 | 0x00200000
+
+    def raw(handle):
+        return getattr(handle, "value", handle)
+
+    def info(handle):
+        record = _FileInfo()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(record)):
+            raise _image_delete_error("could not inspect a stable Windows handle")
+        return record
+
+    def identity(record):
+        return (int(record.volume), int(record.index_high), int(record.index_low),
+                (int(record.size_high) << 32) | int(record.size_low))
+
+    def open_handle(path: Path, access: int, flags: int):
+        handle = kernel32.CreateFileW(str(path), access, share, None, 3, flags, None)
+        if raw(handle) == invalid:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        return handle
+
+    def read_head(handle):
+        data = ctypes.create_string_buffer(16)
+        count = wintypes.DWORD()
+        if not kernel32.ReadFile(handle, data, 16, ctypes.byref(count), None):
+            raise _image_delete_error("could not inspect image contents")
+        return data.raw[:count.value]
+
+    handles = []
+    try:
+        _check_image_delete_cancelled(cancelled, directory=candidate)
+        root_handle = open_handle(root, access_dir, flags_dir)
+        handles.append(root_handle)
+        root_info = info(root_handle)
+        root_key = (int(root_info.volume), int(root_info.index_high), int(root_info.index_low))
+        try:
+            current_root_stat = os.stat(root, follow_symlinks=False)
+        except OSError as exc:
+            raise _image_delete_error("SCM checkout changed before deletion", 403) from exc
+        # The retained root handle denies rename/delete sharing, so this path
+        # stat identifies that same pinned object. CPython's Windows st_dev is
+        # not the Win32 volume serial and must not be compared to root_key.
+        if (root_info.attrs & 0x400 or not root_info.attrs & 0x10 or
+                _artifact_identity(current_root_stat) != root_identity_expected):
+            raise _image_delete_error("SCM checkout changed before deletion", 403)
+        # Canonical lexical containment is checked again immediately before
+        # opening components; every opened component is independently checked.
+        if os.path.commonpath((str(root), str(candidate))) != str(root):
+            raise _image_delete_error("path is outside the SCM checkout", 403)
+        relative = candidate.relative_to(root)
+        parts = relative.parts
+        if not parts:
+            raise _image_delete_error("the SCM checkout itself cannot be deleted", 403)
+        for index, part in enumerate(parts):
+            current = root.joinpath(*parts[:index + 1])
+            try:
+                handle = open_handle(current, access_dir, flags_dir)
+            except OSError as exc:
+                if index == len(parts) - 1:
+                    if getattr(exc, "winerror", None) in (2, 3):
+                        return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
+                    # A regular file cannot be opened with LIST_DIRECTORY;
+                    # inspect the final object with an attributes-only handle
+                    # so non-directories retain the successful zero result.
+                    try:
+                        leaf_handle = open_handle(current, 0x0080, flags_file)
+                    except OSError:
+                        raise _image_delete_error("path contains an unsafe component") from exc
+                    handles.append(leaf_handle)
+                    leaf = info(leaf_handle)
+                    if leaf.attrs & 0x400:
+                        raise _image_delete_error("path contains a symlink or reparse point") from exc
+                    return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
+                raise _image_delete_error("path contains an unsafe component") from exc
+            handles.append(handle)
+            record = info(handle)
+            if record.attrs & 0x400:
+                raise _image_delete_error("path contains a symlink or reparse point")
+            if not record.attrs & 0x10:
+                if index == len(parts) - 1:
+                    return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
+                raise _image_delete_error("path contains a non-directory component")
+        directory_handle = handles[-1]
+        current_root = info(root_handle)
+        if (int(current_root.volume), int(current_root.index_high), int(current_root.index_low)) != root_key:
+            raise _image_delete_error("SCM checkout changed during deletion", 403)
+        # A bounded directory enumeration is done only after the stable target
+        # handle exists.  os.scandir is used for names; each candidate is then
+        # reopened by exact path and verified by its stable handle.
+        candidates = []
+        scanned = 0
+        for entry in os.scandir(candidate):
+            _check_image_delete_cancelled(cancelled, directory=candidate)
+            if scanned >= IMAGE_DELETE_MAX_SCANNED:
+                raise _image_delete_error("directory scan is too large; no images were deleted")
+            scanned += 1
+            if len(entry.name.encode("utf-8")) > IMAGE_DELETE_MAX_NAME_BYTES:
+                raise _image_delete_error("directory entry name is too long; no images were deleted")
+            child = candidate / entry.name
+            probe_handle = open_handle(child, 0x0080, flags_file)
+            try:
+                probe = info(probe_handle)
+                if probe.attrs & 0x400:
+                    raise _image_delete_error("directory contains a reparse point")
+                if probe.attrs & (0x10 | 0x40):  # DIRECTORY or DEVICE
+                    continue
+            finally:
+                kernel32.CloseHandle(probe_handle)
+            child_handle = open_handle(child, access_file, flags_file)
+            try:
+                record = info(child_handle)
+                if record.attrs & 0x400:
+                    raise _image_delete_error("directory contains a reparse point")
+                if record.attrs & (0x10 | 0x40) or identity(record) != identity(probe):
+                    raise _image_delete_error("directory entry changed during preflight")
+                if not _image_header_is_image(read_head(child_handle)):
+                    continue
+                candidates.append({"name": entry.name, "identity": identity(record)})
+                if len(candidates) > IMAGE_DELETE_MAX_CANDIDATES:
+                    raise _image_delete_error("too many image candidates; no images were deleted")
+            finally:
+                kernel32.CloseHandle(child_handle)
+        if scanned >= IMAGE_DELETE_MAX_SCANNED:
+            raise _image_delete_error("directory scan is too large; no images were deleted")
+        candidates.sort(key=lambda item: item["name"])
+        if _image_delete_result_size(candidate, [item["name"] for item in candidates]) > IMAGE_DELETE_MAX_RESULT_BYTES:
+            raise _image_delete_error("deletion result is too large; no images were deleted")
+        deleted = []
+        for item in candidates:
+            _check_image_delete_cancelled(cancelled, deleted=len(deleted), names=deleted,
+                                          directory=candidate)
+            child_handle = open_handle(candidate / item["name"], access_file, flags_file)
+            try:
+                current_root = info(root_handle)
+                if (int(current_root.volume), int(current_root.index_high), int(current_root.index_low)) != root_key:
+                    raise _image_delete_error("SCM checkout changed during deletion", 403,
+                                              deleted=len(deleted), names=deleted, directory=candidate)
+                record = info(child_handle)
+                if identity(record) != item["identity"] or not _image_header_is_image(read_head(child_handle)):
+                    raise _image_delete_error("an image changed before deletion", deleted=len(deleted), names=deleted, directory=candidate)
+                disposition = _DispositionEx(1 | 2)  # DELETE | POSIX_SEMANTICS
+                # SetFileInformationByHandle requires the raw HANDLE value on
+                # some ctypes/Python Windows combinations.
+                if not kernel32.SetFileInformationByHandle(raw(child_handle), 22,
+                                                            ctypes.byref(disposition), ctypes.sizeof(disposition)):
+                    raise _image_delete_error("stable handle deletion is unavailable", deleted=len(deleted), names=deleted, directory=candidate)
+                deleted.append(item["name"])
+            finally:
+                kernel32.CloseHandle(child_handle)
+        return {"ok": True, "deleted": len(deleted), "names": deleted, "dir": str(candidate)}
+    finally:
+        for handle in reversed(handles):
+            kernel32.CloseHandle(handle)
+
+
+_IMAGE_DELETE_OP_LOCK = threading.Lock()
+_IMAGE_DELETE_OPS = {}
+_IMAGE_DELETE_OP_MAX = 4
+_IMAGE_DELETE_OP_TTL = 600.0
+
+
+def _prune_image_delete_operations_locked(now=None):
+    now = time.time() if now is None else now
+    for operation_id, operation in list(_IMAGE_DELETE_OPS.items()):
+        if operation.get("done") and now - operation.get("ended", now) >= _IMAGE_DELETE_OP_TTL:
+            _IMAGE_DELETE_OPS.pop(operation_id, None)
+
+
+def _run_image_delete_operation(operation_id: str, raw: str, settings: dict):
+    with _IMAGE_DELETE_OP_LOCK:
+        operation = _IMAGE_DELETE_OPS.get(operation_id)
+        if operation is None:
+            return
+        deadline = operation["deadline"]
+    cancelled = lambda: time.monotonic() >= deadline
+    try:
+        # Bind relative paths to the settings snapshot taken by the initiating
+        # RPC rather than whichever checkout happens to be current later.
+        result = _delete_images_impl(raw, settings, cancelled)
+    except ImageDeleteError as error:
+        result = error.body()
+    except Exception:
+        result = {"ok": False, "errors": ["image deletion failed"], "deleted": 0, "names": []}
+    with _IMAGE_DELETE_OP_LOCK:
+        operation = _IMAGE_DELETE_OPS.get(operation_id)
+        if operation is not None:
+            operation["done"] = True
+            operation["result"] = result
+            operation["ended"] = time.time()
+
+
+def start_image_delete_operation(raw: str) -> dict:
+    with _IMAGE_DELETE_OP_LOCK:
+        _prune_image_delete_operations_locked()
+        active = sum(not operation.get("done") for operation in _IMAGE_DELETE_OPS.values())
+        if active >= _IMAGE_DELETE_OP_MAX or len(_IMAGE_DELETE_OPS) >= _IMAGE_DELETE_OP_MAX * 2:
+            return {"ok": False, "errors": ["too many image deletion operations"]}
+        operation_id = secrets.token_hex(16)
+        _IMAGE_DELETE_OPS[operation_id] = {
+            "done": False,
+            "result": None,
+            "deadline": time.monotonic() + 300.0,
+        }
+        try:
+            settings = load_settings()
+            threading.Thread(target=_run_image_delete_operation,
+                             args=(operation_id, raw, settings), daemon=True,
+                             name="image-delete-operation").start()
+        except Exception:
+            _IMAGE_DELETE_OPS.pop(operation_id, None)
+            return {"ok": False, "errors": ["could not start image deletion"]}
+    return {"operation_id": operation_id}
+
+
+def poll_image_delete_operation(operation_id: str) -> dict:
+    with _IMAGE_DELETE_OP_LOCK:
+        _prune_image_delete_operations_locked()
+        operation = _IMAGE_DELETE_OPS.get(operation_id)
+        if operation is None:
+            return {"ok": False, "error": {"code": "bad_request", "message": "operation not found"}}
+        if not operation.get("done"):
+            return {"done": False}
+        return {"done": True, "result": operation["result"]}
+
+
+def _delete_images_impl(raw: str, settings: Optional[dict] = None,
+                        cancelled=None) -> dict:
+    root, candidate, root_identity = _delete_images_target(raw, settings)
+    with _image_delete_lock():
+        _check_image_delete_cancelled(cancelled, directory=candidate)
+        if os.name == "nt":
+            return _delete_images_windows(root, candidate, root_identity, cancelled)
+        root_fd, directory_fd, directory = _open_delete_directory_posix(
+            root, candidate, root_identity)
+        try:
+            if directory_fd is None:
+                _check_image_delete_cancelled(cancelled, directory=candidate)
+                return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
+            return _delete_images_posix(root, directory_fd, candidate, cancelled)
+        finally:
+            _close_delete_fds(root_fd, directory_fd)
+
+
+def delete_images(raw: str, settings: Optional[dict] = None) -> dict:
+    try:
+        return _delete_images_impl(raw, settings)
+    except ImageDeleteError as exc:
+        return exc.body()
+    except Exception:
+        return {"ok": False, "errors": ["image deletion failed"], "deleted": 0, "names": []}
 
 
 def allowed_roots(settings: dict) -> List[Path]:
@@ -6271,32 +7018,22 @@ class Handler(BaseHTTPRequestHandler):
                 result, status = file_reveal_action(body.get("path"), load_settings())
                 return self._json(result, status)
             if path == "/api/fs":
+                # Packaged content has one owner for this destructive action.
+                # Reject before reading or resolving its path so HTTP cannot be
+                # used as a native fallback or as a second validation route.
+                if _IPC_MODE:
+                    return self._json({"ok": False, "errors": [
+                        "native image deletion is required in packaged mode"]}, 403)
                 body = self._body()
-                raw = str(body.get("path") or "").strip()
-                if not raw:
-                    return self._json({"ok": False, "errors": ["no path"]}, 400)
-                p = Path(raw)
-                roots = allowed_roots(load_settings())
-                if not p.is_absolute():
-                    cand = next((r / p for r in roots if (r / p).exists()), None)
-                    p = cand or (roots[0] / p if roots else p)
-                if not _inside(p, roots):
-                    return self._json({"ok": False, "errors": ["path is outside the allowed repos"]}, 403)
-                if body.get("op") == "delete_images":
-                    if not p.is_dir():
-                        return self._json({"ok": True, "deleted": 0, "names": [], "dir": str(p)})
-                    names = []
-                    for f in sorted(p.iterdir()):
-                        if not f.is_file() or not is_image_file(f):
-                            continue  # non-images (READMEs, EMPTY.md, …) are left alone
-                        try:
-                            f.unlink()
-                            names.append(f.name)
-                        except Exception as e:
-                            return self._json({"ok": False, "errors": [f"could not delete {f.name}: {e}"],
-                                                "deleted": len(names)}, 400)
-                    return self._json({"ok": True, "deleted": len(names), "names": names, "dir": str(p)})
-                return self._json({"ok": False, "errors": [f"unknown op \u201c{body.get('op')}\u201d"]}, 400)
+                if not isinstance(body, dict) or body.get("op") != "delete_images":
+                    return self._json({"ok": False, "errors": [
+                        f"unknown op \u201c{body.get('op') if isinstance(body, dict) else None}\u201d"]}, 400)
+                raw = body.get("path")
+                try:
+                    result = _delete_images_impl(raw, load_settings())
+                except ImageDeleteError as error:
+                    return self._json(error.body(), error.status)
+                return self._json(result)
             return self._json({"error": f"no such route: {path}"}, 404)
         except (BrokenPipeError, ConnectionResetError):
             pass

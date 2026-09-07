@@ -49,7 +49,7 @@ def main() -> int:
         return fail("pdf image listing does not use the artifact facade")
     if "listing.truncated" not in pdf or "Never offer a destructive action" not in pdf:
         return fail("pdf does not guard destructive deletion on truncated listings")
-    if "delete_images" not in pdf:
+    if 'import { deleteImages } from "../fs-transport.js";' not in pdf:
         return fail("pdf confirmation/deletion behavior disappeared")
 
     # There must be one owner for these compatibility routes. Other /api/file

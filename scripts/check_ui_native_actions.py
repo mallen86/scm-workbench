@@ -56,8 +56,11 @@ def main() -> int:
         return fail("raw file-list metadata HTTP route was removed")
     if any("/api/files/save" in p.read_text(encoding="utf-8") for p in UI.rglob("*.js")):
         return fail("UI retains a direct artifact save HTTP route")
-    if "/api/fs" not in pdf or "delete_images" not in pdf:
-        return fail("filesystem delete HTTP route was removed")
+    fs_facade = (UI / "fs-transport.js").read_text(encoding="utf-8")
+    if 'from "../fs-transport.js"' not in pdf or '"fs.delete_images"' not in fs_facade:
+        return fail("filesystem deletion did not use its transport facade")
+    if 'fetch("/api/fs"' not in fs_facade:
+        return fail("standalone browser filesystem compatibility route was removed")
     for path, marker in (
         (UI / "core.js", 'openExternalUrl(url)'),
         (UI / "native-actions.js", 'saveArtifact(grantId, suggestedName)'),
