@@ -1,7 +1,8 @@
 /* pages/fetch — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, nativePick, pageHead, toast } from "../core.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
+import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
+import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
@@ -85,39 +86,36 @@ export function patchFetchForm(kind) {
     const label = el("label", { class: "fp-label" }, "Decklist file ", el("span", { class: "req" }, "*"));
     // In the app's own window we can open the native OS file chooser; in a
     // browser (dev mode) the button doesn't exist and the folder list is it.
-    const canPick = nativePick.canPick();
-    if (canPick) {
+    const canImport = canImportDecklist();
+    if (canImport) {
       const browse = el("button", {
         class: "btn btn-ghost btn-sm", type: "button",
         title: "Pick any file on disk — it's copied into game/decklist/ and appears in the list",
         onclick: async () => {
           browse.disabled = true;
-          let picked = null;
           try {
-            picked = await nativePick.pickFile();
+            const result = await importDecklist();
+            if (result === null) {
+              browse.disabled = false;
+              return;
+            }
+            if (!result?.ok) {
+              browse.disabled = false;
+              toast("err", (result?.errors || [])[0] || "Importing the file failed.");
+              return;
+            }
+            S.info.scm.decklists = result.decklists;
+            args.deck_file = result.name;
+            fillList();
+            autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
+            afterFormChange(kind, args);
+            browse.disabled = false;
+            toast("ok", `Imported “${result.name}” into the decklist folder`);
+            return;
           } catch (e) {
             browse.disabled = false;
             toast("warn", `The file picker failed to open (${e.message || "unknown error"}) — paste the decklist text instead.`);
             return;
-          }
-          browse.disabled = false;
-          if (!picked) return; // cancelled in the panel
-          let r;
-          try {
-            r = await api("/api/decklists/import", { path: picked });
-          } catch (e) {
-            toast("err", e.message);
-            return;
-          }
-          if (r.ok) {
-            S.info.scm.decklists = r.decklists;
-            args.deck_file = r.name;
-            fillList();
-            autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
-            afterFormChange(kind, args);
-            toast("ok", `Imported “${r.name}” into the decklist folder`);
-          } else {
-            toast("err", (r.errors || [])[0] || "Importing the file failed.");
           }
         },
       }, ico("folder"), "Browse…");
@@ -129,7 +127,7 @@ export function patchFetchForm(kind) {
       const fl = S.info.scm.decklists || [];
       list.innerHTML = "";
       if (!fl.length) list.append(el("div", { class: "small faint" },
-        "No decklist files in game/decklist/ yet — use “Paste text” to create one" + (canPick ? ", or pick an existing file with Browse…" : "")));
+        "No decklist files in game/decklist/ yet — use “Paste text” to create one" + (canImport ? ", or pick an existing file with Browse…" : "")));
       for (const f of fl) {
         list.append(el("div", {
           class: `fp-item ${args.deck_file === f.name ? "active" : ""}`,

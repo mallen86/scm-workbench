@@ -145,27 +145,20 @@ export async function api(path, body) {
 
 /* --------------------------- native window bridge -------------------------
    In the app's own window we can open native OS file dialogs; in a plain
-   browser (dev mode) they don't exist, so pages gate those buttons on
-   nativePick.canPick() / nativePick.canSave().
+   browser (dev mode) they don't exist, so pages gate save buttons on
+   nativePick.canSave(). Decklist import has its own Tauri command facade.
 
    Two shells have provided that bridge so far:
-     pywebview (the macOS app window) — window.pywebview.api.pick_file /
-       pick_save, returning the chosen path or null on cancel;
-     the Tauri shell (the Windows app window) — the same contract over its
-       IPC bridge (window.__TAURI_INTERNALS__.invoke), via the dialog plugin
-       (plugin:dialog|open / |save). Both resolve to a promise of
+     pywebview (the macOS app window) — window.pywebview.api.pick_save,
+       returning the chosen path or null on cancel;
+     the Tauri shell (the Windows app window) — save uses the same contract over
+       its IPC bridge (window.__TAURI_INTERNALS__.invoke). Both resolve to a promise of
        path-or-null, so callers can await them identically. */
 const _tauriInvoke = () => getTauriInvoke();
 const _pbApi = () => (window.pywebview && window.pywebview.api) || null;
 
 export const nativePick = {
-  canPick() { return !!((_pbApi() || {}).pick_file) || !!_tauriInvoke(); },
   canSave() { return !!((_pbApi() || {}).pick_save) || !!_tauriInvoke(); },
-  pickFile() {
-    const a = _pbApi();
-    if (a && a.pick_file) return a.pick_file();
-    return _tauriInvoke()("plugin:dialog|open", { options: { multiple: false, directory: false } });
-  },
   pickSave(filename) {
     const a = _pbApi();
     if (a && a.pick_save) return a.pick_save(filename);

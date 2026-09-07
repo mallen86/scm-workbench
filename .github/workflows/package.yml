@@ -25,6 +25,7 @@ jobs:
           python -m unittest tests.test_update_handoff -v
           python scripts/check_ui_imports.py
           python scripts/check_ui_transport.py
+          python scripts/check_ui_decklists.py
           python scripts/check_ui_jobs.py
           python scripts/check_ui_repos.py
           python scripts/check_ui_preview.py
@@ -297,7 +298,13 @@ jobs:
             echo "smoke FAILED: the WebView fetched an update route over HTTP" >&2
             exit 1
           fi
-          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset/update HTTP routes were not used"
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "POST /api/decklists/import([? ][^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView imported a decklist over HTTP" >&2
+            exit 1
+          fi
+          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset/update/decklist HTTP routes were not used"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -438,6 +445,7 @@ jobs:
           python -m unittest tests.test_update_handoff -v
           python scripts/check_ui_imports.py
           python scripts/check_ui_transport.py
+          python scripts/check_ui_decklists.py
           python scripts/check_ui_jobs.py
           python scripts/check_ui_repos.py
           python scripts/check_ui_preview.py
@@ -552,6 +560,7 @@ jobs:
               $offsetWritePattern = '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'
               $repoMetadataPattern = '^\[workbench\] "POST /api/repos/(refs|save|check)([? ][^\"]*)? HTTP/'
               $updatePattern = '^\[workbench\] "(GET /api/updates([? ][^\"]*)?|GET /api/release-notes([? ][^\"]*)?|POST /api/updates/(check|start)([? ][^\"]*)?) HTTP/'
+              $decklistImportPattern = '^\[workbench\] "POST /api/decklists/import([? ][^\"]*)? HTTP/'
               $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
@@ -563,16 +572,17 @@ jobs:
               $offsetWriteHttp = $webviewRequests | Select-String -Pattern $offsetWritePattern
               $repoMetadataHttp = $webviewRequests | Select-String -Pattern $repoMetadataPattern
               $updateHttp = $webviewRequests | Select-String -Pattern $updatePattern
+              $decklistImportHttp = $webviewRequests | Select-String -Pattern $decklistImportPattern
               # Raw file reads, images_only metadata, save, and delete remain
               # HTTP. Browser fallback is outside this packaged-WebView check;
-              # native settings/offset/repository metadata routes are not.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp) {
+              # native settings/offset/repository/decklist routes are not.
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp -or $decklistImportHttp) {
                 Get-Content $log
                 throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
               }
             }
           }
-          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, preview, and updates.get used native IPC; no migrated metadata/action/settings/offset/repository/update route used HTTP"
+          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, preview, and updates.get used native IPC; no migrated metadata/action/settings/offset/repository/update/decklist route used HTTP"
           $proc | Stop-Process -Force
           $proc.WaitForExit()
           Start-Sleep -Seconds 2

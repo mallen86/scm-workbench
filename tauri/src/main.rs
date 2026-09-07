@@ -23,7 +23,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use serde_json::Value;
+use tauri::{
+    AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
+use tauri_plugin_dialog::DialogExt;
 
 mod ipc;
 mod update_helper;
@@ -114,6 +118,50 @@ fn loading_page() -> WebviewUrl {
     WebviewUrl::App("loading.html".into())
 }
 
+/// Native decklist import owns the picker. The callback-based dialog is
+/// intentionally bridged to an async command: no blocking picker runs on the
+/// Tauri main thread, and the worker receives only the selected path.
+#[tauri::command]
+async fn wb_decklist_import(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+) -> Result<Value, String> {
+    let worker = state.inner().clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Import decklist")
+        .add_filter(
+            "Decklists",
+            &[
+                "txt", "text", "csv", "tsv", "json", "xml", "md", "deck", "dek", "ydk", "ydke",
+                "list",
+            ],
+        )
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "decklist picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "decklist picker failed".to_string()))?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected path is unavailable".to_string())?;
+    let source_path = path
+        .to_str()
+        .ok_or_else(|| "selected path is not valid UTF-8".to_string())?;
+    if source_path.as_bytes().len() > 4096 {
+        return Err("selected path exceeds 4096 UTF-8 bytes".to_string());
+    }
+    worker.import_selected_decklist(source_path)
+}
+
 fn main() {
     // The updater is an external, stdio-free mode.  It must be selected before
     // Tauri setup creates windows, starts IPC, or touches the worker.
@@ -127,7 +175,7 @@ fn main() {
     let worker_slot = WorkerSlot::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc])
+        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc, wb_decklist_import])
         .manage(worker_slot.clone())
         .manage(Worker {
             slot: worker_slot,

@@ -24,7 +24,11 @@ calls use relative HTTP URLs. The native protocol covers the three bootstrap
 reads, bounded settings and offset mutations, preview, packaged-Tauri job
 control/log operations, the read-only `template.resolve`/`file.list` metadata
 slice, bounded repository metadata operations, app update/release-note
-operations, and the bounded OS-action methods below. Other surfaces remain on their existing HTTP compatibility paths.
+operations, and the bounded OS-action methods below. Decklist import is a
+separate native command (`wb_decklist_import`), not a public `wb_rpc` method:
+the command owns the fixed single-file picker and sends one validated private
+`decklists.import_selected` frame to the worker. Other surfaces remain on their
+existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -86,10 +90,13 @@ parameter contracts below.
 | `GET /api/release-notes?tag=...` | `updates.notes` (packaged Tauri) | checked-release notes lookup |
 | (update operation registry) | `updates.poll` (packaged Tauri) | poll an update operation |
 | `POST /api/updates/start` | `updates.start` (packaged Tauri) | `server.start_update_job()` |
+| `POST /api/decklists/import` | `wb_decklist_import` (packaged Tauri command) | `server.import_decklist()` |
 
-Those HTTP routes remain served as compatibility endpoints; native selection is
-a client transport choice, not their removal. The methods use these exact
-parameter and result shapes inside the common RPC envelope. For `settings.set`,
+Those HTTP routes remain served as standalone-browser compatibility endpoints;
+the IPC-mode worker rejects path-based `POST /api/decklists/import` so packaged
+content cannot bypass the native picker. Native selection is otherwise a client
+transport choice, not route removal. The methods use these exact parameter and
+result shapes inside the common RPC envelope. For `settings.set`,
 the worker holds the settings lock across load, schema validation, merge, and
 atomic commit. It writes a sibling temporary file and replaces `settings.json`
 with `os.replace`; a failed validation or write leaves the previous file intact.
@@ -139,6 +146,24 @@ state/projection transaction described below:
   Success is exactly `{"ok":true,"settings":<complete merged settings>}`.
   Validation happens before any write, so a rejected change cannot partially
   update settings.
+
+### Decklist import
+
+`wb_decklist_import` is a no-argument Tauri command, not a public `wb_rpc`
+method. Rust opens a parented single-file dialog and privately sends exactly
+`{"source_path":"<selected UTF-8 path>"}` as `decklists.import_selected`;
+public `wb_rpc` rejects that method. Cancellation returns JSON `null`,
+application failures return bounded `{"ok":false,"errors":[...]}`, and native
+invocation failures reject without HTTP fallback.
+
+The worker accepts paths up to 4096 UTF-8 bytes and copies at most 8 MiB from
+one stable regular-file handle. Final symlinks/reparse points, controls, unsafe
+or reserved portable filenames, and symlinked destination components are
+rejected. Publication into the effective SCM `game/decklist` directory holds
+the SCM repository lock, uses an exclusive sibling temporary file plus an
+atomic no-replace hard link, and never overwrites a collision. Returned entries
+are deterministic and bounded to 8192 scanned entries, 1024 results, and a
+512 KiB encoded result; manifest and info caches are invalidated after success.
 
 ### Repository metadata operations
 

@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the wb_decklist_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-decklist-import",
+          "markdownDescription": "Enables the wb_decklist_import command without any pre-configured scope."
+        },
+        {
           "description": "Enables the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "allow-wb-restart",
@@ -187,6 +193,12 @@
           "type": "string",
           "const": "allow-wb-rpc",
           "markdownDescription": "Enables the wb_rpc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_decklist_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-decklist-import",
+          "markdownDescription": "Denies the wb_decklist_import command without any pre-configured scope."
         },
         {
           "description": "Denies the wb_restart command without any pre-configured scope.",

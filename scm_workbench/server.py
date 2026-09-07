@@ -39,6 +39,7 @@ import webbrowser
 import unicodedata
 from collections import OrderedDict
 import copy
+import errno
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -133,6 +134,506 @@ def find_scm_repo() -> Optional[Path]:
 
 def find_extras_repo() -> Optional[Path]:
     return _sibling("scm-extras", "generate.py")
+
+
+# Decklists cross a trust boundary: the native dialog supplies only a path,
+# while the worker owns the copy into the managed repository.  Keep these
+# limits independent of the JSON-lines frame limits.
+DECKLIST_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+DECKLIST_PATH_MAX_BYTES = 4096
+DECKLIST_NAME_MAX_BYTES = 255
+DECKLIST_SCAN_MAX_SCANNED = 8192
+DECKLIST_SCAN_MAX_ITEMS = 1024
+DECKLIST_SCAN_MAX_RESULT_BYTES = 512 * 1024
+DECKLIST_IO_CHUNK = 64 * 1024
+DECKLIST_PLACEHOLDERS = frozenset(("README.md", "EMPTY.md"))
+DECKLIST_TEMP_PREFIX = ".wb-decklist-import-"
+
+
+class DecklistImportError(Exception):
+    """Bounded application failure for a decklist import or scan."""
+
+    def __init__(self, message: str):
+        super().__init__(" ".join(str(message).split())[:256])
+        self.message = str(self) or "decklist operation failed"
+
+
+def _utf8_size(value: str, label: str, limit: int) -> int:
+    if not isinstance(value, str) or not value:
+        raise DecklistImportError(f"{label} must be a non-empty string")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise DecklistImportError(f"{label} must be valid UTF-8") from exc
+    if size > limit:
+        raise DecklistImportError(f"{label} exceeds {limit} UTF-8 bytes")
+    return size
+
+
+def _decklist_name(name: str) -> str:
+    _utf8_size(name, "decklist name", DECKLIST_NAME_MAX_BYTES)
+    if name in (".", "..") or not name.strip():
+        raise DecklistImportError("invalid decklist name")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or unicodedata.category(c) == "Cc"
+           for c in name):
+        raise DecklistImportError("decklist name contains control characters")
+    if any(c in name for c in ("/", "\\", ":")):
+        raise DecklistImportError("decklist name contains a separator or ADS character")
+    if name.endswith((".", " ")):
+        raise DecklistImportError("decklist name must not end with dot or space")
+    stem = name.split(".", 1)[0].upper()
+    if stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"COM[1-9]", stem) or re.fullmatch(r"LPT[1-9]", stem):
+        raise DecklistImportError("decklist name is reserved on Windows")
+    if name in DECKLIST_PLACEHOLDERS or name.startswith(DECKLIST_TEMP_PREFIX):
+        raise DecklistImportError("reserved decklist name")
+    return name
+
+
+def _is_reparse_or_symlink(st: os.stat_result) -> bool:
+    attrs = getattr(st, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(st.st_mode) or bool(attrs & reparse)
+
+
+def _decklist_components(path: Path, *, create: bool = False) -> Path:
+    """Check every destination component without resolving symlinks."""
+    path = Path(os.path.abspath(os.fspath(path)))
+    # The effective SCM path is the trust anchor. Check it and the two fixed
+    # children, rather than platform ancestors such as macOS's /var alias.
+    base = path.parent.parent
+    components = (base, path.parent, path)
+    for current in components:
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                raise DecklistImportError("decklist directory does not exist")
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            st = os.lstat(current)
+        except OSError as exc:
+            raise DecklistImportError("could not inspect decklist directory") from exc
+        if _is_reparse_or_symlink(st) or not stat.S_ISDIR(st.st_mode):
+            raise DecklistImportError("decklist destination contains a symlink or non-directory")
+    return path
+
+
+def _open_posix_decklist_directory(scm: Path, *, create: bool = True) -> Tuple[Path, int]:
+    """Open SCM/game/decklist without following a path component."""
+    if os.name == "nt" or not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+        raise DecklistImportError("secure decklist directory handles are unavailable")
+    root = Path(os.path.abspath(os.fspath(scm)))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    opened: List[int] = []
+    try:
+        current = os.open(root, flags)
+        opened.append(current)
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            raise DecklistImportError("decklist destination is not a directory")
+        for component in ("game", "decklist"):
+            if create:
+                try:
+                    os.mkdir(component, 0o755, dir_fd=current)
+                except FileExistsError:
+                    pass
+                except OSError as exc:
+                    raise DecklistImportError("could not create decklist directory") from exc
+            try:
+                child = os.open(component, flags, dir_fd=current)
+            except OSError as exc:
+                raise DecklistImportError(
+                    "decklist destination contains a symlink or non-directory") from exc
+            opened.append(child)
+            current = child
+        final_fd = opened.pop()
+        return root / "game" / "decklist", final_fd
+    except DecklistImportError:
+        raise
+    except OSError as exc:
+        raise DecklistImportError("could not open decklist directory") from exc
+    finally:
+        for opened_fd in opened:
+            try:
+                os.close(opened_fd)
+            except OSError:
+                pass
+
+
+def _decklist_scan(directory: Path, directory_fd: Optional[int] = None) -> dict:
+    """Bounded deterministic listing shared by info, manifest, and import."""
+    try:
+        directory_stat = os.fstat(directory_fd) if directory_fd is not None else os.lstat(directory)
+    except OSError as exc:
+        raise DecklistImportError("could not inspect decklist directory") from exc
+    if _is_reparse_or_symlink(directory_stat) or not stat.S_ISDIR(directory_stat.st_mode):
+        raise DecklistImportError("decklist directory is not a regular directory")
+    candidates: List[dict] = []
+    scanned = found = 0
+    truncated = scan_limited = False
+    try:
+        iterator = os.scandir(directory_fd if directory_fd is not None else directory)
+        with iterator:
+            for entry in iterator:
+                if scanned >= DECKLIST_SCAN_MAX_SCANNED:
+                    truncated = scan_limited = True
+                    break
+                scanned += 1
+                name = entry.name
+                if name in DECKLIST_PLACEHOLDERS or name.startswith(DECKLIST_TEMP_PREFIX):
+                    continue
+                try:
+                    encoded_name = name.encode("utf-8")
+                except UnicodeEncodeError:
+                    truncated = True
+                    continue
+                if (not encoded_name or len(encoded_name) > DECKLIST_NAME_MAX_BYTES or
+                        any(ord(c) < 0x20 or ord(c) == 0x7f for c in name)):
+                    truncated = True
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    truncated = True
+                    continue
+                if _is_reparse_or_symlink(st) or not stat.S_ISREG(st.st_mode):
+                    continue
+                found += 1
+                candidates.append({"name": name, "size": int(st.st_size)})
+    except OSError as exc:
+        raise DecklistImportError("could not scan decklist directory") from exc
+
+    # Once enumeration itself hits the cap, returning an OS-order-dependent
+    # subset would make the result nondeterministic. Fail closed with an empty
+    # partial list; the caller still gets explicit truncation and counts.
+    candidates = [] if scan_limited else sorted(candidates, key=lambda item: item["name"])
+    if len(candidates) > DECKLIST_SCAN_MAX_ITEMS:
+        truncated = True
+    items = candidates[:DECKLIST_SCAN_MAX_ITEMS]
+    # Bound the complete scan object, not just its item array; import adds a
+    # small envelope around this same listing before it crosses IPC.
+    while items and len(json.dumps(
+            {"items": items, "scanned": scanned, "found": found, "truncated": truncated},
+            ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > DECKLIST_SCAN_MAX_RESULT_BYTES:
+        items.pop()
+        truncated = True
+    return {"items": items, "scanned": scanned, "found": found, "truncated": bool(truncated)}
+
+
+def _decklist_lock():
+    """Acquire the same per-SCM lock as repo_sync, without an unbounded wait."""
+    import contextlib
+    @contextlib.contextmanager
+    def locked():
+        lock_path = repo_sync.data_dir() / ".repos-scm-lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        acquired = False
+        deadline = time.monotonic() + 7.5
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0, 2)
+                if fh.tell() == 0:
+                    fh.write(" ")
+                    fh.flush()
+                contention_errno = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+                contention_winerror = {32, 33, 36, 170, 212}
+                while time.monotonic() < deadline:
+                    try:
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        acquired = True
+                        break
+                    except OSError as exc:
+                        if (getattr(exc, "errno", None) not in contention_errno and
+                                getattr(exc, "winerror", None) not in contention_winerror):
+                            raise DecklistImportError("could not acquire repository lock") from exc
+                        time.sleep(0.05)
+            else:
+                import fcntl
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.05)
+            if not acquired:
+                raise DecklistImportError("repository is busy")
+            yield
+        finally:
+            if acquired:
+                try:
+                    if os.name == "nt":
+                        fh.seek(0)
+                        import msvcrt
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fh, fcntl.LOCK_UN)
+                finally:
+                    fh.close()
+            else:
+                fh.close()
+    return locked()
+
+
+def _open_decklist_source(source_path: str):
+    _utf8_size(source_path, "source path", DECKLIST_PATH_MAX_BYTES)
+    if "\x00" in source_path or any(ord(c) < 0x20 or ord(c) == 0x7f for c in source_path):
+        raise DecklistImportError("source path contains control characters")
+    name = os.path.basename(source_path)
+    if not name or name != source_path.rstrip("/\\").split("/")[-1].split("\\")[-1]:
+        # The basename is still used for the destination, but an empty leaf is
+        # never a valid selected file.
+        raise DecklistImportError("source path has no file name")
+    name = _decklist_name(name)
+    if os.name == "nt":
+        # Open the final object itself and inspect reparse attributes before
+        # converting the stable Win32 handle to a CRT fd for bounded reads.
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                         wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        class _ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        kernel32.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+        kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(source_path, 0x80000000, 0x00000007, None, 3,
+                                      0x00200000, None)  # GENERIC_READ, OPEN_EXISTING, OPEN_REPARSE_POINT
+        raw_handle = getattr(handle, "value", handle)
+        invalid = ctypes.c_void_p(-1).value
+        if raw_handle == invalid:
+            raise DecklistImportError("could not open selected decklist")
+        handle_info = _ByHandleFileInformation()
+        if (not kernel32.GetFileInformationByHandle(handle, ctypes.byref(handle_info))
+                or handle_info.dwFileAttributes & 0x400):
+            kernel32.CloseHandle(handle)
+            raise DecklistImportError("selected source is a reparse point or unavailable")
+        try:
+            import msvcrt
+            fd = msvcrt.open_osfhandle(raw_handle, os.O_RDONLY)
+        except Exception as exc:
+            kernel32.CloseHandle(handle)
+            raise DecklistImportError("could not open selected decklist") from exc
+    else:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(source_path, flags)
+        except OSError as exc:
+            raise DecklistImportError("could not open selected decklist") from exc
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise DecklistImportError("could not open selected decklist") from exc
+    if _is_reparse_or_symlink(st) or not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise DecklistImportError("selected source is not a regular file")
+    if st.st_size > DECKLIST_SOURCE_MAX_BYTES:
+        os.close(fd)
+        raise DecklistImportError("selected decklist exceeds 8 MiB")
+    return fd, st, name
+
+
+def import_decklist(source_path: str) -> dict:
+    """Copy one selected file through stable source/destination handles."""
+    fd, source_stat, name = _open_decklist_source(source_path)
+    directory_fd = None
+    temp_name = None
+    temp_path = None
+    try:
+        scm, _ = effective_dirs(load_settings())
+        if not scm:
+            raise DecklistImportError("no copy of silhouette-card-maker is connected yet")
+        with _decklist_lock():
+            if os.name == "nt":
+                directory = _decklist_components(Path(scm) / "game" / "decklist", create=True)
+            else:
+                directory, directory_fd = _open_posix_decklist_directory(Path(scm))
+
+            def destination_exists(candidate_name: str) -> bool:
+                try:
+                    if directory_fd is None:
+                        os.lstat(directory / candidate_name)
+                    else:
+                        os.stat(candidate_name, dir_fd=directory_fd, follow_symlinks=False)
+                    return True
+                except FileNotFoundError:
+                    return False
+
+            target_name = name
+            stem, extension = os.path.splitext(name)
+            for suffix in range(1000):
+                candidate_name = target_name if suffix == 0 else f"{stem} ({suffix + 1}){extension}"
+                _utf8_size(candidate_name, "decklist name", DECKLIST_NAME_MAX_BYTES)
+                if not destination_exists(candidate_name):
+                    target_name = candidate_name
+                    break
+            else:
+                raise DecklistImportError("too many decklist name collisions")
+
+            # O_EXCL makes the temporary file private to this operation. It is
+            # never removed unless this operation created it.
+            for _ in range(16):
+                candidate_name = f"{DECKLIST_TEMP_PREFIX}{uuid.uuid4().hex}.tmp"
+                candidate_path = directory / candidate_name
+                try:
+                    if directory_fd is None:
+                        temp_fd = os.open(
+                            candidate_path,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                            0o600,
+                        )
+                        temp_path = candidate_path
+                    else:
+                        temp_fd = os.open(
+                            candidate_name,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                            0o600,
+                            dir_fd=directory_fd,
+                        )
+                    temp_name = candidate_name
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise DecklistImportError("could not create temporary decklist")
+
+            total = 0
+            try:
+                while total < source_stat.st_size:
+                    chunk = os.read(fd, min(DECKLIST_IO_CHUNK, source_stat.st_size - total))
+                    if not chunk:
+                        raise DecklistImportError("selected source changed while reading")
+                    written = 0
+                    while written < len(chunk):
+                        count = os.write(temp_fd, chunk[written:])
+                        if count <= 0:
+                            raise DecklistImportError("could not write temporary decklist")
+                        written += count
+                    total += len(chunk)
+                    if total > DECKLIST_SOURCE_MAX_BYTES:
+                        raise DecklistImportError("selected decklist exceeds 8 MiB")
+                if os.read(fd, 1):
+                    raise DecklistImportError("selected source grew while reading")
+                end_stat = os.fstat(fd)
+
+                def source_identity(value):
+                    return (
+                        value.st_dev,
+                        value.st_ino,
+                        value.st_size,
+                        getattr(value, "st_mtime_ns", value.st_mtime),
+                        getattr(value, "st_ctime_ns", value.st_ctime),
+                    )
+
+                if source_identity(end_stat) != source_identity(source_stat):
+                    raise DecklistImportError("selected source changed while reading")
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+
+            def publish(candidate_name: str) -> None:
+                if directory_fd is None:
+                    os.link(temp_path, directory / candidate_name)
+                else:
+                    os.link(
+                        temp_name,
+                        candidate_name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+
+            try:
+                publish(target_name)
+            except FileExistsError:
+                # The repository lock excludes Workbench writers, but an
+                # external writer can still win. No-replace publication then
+                # selects a fresh bounded suffix without overwriting it.
+                for suffix in range(1, 1000):
+                    candidate_name = f"{stem} ({suffix + 1}){extension}"
+                    _utf8_size(candidate_name, "decklist name", DECKLIST_NAME_MAX_BYTES)
+                    try:
+                        publish(candidate_name)
+                        target_name = candidate_name
+                        break
+                    except FileExistsError:
+                        continue
+                else:
+                    raise DecklistImportError("too many decklist name collisions")
+
+            if directory_fd is None:
+                os.unlink(temp_path)
+            else:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            temp_name = temp_path = None
+            try:
+                if directory_fd is not None:
+                    os.fsync(directory_fd)
+                else:
+                    flush_fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(flush_fd)
+                    finally:
+                        os.close(flush_fd)
+            except OSError:
+                pass
+            listing = _decklist_scan(directory, directory_fd)
+
+        result = {"ok": True, "name": target_name, "decklists": listing["items"],
+                  "truncated": listing["truncated"]}
+        while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > DECKLIST_SCAN_MAX_RESULT_BYTES and result["decklists"]:
+            result["decklists"].pop()
+            result["truncated"] = True
+        invalidate_manifest_cache()
+        return result
+    except DecklistImportError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise DecklistImportError("decklist import failed") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if temp_name is not None:
+            try:
+                if directory_fd is not None:
+                    os.unlink(temp_name, dir_fd=directory_fd)
+                elif temp_path is not None:
+                    os.unlink(temp_path)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
@@ -253,12 +754,23 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
         pass
 
     dl = scm / "game" / "decklist"
-    if dl.is_dir():
-        placeholders = {"README.md", "EMPTY.md"}
-        info["decklists"] = [
-            {"name": p.name, "size": p.stat().st_size}
-            for p in sorted(dl.iterdir()) if p.is_file() and p.name not in placeholders
-        ]
+    scan_fd = None
+    try:
+        if os.name == "nt":
+            if dl.exists() and not dl.is_symlink():
+                _decklist_components(dl, create=False)
+                info["decklists"] = _decklist_scan(dl)["items"]
+        else:
+            dl, scan_fd = _open_posix_decklist_directory(scm, create=False)
+            info["decklists"] = _decklist_scan(dl, scan_fd)["items"]
+    except (DecklistImportError, OSError):
+        info["decklists"] = []
+    finally:
+        if scan_fd is not None:
+            try:
+                os.close(scan_fd)
+            except OSError:
+                pass
     outdir = scm / "game" / "output"
     if outdir.is_dir():
         info["output_pdfs"] = [p.name for p in sorted(outdir.glob("*.pdf"))]
@@ -3648,6 +4160,8 @@ def get_manifest() -> dict:
 def invalidate_manifest_cache() -> None:
     with MANIFEST_LOCK:
         MANIFEST_CACHE.clear()
+        _INFO_SNAP.clear()
+        _REPOS_MTIME.clear()
 
 
 class PreviewError(Exception):
@@ -4912,33 +5426,20 @@ class Handler(BaseHTTPRequestHandler):
                 result = repo_refs_result(key)
                 return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/decklists/import":
+                # A packaged worker must only accept the path delivered over
+                # the native command. Standalone browser mode keeps this
+                # compatibility route for callers which already have a path;
+                # the UI never exposes a browser picker.
+                if _IPC_MODE:
+                    return self._json({"ok": False, "errors": [
+                        "native picker required for packaged decklist import"]}, 400)
                 body = self._body()
-                src = str(body.get("path") or "").strip()
-                if not src or not os.path.isfile(src):
-                    return self._json({"ok": False, "errors": [f"no such file: “{src or '(none given)'}”"]}, 400)
-                scm, _ = effective_dirs(load_settings())
-                if not scm:
-                    return self._json({"ok": False, "errors": ["no copy of silhouette-card-maker is connected yet"]}, 400)
-                dl = scm / "game" / "decklist"
-                dl.mkdir(parents=True, exist_ok=True)
-                name = os.path.basename(src)
-                target = dl / name
-                n = 2
-                while target.exists():
-                    stem, ext = os.path.splitext(name)
-                    target = dl / f"{stem} ({n}){ext}"
-                    n += 1
+                src = body.get("path") if isinstance(body, dict) else None
                 try:
-                    shutil.copy2(src, target)
-                except Exception as e:
-                    return self._json({"ok": False, "errors": [f"copy failed: {e}"]}, 400)
-                invalidate_manifest_cache()
-                placeholders = {"README.md", "EMPTY.md"}
-                decklists = [
-                    {"name": pp.name, "size": pp.stat().st_size}
-                    for pp in sorted(dl.iterdir()) if pp.is_file() and pp.name not in placeholders
-                ]
-                return self._json({"ok": True, "name": target.name, "decklists": decklists})
+                    result = import_decklist(src)
+                except DecklistImportError as exc:
+                    return self._json({"ok": False, "errors": [exc.message]}, 400)
+                return self._json(result)
             if path == "/api/offset":
                 body = self._body()
                 if not isinstance(body, dict):

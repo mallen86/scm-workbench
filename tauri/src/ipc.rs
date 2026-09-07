@@ -138,6 +138,20 @@ impl WorkerRpc {
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         validate_method(method)?;
+        self.call_unchecked(method, params)
+    }
+
+    /// Private protocol edge owned by the native picker command. The caller
+    /// can supply only the path returned by that dialog; neither the method nor
+    /// an arbitrary parameter object is exposed to the WebView.
+    pub(crate) fn import_selected_decklist(&self, source_path: &str) -> Result<Value, String> {
+        self.call_unchecked(
+            "decklists.import_selected",
+            json!({"source_path": source_path}),
+        )
+    }
+
+    fn call_unchecked(&self, method: &str, params: Value) -> Result<Value, String> {
         if !params.is_object() {
             return Err("invalid params".to_string());
         }
@@ -539,11 +553,28 @@ mod tests {
             "repos.poll.extra",
             "repos.poll/",
             "repos.poll ",
+            "decklists.import_selected",
             "server.shutdown",
             "__import__",
         ] {
             assert_eq!(validate_method(method), Err("unknown method".into()));
         }
+    }
+
+    #[test]
+    fn private_decklist_method_is_not_public() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "decklists.import_selected",
+                json!({"source_path": "/tmp/deck.txt"})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.import_selected_decklist("/tmp/deck.txt"),
+            Err("worker unavailable".into())
+        );
     }
 
     #[test]

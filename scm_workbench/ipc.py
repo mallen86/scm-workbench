@@ -35,7 +35,7 @@ ALLOWED_METHODS = frozenset((
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
-    "offset.set", "offset.delete",
+    "offset.set", "offset.delete", "decklists.import_selected",
 ))
 
 
@@ -157,6 +157,18 @@ def dispatch(request: dict) -> dict:
             if not result.get("ok"):
                 error = result.get("error") or {}
                 return _error(request_id, "bad_request", _bounded_ipc_message(error.get("message", "operation not found")))
+        elif method == "decklists.import_selected":
+            if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
+                return _bad_params(request_id, "decklists.import_selected requires exactly source_path string")
+            try:
+                if len(params["source_path"].encode("utf-8")) > server.DECKLIST_PATH_MAX_BYTES:
+                    return _bad_params(request_id, "decklist source path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "decklist source path must be valid UTF-8")
+            try:
+                result = server.import_decklist(params["source_path"])
+            except server.DecklistImportError as error:
+                result = {"ok": False, "errors": [error.message]}
         elif method == "settings.set":
             if set(params) != {"changes"}:
                 return _bad_params(request_id, "settings.set requires exactly changes")
