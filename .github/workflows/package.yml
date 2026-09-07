@@ -32,6 +32,7 @@ jobs:
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
+          python scripts/check_ui_updates.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
@@ -184,8 +185,8 @@ jobs:
               echo "smoke: the worker answers on 127.0.0.1:8038"
             fi
             # The webview marker proves the actual window loaded the live UI;
-            # the stderr markers below prove its bootstrap, jobs.list, and
-            # preview reads used native IPC rather than HTTP.
+            # the stderr markers below prove its bootstrap, jobs.list, preview, and
+            # local updates.get reads used native IPC rather than HTTP.
             if [ -n "$worker_ok" ] && grep -q "webview session on / (WebKit)" "$data/server-tauri.log" 2>/dev/null; then
               webview_ok=1
             fi
@@ -193,7 +194,8 @@ jobs:
                && grep -q "\[ipc\] served manifest" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served settings.get" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served jobs.list" "$data/server-tauri.log" 2>/dev/null \
-               && grep -q "\[ipc\] served preview" "$data/server-tauri.log" 2>/dev/null; then
+               && grep -q "\[ipc\] served preview" "$data/server-tauri.log" 2>/dev/null \
+               && grep -q "\[ipc\] served updates.get" "$data/server-tauri.log" 2>/dev/null; then
               ipc_ok=1
             fi
             if [ -n "$webview_ok" ] && [ -n "${ipc_ok:-}" ]; then break; fi
@@ -217,7 +219,7 @@ jobs:
           fi
           if [ -z "${ipc_ok:-}" ]; then
             echo "---- server log (last 80) ----"; tail -80 "$data/server-tauri.log" 2>/dev/null || true
-            echo "smoke FAILED: the webview did not produce all five native IPC markers" >&2
+            echo "smoke FAILED: the webview did not produce all six native IPC markers" >&2
             exit 1
           fi
           if grep -Eq '"GET /api/(info|manifest|settings)([ ?"]|$)' "$data/server-tauri.log"; then
@@ -289,7 +291,13 @@ jobs:
             echo "smoke FAILED: the WebView fetched a directory image listing over HTTP" >&2
             exit 1
           fi
-          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset HTTP routes were not used"
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "(GET /api/updates([? ][^\"]*)?|GET /api/release-notes([? ][^\"]*)?|POST /api/updates/(check|start)([? ][^\"]*)?) HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched an update route over HTTP" >&2
+            exit 1
+          fi
+          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset/update HTTP routes were not used"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -437,6 +445,7 @@ jobs:
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
+          python scripts/check_ui_updates.py
       - name: Node syntax check — every UI module
         shell: pwsh
         run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
@@ -516,13 +525,14 @@ jobs:
                 (Select-String -Path $log -Pattern '\[ipc\] served manifest' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served settings\.get' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served jobs\.list' -Quiet) -and
-                (Select-String -Path $log -Pattern '\[ipc\] served preview' -Quiet))
+                (Select-String -Path $log -Pattern '\[ipc\] served preview' -Quiet) -and
+                (Select-String -Path $log -Pattern '\[ipc\] served updates\.get' -Quiet))
             }
             if ($workerOk -and $webviewOk -and $ipcOk) { break }
           }
           if (-not $workerOk) { throw "smoke: the worker never answered on 127.0.0.1:8038" }
           if (-not $webviewOk) { throw "smoke: the worker serves, but no actual WebView2 page reached the UI" }
-          if (-not $ipcOk) { throw "smoke: the WebView2 page did not produce all five native IPC markers" }
+          if (-not $ipcOk) { throw "smoke: the WebView2 page did not produce all six native IPC markers" }
           if (Test-Path $log) {
             if (Select-String -Path $log -Pattern '"GET /api/(info|manifest|settings)([ ?"]|$)' -Quiet) {
               Get-Content $log
@@ -541,6 +551,7 @@ jobs:
               $settingsWritePattern = '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'
               $offsetWritePattern = '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'
               $repoMetadataPattern = '^\[workbench\] "POST /api/repos/(refs|save|check)([? ][^\"]*)? HTTP/'
+              $updatePattern = '^\[workbench\] "(GET /api/updates([? ][^\"]*)?|GET /api/release-notes([? ][^\"]*)?|POST /api/updates/(check|start)([? ][^\"]*)?) HTTP/'
               $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
@@ -551,16 +562,17 @@ jobs:
               $settingsWriteHttp = $webviewRequests | Select-String -Pattern $settingsWritePattern
               $offsetWriteHttp = $webviewRequests | Select-String -Pattern $offsetWritePattern
               $repoMetadataHttp = $webviewRequests | Select-String -Pattern $repoMetadataPattern
+              $updateHttp = $webviewRequests | Select-String -Pattern $updatePattern
               # Raw file reads, images_only metadata, save, and delete remain
               # HTTP. Browser fallback is outside this packaged-WebView check;
               # native settings/offset/repository metadata routes are not.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp) {
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp) {
                 Get-Content $log
                 throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
               }
             }
           }
-          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, and preview used native IPC; no migrated metadata/action/settings/offset/repository route used HTTP"
+          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, preview, and updates.get used native IPC; no migrated metadata/action/settings/offset/repository/update route used HTTP"
           $proc | Stop-Process -Force
           $proc.WaitForExit()
           Start-Sleep -Seconds 2

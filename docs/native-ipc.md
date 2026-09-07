@@ -23,8 +23,8 @@ Tauri window currently navigates to that worker origin because unmigrated UI
 calls use relative HTTP URLs. The native protocol covers the three bootstrap
 reads, bounded settings and offset mutations, preview, packaged-Tauri job
 control/log operations, the read-only `template.resolve`/`file.list` metadata
-slice, bounded repository metadata operations, and the bounded OS-action methods
-below. Other surfaces remain on their existing HTTP compatibility paths.
+slice, bounded repository metadata operations, app update/release-note
+operations, and the bounded OS-action methods below. Other surfaces remain on their existing HTTP compatibility paths.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -49,11 +49,12 @@ A request has this exact shape:
 
 `id` must be a non-empty string. `method` must be a string in the allowlist
 below, and `params` must be a JSON object. The exact allowlist contains
-twenty-one methods: `info`, `manifest`, `settings.get`, `settings.set`,
+twenty-six methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
-`repos.check`, and `repos.poll`. The bootstrap read methods take `{}`;
+`repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
+`updates.poll`, and `updates.start`. The bootstrap read methods take `{}`;
 preview, job, artifact metadata, offset, and repository methods use the
 parameter contracts below.
 
@@ -80,6 +81,11 @@ parameter contracts below.
 | `POST /api/repos/save` | `repos.source.set` (packaged Tauri) | `repo_sync.resolve_target()` and the settings/state transaction |
 | `POST /api/repos/check` | `repos.check` (packaged Tauri) | `run_repo_check()` in a background operation |
 | (operation registry) | `repos.poll` (packaged Tauri) | poll a repository metadata operation |
+| `GET /api/updates` | `updates.get` (packaged Tauri) | `server.updates_view()` |
+| `POST /api/updates/check` | `updates.check` (packaged Tauri) | bounded background update check |
+| `GET /api/release-notes?tag=...` | `updates.notes` (packaged Tauri) | checked-release notes lookup |
+| (update operation registry) | `updates.poll` (packaged Tauri) | poll an update operation |
+| `POST /api/updates/start` | `updates.start` (packaged Tauri) | `server.start_update_job()` |
 
 Those HTTP routes remain served as compatibility endpoints; native selection is
 a client transport choice, not their removal. The methods use these exact
@@ -352,7 +358,7 @@ The defined error codes are:
 * `bad_request` — invalid JSON or UTF-8, a non-object request, an invalid or
   missing ID/method/params, or an input line over 1 MiB. Malformed requests
   whose ID cannot be trusted use `"id":null`.
-* `unknown_method` — a method outside the twenty-one-method allowlist.
+* `unknown_method` — a method outside the twenty-six-method allowlist.
 * `not_directory`, `unreadable`, and `forbidden` — bounded `file.list`
   metadata resolution could not produce a listing. A missing directory is
   instead the successful `{exists:false,...}` result described above. These
@@ -432,10 +438,11 @@ quiet external helpers, or pipe and consume job output inside the worker. This
 also applies to future child-process additions; a stray print can corrupt
 framing and deadlock or mis-correlate the native caller.
 
-## Update hardening prerequisite
+## Update hardening and native boundary
 
-Updates still use HTTP during this migration phase, but their remote-input boundary is
-hardened before native exposure. Release metadata is capped at 2 MiB and validated
+The update lifecycle remains unchanged while metadata and operation admission are
+exposed through native IPC; its remote-input boundary is hardened before and during
+native exposure. Release metadata is capped at 2 MiB and validated
 against the configured repository, fixed GitHub URL shapes, exact supported artifact
 names, and bounded asset fields. Concurrent checks share one locked lookup and publish
 strict, atomic state. Release notes are tag-bound, size-limited, HTML-escaped Markdown;
@@ -448,7 +455,7 @@ ranges, and symlink targets, then securely stages and atomically publishes only 
 absent destination with a platform no-replace rename. Release shapes are checked
 against the macOS `.app` and Windows `exe`/`app`/`runtime` workflows; unsupported
 permissions, links, compression, and encrypted or ambiguous records fail closed.
-HTTP update-start accepts only `{}` and admits one canonical newer state/token for the
+HTTP and native update-start accept only `{}` and admit one canonical newer state/token for the
 entire updater-thread lifetime, including failure cleanup. A native external helper
 engine is active before Tauri startup: it validates a fixed token-bound journal,
 fences process identities, uses atomic no-replace sibling publication, requires an
@@ -459,8 +466,7 @@ through the durable journal/request boundary; the old in-process swap/relaunch p
 not used. It supports the signed macOS `.app` shape (including safe internal runtime
 symlinks) and the flat Windows bundle shape without weakening the worker's kill-on-close
 job object. Result reconciliation finalizes the persisted handoff job on the next
-shell/worker startup. Updates are intentionally not part of the native JSON-lines RPC
-yet.
+shell/worker startup. The native update methods do not alter this helper lifecycle.
 
 ## Browser fallback and migration boundary
 
@@ -468,21 +474,50 @@ The UI keeps its existing transport seams. In a packaged Tauri window,
 `preview`, `settings.set`, `offset.set`, `offset.delete`, `jobs.list`,
 `jobs.start`, `jobs.log`, `jobs.kill`, aggregate `jobs.poll`, `template.resolve`,
 `file.list`, `file.open`, `file.reveal`, `url.open`, and the asynchronous
-`repos.refs`, `repos.source.set`, `repos.check`, and `repos.poll` methods, as
-well as the three bootstrap reads, use native IPC when a callable Tauri
+`repos.refs`, `repos.source.set`, `repos.check`, `repos.poll`, `updates.get`,
+`updates.check`, `updates.notes`, `updates.poll`, and `updates.start` methods,
+as well as the three bootstrap reads, use native IPC when a callable Tauri
 `invoke` capability exists. In a normal browser there is no Tauri capability:
 preview, template resolution, directory metadata, OS actions, repo metadata,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, image deletion, and the
-state-changing update-start operation remain HTTP. The repository HTTP routes
+worker call. Binary file reads, save/copy, image deletion, and raw state-changing
+file operations remain HTTP. Browser update routes remain compatibility endpoints.
+The repository HTTP routes
 remain the browser fallback only; a packaged native failure never retries them.
-The packaged smoke test rejects WebView `POST /api/settings` and
-`POST /api/offset` after the WebKit marker; browser-mode HTTP fallback remains
+The packaged smoke test rejects WebView `POST /api/settings`,
+`POST /api/offset`, update metadata reads, release-notes reads, and update
+check/start posts after the WebKit marker; browser-mode HTTP fallback remains
 allowed, and native failure never retries over HTTP.
 
-The current migration ledger is (21 native methods; the four repository
+### App updates and release notes
+
+`updates.get` is synchronous and returns exactly the existing `GET
+/api/updates` body: `current`, `repo`, `packaged`, `bundle`, and `state`. Its
+response-only `state.checking` boolean reports queued/running checks and is
+never persisted or accepted by the strict state-file schema. The
+`updates.check` start method takes exactly `{"force":true|false}` and
+`updates.notes` takes exactly `{"tag":"..."}` (a non-empty tag of at most 128
+UTF-8 bytes). Both return immediately with the common operation acknowledgement;
+`updates.poll` takes exactly `{"id":"..."}` with an ID of at most 64
+characters and returns `running` or a terminal `done` envelope containing the
+same final body as its HTTP route. Notes are
+bound to the canonical checked state's latest tag both before queueing and
+before publication, so stale or cross-release notes are rejected.
+
+The update registry is independent of repository IDs and state: queued checks
+also have status `running` for the public operation contract. It has two daemon
+workers, queue 16, at most 16 active and 32 retained records, a 1 MiB result
+cap, 256-character bounded errors, random 32-hex IDs, monotonic timestamps,
+and 300-second terminal retention. Checks still share `run_update_check`'s
+single-flight backend. `updates.start` is synchronous and uses the existing
+transactional admission fence, returning the exact `/api/updates/start` body.
+Native errors never retry through HTTP. Browser routes remain compatibility
+endpoints and support an optional encoded `tag` query parameter; omitting it
+binds the current checked release.
+
+The current migration ledger is (26 native methods; the five update
 methods are the latest entries):
 
 | Surface | Current transport | Status |
@@ -499,7 +534,7 @@ methods are the latest entries):
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
-| Updates and update-start | HTTP | Deferred: update lifecycle and replacement remain HTTP |
+| Updates metadata, checks, release notes, and update-start | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP compatibility remains; transactional replacement lifecycle is unchanged |
 | Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
 
 This ledger is a follow-up checklist, not permission to expand the current
@@ -537,19 +572,20 @@ python scripts/check_ui_artifacts.py
 python scripts/check_ui_native_actions.py
 python scripts/check_ui_settings.py
 python scripts/check_ui_offsets.py
+python scripts/check_ui_updates.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
 ```
 
 The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
-webview loaded, all three bootstrap reads, `preview`, and `jobs.list` used
-native IPC, no bootstrap or migrated route (including repository metadata) was
-fetched over HTTP by the WebView, and the worker is reaped. The five existing
-startup markers remain
-exactly the contract (`info`, `manifest`, `settings.get`, `jobs.list`, and
-`preview`); settings and offset writes do not add a startup mutation or fake
-marker.
+webview loaded, all three bootstrap reads, `preview`, `jobs.list`, and the
+startup-local `updates.get` read used native IPC, no bootstrap or migrated route
+(including repository metadata and updates) was fetched over HTTP by the
+WebView, and the worker is reaped. The six startup markers are exactly the
+contract (`info`, `manifest`, `settings.get`, `jobs.list`, `preview`, and
+`updates.get`); settings and offset writes do not add a startup mutation or
+fake marker.
 They intentionally do not require
 `template.resolve` or `file.list` markers: these methods are read-only metadata
 facades and are not deterministically invoked during startup, so CI does not
@@ -562,9 +598,9 @@ migrated metadata routes and, after the WebKit marker, rejects `POST
 `/api/file` action queries containing the exact `open=1`, `reveal=1`, or `url=`
 keys in any reasonable query order. It deliberately allows raw `/api/file`
 reads, `images_only=1` metadata, and file save/delete compatibility requests.
-No repository startup marker is added: the five existing startup IPC markers
-remain the complete packaged smoke contract. The lower-layer Python, Rust, and
-Node contracts cover the asynchronous repository operations.
+No repository startup marker is added: the six startup IPC markers remain the
+complete packaged smoke contract. The lower-layer Python, Rust, and Node
+contracts cover the asynchronous repository and update operations.
 Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
 then assembles the local macOS bundle; the packaging workflow is the canonical

@@ -34,6 +34,7 @@ ALLOWED_METHODS = frozenset((
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
+    "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
     "offset.set", "offset.delete",
 ))
 
@@ -86,7 +87,7 @@ def dispatch(request: dict) -> dict:
     from scm_workbench import server
 
     try:
-        if method in ("info", "manifest", "settings.get", "jobs.list") and params:
+        if method in ("info", "manifest", "settings.get", "jobs.list", "updates.get", "updates.start") and params:
             return _bad_params(request_id, f"{method} does not accept parameters")
         if method == "info":
             result = server.get_info()
@@ -94,6 +95,33 @@ def dispatch(request: dict) -> dict:
             result = server.get_manifest()
         elif method == "settings.get":
             result = server.load_settings()
+        elif method == "updates.get":
+            result = server.updates_view()
+        elif method == "updates.check":
+            if set(params) != {"force"} or not isinstance(params.get("force"), bool):
+                return _bad_params(request_id, "updates.check requires exactly force boolean")
+            result = server._start_update_operation("check", {"force": params["force"]})
+        elif method == "updates.notes":
+            if set(params) != {"tag"} or not isinstance(params.get("tag"), str) or not params["tag"]:
+                return _bad_params(request_id, "updates.notes requires exactly tag string")
+            try:
+                if len(params["tag"].encode("utf-8")) > 128:
+                    return _bad_params(request_id, "updates.notes tag exceeds 128 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "updates.notes tag must be valid UTF-8")
+            if not server._checked_update_tag(params["tag"]):
+                return _bad_params(request_id, "release tag is not the checked release")
+            result = server._start_update_operation("notes", {"tag": params["tag"]})
+        elif method == "updates.poll":
+            if set(params) != {"id"} or not isinstance(params.get("id"), str) \
+                    or not params["id"] or len(params["id"]) > 64:
+                return _bad_params(request_id, "updates.poll requires exactly id")
+            result = server.poll_update_operation(params["id"])
+            if not result.get("ok"):
+                error = result.get("error") or {}
+                return _error(request_id, "bad_request", _bounded_ipc_message(error.get("message", "operation not found")))
+        elif method == "updates.start":
+            result = server.update_start_result()
         elif method == "repos.refs":
             if set(params) != {"repo"} or not isinstance(params.get("repo"), str):
                 return _bad_params(request_id, "repos.refs requires exactly repo")

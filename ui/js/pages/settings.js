@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
 // URL reaches the OS browser. A release link must remain on GitHub and have
@@ -37,7 +37,7 @@ function showWhatsNew(tag, releaseUrl) {
     root.hidden = false;
     const close = () => { root.hidden = true; };
     try {
-      const r = await api("/api/release-notes");
+      const r = await getUpdateNotes(tag);
       if (!r.ok) throw new Error(r.error || "the release notes couldn't be fetched");
       m.querySelectorAll(".m-ico, h3, .m-loading").forEach(n => n.remove());
       m.append(el("h3", {}, "What's new in ", String(r.tag ?? "")));
@@ -393,11 +393,22 @@ PAGES.settings = (root) => {
     };
 
     let busy = false;
+    let checkPending = false;
     const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
 
     const render = async () => {
       let r;
-      try { r = await api("/api/updates"); } catch { return; }
+      try { r = await getUpdates(); }
+      catch (error) {
+        uLast.textContent = "Last checked: unavailable";
+        uBtn.textContent = checkPending ? "Checking…" : "Update check unavailable";
+        uBtn.disabled = true;
+        uBtn.onclick = null;
+        uStatus.textContent = checkPending
+          ? "Asking GitHub for the newest release…"
+          : "The update service is unavailable: " + (error?.message || "try again later");
+        return;
+      }
       const st = r.state || {};
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
       const stale = st.checked_at != null && (Date.now() / 1000 - st.checked_at) > 86400;
@@ -408,7 +419,8 @@ PAGES.settings = (root) => {
         uBtn.onclick = disabled ? null : onClick;
         uBtn.title = title;
       };
-      if (st.checking) {   // a check is in flight (the daily daemon or another click)
+      // if (st.checking) is represented by this combined server/local guard.
+      if (checkPending || st.checking) {   // a check is in flight (the daily daemon or another click)
         setBtn("Checking…", null, true);
         uStatus.textContent = "Asking GitHub for the newest release…";
         return;
@@ -466,7 +478,10 @@ PAGES.settings = (root) => {
     async function doCheck() {
       if (busy) return;
       busy = true;
-      const st0 = (await api("/api/updates").catch(() => null))?.state || {};
+      checkPending = true;
+      uBtn.disabled = true;
+      uStatus.textContent = "Asking GitHub for the newest release…";
+      const st0 = (await Promise.resolve().then(() => getUpdates()).catch(() => null))?.state || {};
       const fresh = st0.checked_at != null && (Date.now() / 1000 - st0.checked_at) < 86400
         && ["up-to-date", "update-available"].includes(st0.status);
       if (!fresh) {
@@ -475,11 +490,12 @@ PAGES.settings = (root) => {
       }
       let r;
       try {
-        r = await api("/api/updates/check", { force: !fresh });
+        r = await checkUpdates(!fresh);
       } catch (e) {
         uStatus.textContent = "The check didn't get through — try again in a moment.";
       } finally {
         busy = false;
+        checkPending = false;
       }
       await render();
       if (r?.state?.status === "up-to-date") toast("ok", `No update — ${vv(r.state.latest)} is the newest.`);
@@ -488,7 +504,9 @@ PAGES.settings = (root) => {
     }
 
     const startUpdate = async () => {
-      const r = await api("/api/updates/start", {});
+      let r;
+      try { r = await startUpdateRequest(); }
+      catch (error) { toast("err", error?.message || "The update could not start."); return; }
       if (!r.ok) { toast("warn", r.errors?.[0] || "The update could not start."); return; }
       uStatus.textContent = "Working — the progress is in the strip at the bottom left. The app closes itself and reopens as the new version when it's done.";
       const job = r.job || {};

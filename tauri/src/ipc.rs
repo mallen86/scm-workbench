@@ -233,7 +233,8 @@ fn validate_method(method: &str) -> Result<(), String> {
         "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
         | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll" | "preview"
         | "template.resolve" | "file.list" | "file.open" | "file.reveal" | "url.open"
-        | "repos.refs" | "repos.source.set" | "repos.check" | "repos.poll" => Ok(()),
+        | "repos.refs" | "repos.source.set" | "repos.check" | "repos.poll" | "updates.get"
+        | "updates.check" | "updates.notes" | "updates.poll" | "updates.start" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -488,6 +489,11 @@ mod tests {
             "repos.source.set",
             "repos.check",
             "repos.poll",
+            "updates.get",
+            "updates.check",
+            "updates.notes",
+            "updates.poll",
+            "updates.start",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -812,6 +818,12 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(
             rpc.call("repos.poll", json!({"operation_id": "missing-operation"})),
+            Err("worker error: bad_request".into())
+        );
+        let updates = rpc.call("updates.get", json!({})).unwrap();
+        assert!(updates.get("current").and_then(Value::as_str).is_some());
+        assert_eq!(
+            rpc.call("updates.poll", json!({"id": "missing-update"})),
             Err("worker error: bad_request".into())
         );
 

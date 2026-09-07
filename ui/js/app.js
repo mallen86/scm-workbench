@@ -14,7 +14,7 @@
      info.js      refreshInfo() and the boot-failure banner
      pages/*.js   one module per page (dashboard, fetch, pdf, offset, ...)
    ========================================================================== */
-import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import "./pages/dashboard.js";
+import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import { getTauriInvoke } from "./transport.js";import { getUpdates } from "./updates-transport.js";import "./pages/dashboard.js";
 import "./pages/fetch.js";
 import "./pages/pdf.js";
 import "./pages/offset.js";
@@ -28,6 +28,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindNav();
   bindConsole();
   iconize(document);
+  // Packaged startup performs only the local native update-state read. The
+  // facade has no HTTP fallback once invoke is present; browser startup does
+  // not call the update route at all.
+  if (getTauriInvoke()) Promise.resolve().then(() => getUpdates()).catch(() => {});
   // initial theme before info loads (avoid flash) — and the simple-mode nav
   // collapse, from the same early settings read, so the first paint is already
   // in the right shape

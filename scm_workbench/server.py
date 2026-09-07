@@ -2446,6 +2446,192 @@ def release_notes_view(expected_tag: Optional[str] = None) -> dict:
     return result
 
 
+# Updates use a registry separate from repository metadata operations.  The
+# serialized IPC reader only admits work here; network calls run on two daemon
+# workers and are therefore never allowed to hold the reader open.
+_UPDATE_OP_LOCK = threading.Lock()
+_UPDATE_OPS = {}
+_UPDATE_OP_QUEUE = queue.Queue(maxsize=16)
+_UPDATE_OP_WORKERS_STARTED = False
+_UPDATE_OP_ACTIVE_MAX = 16
+_UPDATE_OP_TOTAL_MAX = 32
+_UPDATE_OP_RESULT_MAX = 1024 * 1024
+_UPDATE_OP_ERROR_MAX = 256
+_UPDATE_OP_TTL = 300
+
+
+def updates_view() -> dict:
+    """The shared, synchronous GET /api/updates representation.
+
+    ``checking`` is deliberately a response-only projection.  The persisted
+    update-state schema remains strict and never receives this transient key.
+    Snapshot operation activity before reading state so this helper cannot
+    participate in a registry/state lock inversion.
+    """
+    with _UPDATE_OP_LOCK:
+        checking = any(op.get("kind") == "check" and
+                       op.get("status") in ("running", "queued")
+                       for op in _UPDATE_OPS.values())
+    state = copy.deepcopy(load_update_state())
+    state["checking"] = checking
+    return {"current": SERVER_VERSION, "repo": updater.UPDATE_REPO,
+            "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
+            "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or "",
+            "state": state}
+
+
+def _update_check_result(force: bool) -> dict:
+    """Return the browser-compatible final body for an update check."""
+    if not force:
+        st = load_update_state()
+        if st.get("status") in ("up-to-date", "update-available") and st.get("checked_at") is not None:
+            try:
+                age = time.time() - float(st["checked_at"])
+            except Exception:
+                age = None
+            if age is not None and age < UPDATE_CHECK_INTERVAL:
+                cached = copy.deepcopy(st)
+                cached["cached"] = True
+                return {"ok": True, "state": cached}
+    return {"ok": True, "state": run_update_check()}
+
+
+def _checked_update_tag(tag: str) -> bool:
+    st = load_update_state()
+    return bool(_valid_update_state(st) and st.get("status") in ("up-to-date", "update-available")
+                and st.get("checked_at") is not None and st.get("latest") == tag)
+
+
+def _update_notes_result(tag: str) -> dict:
+    """Load notes only while the canonical checked release is still `tag`."""
+    if not _checked_update_tag(tag):
+        return {"ok": False, "error": "release tag is not the checked release"}
+    try:
+        result = release_notes_view(expected_tag=tag)
+    except Exception:
+        return {"ok": False, "errors": ["operation failed"]}
+    # A check can publish a newer canonical release while notes are fetched.
+    # Never return the body from the old release in that case.
+    if not _checked_update_tag(tag):
+        return {"ok": False, "error": "release tag is not the checked release"}
+    return result
+
+
+def _bounded_update_errors(value: Any) -> list:
+    if isinstance(value, (str, bytes)):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+    out = []
+    for item in list(value)[:8]:
+        text = " ".join(str(item or "operation failed").split())
+        out.append(text[:_UPDATE_OP_ERROR_MAX] or "operation failed")
+    return out or ["operation failed"]
+
+
+def _update_result_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _prune_update_operations_locked(now=None):
+    now = time.monotonic() if now is None else now
+    for operation_id, operation in list(_UPDATE_OPS.items()):
+        if operation.get("status") == "done" and now - operation.get("ended", now) >= _UPDATE_OP_TTL:
+            _UPDATE_OPS.pop(operation_id, None)
+
+
+def _update_operation_worker():
+    while True:
+        operation_id = _UPDATE_OP_QUEUE.get()
+        try:
+            with _UPDATE_OP_LOCK:
+                operation = _UPDATE_OPS.get(operation_id)
+            if operation is None:
+                continue
+            try:
+                result = operation["call"]()
+                if not isinstance(result, dict):
+                    result = {"ok": False, "errors": ["operation returned an invalid result"]}
+                if "errors" in result:
+                    result["errors"] = _bounded_update_errors(result["errors"])
+                if _update_result_size(result) > _UPDATE_OP_RESULT_MAX:
+                    result = {"ok": False, "errors": ["operation result exceeds 1 MiB"]}
+            except Exception:
+                result = {"ok": False, "errors": ["operation failed"]}
+            with _UPDATE_OP_LOCK:
+                current = _UPDATE_OPS.get(operation_id)
+                if current is not None:
+                    current["status"] = "done"
+                    current["result"] = result
+                    current["ended"] = time.monotonic()
+        finally:
+            _UPDATE_OP_QUEUE.task_done()
+
+
+def _ensure_update_operation_workers_locked():
+    global _UPDATE_OP_WORKERS_STARTED
+    if _UPDATE_OP_WORKERS_STARTED:
+        return
+    _UPDATE_OP_WORKERS_STARTED = True
+    for number in range(2):
+        threading.Thread(target=_update_operation_worker, daemon=True,
+                         name=f"update-operation-{number + 1}").start()
+
+
+def _start_update_operation(kind: str, args: dict) -> dict:
+    with _UPDATE_OP_LOCK:
+        _prune_update_operations_locked()
+        active = sum(op.get("status") == "running" for op in _UPDATE_OPS.values())
+        if active >= _UPDATE_OP_ACTIVE_MAX or len(_UPDATE_OPS) >= _UPDATE_OP_TOTAL_MAX:
+            return {"ok": False, "errors": ["too many update operations"]}
+        operation_id = secrets.token_hex(16)
+        while operation_id in _UPDATE_OPS:
+            operation_id = secrets.token_hex(16)
+        if kind == "check":
+            call = lambda: _update_check_result(args["force"])
+        elif kind == "notes":
+            # Recheck while holding the registry admission lock: validation in
+            # the IPC adapter can race a newly published update state.
+            if not _checked_update_tag(args["tag"]):
+                return {"ok": False, "errors": ["release tag is not the checked release"]}
+            call = lambda: _update_notes_result(args["tag"])
+        else:
+            return {"ok": False, "errors": ["unknown update operation"]}
+        now = time.monotonic()
+        _UPDATE_OPS[operation_id] = {
+            "kind": kind, "status": "running", "call": call, "result": None,
+            "started": now, "ended": None,
+        }
+        _ensure_update_operation_workers_locked()
+        try:
+            _UPDATE_OP_QUEUE.put_nowait(operation_id)
+        except queue.Full:
+            _UPDATE_OPS.pop(operation_id, None)
+            return {"ok": False, "errors": ["too many update operations"]}
+    return {"ok": True, "operation": {"id": operation_id, "status": "running"}}
+
+
+def poll_update_operation(operation_id: str) -> dict:
+    with _UPDATE_OP_LOCK:
+        _prune_update_operations_locked()
+        operation = _UPDATE_OPS.get(operation_id)
+        if operation is None:
+            return {"ok": False, "error": {"code": "bad_request", "message": "operation not found"}}
+        if operation["status"] == "running":
+            return {"ok": True, "status": "running"}
+        return {"ok": True, "status": "done", "result": copy.deepcopy(operation["result"])}
+
+
+def update_start_result() -> dict:
+    job, errors = start_update_job()
+    if errors:
+        return {"ok": False, "errors": _bounded_update_errors(errors)}
+    return {"ok": True, "job": {
+        "id": job["id"], "title": job["title"], "status": job["status"],
+        "cmd": job["cmd"],
+    }}
+
+
 def get_info() -> dict:
 
     settings = load_settings()
@@ -4600,7 +4786,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/info":
                 return self._json(get_info())
             if path == "/api/release-notes":
-                return self._json(release_notes_view())
+                tags = parse_qs(url.query, keep_blank_values=True).get("tag")
+                if tags is not None and (len(tags) != 1 or not tags[0] or
+                        len(tags[0].encode("utf-8")) > 128):
+                    return self._json({"ok": False, "error": "invalid release tag"}, 400)
+                if tags is None:
+                    result = release_notes_view()
+                else:
+                    result = _update_notes_result(tags[0])
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/repos":
                 return self._json({"repos": repos_view(load_settings())})
             if path == "/api/manifest":
@@ -4633,13 +4827,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 return self._json(load_settings())
             if path == "/api/updates":
-                return self._json({
-                    "current": SERVER_VERSION,
-                    "repo": updater.UPDATE_REPO,
-                    "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
-                    "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or "",
-                    "state": load_update_state(),
-                })
+                return self._json(updates_view())
             if path.startswith("/api/"):
                 return self._json({"error": f"no such route: {path}"}, 404)
             # SPA routes (/pdf, /settings, ...): serve the app shell and let
@@ -4674,32 +4862,18 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 return self._json({"ok": kill_job(m.group(1))})
             if path == "/api/updates/check":
-                body = self._body()
-                force = bool(body.get("force"))
-                if not force:
-                    st = load_update_state()
-                    # recently checked and nothing pending → the check is a no-op
-                    if st.get("status") in ("up-to-date", "update-available") and st.get("checked_at") is not None:
-                        try:
-                            age = time.time() - float(st["checked_at"])
-                        except Exception:
-                            age = None
-                        if age is not None and age < UPDATE_CHECK_INTERVAL:
-                            st["cached"] = True
-                            return self._json({"ok": True, "state": st})
-                return self._json({"ok": True, "state": run_update_check()})
+                body = self._body(strict=True)
+                if not isinstance(body, dict) or set(body) != {"force"} or not isinstance(body["force"], bool):
+                    return self._json({"ok": False, "errors": [
+                        "update check requires exactly boolean force"]}, 400)
+                return self._json(_update_check_result(body["force"]))
             if path == "/api/updates/start":
                 body = self._body(strict=True)
                 if not isinstance(body, dict) or body != {}:
                     return self._json({"ok": False, "errors": [
                         "update start requires exactly an empty object"]}, 400)
-                job, errors = start_update_job()
-                if errors:
-                    return self._json({"ok": False, "errors": errors}, 400)
-                return self._json({"ok": True, "job": {
-                    "id": job["id"], "title": job["title"], "status": job["status"],
-                    "cmd": job["cmd"],
-                }})
+                result = update_start_result()
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/settings":
                 # HTTP keeps its historical direct-patch body shape, while the
                 # native method wraps the same patch as {changes: ...}.  Invalid
