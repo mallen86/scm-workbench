@@ -136,6 +136,71 @@ class NativeActionTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())
 
+    def test_ipc_http_file_route_is_closed_before_any_file_work(self):
+        httpd = server.start_http("127.0.0.1", 0)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        self.http_base = "http://127.0.0.1:%d" % httpd.server_address[1]
+        try:
+            calls = {
+                name: mock.patch.object(server, name, side_effect=AssertionError(name))
+                for name in ("load_settings", "allowed_roots", "url_open_action",
+                             "file_open_action", "file_reveal_action", "list_files")
+            }
+            with (
+                mock.patch.object(server, "_IPC_MODE", True),
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("read")),
+                calls["load_settings"], calls["allowed_roots"],
+                calls["url_open_action"], calls["file_open_action"],
+                calls["file_reveal_action"], calls["list_files"],
+            ):
+                requests = (
+                    "/api/file",
+                    "/api/file?path=" + urllib.parse.quote(str(self.file)),
+                    "/api/file?path=" + urllib.parse.quote(str(self.directory)) + "&images_only=1",
+                    "/api/file?path=" + urllib.parse.quote(str(self.file)) + "&open=1",
+                    "/api/file?path=" + urllib.parse.quote(str(self.directory)) + "&reveal=1",
+                    "/api/file?url=" + urllib.parse.quote("https://example.test"),
+                )
+                for path in requests:
+                    status, body = self._http_request("GET", path)
+                    self.assertEqual(status, 403, path)
+                    self.assertEqual(body, {"ok": False, "errors": [
+                        "native file access is required in packaged mode"]})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=3)
+
+    def test_standalone_raw_file_keeps_bytes_mime_and_safe_disposition(self):
+        payload = b"not text; preserve these bytes"
+        raw_file = self.data / "fixture.pdf"
+        raw_file.write_bytes(payload)
+        httpd = server.start_http("127.0.0.1", 0)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        self.http_base = "http://127.0.0.1:%d" % httpd.server_address[1]
+        try:
+            request = urllib.request.Request(
+                self.http_base + "/api/file?path=" + urllib.parse.quote(str(raw_file)),
+                method="GET")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.read(), payload)
+                self.assertEqual(response.headers["Content-Type"], "application/pdf")
+                self.assertEqual(response.headers["Content-Disposition"],
+                                 'inline; filename="fixture.pdf"; filename*=UTF-8\'\'fixture.pdf')
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=3)
+
+        unsafe_name = 'bad"' + chr(13) + chr(10) + "-é.txt"
+        disposition = server._content_disposition(unsafe_name)
+        self.assertEqual(disposition, 'inline; filename="bad___-_.txt"; '
+                         "filename*=UTF-8''bad%22%0D%0A-%C3%A9.txt")
+        self.assertNotIn("\r", disposition)
+        self.assertNotIn("\n", disposition)
+
     def test_http_and_native_action_semantics_have_parity(self):
         httpd = server.start_http("127.0.0.1", 0)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)

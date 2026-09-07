@@ -82,11 +82,11 @@ parameter contracts below.
 | `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
 | `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
-| `GET /api/file?...images_only=1` (directory metadata) | `file.list` (packaged Tauri) | `server.list_files()` |
+| `GET /api/file?...images_only=1` (standalone-browser directory metadata) | `file.list` (packaged Tauri) | `server.list_files()`; IPC-mode HTTP rejects every `/api/file` request before file work |
 | `POST /api/fs` (`delete_images`) | virtual `fs.delete_images` facade (packaged Tauri) | private bounded start/poll around SCM-only stable-handle deletion |
-| `GET /api/file?...open=1` (regular file action) | `file.open` (packaged Tauri) | `server.file_open_action()` |
+| `GET /api/file?...open=1` (standalone-browser file-action compatibility) | `file.open` (packaged Tauri) | `server.file_open_action()`; IPC-mode HTTP rejects every `/api/file` request |
 | `POST /api/reveal` (file/directory action) | `file.reveal` (packaged Tauri) | `server.file_reveal_action()` |
-| `GET /api/file?...url=` (external URL action) | `url.open` (packaged Tauri) | `server.url_open_action()` |
+| `GET /api/file?...url=` (standalone-browser URL-action compatibility) | `url.open` (packaged Tauri) | `server.url_open_action()`; IPC-mode HTTP rejects every `/api/file` request |
 | `POST /api/repos/refs` | `repos.refs` (packaged Tauri) | `repo_sync.list_refs()` in a background operation |
 | `POST /api/repos/save` | `repos.source.set` (packaged Tauri) | `repo_sync.resolve_target()` and the settings/state transaction |
 | `POST /api/repos/check` | `repos.check` (packaged Tauri) | `run_repo_check()` in a background operation |
@@ -99,7 +99,10 @@ parameter contracts below.
 | `POST /api/decklists/import` | `wb_decklist_import` (packaged Tauri command) | `server.import_decklist()` |
 
 Those HTTP routes remain served as standalone-browser compatibility endpoints;
-the IPC-mode worker rejects path-based `POST /api/decklists/import` so packaged
+all `/api/file` requests are rejected in IPC mode before action, metadata, or
+raw-file handling. The packaged UI has native callers for every file surface;
+there is no packaged raw-file caller. The IPC-mode worker rejects path-based
+`POST /api/decklists/import` so packaged
 content cannot bypass the native picker. Native selection is otherwise a client
 transport choice, not route removal. The methods use these exact parameter and
 result shapes inside the common RPC envelope. For `settings.set`,
@@ -546,13 +549,15 @@ preview, template resolution, directory metadata, OS actions, repo metadata,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
-worker call. Binary file reads, save/copy, and raw state-changing file operations remain
-HTTP. Image deletion is native in packaged windows and retains only POST
+worker call. Raw binary reads are browser-only HTTP compatibility; packaged
+HTTP rejects `/api/file` because there is no packaged raw-file caller. Image
+deletion is native in packaged windows and retains only POST
 `/api/fs` for standalone browsers. Browser update routes remain compatibility
 endpoints.
 The repository HTTP routes
 remain the browser fallback only; a packaged native failure never retries them.
-The packaged smoke test rejects WebView `POST /api/settings`,
+The packaged smoke test rejects every WebView `GET /api/file` after the
+WebKit marker, as well as `POST /api/settings`,
 `POST /api/offset`, update metadata reads, release-notes reads, and update
 check/start posts after the WebKit marker; browser-mode HTTP fallback remains
 allowed, and native failure never retries over HTTP.
@@ -610,9 +615,9 @@ latest entry):
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
-| `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
-| `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
-| Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
+| `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; standalone browser HTTP compatibility remains; packaged `/api/file` is rejected |
+| `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; standalone browser HTTP compatibility remains; packaged `/api/file` is rejected; strict roots/URL policy above |
+| Raw binary file reads | Standalone browser HTTP compatibility only | **Unavailable in packaged mode because there is no caller**; any future access must be a purpose-specific native grant, not a generic read capability |
 | Artifact export (`files.export_*` / `/api/files/save`) | Native grant + parented dialog; standalone HTTP compatibility only | Packaged IPC rejects the HTTP route. Grants are 64-hex, one-use after success, TTL 300 s, max 32; source is a successful create/offset/calibration PDF snapshot below that job's pinned SCM root (regular, stable, <=4 GiB). Copies use 64 KiB chunks, 2 workers, 8 active operations, 32 retained results, no overwrite/mkdir, and bounded collision suffixes. Browser mode has no picker; its explicit compatibility route requires an existing destination parent. |
 | Image deletion (`fs.delete_images` / `/api/fs`) | Tauri JSON-lines in packaged windows; POST `/api/fs` in standalone browsers | SCM-only, bounded preflight, stable POSIX dirfds or Windows handles; packaged HTTP rejects before path work |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
@@ -680,9 +685,9 @@ behavior; the runtime smoke guard still rejects WebView HTTP requests to the
 migrated metadata routes and, after the WebKit marker, rejects `POST
 /api/settings`, `POST /api/offset`, `POST /api/repos/refs`,
 `POST /api/repos/save`, `POST /api/repos/check`, `/api/reveal`, plus
-`/api/file` action queries containing the exact `open=1`, `reveal=1`, or `url=`
-keys in any reasonable query order. It deliberately allows raw `/api/file`
-reads, `images_only=1` metadata, and file save/delete compatibility requests.
+`/api/file` requests after the marker are all forbidden, including raw reads,
+`images_only=1` metadata, and action queries; file save/delete compatibility
+requests remain separately guarded by their own route policy.
 No repository startup marker is added: the six startup IPC markers remain the
 complete packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.

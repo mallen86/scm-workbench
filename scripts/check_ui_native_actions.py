@@ -36,12 +36,23 @@ def main() -> int:
         if marker not in facade:
             return fail(f"native action facade is missing {marker}")
 
-    # These routes are actions, not metadata reads. They must have one owner so
-    # packaged windows cannot accidentally bypass the native boundary.
+    # Every /api/file URL is confined to a browser-compatibility facade. The
+    # facades select native IPC first, so packaged windows cannot accidentally
+    # bypass the native boundary or introduce a generic byte consumer.
+    file_facades = {UI / "native-actions.js", UI / "artifacts.js"}
+    raw_byte_patterns = (
+        "arrayBuffer", ".blob(", "response.body", "body.getReader",
+        "FileReader", "readAsArrayBuffer", "Uint8Array", "new Blob",
+        "createObjectURL",
+    )
     for path in sorted(UI.rglob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        if any(pattern in source for pattern in raw_byte_patterns):
+            return fail(f"{path.relative_to(ROOT)} contains a raw-byte file consumer pattern")
         if path == FACADE:
             continue
-        source = path.read_text(encoding="utf-8")
+        if "/api/file" in source and path not in file_facades:
+            return fail(f"{path.relative_to(ROOT)} directly uses the /api/file compatibility route")
         if "/api/reveal" in source or "/api/file?path=" in source or "/api/file?url=" in source:
             return fail(f"{path.relative_to(ROOT)} directly bypasses native actions")
         if "&open=1" in source or "?url=" in source:
@@ -53,7 +64,7 @@ def main() -> int:
     pdf = (UI / "pages" / "pdf.js").read_text(encoding="utf-8")
     console = (UI / "console.js").read_text(encoding="utf-8")
     if "/api/file?${query}" not in artifacts or 'method: "file.list"' not in artifacts:
-        return fail("raw file-list metadata HTTP route was removed")
+        return fail("browser file-list compatibility HTTP route was removed")
     if any("/api/files/save" in p.read_text(encoding="utf-8") for p in UI.rglob("*.js")):
         return fail("UI retains a direct artifact save HTTP route")
     fs_facade = (UI / "fs-transport.js").read_text(encoding="utf-8")

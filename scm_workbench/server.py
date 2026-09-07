@@ -44,7 +44,7 @@ import html
 import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urlparse, urlsplit
 from typing import Any, Dict, List, Optional, Tuple
 
 from scm_workbench import repo_sync, updater
@@ -6668,6 +6668,21 @@ MIME = {
 }
 
 
+def _content_disposition(filename: str) -> str:
+    """Return a header-safe legacy name plus the original RFC 5987 name."""
+    # The quoted fallback is deliberately ASCII-only and excludes the header
+    # delimiters most likely to be interpreted by old clients.  The extended
+    # parameter preserves the user-visible name without putting controls in a
+    # response header.
+    fallback = "".join(
+        char if 0x21 <= ord(char) <= 0x7E and char not in {'"', "\\", ";"}
+        else "_"
+        for char in filename
+    ) or "download"
+    encoded = quote(filename, safe="!#$&+-.^_`|~", encoding="utf-8", errors="replace")
+    return f'inline; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
 def resolve_template(paper: str, card: str, borderless: bool,
                      settings: Optional[dict] = None) -> dict:
     """Resolve one upstream cutting template for both HTTP and native IPC."""
@@ -7073,6 +7088,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, ctype)
 
     def _file(self, q):
+        # Packaged content has native owners for every file surface.  Reject
+        # before settings, path resolution, action dispatch, or file reads so
+        # an unrecognised query cannot become a filesystem capability.
+        if _IPC_MODE:
+            return self._json({"ok": False, "errors": [
+                "native file access is required in packaged mode"]}, 403)
         url = (q.get("url") or [""])[0]
         if url:
             # Same open semantics as open=1, aimed at a link: the server
@@ -7115,7 +7136,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         data = p.read_bytes()
         self._send(200, data, MIME.get(p.suffix.lower(), "application/octet-stream"),
-                   [("Content-Disposition", f'inline; filename="{p.name}"')])
+                   [("Content-Disposition", _content_disposition(p.name))])
 
     def _template(self, q):
         """Resolve a cutting template using the shared HTTP/native helper."""

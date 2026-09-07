@@ -52,8 +52,8 @@ def main() -> int:
     if 'import { deleteImages } from "../fs-transport.js";' not in pdf:
         return fail("pdf confirmation/deletion behavior disappeared")
 
-    # There must be one owner for these compatibility routes. Other /api/file
-    # calls in pdf.js are intentionally retained for opening the PDF/template.
+    # The artifact facade owns the standalone-browser metadata compatibility
+    # route; packaged callers take the native branch above.
     for path in sorted(UI.rglob("*.js")):
         source = path.read_text(encoding="utf-8")
         if path != artifacts_path and ("/api/template" in source or "images_only=1" in source):

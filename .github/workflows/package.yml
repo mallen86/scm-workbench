@@ -245,10 +245,15 @@ jobs:
             echo "smoke FAILED: the WebView fetched /api/preview over HTTP" >&2
             exit 1
           fi
-          # Metadata reads are migrated, and native OS actions must not leak
-          # back to HTTP once the actual WebView has loaded. Match query keys
-          # as complete pairs so raw reads and images_only metadata remain
-          # allowed, while query order does not matter for the action keys.
+          # The packaged UI has native owners for every file surface. Reject
+          # any WebView GET /api/file after the marker, including malformed,
+          # raw-read, metadata, and action queries.
+          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
+              | grep -Eq '^\[workbench\] "GET /api/file([? ][^\"]*)? HTTP/'; then
+            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+            echo "smoke FAILED: the WebView fetched /api/file over HTTP" >&2
+            exit 1
+          fi
           # Settings, offsets, and repository metadata writes/starts must use
           # native IPC in the packaged WebView; browser-mode GET/POST fallback
           # remains a compatibility path.
@@ -277,21 +282,9 @@ jobs:
             exit 1
           fi
           if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "GET /api/file\?([^ ]*&)?(open=1|reveal=1|url=[^& ]*)(&[^ ]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched a native file/url action over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
               | grep -Eq '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'; then
             echo "---- server log ----"; cat "$data/server-tauri.log" >&2
             echo "smoke FAILED: the WebView fetched /api/template over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "GET /api/file\?([^ ]*&)?images_only=1(&[^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched a directory image listing over HTTP" >&2
             exit 1
           fi
           if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
@@ -569,9 +562,8 @@ jobs:
               $jobPattern = '^\[workbench\] "(GET|POST) /api/jobs( HTTP/|[? ][^\"]* HTTP/|/[\w-]+/(log|stream|kill)(\?[^ ]*)? HTTP/)'
               $previewPattern = '^\[workbench\] "GET /api/preview([? ][^\"]*)? HTTP/'
               $templatePattern = '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'
-              $imageListPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?images_only=1(&[^\"]*)? HTTP/'
+              $fileRoutePattern = '^\[workbench\] "GET /api/file([? ][^\"]*)? HTTP/'
               $revealActionPattern = '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'
-              $fileActionPattern = '^\[workbench\] "GET /api/file\?([^ ]*&)?(open=1|reveal=1|url=[^& ]*)(&[^\"]*)? HTTP/'
               $settingsWritePattern = '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'
               $offsetWritePattern = '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'
               $repoMetadataPattern = '^\[workbench\] "POST /api/repos/(refs|save|check)([? ][^\"]*)? HTTP/'
@@ -583,9 +575,8 @@ jobs:
               $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
               $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
               $templateHttp = $webviewRequests | Select-String -Pattern $templatePattern
-              $imageListHttp = $webviewRequests | Select-String -Pattern $imageListPattern
+              $fileRouteHttp = $webviewRequests | Select-String -Pattern $fileRoutePattern
               $revealActionHttp = $webviewRequests | Select-String -Pattern $revealActionPattern
-              $fileActionHttp = $webviewRequests | Select-String -Pattern $fileActionPattern
               $settingsWriteHttp = $webviewRequests | Select-String -Pattern $settingsWritePattern
               $offsetWriteHttp = $webviewRequests | Select-String -Pattern $offsetWritePattern
               $repoMetadataHttp = $webviewRequests | Select-String -Pattern $repoMetadataPattern
@@ -593,12 +584,11 @@ jobs:
               $decklistImportHttp = $webviewRequests | Select-String -Pattern $decklistImportPattern
               $artifactSaveHttp = $webviewRequests | Select-String -Pattern $artifactSavePattern
               $fsDeleteHttp = $webviewRequests | Select-String -Pattern $fsDeletePattern
-              # Raw file reads and images_only metadata remain HTTP; native
-              # artifact export and native settings/offset/repository/decklist
-              # routes are not browser fallbacks in packaged windows.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $imageListHttp -or $revealActionHttp -or $fileActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp -or $decklistImportHttp -or $artifactSaveHttp -or $fsDeleteHttp) {
+              # Every file surface is native in packaged windows; reject any
+              # WebView GET /api/file, including raw, metadata, and actions.
+              if ($jobHttp -or $previewHttp -or $templateHttp -or $fileRouteHttp -or $revealActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp -or $decklistImportHttp -or $artifactSaveHttp -or $fsDeleteHttp) {
                 Get-Content $log
-                throw "smoke: the WebView2 page fetched a migrated metadata route over HTTP"
+                throw "smoke: the WebView2 page fetched a migrated metadata/file route over HTTP"
               }
             }
           }
