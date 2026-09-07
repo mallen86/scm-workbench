@@ -6800,8 +6800,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static("index.html")
             if path.startswith("/ui/"):
                 return self._static(path[4:])
-            if path == "/favicon.svg":
-                return self._static("favicon.svg")
+            # Embedded Tauri assets live at the app-origin root. Serve those
+            # same bounded paths in standalone-browser mode so one HTML tree
+            # works in both environments; retain /ui/* for old bookmarks.
+            if path.startswith("/js/") or path in (
+                    "/favicon.svg", "/logo.svg", "/theme.css"):
+                return self._static(path[1:])
             if path == "/up":
                 # Liveness probe: the app window's “starting” page polls this
                 # until the server is ready, then navigates to the real UI. The

@@ -32,38 +32,21 @@ Two things that make this step feel broken:
 
 ## "The window opens but it never loads"
 
-If the window comes up and just sits there (splash, or a blank page), there
-are two gates, in this order:
+If the window comes up and stays on the embedded splash, first check
+**Gatekeeper**. If the app was just updated or freshly downloaded, *System
+Settings → Privacy & Security* may show "SCM Workbench from an unknown
+developer was prevented from opening" — click **Open Anyway**, then launch it
+again. This gate can return after an in-app update because the updater applies
+a fresh ad-hoc signature.
 
-1. **Gatekeeper** — if the app was *just updated or freshly downloaded*, the
-   launch is blocked outright: *System Settings → Privacy & Security* shows
-   "SCM Workbench from an unknown developer was prevented from opening" —
-   click **Open Anyway** there, then launch it again. (This is the one users
-   hit after in-app updates; see the update section below.)
-2. **Local Network** permission, which current macOS asks for separately:
-
-- **System Settings → Privacy & Security → Local Network** — make sure
-  *SCM Workbench* is switched **on**.
-- If it isn't in the list at all, launch the app once from **Applications**
-  (not Downloads, not a terminal) and the prompt appears; answer **Allow**.
-  The window needs plain-HTTP access to its own worker on `127.0.0.1:8038`;
-  without the grant the webview is denied and no app version can load.
-- **The one-time gates return after an in-app update, too.** The updater
-  re-signs the bundle in place with a fresh ad-hoc seal, so macOS treats the
-  relaunched copy as a brand-new, never-seen app: expect the same
-  **"Open Anyway"** entry under *Privacy & Security* as on first install
-  (click it once; it is remembered for this build), and possibly the local-
-  network question as well (allow it — the window loads through either).
-  The updater's closing message names both, so a blocked relaunch has an
-  answer instead of a mystery.
-
-What it is *not*: a broken download. A quarantined copy still passes the
-signature check (the app verifies its own seal at build time, and a copy that
-failed that check never ships), so a stuck window is a state of the webview
-on that machine after a fresh signature, not damaged bytes — re-downloading
-the same version won't change it. On current macOS the reliable clear is a
-reboot (or the Open Anyway / Local Network steps above, then a re-open); the
-window's own splash message now tells you which one to try first.
+The WebView now loads embedded assets and talks to its worker through native
+IPC, so **Local Network permission is not required**. If the worker cannot
+start, the splash changes to an in-place diagnostic page with **Try again** and
+**Copy report** controls. Use that report and the path it displays rather than
+re-downloading: a quarantined copy that passed the shipped signature check is
+not repaired by downloading the same bytes again. If macOS leaves the newly
+signed WebView in a stale state, quit every SCM Workbench instance and reopen
+it; reboot only if that does not clear the system state.
 
 ## "The worker died at start-up, and its port (8038) is already taken…"
 

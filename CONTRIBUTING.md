@@ -88,16 +88,28 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
   persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when
   packaged).
 * The Workbench never imports code from the base repos — it reads their JSON and shells out, so it stays compatible with whatever version the repos are on. `silhouette-card-maker` and `scm-extras` are always authoritative for fetching, PDF/DXF generation, and layouts; Workbench only wraps and orchestrates them.
-* **Native boundary (current migration wave).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Bootstrap reads, bounded `settings.set`, `offset.set`/`offset.delete`, preview, packaged-Tauri job list/start/log/kill/poll, read-only `template.resolve`/`file.list` metadata, bounded `file.open`/`file.reveal`/`url.open` OS actions, a Rust-owned no-argument decklist picker/import command backed by private `decklists.import_selected` IPC, a Rust-owned artifact save dialog backed by short-lived successful-job grants and private asynchronous `files.export_*` IPC, secure SCM-only image deletion (`fs.delete_images`), asynchronous repository metadata (`repos.refs`, `repos.source.set`, `repos.check`, `repos.poll`), and asynchronous update/release-notes operations (`updates.get`, `updates.check`, `updates.notes`, `updates.poll`, `updates.start`) use native IPC; browser HTTP/SSE fallback, browser-only raw bytes, and static/worker-origin navigation remain HTTP; packaged `/api/file` is rejected because the UI has no raw-file caller. Standalone browsers retain POST `/api/fs`; packaged HTTP image deletion is rejected before path work. Update checks/notes and repository network work are backgrounded so starts and polls remain immediate; `repo_init` and `repo_update` remain `jobs.start` operations. Offset state is canonical in Workbench data and is projected atomically into SCM under a serialized offset/job lease; repository source settings and repository check/deployment metadata retain their separate canonical mirrors. The upstream repo is never modified by metadata IPC. Native actions and mutations never silently retry over HTTP. `settings.set` accepts only its bounded settings schema and offsets have their own exact numeric and paper-size bounds. See [docs/native-ipc.md](docs/native-ipc.md) for the exact schema, bounds, ACL, rollout rule, and verification commands.
+* **Native boundary (current migration wave).** The packaged Tauri window supervises one Python worker. That worker serves both the existing HTTP compatibility server and bounded JSON-lines RPC over stdin/stdout. Bootstrap reads, bounded `settings.set`, `offset.set`/`offset.delete`, preview, packaged-Tauri job list/start/log/kill/poll, read-only `template.resolve`/`file.list` metadata, bounded `file.open`/`file.reveal`/`url.open` OS actions, a Rust-owned no-argument decklist picker/import command backed by private `decklists.import_selected` IPC, a Rust-owned artifact save dialog backed by short-lived successful-job grants and private asynchronous `files.export_*` IPC, secure SCM-only image deletion (`fs.delete_images`), asynchronous repository metadata (`repos.refs`, `repos.source.set`, `repos.check`, `repos.poll`), and asynchronous update/release-notes operations (`updates.get`, `updates.check`, `updates.notes`, `updates.poll`, `updates.start`) use native IPC; browser HTTP/SSE fallback and browser-only raw bytes remain HTTP compatibility; packaged static assets and navigation are embedded, and packaged `/api/file` is rejected because the UI has no raw-file caller. Standalone browsers retain POST `/api/fs`; packaged HTTP image deletion is rejected before path work. Update checks/notes and repository network work are backgrounded so starts and polls remain immediate; `repo_init` and `repo_update` remain `jobs.start` operations. Offset state is canonical in Workbench data and is projected atomically into SCM under a serialized offset/job lease; repository source settings and repository check/deployment metadata retain their separate canonical mirrors. The upstream repo is never modified by metadata IPC. Native actions and mutations never silently retry over HTTP. `settings.set` accepts only its bounded settings schema and offsets have their own exact numeric and paper-size bounds. See [docs/native-ipc.md](docs/native-ipc.md) for the exact schema, bounds, ACL, rollout rule, and verification commands.
 
 The data area holds `settings.json`, job history/logs, canonical `offset_state.json`, `repos-state.json`, the managed repo copies, and the provisioned runtime — delete it to factory-reset. The bundle itself is never written to at runtime.
 
 ## Packaging the app
 
 The packaged app is a Tauri native webview plus one bundled, supervised Python
-worker. It is not a Briefcase/pywebview window. The worker serves the UI's
-transitional HTTP origin and the first-slice JSON-lines IPC described in
-[docs/native-ipc.md](docs/native-ipc.md).
+worker. It is not a Briefcase/pywebview window. The WebView loads the embedded
+`ui/index.html` and root-relative assets from Tauri's bounded `ui/` frontend distribution; the worker's
+HTTP listener remains transitional compatibility support while JSON-lines IPC
+serves the packaged UI, as described in [docs/native-ipc.md](docs/native-ipc.md).
+
+To exercise the packaged asset origin from a source checkout (without a
+release bundle), run:
+
+```sh
+(cd tauri && SCM_WORKBENCH_DATA="$(mktemp -d /private/tmp/scm-workbench-source.XXXXXX)" SCM_WORKBENCH_NO_BOOTSTRAP=1 SCM_WORKBENCH_PYTHON="$(command -v python3)" cargo run --locked --features custom-protocol)
+```
+
+This intentionally does not use `devUrl` or navigate the WebView to the
+worker's loopback port. Standalone browser development remains the Python
+server flow above.
 
 Use a Python 3.13 development environment, Rust, and Node.js for the local
 checks and build:
@@ -105,6 +117,7 @@ checks and build:
 ```sh
 uv venv && uv sync
 python -m unittest discover -s tests -v
+python scripts/check_tauri_embedded.py
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_decklists.py
@@ -119,8 +132,9 @@ python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
 python scripts/check_ui_fs_delete.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
-(cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
-(cd tauri && cargo build --release --features custom-protocol)
+(cd tauri && cargo fmt --check)
+(cd tauri && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo test && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo check --features custom-protocol)
+(cd tauri && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo build --release --features custom-protocol)
 ```
 
 `PIP_FIND_LINKS=file://$(pwd)/ciwheels` is used by CI and by
@@ -128,7 +142,9 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 `scripts/build.sh macos` also assembles the local `.app`. The complete
 platform-specific assembly and smoke checks live in
 `.github/workflows/package.yml`; use that workflow (or a matching local copy
-of its steps) for the Windows bundle.
+of its steps) for the Windows bundle. The smoke checks treat the native IPC
+markers emitted by the embedded UI as rendered-UI evidence and separately
+assert that no WebView request reached the transitional HTTP listener.
 
 The supported release matrix is **macOS ARM64 only** and **Windows x64 only**:
 there is no Intel/universal macOS artifact and no ARM Windows artifact. The

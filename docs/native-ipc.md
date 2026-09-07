@@ -12,25 +12,28 @@ The packaged app has one Tauri shell and one supervised Python worker:
 SCM Workbench (Tauri native webview)
   └─ Python -m scm_workbench.server --ipc --no-browser
        ├─ stdin/stdout: bounded JSON-lines RPC
-       └─ 127.0.0.1:8038: HTTP compatibility server, static assets, and
-                           every endpoint not yet migrated
+       └─ 127.0.0.1:8038: transitional standalone-browser compatibility
+                           listener (never the packaged WebView origin)
 ```
 
 The worker is one process, not a native server plus a second Python server.
 It continues to own Workbench behavior and binds its existing loopback HTTP
-server so that the rest of the UI remains functional during migration. The
-Tauri window currently navigates to that worker origin because unmigrated UI
-calls use relative HTTP URLs. The native protocol covers the three bootstrap
-reads, bounded settings and offset mutations, preview, packaged-Tauri job
-control/log operations, the read-only `template.resolve`/`file.list` metadata
-slice, bounded repository metadata operations, app update/release-note
-operations, the bounded OS-action methods below, and secure image deletion.
+server as transitional compatibility support for standalone-browser flows.
+The packaged Tauri window stays inside the bounded embedded `ui/` frontend
+distribution (`index.html` and root-relative assets); it does not navigate to
+worker HTTP. The native
+protocol covers the three bootstrap reads, bounded settings and offset
+mutations, preview, packaged-Tauri job control/log operations, the read-only
+`template.resolve`/`file.list` metadata slice, bounded repository metadata
+operations, app update/release-note operations, the bounded OS-action methods
+below, and secure image deletion.
 Image deletion is public `fs.delete_images` RPC with exact `{path}` params; its
 only browser fallback is explicit POST `/api/fs`. Decklist import is a
 separate native command (`wb_decklist_import`), not a public `wb_rpc` method:
 the command owns the fixed single-file picker and sends one validated private
-`decklists.import_selected` frame to the worker. Other surfaces remain on their
-existing HTTP compatibility paths.
+`decklists.import_selected` frame to the worker. Standalone-browser surfaces
+remain on their existing HTTP compatibility paths; the packaged UI uses native
+IPC for its migrated calls.
 
 A source checkout still uses the browser development flow: `python -m
 scm_workbench` (or `python -m scm_workbench.server`) starts the HTTP server and
@@ -477,9 +480,9 @@ stdin and stdout pipes. It:
   hanging the webview.
 
 The webview reaches one narrow Tauri command, `wb_rpc`. The Tauri capability
-ACL grants `allow-wb-rpc` to the main window and permits the worker-served
-origin `http://127.0.0.1:8038`; the command itself validates the same method
-allowlist before writing to the child. Python validates it again, including
+ACL grants `allow-wb-rpc` to the embedded main window; there is no remote
+worker-origin scope. The command itself validates the same method allowlist
+before writing to the child. Python validates it again, including
 OS-action path and URL policy. This is a transport/orchestration boundary, not
 a general native escape hatch.
 
@@ -553,14 +556,11 @@ worker call. Raw binary reads are browser-only HTTP compatibility; packaged
 HTTP rejects `/api/file` because there is no packaged raw-file caller. Image
 deletion is native in packaged windows and retains only POST
 `/api/fs` for standalone browsers. Browser update routes remain compatibility
-endpoints.
-The repository HTTP routes
-remain the browser fallback only; a packaged native failure never retries them.
-The packaged smoke test rejects every WebView `GET /api/file` after the
-WebKit marker, as well as `POST /api/settings`,
-`POST /api/offset`, update metadata reads, release-notes reads, and update
-check/start posts after the WebKit marker; browser-mode HTTP fallback remains
-allowed, and native failure never retries over HTTP.
+endpoints. The repository HTTP routes remain the browser fallback only; a
+packaged native failure never retries them. The packaged smoke test treats the
+six native IPC markers as rendered-UI evidence and rejects any worker HTTP
+request other than its explicit `/up` liveness probe. Browser-mode HTTP
+fallback remains allowed, and native failure never retries over HTTP.
 
 ### App updates and release notes
 
@@ -611,7 +611,7 @@ latest entry):
 | Surface | Current transport | Status |
 | --- | --- | --- |
 | Bootstrap `info`, `manifest`, `settings.get` reads | Tauri → worker JSON-lines | **This first slice** |
-| Static assets, `/`, `/up`, worker-origin navigation | HTTP | Compatibility path |
+| Static assets, `/`, `/up`, and worker-origin routes | HTTP | Standalone-browser compatibility only; packaged assets/routes are embedded |
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
@@ -624,16 +624,18 @@ latest entry):
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
 | Updates metadata, checks, release notes, and update-start | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP compatibility remains; transactional replacement lifecycle is unchanged |
-| Static assets, worker-origin navigation, and other compatibility routes | HTTP | Compatibility path; not an OS-action capability |
+| Static assets, worker-origin routes, and other compatibility routes | HTTP | Standalone-browser compatibility path; packaged WebView remains embedded |
 
 This ledger is a follow-up checklist, not permission to expand the current
 slice. New UI features must go through the transport adapter (`api()` and its
 native route selection), not add a direct `fetch()` that bypasses the boundary.
 When an endpoint group is migrated, it needs parity coverage against HTTP,
 Python and Tauri allowlist updates, UI selection tests, and a packaged smoke
-check before its HTTP path is removed. Keep HTTP and the worker-origin
-navigation until every relative call has a native transport or an explicit
-compatibility proxy. Do not infer HTTP removal from this first slice.
+check before its HTTP path is removed. Keep the worker HTTP listener for
+standalone-browser compatibility until every relative call has a native
+transport or an explicit compatibility proxy. The packaged WebView itself
+must remain on the embedded origin; do not infer listener removal from this
+first slice.
 
 ## Upstream ownership
 
@@ -663,31 +665,23 @@ python scripts/check_ui_settings.py
 python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
 python scripts/check_ui_fs_delete.py
+python scripts/check_tauri_embedded.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
-(cd tauri && cargo fmt --check && cargo test && cargo check --features custom-protocol)
+(cd tauri && cargo fmt --check)
+(cd tauri && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo test && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo check --features custom-protocol)
 ```
 
 The packaged smoke checks use temporary data and
-`SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the actual
-webview loaded, all three bootstrap reads, `preview`, `jobs.list`, and the
-startup-local `updates.get` read used native IPC, no bootstrap or migrated route
-(including repository metadata and updates) was fetched over HTTP by the
-WebView, and the worker is reaped. The six startup markers are exactly the
-contract (`info`, `manifest`, `settings.get`, `jobs.list`, `preview`, and
-`updates.get`); settings and offset writes do not add a startup mutation or
-fake marker.
-They intentionally do not require
-`template.resolve` or `file.list` markers: these methods are read-only metadata
-facades and are not deterministically invoked during startup, so CI does not
-add fake UI calls or claim WebView markers for them. The executable facade
-contract, Python HTTP/native parity, and Rust real-worker coverage prove their
-behavior; the runtime smoke guard still rejects WebView HTTP requests to the
-migrated metadata routes and, after the WebKit marker, rejects `POST
-/api/settings`, `POST /api/offset`, `POST /api/repos/refs`,
-`POST /api/repos/save`, `POST /api/repos/check`, `/api/reveal`, plus
-`/api/file` requests after the marker are all forbidden, including raw reads,
-`images_only=1` metadata, and action queries; file save/delete compatibility
-requests remain separately guarded by their own route policy.
+`SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the
+embedded index/assets rendered, all three bootstrap reads, `preview`,
+`jobs.list`, and the startup-local `updates.get` read used native IPC, no
+WebView HTTP request reached the transitional listener, and the worker is
+reaped. The six startup markers are exactly the rendered-UI contract (`info`,
+`manifest`, `settings.get`, `jobs.list`, `preview`, and `updates.get`); settings
+and offset writes do not add a startup mutation or fake marker. The static
+embedded check verifies the `/ui/...` asset tree and SPA route set. The
+standalone worker HTTP listener remains available for browser compatibility;
+port closure is intentionally not claimed by this slice.
 No repository startup marker is added: the six startup IPC markers remain the
 complete packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.

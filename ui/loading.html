@@ -26,31 +26,29 @@
 </head>
 <body>
 <div class="box">
-  <img class="mark" src="/ui/logo.svg" alt="">
-  <div class="d">Starting the SCM Workbench server…</div>
+  <img class="mark" src="/logo.svg" alt="">
+  <div class="d">Starting the SCM Workbench…</div>
 </div>
+<script>
+  // The shell keeps this embedded page visible until the worker answers,
+  // then opens the embedded UI. If it is after a long wait, say so instead
+  // of pulsing forever.
+  (function () {
+    var waited = 0;
+    var timer = setInterval(function () {
+      waited += 1;
+      if (waited >= 120) {
+        clearInterval(timer);
+        document.querySelector(".d").textContent =
+          "This window is waiting for the app's bundled worker, and it " +
+          "never arrived. Quit SCM Workbench completely and open it again; on a " +
+          "fresh update that is usually all it takes. If it still will not " +
+          "load, see \u201CFirst run on Mac\u201D in the README — a " +
+          "re-sign can wedge the window on current macOS, and a reboot " +
+          "clears it.";
+      }
+    }, 500);
+  })();
+</script>
 </body>
 </html>
-  <script>
-    // The shell takes this window to the worker's origin the moment the
-    // worker answers; normally this page never notices it is still here.
-    // If it is after a long wait, the navigation never happened - on macOS
-    // that state has a name, so say it instead of pulsing forever.
-    (function () {
-      var waited = 0;
-      var timer = setInterval(function () {
-        waited += 1;
-        if (waited >= 120) {
-          clearInterval(timer);
-          document.querySelector(".d").textContent =
-            "This window is waiting for the app's own server, and it never " +
-            "arrived. Quit SCM Workbench completely and open it again; on a " +
-            "fresh update that is usually all it takes. If it still will not " +
-            "load, see \u201CFirst run on Mac\u201D in the README — a " +
-            "re-sign can wedge the window on current macOS, and a reboot " +
-            "clears it.";
-        }
-      }, 500);
-    })();
-  </script>
-</body>

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tauri::{
-    AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 
@@ -112,10 +112,33 @@ impl Drop for Worker {
     }
 }
 
-/// The page shown while the worker is starting: an app asset (served from
-/// the bundle), navigated to the live server once the port answers.
+/// The pages shown by the packaged shell are both embedded assets.  The
+/// The frontend distribution is the bounded `ui/` tree; no repository source,
+/// configuration, or VCS metadata is embedded into the application assets.
 fn loading_page() -> WebviewUrl {
     WebviewUrl::App("loading.html".into())
+}
+
+/// Only the Tauri asset origin may navigate this window.  In particular, a
+/// stale or future UI call cannot turn the shell into a loopback browser tab.
+fn is_embedded_url(url: &Url) -> bool {
+    #[cfg(windows)]
+    let (scheme, host) = ("http", "tauri.localhost");
+    #[cfg(not(windows))]
+    let (scheme, host) = ("tauri", "localhost");
+    url.scheme() == scheme
+        && url.host_str() == Some(host)
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn embedded_index_url() -> Url {
+    #[cfg(windows)]
+    let origin = "http://tauri.localhost";
+    #[cfg(not(windows))]
+    let origin = "tauri://localhost";
+    Url::parse(&format!("{origin}/index.html")).expect("embedded Tauri URL is valid")
 }
 
 /// Native decklist import owns the picker. The callback-based dialog is
@@ -292,6 +315,19 @@ fn main() {
             if let Err(e) = fs::create_dir_all(&requested_data) {
                 let window = WebviewWindowBuilder::new(app, "main", loading_page())
                     .title("SCM Workbench")
+                    .on_navigation(is_embedded_url)
+                    .on_web_resource_request(|request, response| {
+                        // Embedded assets are versioned by the binary, but a
+                        // WebView may retain a cache across app updates. Ask
+                        // it to revalidate the embedded UI conservatively;
+                        // this does not touch the worker's HTTP cache.
+                        if request.uri().path().starts_with('/') {
+                            response.headers_mut().insert(
+                                "Cache-Control",
+                                "no-cache".parse().expect("valid cache header"),
+                            );
+                        }
+                    })
                     .build()
                     .expect("failed to create the main window");
                 fail_window(
@@ -369,6 +405,19 @@ fn main() {
                 .min_inner_size(940.0, 600.0)
                 .inner_size(1280.0, 860.0)
                 .center()
+                .on_navigation(is_embedded_url)
+                .on_web_resource_request(|request, response| {
+                    // Embedded assets are versioned by the binary, but a
+                    // WebView may retain a cache across app updates. Ask it
+                    // to revalidate the embedded UI conservatively; this
+                    // does not touch the worker's HTTP cache.
+                    if request.uri().path().starts_with('/') {
+                        response.headers_mut().insert(
+                            "Cache-Control",
+                            "no-cache".parse().expect("valid cache header"),
+                        );
+                    }
+                })
                 .build()
                 .expect("failed to create the main window");
 
@@ -873,6 +922,58 @@ fn attach_worker_to_job(child: &Child) -> std::io::Result<WorkerJob> {
     Ok(job)
 }
 
+#[cfg(test)]
+mod embedded_tests {
+    use super::*;
+
+    #[test]
+    fn entry_page_is_an_embedded_asset() {
+        assert!(matches!(
+            loading_page(),
+            WebviewUrl::App(path) if path.to_string_lossy() == "loading.html"
+        ));
+        assert!(embedded_index_url().path().ends_with("/index.html"));
+    }
+
+    #[test]
+    fn transitional_readiness_requires_port_and_owned_child() {
+        assert!(owned_worker_ready_state(true, true));
+        assert!(!owned_worker_ready_state(false, true));
+        assert!(!owned_worker_ready_state(true, false));
+        assert!(!owned_worker_ready_state(false, false));
+    }
+
+    #[test]
+    fn navigation_policy_rejects_loopback_and_external_urls() {
+        assert!(is_embedded_url(&embedded_index_url()));
+        let mut spa_route = embedded_index_url();
+        spa_route.set_path("/pdf");
+        assert!(is_embedded_url(&spa_route));
+        assert!(!is_embedded_url(
+            &Url::parse("http://127.0.0.1:8038/").unwrap()
+        ));
+        assert!(!is_embedded_url(
+            &Url::parse("https://example.com/").unwrap()
+        ));
+        #[cfg(windows)]
+        for unsafe_url in [
+            "http://tauri.localhost:8038/",
+            "http://user@tauri.localhost/",
+            "http://sub.tauri.localhost/",
+        ] {
+            assert!(!is_embedded_url(&Url::parse(unsafe_url).unwrap()));
+        }
+        #[cfg(not(windows))]
+        for unsafe_url in [
+            "tauri://localhost:8038/",
+            "tauri://user@localhost/",
+            "tauri://sub.localhost/",
+        ] {
+            assert!(!is_embedded_url(&Url::parse(unsafe_url).unwrap()));
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
@@ -895,31 +996,24 @@ mod windows_tests {
     }
 }
 
-/// One worker is ready on the port, but no app window owns it: a hard-killed
-/// previous instance (End Task) or a translocated launch whose temp copy died
-/// leaves the python listening behind, and the window now has to decide
-/// whether that listener is the one it will drive. Bounded native RPC polling
-/// still requires this launch's worker, so it is almost never right:
-/// a window whose webview is denied plain-HTTP loopback (the local-network
-/// privacy prompt on current macOS, denied or never shown because the app
-/// ran from a quarantined, translocated copy) can't drive *any* server -
-/// it renders the splash, times out, and the user sees a stuck window while
-/// the old worker runs fine in the dark. The only safe shape is "the worker
-/// this very launch spawned" - the slot is populated by `spawn_worker` before
-/// we get here, so a populated slot is this launch's child, and an empty one
-/// means the spawn failed or the child died during the initial readiness
-/// check. Claiming the port is kept as a separate, *declined* step in that
-/// case: we never kill a listener we did not spawn.
-fn foreign_worker(slot: &WorkerSlot) -> bool {
-    !port_open(WORKER_PORT) || slot.lock().ok().map(|g| g.is_some()).unwrap_or(false)
+/// Transitional readiness requires both the loopback listener and the child
+/// this launch placed in its supervised slot. A foreign listener alone is
+/// never accepted; the next slice removes this port check with the listener.
+fn owned_worker_ready_state(port_ready: bool, owns_child: bool) -> bool {
+    port_ready && owns_child
 }
 
-/// Wait until the worker answers on the loopback port (or it dies), then
-/// point the window at it. Keep watching: if the worker dies later, the
-/// window says so instead of going quiet.
-fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: WorkerRpc) {
-    let url = format!("http://127.0.0.1:{WORKER_PORT}");
+fn owned_worker_ready(slot: &WorkerSlot) -> bool {
+    owned_worker_ready_state(
+        port_open(WORKER_PORT),
+        slot.lock().ok().map(|g| g.is_some()).unwrap_or(false),
+    )
+}
 
+/// Wait until the worker answers on the transitional loopback port (or it
+/// dies), then show the already-embedded UI. Keep watching: if the worker
+/// dies later, the embedded window says so instead of going quiet.
+fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: WorkerRpc) {
     // The child died before the initial readiness check (spawn succeeded, the
     // worker bailed in its first instants). The old page said "ended before
     // it was ready" - true, but it leaves the user staring at a dead window
@@ -959,7 +1053,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
     let mut up = false;
     let deadline = Instant::now() + Duration::from_secs(120);
     while !up && Instant::now() < deadline {
-        if foreign_worker(&slot) {
+        if owned_worker_ready(&slot) {
             up = true;
             break;
         }
@@ -1005,10 +1099,10 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
 
     let _ = app.run_on_main_thread({
         let w = window.clone();
-        let url = url.clone();
         move || {
-            // From a data: page a top-level http navigation is allowed.
-            let _ = w.eval(&format!("window.location.replace('{url}');"));
+            // Keep the WebView on the Tauri asset origin. The worker's HTTP
+            // listener remains transitional IPC support, never a UI origin.
+            let _ = w.navigate(embedded_index_url());
         }
     });
 
@@ -1222,13 +1316,13 @@ fn fail_window(window: &WebviewWindow, data: &Path, body: &str, detail: &str) {
     js.push_str("document.getElementById('wb-retry').onclick=function(){if(t&&t.invoke){t.invoke('wb_restart');}else{location.reload();}};");
     js.push_str("document.getElementById('wb-copy').onclick=function(e){");
     js.push_str("var b=e.currentTarget;");
-    js.push_str("var text='SCM Workbench — startup report\n\n'");
+    js.push_str("var text='SCM Workbench — startup report\\n\\n'");
     js.push_str("+document.getElementById('wb-reason').textContent");
-    js.push_str("+'\n\n'+document.getElementById('wb-log').textContent;");
+    js.push_str("+'\\n\\n'+document.getElementById('wb-log').textContent;");
     js.push_str("navigator.clipboard.writeText(text)");
     js.push_str(".then(function(){b.textContent='Copied';})");
-    js.push_str(".catch(function(){b.textContent='Couldn't copy';});");
-    js.push_str("})();");
+    js.push_str(".catch(function(){b.textContent='Couldn\\'t copy';});");
+    js.push_str("};})();");
 
     let html = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head>
@@ -1250,8 +1344,14 @@ fn fail_window(window: &WebviewWindow, data: &Path, body: &str, detail: &str) {
         data = escape(&data.display().to_string()),
         js = js,
     );
-    let page = format!("data:text/html;charset=utf-8,{}", percent_encode(&html));
-    let _ = window.eval(&format!("window.location.replace({});", json_string(&page)));
+    // Render the failure in the embedded loading document instead of
+    // navigating to a data:, file:, or worker-HTTP URL. This keeps the retry
+    // command available while the navigation policy remains asset-only.
+    let script = format!(
+        "document.open();document.write({});document.close();",
+        json_string(&html)
+    );
+    let _ = window.eval(&script);
 }
 
 /// "Try again" on the startup-failure page: restart the whole app. The data
@@ -1270,17 +1370,4 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

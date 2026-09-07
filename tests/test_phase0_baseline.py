@@ -162,6 +162,19 @@ class HttpContractTests(unittest.TestCase):
             raw = error.read().decode("utf-8")
             return error.code, json.loads(raw) if raw else {}
 
+    def test_standalone_browser_serves_root_relative_embedded_assets(self):
+        expected_types = {
+            "/theme.css": "text/css",
+            "/js/app.js": "text/javascript",
+            "/logo.svg": "image/svg+xml",
+        }
+        for path, expected_type in expected_types.items():
+            with self.subTest(path=path):
+                with urllib.request.urlopen(self.base + path, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(response.read())
+                    self.assertEqual(response.headers.get_content_type(), expected_type)
+
     def test_settings_persistence_shape_and_nested_merge(self):
         status, result = self.request("POST", "/api/settings", {
             "scm_dir": str(self.fixture.scm),

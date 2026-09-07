@@ -12,6 +12,10 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-14  # arm64 runner; Intel is intentionally not a release target
+    env:
+      # Keep Cargo outputs outside the checkout; frontendDist embeds only the
+      # bounded ui/ tree, never repository source or build artifacts.
+      CARGO_TARGET_DIR: ${{ runner.temp }}/scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
       - name: Assert the release architecture
@@ -36,6 +40,7 @@ jobs:
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
           python scripts/check_ui_fs_delete.py
+          python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
@@ -80,7 +85,7 @@ jobs:
           # bundle that carries anything else at its root - so the payload
           # (the app's code and the runtime) goes inside Contents/, and a
           # moved or renamed .app keeps working.
-          cp "$ws/tauri/target/release/scm-workbench" "$app/Contents/MacOS/SCM Workbench"
+          cp "$CARGO_TARGET_DIR/release/scm-workbench" "$app/Contents/MacOS/SCM Workbench"
           cp -R "$ws/scm_workbench" "$app/Contents/app/scm_workbench"
           cp -R "$ws/ui" "$app/Contents/app/ui"
           mv "$bundle/runtime" "$app/Contents/runtime"
@@ -143,22 +148,15 @@ jobs:
             esac
           done
           codesign --force --deep --sign - "$app"
-      - name: Smoke test - the window's webview must be on the UI
-        # The piece three releases shipped broken: the worker answered, the
-        # webview never reached it, and nothing in CI looked at the webview.
-        # (The old smoke curled /up - that proves the *worker*, not
-        # the *window*.) The shape of the proof: only a real WebKit session
-        # sends a WebKit User-Agent, so a WebKit UA on the worker's request
-        # log is the marker that a human would see the UI. Two failures,
-        # named: the worker never binds (the old check), and the worker
-        # serves but no webview ever connects (the blank-window class -
-        # exactly what the user saw on v0.3.2 through v0.3.4: a healthy
-        # server log next to a window stuck on its splash). NO_BOOTSTRAP
-        # keeps the test hermetic (no 570 MB repo clone in a CI run). Before
-        # the launch, the bundled runtime must import the core job
-        # dependencies - that is what "self-contained" means, and on arm64
-        # it also proves the ad-hoc signing made the extension modules
-        # loadable.
+      - name: Smoke test - embedded UI and native IPC
+        # The smoke proves two separate things: /up proves the transitional
+        # worker is live, while the six IPC markers prove that the embedded
+        # index and its root-relative embedded assets invoked native calls.
+        # The worker HTTP listener is deliberately still present for browser
+        # compatibility; this check does not claim that port is closed.
+        # NO_BOOTSTRAP keeps the test hermetic (no 570 MB repo clone in CI).
+        # Before launch, importing the bundled job dependencies also proves
+        # the runtime is self-contained and loadable on arm64.
         #
         # The payload (app/, runtime/) lives under Contents/ - inside the
         # code-signature seal the Sign step made. Anything that runs from
@@ -174,25 +172,23 @@ jobs:
           app="$ws/build/macos/SCM Workbench.app"
           export PYTHONDONTWRITEBYTECODE=1
           "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
-          data="$(mktemp -d)/scm-data"
+          data="$(mktemp -d /private/tmp/scm-workbench-smoke.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
           "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/smoke.log" 2>&1 &
           app_pid=$!
           worker_ok=""
-          webview_ok=""
+          ipc_ok=""
           for i in $(seq 1 90); do
             sleep 1
             if [ -z "$worker_ok" ] && curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then
               worker_ok=1
               echo "smoke: the worker answers on 127.0.0.1:8038"
             fi
-            # The webview marker proves the actual window loaded the live UI;
-            # the stderr markers below prove its bootstrap, jobs.list, preview, and
-            # local updates.get reads used native IPC rather than HTTP.
-            if [ -n "$worker_ok" ] && grep -q "webview session on / (WebKit)" "$data/server-tauri.log" 2>/dev/null; then
-              webview_ok=1
-            fi
+            # These native IPC markers are rendered-UI evidence: they are
+            # emitted only after the embedded index's JavaScript invokes the
+            # worker bridge. There is intentionally no WebKit/worker-origin
+            # marker in this smoke now that the WebView never visits HTTP.
             if [ -n "$worker_ok" ] && grep -q "\[ipc\] served info" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served manifest" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served settings.get" "$data/server-tauri.log" 2>/dev/null \
@@ -201,7 +197,7 @@ jobs:
                && grep -q "\[ipc\] served updates.get" "$data/server-tauri.log" 2>/dev/null; then
               ipc_ok=1
             fi
-            if [ -n "$webview_ok" ] && [ -n "${ipc_ok:-}" ]; then break; fi
+            if [ -n "$ipc_ok" ]; then break; fi
           done
           # A *soft* kill here is deliberate for the smoke test: it exercises the
           # normal CloseRequested path (the window closes cleanly). The separate
@@ -213,105 +209,21 @@ jobs:
             echo "smoke FAILED: the worker never answered" >&2
             exit 1
           fi
-          if [ -z "$webview_ok" ]; then
-            echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
-            echo "---- server log (last 40) ----"; tail -40 "$data/server-tauri.log" 2>/dev/null || true
-            echo "smoke FAILED: the worker serves, but no webview ever reached it" >&2
-            echo "              (the blank-window failure the user would see - not shippable)" >&2
-            exit 1
-          fi
-          if [ -z "${ipc_ok:-}" ]; then
+          if [ -z "$ipc_ok" ]; then
             echo "---- server log (last 80) ----"; tail -80 "$data/server-tauri.log" 2>/dev/null || true
-            echo "smoke FAILED: the webview did not produce all six native IPC markers" >&2
+            echo "smoke FAILED: the embedded UI did not produce all six native IPC markers" >&2
             exit 1
           fi
-          if grep -Eq '"GET /api/(info|manifest|settings)([ ?"]|$)' "$data/server-tauri.log"; then
+          # The only HTTP traffic expected in this transitional slice is the
+          # explicit /up liveness probe above. Any other worker request would
+          # mean the WebView escaped the embedded Tauri asset origin.
+          if grep -E '^\[workbench\] "(GET|POST) /' "$data/server-tauri.log" \
+              | grep -v '"GET /up HTTP/' >/dev/null 2>&1; then
             echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: a bootstrap endpoint was fetched over HTTP" >&2
+            echo "smoke FAILED: the embedded WebView made an HTTP request" >&2
             exit 1
           fi
-          # Only inspect actual request-log records after the WebKit marker;
-          # startup probes before the window exists are not WebView traffic.
-          webview_line="$(grep -n -m1 "webview session on / (WebKit)" "$data/server-tauri.log" | cut -d: -f1 || true)"
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "(GET|POST) /api/jobs( HTTP/|[? ][^\"]* HTTP/|/[[:alnum:]_-]+/(log|stream|kill)(\?[^ ]*)? HTTP/)'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched a migrated job route over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "GET /api/preview([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched /api/preview over HTTP" >&2
-            exit 1
-          fi
-          # The packaged UI has native owners for every file surface. Reject
-          # any WebView GET /api/file after the marker, including malformed,
-          # raw-read, metadata, and action queries.
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "GET /api/file([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched /api/file over HTTP" >&2
-            exit 1
-          fi
-          # Settings, offsets, and repository metadata writes/starts must use
-          # native IPC in the packaged WebView; browser-mode GET/POST fallback
-          # remains a compatibility path.
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView wrote settings over HTTP instead of native IPC" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView wrote offsets over HTTP instead of native IPC" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched the native reveal action over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/repos/(refs|save|check)([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched repository metadata over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched /api/template over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "(GET /api/updates([? ][^\"]*)?|GET /api/release-notes([? ][^\"]*)?|POST /api/updates/(check|start)([? ][^\"]*)?) HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView fetched an update route over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/decklists/import([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView imported a decklist over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/files/save([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView exported an artifact over HTTP" >&2
-            exit 1
-          fi
-          if [ -n "$webview_line" ] && tail -n "+$webview_line" "$data/server-tauri.log" \
-              | grep -Eq '^\[workbench\] "POST /api/fs([? ][^\"]*)? HTTP/'; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
-            echo "smoke FAILED: the WebView deleted images over HTTP" >&2
-            exit 1
-          fi
-          echo "smoke: worker up, actual webview loaded, bootstrap, jobs.list, and preview used native IPC; migrated metadata/action/settings/offset/update/decklist/artifact/fs HTTP routes were not used"
+          echo "smoke: worker up, embedded index/assets rendered, six native IPC markers observed, and no WebView HTTP request"
       - name: Reap check - a hard-killed app must not orphan its worker
         # The inverse of the blank-window class: a worker that outlives the app
         # (PPID 1, port still held) wedges the *next* launch. The old smoke
@@ -324,7 +236,7 @@ jobs:
           ws="$GITHUB_WORKSPACE"
           app="$ws/build/macos/SCM Workbench.app"
           export PYTHONDONTWRITEBYTECODE=1
-          data="$(mktemp -d)/scm-data"
+          data="$(mktemp -d /private/tmp/scm-workbench-reap.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
           "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/reap.log" 2>&1 &
@@ -437,6 +349,10 @@ jobs:
           retention-days: 1
   windows:
     runs-on: windows-latest  # x64 release target
+    env:
+      # Keep Cargo's generated target tree outside the checkout; frontendDist
+      # embeds only the bounded ui/ tree.
+      CARGO_TARGET_DIR: ${{ runner.temp }}\scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
       - name: Assert the release architecture
@@ -463,6 +379,7 @@ jobs:
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
           python scripts/check_ui_fs_delete.py
+          python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
         shell: pwsh
         run: Get-ChildItem ui/js -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
@@ -505,7 +422,7 @@ jobs:
         run: |
           $ws = (Resolve-Path .).Path
           $bundle = Join-Path $ws "build\windows"
-          Copy-Item (Join-Path $ws "tauri\target\release\scm-workbench.exe") (Join-Path $bundle "SCM Workbench.exe")
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR "release\scm-workbench.exe") (Join-Path $bundle "SCM Workbench.exe")
           New-Item -ItemType Directory -Force (Join-Path $bundle "app") | Out-Null
           Copy-Item (Join-Path $ws "scm_workbench") (Join-Path $bundle "app\scm_workbench") -Recurse
           Copy-Item (Join-Path $ws "ui") (Join-Path $bundle "app\ui") -Recurse
@@ -513,11 +430,12 @@ jobs:
           # must not ship inside the bundle:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
-      - name: Smoke test - the bundle's window must serve the UI
-        # The whole point of the new architecture, verified in CI: the exe
-        # comes up, its worker answers on 127.0.0.1:8038, and the app's
-        # own webview is what the user would see. NO_BOOTSTRAP keeps the
-        # test hermetic (no 570 MB repo clone in a CI run).
+      - name: Smoke test - embedded UI and native IPC
+        # /up proves the transitional worker is live; the six native IPC
+        # markers prove the embedded index and root-relative assets rendered.
+        # The worker HTTP listener remains transitional browser support, so
+        # this smoke does not claim that port is closed. NO_BOOTSTRAP keeps
+        # the test hermetic (no 570 MB repo clone in CI).
         run: |
           $ws = (Resolve-Path .).Path
           $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
@@ -525,7 +443,6 @@ jobs:
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
           $workerOk = $false
-          $webviewOk = $false
           $ipcOk = $false
           for ($i = 0; $i -lt 90; $i++) {
             Start-Sleep -Seconds 1
@@ -537,7 +454,9 @@ jobs:
               } catch { }
             }
             if (Test-Path $log) {
-              $webviewOk = [bool](Select-String -Path $log -Pattern 'webview session on / \(WebKit\)' -Quiet)
+              # These markers are emitted only after the embedded index's
+              # JavaScript invokes the worker bridge, so they are rendered-UI
+              # evidence without relying on a worker-origin WebView request.
               $ipcOk = [bool]((Select-String -Path $log -Pattern '\[ipc\] served info' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served manifest' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served settings\.get' -Quiet) -and
@@ -545,54 +464,26 @@ jobs:
                 (Select-String -Path $log -Pattern '\[ipc\] served preview' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served updates\.get' -Quiet))
             }
-            if ($workerOk -and $webviewOk -and $ipcOk) { break }
+            if ($workerOk -and $ipcOk) { break }
           }
           if (-not $workerOk) { throw "smoke: the worker never answered on 127.0.0.1:8038" }
-          if (-not $webviewOk) { throw "smoke: the worker serves, but no actual WebView2 page reached the UI" }
-          if (-not $ipcOk) { throw "smoke: the WebView2 page did not produce all six native IPC markers" }
+          if (-not $ipcOk) { throw "smoke: the embedded UI did not produce all six native IPC markers" }
           if (Test-Path $log) {
-            if (Select-String -Path $log -Pattern '"GET /api/(info|manifest|settings)([ ?"]|$)' -Quiet) {
+            # The /up liveness probe above is the only expected worker HTTP
+            # request. Any other request means the WebView escaped the
+            # embedded Tauri asset origin.
+            $httpRequests = Get-Content $log | Where-Object { $_ -match '^\[workbench\] "(GET|POST) /' -and $_ -notmatch '"GET /up HTTP/' }
+            if ($httpRequests) {
               Get-Content $log
-              throw "smoke: a bootstrap endpoint was fetched over HTTP"
+              throw "smoke: the embedded WebView made an HTTP request"
             }
-            # Scope this to request records after the WebKit marker so setup
-            # probes before the window exists cannot look like WebView traffic.
-            $webviewLine = (Select-String -Path $log -Pattern 'webview session on / \(WebKit\)' | Select-Object -First 1).LineNumber
-            if ($webviewLine) {
-              $jobPattern = '^\[workbench\] "(GET|POST) /api/jobs( HTTP/|[? ][^\"]* HTTP/|/[\w-]+/(log|stream|kill)(\?[^ ]*)? HTTP/)'
-              $previewPattern = '^\[workbench\] "GET /api/preview([? ][^\"]*)? HTTP/'
-              $templatePattern = '^\[workbench\] "GET /api/template([? ][^\"]*)? HTTP/'
-              $fileRoutePattern = '^\[workbench\] "GET /api/file([? ][^\"]*)? HTTP/'
-              $revealActionPattern = '^\[workbench\] "POST /api/reveal([? ][^\"]*)? HTTP/'
-              $settingsWritePattern = '^\[workbench\] "POST /api/settings([? ][^\"]*)? HTTP/'
-              $offsetWritePattern = '^\[workbench\] "POST /api/offset([? ][^\"]*)? HTTP/'
-              $repoMetadataPattern = '^\[workbench\] "POST /api/repos/(refs|save|check)([? ][^\"]*)? HTTP/'
-              $updatePattern = '^\[workbench\] "(GET /api/updates([? ][^\"]*)?|GET /api/release-notes([? ][^\"]*)?|POST /api/updates/(check|start)([? ][^\"]*)?) HTTP/'
-              $decklistImportPattern = '^\[workbench\] "POST /api/decklists/import([? ][^\"]*)? HTTP/'
-              $artifactSavePattern = '^\[workbench\] "POST /api/files/save([? ][^\"]*)? HTTP/'
-              $fsDeletePattern = '^\[workbench\] "POST /api/fs([? ][^\"]*)? HTTP/'
-              $webviewRequests = Get-Content $log | Select-Object -Skip ($webviewLine - 1)
-              $jobHttp = $webviewRequests | Select-String -Pattern $jobPattern
-              $previewHttp = $webviewRequests | Select-String -Pattern $previewPattern
-              $templateHttp = $webviewRequests | Select-String -Pattern $templatePattern
-              $fileRouteHttp = $webviewRequests | Select-String -Pattern $fileRoutePattern
-              $revealActionHttp = $webviewRequests | Select-String -Pattern $revealActionPattern
-              $settingsWriteHttp = $webviewRequests | Select-String -Pattern $settingsWritePattern
-              $offsetWriteHttp = $webviewRequests | Select-String -Pattern $offsetWritePattern
-              $repoMetadataHttp = $webviewRequests | Select-String -Pattern $repoMetadataPattern
-              $updateHttp = $webviewRequests | Select-String -Pattern $updatePattern
-              $decklistImportHttp = $webviewRequests | Select-String -Pattern $decklistImportPattern
-              $artifactSaveHttp = $webviewRequests | Select-String -Pattern $artifactSavePattern
-              $fsDeleteHttp = $webviewRequests | Select-String -Pattern $fsDeletePattern
-              # Every file surface is native in packaged windows; reject any
-              # WebView GET /api/file, including raw, metadata, and actions.
-              if ($jobHttp -or $previewHttp -or $templateHttp -or $fileRouteHttp -or $revealActionHttp -or $settingsWriteHttp -or $offsetWriteHttp -or $repoMetadataHttp -or $updateHttp -or $decklistImportHttp -or $artifactSaveHttp -or $fsDeleteHttp) {
-                Get-Content $log
-                throw "smoke: the WebView2 page fetched a migrated metadata/file route over HTTP"
-              }
+            # No WebKit marker is expected: the WebView never visits worker HTTP.
+            if (Select-String -Path $log -Pattern 'webview session on / \(WebKit\)' -Quiet) {
+              Get-Content $log
+              throw "smoke: a WebView HTTP navigation was observed"
             }
           }
-          Write-Host "smoke: worker up, actual WebView2 loaded, bootstrap, jobs.list, preview, and updates.get used native IPC; no migrated metadata/action/settings/offset/repository/update/decklist route used HTTP"
+          Write-Host "smoke: worker up, embedded index/assets rendered, six native IPC markers observed, and no WebView HTTP request"
           $proc | Stop-Process -Force
           $proc.WaitForExit()
           Start-Sleep -Seconds 2
