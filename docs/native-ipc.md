@@ -165,6 +165,39 @@ atomic no-replace hard link, and never overwrites a collision. Returned entries
 are deterministic and bounded to 8192 scanned entries, 1024 results, and a
 512 KiB encoded result; manifest and info caches are invalidated after success.
 
+### Artifact export
+
+Successful `create_pdf`, `offset_pdf`, and `calibration` jobs snapshot only new
+or changed regular PDFs below that job's pinned SCM checkout. The snapshot
+persists with job history and records the canonical path, root identity, file
+identity, size, and modification/change times. `jobs.list` keeps its existing
+`outputs` array and adds a parallel `save_grants` array. Legacy rows without a
+snapshot, failed jobs, directories, symlinks/reparse points, files outside the
+pinned checkout, and files larger than 4 GiB receive no grant.
+
+A valid snapshot may mint a fresh process-local 64-hex grant after restart.
+Tokens expire after 300 seconds, are memoized across polling, and are bounded
+to 32 total. Expiration or a successful export invalidates that token; minting
+a replacement always reopens and revalidates the immutable snapshot. The
+WebView passes only a grant and bounded basename hint to `wb_save_artifact`.
+Rust owns the parented save dialog, and only its selected destination reaches
+the private worker protocol.
+
+`files.export_selected`, `files.export_poll`, and `files.export_cancel` are
+private worker methods and are rejected by public `wb_rpc`. Copying runs on a
+two-thread executor with at most eight queued/running operations, 32 retained
+results, a 600-second result TTL, 64 KiB chunks, stable source handles, source
+identity/change checks, cooperative cancellation, exclusive sibling temporary
+files, and atomic no-replace publication with at most 1000 collision suffixes.
+The destination parent must already exist; no parent directory is created and
+no existing file or symlink is overwritten. Picker cancellation returns JSON
+`null`; application rejection returns bounded `{"ok":false,"errors":[...]}`;
+native infrastructure failure rejects without HTTP fallback.
+
+The IPC-mode worker rejects `POST /api/files/save`. Standalone browser mode
+retains that explicit compatibility route, but the normal browser UI has no
+native picker. The route shares bounded stable-copy/no-overwrite behavior.
+
 ### Repository metadata operations
 
 Repository metadata has an asynchronous native contract because refs and update
@@ -555,7 +588,8 @@ methods are the latest entries):
 | `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; strict roots/URL policy above |
 | Binary artifacts/raw file reads | HTTP | Deferred: later bounded artifact/path handling; native actions never return bytes |
-| Save/copy and image deletion (`/api/files/save`, `/api/fs`) | HTTP | Deferred: preserve user-selected destinations and destructive-operation guards |
+| Artifact export (`files.export_*` / `/api/files/save`) | Native grant + parented dialog; standalone HTTP compatibility only | Packaged IPC rejects the HTTP route. Grants are 64-hex, one-use after success, TTL 300 s, max 32; source is a successful create/offset/calibration PDF snapshot below that job's pinned SCM root (regular, stable, <=4 GiB). Copies use 64 KiB chunks, 2 workers, 8 active operations, 32 retained results, no overwrite/mkdir, and bounded collision suffixes. Browser mode has no picker; its explicit compatibility route requires an existing destination parent. |
+| Image deletion (`/api/fs`) | HTTP/native existing action | Destructive repository action remains separately guarded |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |

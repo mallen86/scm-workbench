@@ -162,6 +162,105 @@ async fn wb_decklist_import(
     worker.import_selected_decklist(source_path)
 }
 
+/// Native artifact save. The selected destination is consumed here and is
+/// never returned to JavaScript before the worker has copied it. Rust only
+/// accepts an opaque grant and a bounded basename hint from the WebView.
+#[tauri::command]
+async fn wb_save_artifact(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+    grant_id: String,
+    suggested_name: String,
+) -> Result<Value, String> {
+    if grant_id.len() != 64
+        || !grant_id
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
+        return Err("invalid save grant".to_string());
+    }
+    let upper_stem = suggested_name
+        .trim_end_matches([' ', '.'])
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    let reserved = matches!(upper_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || upper_stem
+            .strip_prefix("COM")
+            .or_else(|| upper_stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            });
+    if suggested_name.is_empty()
+        || suggested_name.len() > 255
+        || suggested_name.ends_with([' ', '.'])
+        || reserved
+        || suggested_name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\' || c == ':')
+    {
+        return Err("invalid suggested file name".to_string());
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export PDF")
+        .add_filter("PDF", &["pdf"])
+        .set_file_name(suggested_name.clone())
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "save dialog failed".to_string())?
+        .map_err(|_| "save dialog failed".to_string())?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected destination is unavailable".to_string())?;
+    let destination = path
+        .to_str()
+        .ok_or_else(|| "selected destination is not valid UTF-8".to_string())?
+        .to_string();
+    if destination.len() > 4096 || destination.chars().any(|c| c.is_control()) {
+        return Err("selected destination is invalid".to_string());
+    }
+    let worker = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = worker.export_selected_artifact(&grant_id, &destination)?;
+        if started.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Ok(started);
+        }
+        let operation_id = started
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "malformed artifact export response".to_string())?
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(305);
+        loop {
+            if Instant::now() >= deadline {
+                let _ = worker.cancel_artifact_export(&operation_id);
+                return Err("artifact export timed out".to_string());
+            }
+            let value = worker.poll_artifact_export(&operation_id)?;
+            if value.get("done").and_then(Value::as_bool) == Some(true) {
+                return value
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| "malformed artifact export result".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .map_err(|_| "artifact export task failed".to_string())?
+}
+
 fn main() {
     // The updater is an external, stdio-free mode.  It must be selected before
     // Tauri setup creates windows, starts IPC, or touches the worker.
@@ -175,7 +274,7 @@ fn main() {
     let worker_slot = WorkerSlot::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc, wb_decklist_import])
+        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc, wb_decklist_import, wb_save_artifact])
         .manage(worker_slot.clone())
         .manage(Worker {
             slot: worker_slot,

@@ -29,6 +29,9 @@ MAX_PREVIEW_RESULT_SIZE = 512 * 1024
 # Byte-oriented aliases make the unit explicit for callers and tests.
 MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
+# Private methods are accepted by the child protocol for narrow native
+# helpers, but are deliberately absent from Rust's public wb_rpc allowlist.
+PRIVATE_METHODS = frozenset(("files.export_selected", "files.export_poll", "files.export_cancel"))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
     "file.open", "file.reveal", "url.open",
@@ -36,7 +39,7 @@ ALLOWED_METHODS = frozenset((
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
     "offset.set", "offset.delete", "decklists.import_selected",
-))
+)) | PRIVATE_METHODS
 
 
 def _bad_params(request_id: str, message: str) -> dict:
@@ -313,6 +316,29 @@ def dispatch(request: dict) -> dict:
             if server._offset_name(size) is None:
                 return _bad_params(request_id, "offset.delete size is empty, too long, or contains controls")
             result = server.delete_offset(size)
+        elif method == "files.export_selected":
+            if set(params) != {"grant_id", "destination"}:
+                return _bad_params(request_id, "files.export_selected requires grant_id and destination")
+            if not isinstance(params["grant_id"], str) or not isinstance(params["destination"], str):
+                return _bad_params(request_id, "artifact export values must be strings")
+            try:
+                result = server.export_selected(params["grant_id"], params["destination"])
+            except server.ArtifactExportError as error:
+                result = {"ok": False, "errors": [error.message]}
+        elif method == "files.export_poll":
+            if set(params) != {"operation_id"} or not isinstance(params["operation_id"], str):
+                return _bad_params(request_id, "files.export_poll requires operation_id")
+            try:
+                result = server.export_poll(params["operation_id"])
+            except server.ArtifactExportError as error:
+                return _error(request_id, "bad_request", error.message)
+        elif method == "files.export_cancel":
+            if set(params) != {"operation_id"} or not isinstance(params["operation_id"], str):
+                return _bad_params(request_id, "files.export_cancel requires operation_id")
+            try:
+                result = server.export_cancel(params["operation_id"])
+            except server.ArtifactExportError as error:
+                return _error(request_id, "bad_request", error.message)
         elif method == "jobs.start":
             if set(params) != {"kind", "args"} or not _string(params.get("kind"), "kind"):
                 return _bad_params(request_id, "jobs.start requires string kind and object args")

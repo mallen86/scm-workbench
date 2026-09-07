@@ -149,6 +149,26 @@ DECKLIST_IO_CHUNK = 64 * 1024
 DECKLIST_PLACEHOLDERS = frozenset(("README.md", "EMPTY.md"))
 DECKLIST_TEMP_PREFIX = ".wb-decklist-import-"
 
+# Artifact export is a deliberately separate trust boundary from the legacy
+# browser compatibility route.  Grants contain no paths in the WebView; they
+# are short-lived handles to immutable records owned by this worker.
+ARTIFACT_MAX_BYTES = 4 * 1024 * 1024 * 1024
+ARTIFACT_NAME_MAX_BYTES = 255
+ARTIFACT_PATH_MAX_BYTES = 4096
+ARTIFACT_IO_CHUNK = 64 * 1024
+ARTIFACT_GRANT_TTL = 300.0
+ARTIFACT_GRANT_MAX = 32
+ARTIFACT_EXPORT_MAX_ACTIVE = 8
+ARTIFACT_EXPORT_MAX_RETAINED = 32
+ARTIFACT_EXPORT_TTL = 600.0
+ARTIFACT_EXPORT_PREFIX = ".wb-artifact-export-"
+
+
+class ArtifactExportError(Exception):
+    def __init__(self, message: str):
+        super().__init__(" ".join(str(message).split())[:256])
+        self.message = str(self) or "artifact export failed"
+
 
 class DecklistImportError(Exception):
     """Bounded application failure for a decklist import or scan."""
@@ -3301,7 +3321,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3479,7 +3499,8 @@ def list_jobs() -> dict:
                "status": j["status"], "exit_code": j.get("exit_code"), "cmd": j["cmd"]}
         if j.get("progress"):
             row["progress"] = j["progress"]
-        row.update(warnings=j.get("warnings", []), outputs=job_outputs(j))
+        row.update(warnings=j.get("warnings", []), outputs=job_outputs(j),
+                   save_grants=_grants_for_job(j))
         running.append(row)
     ids = {r["id"] for r in running}
     history = []
@@ -3488,6 +3509,9 @@ def list_jobs() -> dict:
             continue
         row = dict(old)
         row.setdefault("outputs", job_outputs(row))
+        # Persisted immutable snapshots mint fresh process-local grants after
+        # restart; historical rows without snapshots remain display-only.
+        row["save_grants"] = _grants_for_job(row)
         history.append(row)
     return {"jobs": running + history[:200]}
 
@@ -3605,20 +3629,154 @@ def poll_jobs(cursors: list, max_events: int) -> dict:
     return {"jobs": result}
 
 
+def _artifact_identity(st: os.stat_result) -> dict:
+    return {"dev": int(getattr(st, "st_dev", 0)), "ino": int(getattr(st, "st_ino", 0)),
+            "size": int(st.st_size), "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+            "ctime_ns": int(getattr(st, "st_ctime_ns", int(st.st_ctime * 1e9)))}
+
+
+def _artifact_name(value: str) -> str:
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        raise ArtifactExportError("artifact name is invalid")
+    try:
+        if len(value.encode("utf-8")) > ARTIFACT_NAME_MAX_BYTES:
+            raise ArtifactExportError("artifact name exceeds 255 UTF-8 bytes")
+    except UnicodeEncodeError as exc:
+        raise ArtifactExportError("artifact name must be valid UTF-8") from exc
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or unicodedata.category(c) == "Cc" for c in value):
+        raise ArtifactExportError("artifact name contains control characters")
+    if any(c in value for c in ("/", "\\", ":")):
+        raise ArtifactExportError("artifact name must not contain path separators")
+    # Keep the destination contract portable even when the worker is running
+    # on POSIX and the selected path will later be used on Windows.
+    stem = value.rstrip(" .").split(".", 1)[0].upper()
+    if value != value.rstrip(" .") or not value.strip() or stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(?:COM|LPT)[1-9]", stem or ""):
+        raise ArtifactExportError("artifact name is not portable")
+    return value
+
+
+def _artifact_path_parts(path: Path) -> list:
+    if not path.is_absolute():
+        raise ArtifactExportError("artifact path must be absolute")
+    try:
+        raw = str(path)
+        if len(raw.encode("utf-8")) > ARTIFACT_PATH_MAX_BYTES:
+            raise ArtifactExportError("artifact path exceeds 4096 UTF-8 bytes")
+    except UnicodeEncodeError as exc:
+        raise ArtifactExportError("artifact path must be valid UTF-8") from exc
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        raise ArtifactExportError("artifact path contains control characters")
+    parts = list(path.parts)
+    if any(part in ("", ".", "..") for part in parts[1:]):
+        raise ArtifactExportError("artifact path contains an unsafe component")
+    return parts
+
+
+def _artifact_inside(root: Path, candidate: Path) -> bool:
+    try:
+        relative = candidate.relative_to(root)
+        return bool(relative.parts) and all(part not in ("", ".", "..")
+                                            for part in relative.parts)
+    except ValueError:
+        return False
+
+
+def _artifact_expected_paths(job: dict) -> list:
+    """Compute only the output families owned by a terminal artifact job."""
+    kind, args = job.get("kind"), job.get("args") or {}
+    root = Path(str(job.get("scm_path") or ""))
+    if not root.is_absolute() or kind not in ("create_pdf", "offset_pdf", "calibration"):
+        return []
+    if kind == "calibration":
+        directory = root / "calibration"
+        try:
+            found = []
+            for p in directory.iterdir():
+                if p.name.lower().endswith(".pdf"):
+                    found.append(p)
+                    if len(found) >= 64:
+                        break
+            return found
+        except OSError:
+            return []
+    if kind == "create_pdf":
+        if args.get("output_images"):
+            return []
+        raw = str(args.get("output_path") or "game/output/game.pdf")
+        return [Path(raw) if Path(raw).is_absolute() else root / raw]
+    raw = str(args.get("output_pdf_path") or "")
+    src = Path(str(args.get("pdf_path") or "game/output/game.pdf"))
+    src = src if src.is_absolute() else root / src
+    return [Path(raw) if raw and Path(raw).is_absolute() else (root / raw if raw else src.with_name(src.stem + "_offset.pdf"))]
+
+
+def _snapshot_artifacts(job: dict) -> list:
+    if job.get("status") != "ok":
+        return []
+    raw_root = Path(str(job.get("scm_path") or ""))
+    root = raw_root
+    try:
+        if not raw_root.is_absolute() or _is_reparse_or_symlink(os.lstat(raw_root)):
+            return []
+        root = raw_root.resolve(strict=True)
+        if len(str(root).encode("utf-8")) > ARTIFACT_PATH_MAX_BYTES:
+            return []
+        root_stat = os.stat(root, follow_symlinks=False)
+        if not root.is_dir() or _is_reparse_or_symlink(os.lstat(root)) or not stat.S_ISDIR(root_stat.st_mode):
+            return []
+    except OSError:
+        return []
+    result = []
+    for expected_path in _artifact_expected_paths(job):
+        try:
+            # Rebase the job's lexical path onto the canonical pinned root
+            # before inspecting every component. Resolving the candidate first
+            # would erase evidence that an expected artifact was a symlink.
+            relative = expected_path.relative_to(raw_root)
+            if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+                continue
+            candidate = root.joinpath(*relative.parts)
+            if len(str(candidate).encode("utf-8")) > ARTIFACT_PATH_MAX_BYTES:
+                continue
+            if not _artifact_inside(root, candidate) or candidate.suffix.lower() != ".pdf":
+                continue
+            probe = root
+            safe = True
+            for part in relative.parts:
+                probe /= part
+                component_stat = os.lstat(probe)
+                if _is_reparse_or_symlink(component_stat):
+                    safe = False
+                    break
+            if not safe:
+                continue
+            st = os.stat(candidate, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode) or st.st_size < 0 or st.st_size > ARTIFACT_MAX_BYTES:
+                continue
+            identity = _artifact_identity(st)
+            before = (job.get("artifact_before") or {}).get(str(candidate))
+            if before is not None and before == identity:
+                continue
+            result.append({"path": str(candidate), "root": str(root), "name": _artifact_name(candidate.name),
+                           "root_identity": _artifact_identity(root_stat), **identity})
+        except (OSError, ValueError, ArtifactExportError):
+            continue
+    return result[:16]
+
+
 def job_outputs(job: dict) -> list:
-    """Artifact file(s) of a job as absolute paths — what the console's
-    “Move to my files…” button can carry out of the app's private working
-    area: the create/offset PDFs and the calibration sheets. Older persisted
-    jobs (no recorded form args) fall back to the default paths."""
+    """Return snapshotted outputs, never outputs from current Settings."""
+    snapshots = job.get("artifact_snapshots")
+    if isinstance(snapshots, list):
+        return [str(x.get("path")) for x in snapshots if isinstance(x, dict) and isinstance(x.get("path"), str)]
     kind = job.get("kind")
     if kind not in ("create_pdf", "offset_pdf", "calibration"):
         return []
     args = job.get("args") or {}
-    try:
-        scm, _ = effective_dirs(load_settings())
-    except Exception:
-        return []
-    if not scm:
+    scm = Path(str(job.get("scm_path") or ""))
+    # Historical rows without a pinned checkout are display-only and must not
+    # be redirected through current Settings.
+    if not scm.is_absolute():
         return []
     if kind == "create_pdf":
         if args.get("output_images"):
@@ -3636,6 +3794,572 @@ def job_outputs(job: dict) -> list:
         return [str(p if p.is_absolute() else scm / p)]
     cdir = scm / "calibration"
     return [str(p) for p in sorted(cdir.glob("*.pdf"))] if cdir.is_dir() else []
+
+
+# Grants and exports are process-local by design.  Persisted snapshots survive
+# restart for audit/display, but a new worker must not inherit a usable grant.
+ARTIFACT_GRANTS: "OrderedDict[str, dict]" = OrderedDict()
+ARTIFACT_GRANTS_LOCK = threading.RLock()
+EXPORTS: "OrderedDict[str, dict]" = OrderedDict()
+EXPORTS_LOCK = threading.RLock()
+EXPORT_EXECUTOR = __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(max_workers=2, thread_name_prefix="artifact-export")
+
+
+def _grant_error(message: str) -> dict:
+    return {"ok": False, "errors": [" ".join(str(message).split())[:256]]}
+
+
+def _artifact_snapshot_bound_to_job(snapshot: dict, job: dict) -> bool:
+    """A persisted snapshot may name only its job's immutable SCM checkout."""
+    try:
+        raw_root = Path(str(job.get("scm_path") or ""))
+        if not raw_root.is_absolute() or _is_reparse_or_symlink(os.lstat(raw_root)):
+            return False
+        job_root = raw_root.resolve(strict=True)
+        snapshot_root = Path(str(snapshot.get("root") or ""))
+        return snapshot_root == job_root
+    except (OSError, ValueError):
+        return False
+
+
+def _grants_for_job(job: dict) -> Optional[list]:
+    snapshots = job.get("artifact_snapshots")
+    if (job.get("status") != "ok" or
+            job.get("kind") not in ("create_pdf", "offset_pdf", "calibration") or
+            not isinstance(snapshots, list) or not snapshots):
+        return None
+
+    # Once newer rows have filled the bounded registry, avoid filesystem work
+    # for older history entries which cannot receive grants in this response.
+    with ARTIFACT_GRANTS_LOCK:
+        has_existing = any(grant.get("job_id") == job.get("id")
+                           for grant in ARTIFACT_GRANTS.values())
+        if not has_existing and len(ARTIFACT_GRANTS) >= ARTIFACT_GRANT_MAX:
+            return None
+
+    # Revalidate each immutable snapshot independently. A later calibration
+    # file must not invalidate an earlier job, while a rename, symlink swap, or
+    # mutation of that job's actual artifact must.
+    checked = []
+    for snapshot in snapshots[:16]:
+        if (not isinstance(snapshot, dict) or
+                not _artifact_snapshot_bound_to_job(snapshot, job)):
+            return None
+        try:
+            fd, current_stat = _open_artifact_source(snapshot)
+            os.close(fd)
+        except (ArtifactExportError, OSError):
+            return None
+        expected = {key: snapshot.get(key) for key in
+                    ("dev", "ino", "size", "mtime_ns", "ctime_ns")}
+        if _artifact_identity(current_stat) != expected:
+            return None
+        checked.append(snapshot)
+
+    now = time.time()
+    job_id = job.get("id")
+    with ARTIFACT_GRANTS_LOCK:
+        # Process-local memoization is keyed by immutable snapshot contents,
+        # not by the copied row returned from list_jobs().
+        existing = []
+        for grant_id, grant in list(ARTIFACT_GRANTS.items()):
+            if grant.get("expires", 0) <= now:
+                ARTIFACT_GRANTS.pop(grant_id, None)
+                continue
+            if grant.get("job_id") == job_id:
+                existing.append((grant_id, grant))
+        if len(existing) == len(checked) and all(
+                grant.get("snapshot") == snapshot
+                for (_, grant), snapshot in zip(existing, checked)):
+            return [grant_id for grant_id, _ in existing]
+        for grant_id, _ in existing:
+            ARTIFACT_GRANTS.pop(grant_id, None)
+        # Do not evict grants already returned for newer jobs in this same
+        # jobs.list response. Older jobs simply have no native grant until
+        # capacity becomes available.
+        if len(ARTIFACT_GRANTS) + len(checked) > ARTIFACT_GRANT_MAX:
+            return None
+        ids = []
+        for snapshot in checked:
+            grant_id = secrets.token_hex(32)
+            ARTIFACT_GRANTS[grant_id] = {
+                "job_id": job_id,
+                "terminal": True,
+                "snapshot": dict(snapshot),
+                "expires": now + ARTIFACT_GRANT_TTL,
+                "busy": False,
+            }
+            ids.append(grant_id)
+        return ids or None
+
+
+def _expire_artifacts() -> None:
+    now = time.time()
+    with ARTIFACT_GRANTS_LOCK:
+        for key in list(ARTIFACT_GRANTS):
+            if ARTIFACT_GRANTS[key].get("expires", 0) <= now:
+                ARTIFACT_GRANTS.pop(key, None)
+    with EXPORTS_LOCK:
+        for key, op in list(EXPORTS.items()):
+            if op.get("expires", 0) <= now and op.get("done"):
+                EXPORTS.pop(key, None)
+
+
+def _open_windows_regular_file(path: Path) -> Tuple[int, os.stat_result]:
+    """Open one Windows file handle without following a final reparse point."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(str(path), 0x80000000, 0x00000007, None, 3,
+                                  0x00200000, None)
+    raw_handle = getattr(handle, "value", handle)
+    if raw_handle == ctypes.c_void_p(-1).value:
+        raise ArtifactExportError("artifact source could not be opened")
+    info = _ByHandleFileInformation()
+    if (not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info))
+            or info.dwFileAttributes & 0x400):
+        kernel32.CloseHandle(handle)
+        raise ArtifactExportError("artifact source is a reparse point or unavailable")
+    try:
+        fd = msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except Exception as exc:
+        kernel32.CloseHandle(handle)
+        raise ArtifactExportError("artifact source could not be opened") from exc
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    if _is_reparse_or_symlink(st) or not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise ArtifactExportError("artifact source is not a stable regular file")
+    return fd, st
+
+
+def _validate_windows_artifact_components(root: Path, parts: tuple, snapshot: dict) -> None:
+    """Validate the pinned root and each Windows component before CreateFileW."""
+    try:
+        root_stat = os.stat(root, follow_symlinks=False)
+        if (_is_reparse_or_symlink(os.lstat(root)) or
+                not stat.S_ISDIR(root_stat.st_mode) or
+                (snapshot.get("root_identity") and
+                 _artifact_identity(root_stat) != snapshot.get("root_identity"))):
+            raise ArtifactExportError("artifact root changed")
+        probe = root
+        for part in parts:
+            probe /= part
+            if _is_reparse_or_symlink(os.lstat(probe)):
+                raise ArtifactExportError("artifact source contains a reparse point")
+    except OSError as exc:
+        raise ArtifactExportError("artifact source is unavailable") from exc
+
+
+def _open_artifact_source(snapshot: dict) -> Tuple[int, os.stat_result]:
+    root = Path(str(snapshot.get("root") or ""))
+    source = Path(str(snapshot.get("path") or ""))
+    if not root.is_absolute() or not source.is_absolute() or not _artifact_inside(root, source):
+        raise ArtifactExportError("artifact grant is invalid")
+    relative = source.relative_to(root)
+    parts = relative.parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ArtifactExportError("artifact source is invalid")
+
+    if os.name == "nt":
+        # Python has no dir_fd traversal on Windows. Check the pinned root and
+        # every lexical component for reparse points, then use one stable file
+        # handle; the immutable identity check rejects a concurrent swap.
+        _validate_windows_artifact_components(root, parts, snapshot)
+        return _open_windows_regular_file(source)
+
+    # Open every component below the pinned root without following links.
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    fd = root_fd
+    try:
+        root_stat = os.fstat(root_fd)
+        if (snapshot.get("root_identity") and
+                _artifact_identity(root_stat) != snapshot.get("root_identity")):
+            raise ArtifactExportError("artifact root changed")
+        for index, part in enumerate(parts):
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            if index < len(parts) - 1:
+                flags |= os.O_DIRECTORY
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ArtifactExportError("artifact source is not a regular file")
+        return fd, st
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_windows_artifact_parent(parent: Path) -> list:
+    """Pin every Windows destination component against rename/reparse races."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handles = []
+    try:
+        parts = parent.parts
+        if not parts:
+            raise ArtifactExportError("destination parent is invalid")
+        current = Path(parts[0])
+        for part in parts[1:]:
+            current /= part
+            handle = kernel32.CreateFileW(
+                str(current),
+                0x00000080,  # FILE_READ_ATTRIBUTES
+                0x00000001 | 0x00000002,  # share read/write, deliberately not delete
+                None,
+                3,  # OPEN_EXISTING
+                0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+                None,
+            )
+            raw_handle = getattr(handle, "value", handle)
+            if raw_handle == ctypes.c_void_p(-1).value:
+                raise ArtifactExportError("destination parent could not be pinned")
+            info = _ByHandleFileInformation()
+            if (not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)) or
+                    info.dwFileAttributes & 0x400 or
+                    not info.dwFileAttributes & 0x10):
+                kernel32.CloseHandle(handle)
+                raise ArtifactExportError("destination parent contains a reparse point")
+            handles.append(handle)
+        return handles
+    except Exception:
+        for handle in reversed(handles):
+            kernel32.CloseHandle(handle)
+        raise
+
+
+def _close_windows_handles(handles: list) -> None:
+    if not handles:
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    for handle in reversed(handles):
+        kernel32.CloseHandle(handle)
+
+
+def _open_artifact_parent(destination: Path) -> Tuple[int, str, list]:
+    _artifact_path_parts(destination)
+    if destination.name != _artifact_name(destination.name):
+        raise ArtifactExportError("destination name is invalid")
+    parent = destination.parent
+    if not parent.is_absolute():
+        raise ArtifactExportError("destination parent is invalid")
+    if os.name == "nt":
+        if not parent.is_dir() or parent.is_symlink():
+            raise ArtifactExportError("destination parent must already exist")
+        return -1, destination.name, _open_windows_artifact_parent(parent)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for part in parent.parts[1:]:
+            if not part or part == ".":
+                continue
+            if part == "..":
+                raise ArtifactExportError("destination parent is invalid")
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd, destination.name, []
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _copy_artifact(snapshot: dict, destination: str, cancelled=None) -> dict:
+    def check_cancelled():
+        if cancelled is not None and cancelled():
+            raise ArtifactExportError("export cancelled")
+
+    try:
+        check_cancelled()
+        _artifact_path_parts(Path(destination))
+        dest_path = Path(destination)
+        if dest_path.parent.is_symlink():
+            raise ArtifactExportError("destination parent must not be a symlink")
+        # POSIX aliases such as macOS /tmp are canonicalized before dirfd
+        # traversal. Windows keeps the original path so the retained Win32
+        # component handles can detect and pin every junction/reparse boundary.
+        if os.name != "nt":
+            dest_path = dest_path.parent.resolve(strict=True) / dest_path.name
+        src_fd, start = _open_artifact_source(snapshot)
+        try:
+            parent_fd, name, parent_handles = _open_artifact_parent(dest_path)
+        except Exception:
+            os.close(src_fd)
+            raise
+        temp_name = None
+        temp_fd = None
+        try:
+            expected = {k: snapshot.get(k) for k in ("dev", "ino", "size", "mtime_ns", "ctime_ns")}
+            if _artifact_identity(start) != expected or start.st_size > ARTIFACT_MAX_BYTES:
+                raise ArtifactExportError("artifact changed before export")
+            # Select a collision-free final name while holding the parent fd.
+            stem, ext = os.path.splitext(name)
+            final = name
+            for suffix in range(0, 1000):
+                candidate = name if suffix == 0 else f"{stem} ({suffix + 1}){ext}"
+                _artifact_name(candidate)
+                try:
+                    if parent_fd >= 0:
+                        os.stat(candidate, dir_fd=parent_fd, follow_symlinks=False)
+                    elif Path(destination if suffix == 0 else dest_path.with_name(candidate)).exists():
+                        pass
+                    else:
+                        raise FileNotFoundError
+                except FileNotFoundError:
+                    final = candidate
+                    break
+            else:
+                raise ArtifactExportError("too many destination name collisions")
+            for _ in range(16):
+                temp_name = f"{ARTIFACT_EXPORT_PREFIX}{secrets.token_hex(12)}.tmp"
+                try:
+                    if parent_fd >= 0:
+                        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent_fd)
+                    else:
+                        temp_fd = os.open(str(dest_path.parent / temp_name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    break
+                except FileExistsError:
+                    continue
+            if temp_fd is None:
+                raise ArtifactExportError("could not create temporary destination")
+            total = 0
+            while total < start.st_size:
+                check_cancelled()
+                block = os.read(src_fd, min(ARTIFACT_IO_CHUNK, start.st_size - total))
+                if not block:
+                    raise ArtifactExportError("artifact changed while exporting")
+                view = memoryview(block)
+                while view:
+                    count = os.write(temp_fd, view)
+                    if count <= 0: raise ArtifactExportError("could not write destination")
+                    view = view[count:]
+                total += len(block)
+            if os.read(src_fd, 1):
+                raise ArtifactExportError("artifact grew while exporting")
+            end = os.fstat(src_fd)
+            if _artifact_identity(end) != expected or total != expected["size"]:
+                raise ArtifactExportError("artifact changed while exporting")
+            os.fsync(temp_fd)
+            check_cancelled()
+            os.close(temp_fd)
+            temp_fd = None
+            # Hard-link publication is no-replace on POSIX.  On Windows the
+            # fallback is still exclusive because the destination was checked
+            # and this path is only used by the compatibility implementation.
+            if parent_fd >= 0:
+                published = False
+                for suffix in range(0, 1000):
+                    candidate = name if suffix == 0 else f"{stem} ({suffix + 1}){ext}"
+                    try:
+                        os.link(temp_name, candidate, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+                        final = candidate
+                        published = True
+                        break
+                    except FileExistsError:
+                        continue
+                if not published:
+                    raise ArtifactExportError("too many destination name collisions")
+                os.unlink(temp_name, dir_fd=parent_fd)
+                try: os.fsync(parent_fd)
+                except OSError: pass
+            else:
+                published = False
+                for suffix in range(0, 1000):
+                    candidate = name if suffix == 0 else f"{stem} ({suffix + 1}){ext}"
+                    try:
+                        os.link(dest_path.parent / temp_name, dest_path.parent / candidate)
+                        final = candidate
+                        published = True
+                        break
+                    except FileExistsError:
+                        continue
+                if not published:
+                    raise ArtifactExportError("too many destination name collisions")
+                (dest_path.parent / temp_name).unlink()
+            return {"ok": True, "dest": str(dest_path.parent / final), "name": final, "bytes": total}
+        finally:
+            if temp_fd is not None:
+                os.close(temp_fd)
+            if temp_name:
+                try:
+                    if parent_fd >= 0: os.unlink(temp_name, dir_fd=parent_fd)
+                    else: (dest_path.parent / temp_name).unlink()
+                except OSError: pass
+            if parent_fd >= 0:
+                os.close(parent_fd)
+            _close_windows_handles(parent_handles)
+            os.close(src_fd)
+    except ArtifactExportError as exc:
+        return _grant_error(exc.message)
+    except (OSError, ValueError) as exc:
+        return _grant_error(f"could not export artifact: {exc}")
+
+
+def _resolve_artifact_grant(grant_id: str) -> dict:
+    if not isinstance(grant_id, str) or not re.fullmatch(r"[0-9a-f]{64}", grant_id):
+        raise ArtifactExportError("invalid save grant")
+    with ARTIFACT_GRANTS_LOCK:
+        grant = ARTIFACT_GRANTS.get(grant_id)
+        if not grant or grant.get("expires", 0) <= time.time():
+            ARTIFACT_GRANTS.pop(grant_id, None)
+            raise ArtifactExportError("save grant expired")
+        job = _job_record(grant.get("job_id")) or _persisted_record(grant.get("job_id"))
+        if (job and
+                (job.get("status") != "ok" or
+                 not _artifact_snapshot_bound_to_job(grant.get("snapshot") or {}, job))):
+            ARTIFACT_GRANTS.pop(grant_id, None)
+            raise ArtifactExportError("save grant is no longer valid")
+        if not job and not grant.get("terminal"):
+            ARTIFACT_GRANTS.pop(grant_id, None)
+            raise ArtifactExportError("save grant is no longer valid")
+        snapshot = grant.get("snapshot") or {}
+        try:
+            fd, current_stat = _open_artifact_source(snapshot)
+            os.close(fd)
+        except (ArtifactExportError, OSError):
+            ARTIFACT_GRANTS.pop(grant_id, None)
+            raise ArtifactExportError("artifact changed before export")
+        if _artifact_identity(current_stat) != {k: snapshot.get(k) for k in ("dev", "ino", "size", "mtime_ns", "ctime_ns")}:
+            ARTIFACT_GRANTS.pop(grant_id, None)
+            raise ArtifactExportError("artifact changed before export")
+        return grant
+
+
+def export_selected(grant_id: str, destination: str) -> dict:
+    """Validate/admit a grant, then schedule the potentially long copy."""
+    _expire_artifacts()
+    grant = _resolve_artifact_grant(grant_id)
+    if not isinstance(destination, str):
+        raise ArtifactExportError("destination must be a string")
+    _artifact_path_parts(Path(destination))
+    with ARTIFACT_GRANTS_LOCK:
+        if grant.get("busy"):
+            raise ArtifactExportError("save grant is already being used")
+        grant["busy"] = True
+    with EXPORTS_LOCK:
+        if sum(1 for op in EXPORTS.values() if not op.get("done")) >= ARTIFACT_EXPORT_MAX_ACTIVE:
+            with ARTIFACT_GRANTS_LOCK: grant["busy"] = False
+            raise ArtifactExportError("too many artifact exports are active")
+        operation_id = secrets.token_hex(16)
+        operation = {"done": False, "result": None, "expires": time.time() + ARTIFACT_EXPORT_TTL,
+                     "grant_id": grant_id, "cancelled": False}
+        EXPORTS[operation_id] = operation
+        while len(EXPORTS) > ARTIFACT_EXPORT_MAX_RETAINED:
+            old_id = next((key for key, value in EXPORTS.items() if value.get("done")), None)
+            if old_id is None:
+                break
+            EXPORTS.pop(old_id, None)
+    def run():
+        def cancelled():
+            with EXPORTS_LOCK:
+                current = EXPORTS.get(operation_id)
+                return current is None or bool(current.get("cancelled"))
+
+        result = _copy_artifact(grant["snapshot"], destination, cancelled)
+        with EXPORTS_LOCK:
+            current = EXPORTS.get(operation_id)
+            if current:
+                current["done"], current["result"] = True, result
+                # One-use only after successful publication; failed copies may retry.
+                if result.get("ok"):
+                    with ARTIFACT_GRANTS_LOCK: ARTIFACT_GRANTS.pop(grant_id, None)
+                else:
+                    with ARTIFACT_GRANTS_LOCK:
+                        if grant_id in ARTIFACT_GRANTS: ARTIFACT_GRANTS[grant_id]["busy"] = False
+    try:
+        EXPORT_EXECUTOR.submit(run)
+    except RuntimeError as exc:
+        with EXPORTS_LOCK:
+            EXPORTS.pop(operation_id, None)
+        with ARTIFACT_GRANTS_LOCK:
+            if grant_id in ARTIFACT_GRANTS:
+                ARTIFACT_GRANTS[grant_id]["busy"] = False
+        raise ArtifactExportError("artifact export worker is unavailable") from exc
+    return {"operation_id": operation_id}
+
+
+def export_poll(operation_id: str) -> dict:
+    if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        raise ArtifactExportError("invalid export operation")
+    _expire_artifacts()
+    with EXPORTS_LOCK:
+        op = EXPORTS.get(operation_id)
+        if not op:
+            raise ArtifactExportError("export operation not found")
+        if not op.get("done"):
+            return {"done": False}
+        return {"done": True, "result": op.get("result") or _grant_error("export failed")}
+
+
+def export_cancel(operation_id: str) -> dict:
+    if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        raise ArtifactExportError("invalid export operation")
+    with EXPORTS_LOCK:
+        op = EXPORTS.get(operation_id)
+        if not op: raise ArtifactExportError("export operation not found")
+        if op.get("done"): return {"done": True, "result": op.get("result")}
+        op["cancelled"] = True
+        op["result"] = _grant_error("export cancelled")
+        return {"done": False}
 
 
 def _utf8_env() -> dict:
@@ -4421,6 +5145,19 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "scm_path": str(cwd) if cwd else None,
         "offset_lease": offset_lease,
     }
+    # Record terminal candidates before the child starts. This prevents a
+    # successful calibration run from granting an unrelated old PDF merely
+    # because it happens to share the expected family.
+    before = {}
+    for candidate in _artifact_expected_paths(job):
+        try:
+            st = os.stat(candidate, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and not _is_reparse_or_symlink(os.lstat(candidate)):
+                before[str(candidate.resolve())] = _artifact_identity(st)
+        except OSError:
+            pass
+    if before:
+        job["artifact_before"] = before
     if kind == "offset_pdf" and args.get("save"):
         # SCM's own -s writes the shared file with the values just used;
         # _pump mirrors them back into the selected row (or global baseline).
@@ -4578,6 +5315,17 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             job["exit_code"] = rc
             job["ended"] = time.time()
             job["duration"] = round(job["ended"] - job["started"], 2)
+            # Capture once, at terminal success, against the job's immutable
+            # checkout snapshot. This must happen before persistence and never
+            # consult current Settings.
+            if status == "ok":
+                snapshots = _snapshot_artifacts(job)
+                if snapshots:
+                    job["artifact_snapshots"] = snapshots
+                else:
+                    job.pop("artifact_snapshots", None)
+            else:
+                job.pop("artifact_snapshots", None)
     except Exception as exc:
         # A logging/decoding/persistence failure must never release the lease
         # while the child can still read or write the shared SCM projection.
@@ -4591,6 +5339,7 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             job["exit_code"] = rc
             job["ended"] = time.time()
             job["duration"] = round(job["ended"] - job["started"], 2)
+            job.pop("artifact_snapshots", None)
         status = "fail"
     finally:
         try:
@@ -5478,6 +6227,13 @@ class Handler(BaseHTTPRequestHandler):
                     result = set_offset(size.strip() if isinstance(size, str) else size, x, y, angle)
                 return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/files/save":
+                if _IPC_MODE:
+                    return self._json({"ok": False, "errors": [
+                        "native artifact export is required in packaged mode"]}, 403)
+                # Standalone browser compatibility is deliberately separate
+                # from grants: the browser has no picker and may only use this
+                # explicit legacy route. It still rejects symlink sources,
+                # refuses mkdir/overwrite, and bounds the copy.
                 body = self._body()
                 src = os.path.expanduser(str(body.get("src") or "").strip())
                 dest = os.path.expanduser(str(body.get("dest") or "").strip())
@@ -5494,20 +6250,22 @@ class Handler(BaseHTTPRequestHandler):
                     if not _inside(Path(src), allowed_roots(load_settings())):
                         return self._json({"ok": False, "errors": ["that file isn't in a workbench-managed location"]}, 403)
                 except Exception:
-                    pass
-                dest_dir = os.path.dirname(dest)
-                if dest_dir:
-                    os.makedirs(dest_dir, exist_ok=True)
-                final, n = dest, 2
-                base, ext = os.path.splitext(dest)
-                while os.path.exists(final):
-                    final = f"{base} ({n}){ext}"
-                    n += 1
+                    return self._json({"ok": False, "errors": ["could not validate the source location"]}, 403)
                 try:
-                    shutil.copy2(src, final)
-                    return self._json({"ok": True, "dest": final, "name": os.path.basename(final)})
+                    source_path = Path(src)
+                    st = os.stat(source_path, follow_symlinks=False)
+                    if _is_reparse_or_symlink(os.lstat(source_path)) or not stat.S_ISREG(st.st_mode):
+                        return self._json({"ok": False, "errors": ["that source is not a stable regular file"]}, 400)
+                    if st.st_size > ARTIFACT_MAX_BYTES:
+                        return self._json({"ok": False, "errors": ["the source is too large"]}, 400)
+                    parent = Path(dest).parent
+                    if not parent.is_dir() or parent.is_symlink():
+                        return self._json({"ok": False, "errors": ["destination folder must already exist"]}, 400)
+                    result = _copy_artifact({"path": str(source_path.resolve()), "root": str(source_path.parent.resolve()),
+                                             "name": source_path.name, **_artifact_identity(st)}, dest)
+                    return self._json(result, 200 if result.get("ok") else 400)
                 except Exception as e:
-                    return self._json({"ok": False, "errors": [f"Could not copy the file: {e}"]}, 500)
+                    return self._json({"ok": False, "errors": [f"Could not copy the file: {e}"]}, 400)
             if path == "/api/reveal":
                 body = self._body()
                 result, status = file_reveal_action(body.get("path"), load_settings())

@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, nativePick, toast } from "./core.js";import { revealPath } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -309,22 +309,21 @@ export function truncate(s, n) { return s && s.length > n ? "…" + s.slice(-n +
 export function moveJobToMyFiles(job) {
   const outs = (job.outputs || []).filter(Boolean);
   if (!outs.length) return;
-  if (!nativePick.canSave()) {
-    toast("warn", "“Move to my files…” needs the app window — it opens the system save dialog.");
+  const grants = Array.isArray(job.save_grants) ? job.save_grants : [];
+  const grant = grants[0];
+  if (!grant) {
+    toast("warn", "This artifact is no longer available for native export. Run the job again.");
     return;
   }
   const next = outs[0];
-  nativePick.pickSave(next.split(/[\\/]/).pop()).then(dest => {
-    if (!dest) return; // cancelled
-    api("/api/files/save", { src: next, dest })
-      .then(r => {
-        if (r.ok) {
-          toast("ok", `Saved “${r.name}” to your chosen location.`);
-          job.outputs = outs.slice(1);
-          setRevealButtons();
-        } else toast("warn", (r.errors && r.errors[0]) || "Could not save the file.");
-      })
-      .catch(() => toast("warn", "Could not save the file."));
+  saveArtifact(grant, next.split(/[\\/]/).pop()).then(r => {
+    if (r === null) return; // cancelled
+    if (r?.ok) {
+      toast("ok", `Saved “${r.name}” to your chosen location.`);
+      job.outputs = outs.slice(1);
+      job.save_grants = grants.slice(1);
+      setRevealButtons();
+    } else toast("warn", (r?.errors && r.errors[0]) || "Could not save the file.");
   }).catch(e => toast("warn", `The save dialog failed to open (${e.message || "unknown error"}).`));
 }
 

@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the wb_rpc command without any pre-configured scope."
         },
         {
+          "description": "Enables the wb_save_artifact command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-save-artifact",
+          "markdownDescription": "Enables the wb_save_artifact command without any pre-configured scope."
+        },
+        {
           "description": "Denies the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "deny-wb-restart",

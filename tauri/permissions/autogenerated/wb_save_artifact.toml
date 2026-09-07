@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wb-save-artifact"
+description = "Enables the wb_save_artifact command without any pre-configured scope."
+commands.allow = ["wb_save_artifact"]
+
+[[permission]]
+identifier = "deny-wb-save-artifact"
+description = "Denies the wb_save_artifact command without any pre-configured scope."
+commands.deny = ["wb_save_artifact"]

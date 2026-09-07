@@ -49,7 +49,7 @@ def main() -> int:
         return fail("native bootstrap does not invoke wb_rpc with an empty params object")
 
     api_start = core.find("export async function api(path, body)")
-    api_end = core.find("\n\n/* --------------------------- native window bridge", api_start)
+    api_end = core.find("\n\n/* --------------------------------- toasts", api_start)
     if api_start < 0 or api_end < 0:
         return fail("could not locate api() transport boundary")
     api = core[api_start:api_end]

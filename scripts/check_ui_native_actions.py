@@ -21,6 +21,7 @@ def main() -> int:
         'export function openFile(path)',
         'export function revealPath(path)',
         'export function openExternalUrl(url)',
+        'export function saveArtifact(grantId, suggestedName)',
         'invoke("wb_rpc", { method, params })',
         '"file.open"',
         '"file.reveal"',
@@ -46,19 +47,21 @@ def main() -> int:
         if "&open=1" in source or "?url=" in source:
             return fail(f"{path.relative_to(ROOT)} contains an action URL bypass")
 
-    # Keep the intentionally deferred HTTP routes in their existing owners.
+    # Metadata and destructive filesystem compatibility routes remain, but
+    # artifact export must have one native owner and no UI HTTP fallback.
     artifacts = (UI / "artifacts.js").read_text(encoding="utf-8")
-    console = (UI / "console.js").read_text(encoding="utf-8")
     pdf = (UI / "pages" / "pdf.js").read_text(encoding="utf-8")
+    console = (UI / "console.js").read_text(encoding="utf-8")
     if "/api/file?${query}" not in artifacts or 'method: "file.list"' not in artifacts:
         return fail("raw file-list metadata HTTP route was removed")
-    if "/api/files/save" not in console:
-        return fail("file save HTTP route was removed")
+    if any("/api/files/save" in p.read_text(encoding="utf-8") for p in UI.rglob("*.js")):
+        return fail("UI retains a direct artifact save HTTP route")
     if "/api/fs" not in pdf or "delete_images" not in pdf:
         return fail("filesystem delete HTTP route was removed")
     for path, marker in (
         (UI / "core.js", 'openExternalUrl(url)'),
-        (UI / "console.js", 'import { revealPath } from "./native-actions.js";'),
+        (UI / "native-actions.js", 'saveArtifact(grantId, suggestedName)'),
+        (UI / "console.js", 'from "./native-actions.js";'),
         (UI / "pages" / "pdf.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "templates.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "offset.js", 'import { openFile } from "../native-actions.js";'),
@@ -68,6 +71,9 @@ def main() -> int:
             return fail(f"{path.relative_to(ROOT)} did not migrate its action call site")
     if "split(/[\\\\/]/)" not in console:
         return fail("console basename does not handle both slash separators")
+    all_ui = "\n".join(p.read_text(encoding="utf-8") for p in UI.rglob("*.js"))
+    if "nativePick" in all_ui or "plugin:dialog|save" in all_ui or "pick_save" in all_ui:
+        return fail("legacy direct picker/save bridge remains")
 
     node = subprocess.run(
         ["node", "--input-type=module", "-", str(FACADE)],

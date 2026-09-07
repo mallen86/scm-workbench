@@ -151,6 +151,79 @@ impl WorkerRpc {
         )
     }
 
+    /// Private artifact-export edges. These are intentionally typed helpers:
+    /// the WebView can call only the public `wb_rpc` command, whose allowlist
+    /// rejects all three method names.
+    pub(crate) fn export_selected_artifact(
+        &self,
+        grant_id: &str,
+        destination: &str,
+    ) -> Result<Value, String> {
+        let value = self.call_unchecked(
+            "files.export_selected",
+            json!({"grant_id": grant_id, "destination": destination}),
+        )?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "malformed export response".to_string())?;
+        let valid_operation = object.len() == 1
+            && object
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    id.len() == 32
+                        && id
+                            .chars()
+                            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+                });
+        let valid_rejection = object.len() == 2
+            && object.get("ok").and_then(Value::as_bool) == Some(false)
+            && object
+                .get("errors")
+                .and_then(Value::as_array)
+                .is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.len() <= 8
+                        && errors.iter().all(|error| {
+                            error
+                                .as_str()
+                                .is_some_and(|message| !message.is_empty() && message.len() <= 256)
+                        })
+                });
+        if !valid_operation && !valid_rejection {
+            return Err("malformed export response".to_string());
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn poll_artifact_export(&self, operation_id: &str) -> Result<Value, String> {
+        let value =
+            self.call_unchecked("files.export_poll", json!({"operation_id": operation_id}))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "malformed export response".to_string())?;
+        let done = object
+            .get("done")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "malformed export response".to_string())?;
+        if done {
+            let result = object
+                .get("result")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "malformed export response".to_string())?;
+            if result.get("ok").and_then(Value::as_bool).is_none() {
+                return Err("malformed export response".to_string());
+            }
+        } else if object.len() != 1 {
+            return Err("malformed export response".to_string());
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn cancel_artifact_export(&self, operation_id: &str) -> Result<Value, String> {
+        self.call_unchecked("files.export_cancel", json!({"operation_id": operation_id}))
+    }
+
     fn call_unchecked(&self, method: &str, params: Value) -> Result<Value, String> {
         if !params.is_object() {
             return Err("invalid params".to_string());
@@ -554,6 +627,9 @@ mod tests {
             "repos.poll/",
             "repos.poll ",
             "decklists.import_selected",
+            "files.export_selected",
+            "files.export_poll",
+            "files.export_cancel",
             "server.shutdown",
             "__import__",
         ] {

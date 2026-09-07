@@ -50,3 +50,10 @@ export function openExternalUrl(url) {
     `/api/file?url=${encodeURIComponent(url)}`,
   );
 }
+
+/** Save an artifact through the native parented dialog and worker grant. */
+export function saveArtifact(grantId, suggestedName) {
+  const invoke = getTauriInvoke();
+  if (!invoke) return Promise.reject(new Error("artifact export requires the app window"));
+  return invoke("wb_save_artifact", { grantId, suggestedName });
+}
