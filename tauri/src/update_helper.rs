@@ -4,13 +4,16 @@
 //! pipes and emits no output: the data directory is its only interface.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +22,10 @@ const ACK: &str = ".update-ack";
 const HEALTH: &str = ".update-health.json";
 const RESULT: &str = ".update-result.json";
 const JOURNAL_LIMIT: u64 = 64 * 1024;
+const REQUEST: &str = ".update-launch-request.json";
+const HELPER_DIR: &str = "update-helper";
+const HELPER_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const REQUEST_LIMIT: u64 = 4 * 1024;
 const TOKEN_LEN: usize = 64;
 const SCHEMA_VERSION: u32 = 1;
 const HANDOFF_WAIT: Duration = Duration::from_secs(30);
@@ -43,6 +50,7 @@ pub struct Invocation {
     pub data_dir: PathBuf,
     pub token: String,
     pub mode: Mode,
+    pub recovery_wait_pid: Option<u32>,
 }
 
 /// Parse only the one exact command line accepted by the helper.  In
@@ -52,7 +60,7 @@ pub fn parse_cli(args: &[String]) -> Option<Result<Invocation, ()>> {
     if args.get(1).map(String::as_str) != Some("--update-helper") {
         return None;
     }
-    if args.len() != 8 || args[2] != "--data-dir" || args[4] != "--token" || args[6] != "--mode" {
+    if args.len() < 8 || args[2] != "--data-dir" || args[4] != "--token" || args[6] != "--mode" {
         return Some(Err(()));
     }
     let data = PathBuf::from(&args[3]);
@@ -64,14 +72,24 @@ pub fn parse_cli(args: &[String]) -> Option<Result<Invocation, ()>> {
         return Some(Err(()));
     }
     let mode = match args[7].as_str() {
-        "handoff" => Mode::Handoff,
-        "recover" => Mode::Recover,
+        "handoff" if args.len() == 8 => Mode::Handoff,
+        "recover" if args.len() == 10 && args[8] == "--wait-pid" => Mode::Recover,
         _ => return Some(Err(())),
+    };
+    let recovery_wait_pid = if mode == Mode::Recover {
+        let pid = args[9].parse::<u32>().ok().filter(|pid| *pid != 0);
+        if pid.is_none() {
+            return Some(Err(()));
+        }
+        pid
+    } else {
+        None
     };
     Some(Ok(Invocation {
         data_dir: data,
         token,
         mode,
+        recovery_wait_pid,
     }))
 }
 
@@ -93,7 +111,9 @@ pub fn run(invocation: Invocation) -> io::Result<()> {
     let layout = validate_layout(&journal)?;
     match invocation.mode {
         Mode::Handoff => handoff(&data, &mut journal, &layout)?,
-        Mode::Recover => recover(&data, &mut journal, &layout)?,
+        Mode::Recover => {
+            recover_with_wait(&data, &mut journal, &layout, invocation.recovery_wait_pid)?
+        }
     }
     Ok(())
 }
@@ -179,17 +199,70 @@ fn bounded_text(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 
-fn valid_token(token: &str) -> bool {
+pub(crate) fn valid_token(token: &str) -> bool {
     token.len() == TOKEN_LEN
         && token
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaunchRequest {
+    pub version: u32,
+    pub token: String,
+}
+
+/// Read the shell-side launch request.  A malformed, symlinked, oversized, or
+/// otherwise non-regular request is simply not actionable by the watcher.
+pub(crate) fn read_launch_request(data: &Path) -> io::Result<Option<LaunchRequest>> {
+    let path = data.join(REQUEST);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !meta.file_type().is_file() || meta.len() > REQUEST_LIMIT {
+        return Err(invalid("launch request is not a regular bounded file"));
+    }
+    let bytes = fs::read(&path)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("malformed launch request"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid("launch request is not an object"))?;
+    if object.len() != 2 || !object.contains_key("version") || !object.contains_key("token") {
+        return Err(invalid("launch request has an unexpected shape"));
+    }
+    let request: LaunchRequest =
+        serde_json::from_value(value).map_err(|_| invalid("invalid launch request schema"))?;
+    if request.version != SCHEMA_VERSION || !valid_token(&request.token) {
+        return Err(invalid("invalid launch request fields"));
+    }
+    Ok(Some(request))
+}
+
+pub(crate) fn pending_journal(data: &Path) -> io::Result<Option<Journal>> {
+    let data = validate_data_dir(data)?;
+    let path = data.join(JOURNAL);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let journal = read_journal(&path)?;
+    let _ = validate_layout(&journal)?;
+    Ok(Some(journal))
+}
+
 fn is_lexically_canonical(path: &Path) -> bool {
     !path
         .components()
         .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+}
+
+pub(crate) fn canonical_data_dir(input: &Path) -> io::Result<PathBuf> {
+    validate_data_dir(input)
 }
 
 fn validate_data_dir(input: &Path) -> io::Result<PathBuf> {
@@ -397,6 +470,275 @@ fn sync_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Materialize the running shell outside the bundle.  The helper is copied
+/// before it is launched so an updater can replace the bundle without
+/// unlinking the image executing the helper.
+pub(crate) fn materialize_helper(
+    current_exe: &Path,
+    data: &Path,
+    token: &str,
+) -> io::Result<PathBuf> {
+    if !valid_token(token) {
+        return Err(invalid("invalid helper token"));
+    }
+    let data = validate_data_dir(data)?;
+    let source_meta = fs::symlink_metadata(current_exe)?;
+    if !source_meta.file_type().is_file() || source_meta.len() > HELPER_MAX_BYTES {
+        return Err(invalid("current executable is not a bounded regular file"));
+    }
+    let dir = data.join(HELPER_DIR);
+    fs::create_dir_all(&dir)?;
+    let dir_meta = fs::symlink_metadata(&dir)?;
+    if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() || fs::canonicalize(&dir)? != dir {
+        return Err(invalid("helper directory is not a canonical directory"));
+    }
+    let destination = dir.join(token);
+    if let Ok(existing) = fs::symlink_metadata(&destination) {
+        if !existing.file_type().is_file()
+            || existing.file_type().is_symlink()
+            || existing.len() > HELPER_MAX_BYTES
+        {
+            return Err(invalid("existing helper is not a bounded regular file"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let source_mode = source_meta.permissions().mode() & 0o777;
+            let existing_mode = existing.permissions().mode() & 0o777;
+            if source_mode & 0o022 != 0
+                || existing_mode != source_mode
+                || existing_mode & 0o022 != 0
+            {
+                return Err(invalid("existing helper has unsafe permissions"));
+            }
+        }
+        let mut source = File::open(current_exe)?;
+        let mut copy = File::open(&destination)?;
+        let mut source_hash = Sha256::new();
+        let mut copy_hash = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            source_hash.update(&buffer[..count]);
+        }
+        loop {
+            let count = copy.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            copy_hash.update(&buffer[..count]);
+        }
+        if source_hash.finalize() == copy_hash.finalize() {
+            return Ok(destination);
+        }
+        return Err(invalid("existing helper does not match current executable"));
+    }
+    let temporary = dir.join(format!(".{token}.tmp-{}", std::process::id()));
+    let result = (|| {
+        let mut source = File::open(current_exe)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let mut hash = Sha256::new();
+        let mut copied = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            output.write_all(&buffer[..count])?;
+            hash.update(&buffer[..count]);
+            copied = copied.saturating_add(count as u64);
+        }
+        if copied != source_meta.len() {
+            return Err(invalid("helper copy byte count changed"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                &temporary,
+                fs::Permissions::from_mode(source_meta.permissions().mode()),
+            )?;
+        }
+        output.sync_all()?;
+        drop(output);
+        let mut verify_file = File::open(&temporary)?;
+        let mut verify_hash = Sha256::new();
+        let mut verified = 0u64;
+        loop {
+            let count = verify_file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            verify_hash.update(&buffer[..count]);
+            verified = verified.saturating_add(count as u64);
+        }
+        if verified != copied || verify_hash.finalize() != hash.finalize() {
+            return Err(invalid("helper copy verification failed"));
+        }
+        rename_noreplace(&temporary, &destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map(|_| destination)
+}
+
+pub(crate) fn spawn_helper(
+    helper: &Path,
+    data: &Path,
+    token: &str,
+    mode: Mode,
+    recovery_wait_pid: Option<u32>,
+) -> io::Result<Child> {
+    if !valid_token(token) || (mode == Mode::Handoff && recovery_wait_pid.is_some()) {
+        return Err(invalid("invalid helper launch arguments"));
+    }
+    if mode == Mode::Recover && recovery_wait_pid.unwrap_or(0) == 0 {
+        return Err(invalid("recovery helper requires a wait PID"));
+    }
+    let helper_meta = fs::symlink_metadata(helper)?;
+    if !helper_meta.file_type().is_file() || helper_meta.len() > HELPER_MAX_BYTES {
+        return Err(invalid("helper executable is not a bounded regular file"));
+    }
+    let data = validate_data_dir(data)?;
+    let mut command = Command::new(helper);
+    command
+        .arg("--update-helper")
+        .arg("--data-dir")
+        .arg(data.as_os_str())
+        .arg("--token")
+        .arg(token)
+        .arg("--mode")
+        .arg(match mode {
+            Mode::Handoff => "handoff",
+            Mode::Recover => "recover",
+        });
+    if let Some(pid) = recovery_wait_pid {
+        command.arg("--wait-pid").arg(pid.to_string());
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    command.spawn()
+}
+
+pub(crate) fn remove_launch_request(data: &Path) -> io::Result<()> {
+    let path = data.join(REQUEST);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(invalid("launch request is not a regular file"));
+    }
+    fs::remove_file(path)
+}
+
+pub(crate) fn remove_ack(data: &Path) -> io::Result<()> {
+    let path = data.join(ACK);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(invalid("update ACK is not a regular file"));
+    }
+    fs::remove_file(path)
+}
+
+#[allow(dead_code)]
+pub(crate) fn wait_for_ack(data: &Path, token: &str, timeout: Duration) -> bool {
+    wait_for_ack_since(data, token, timeout, SystemTime::now())
+}
+
+pub(crate) fn wait_for_ack_since(
+    data: &Path,
+    token: &str,
+    timeout: Duration,
+    attempt_started: SystemTime,
+) -> bool {
+    if !valid_token(token) {
+        return false;
+    }
+    let end = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < end {
+        let path = data.join(ACK);
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            let fresh = meta
+                .modified()
+                .ok()
+                .map(|mtime| mtime >= attempt_started)
+                .unwrap_or(false);
+            if meta.file_type().is_file() && meta.len() == TOKEN_LEN as u64 && fresh {
+                if fs::read(&path).ok().as_deref() == Some(token.as_bytes()) {
+                    return true;
+                }
+            }
+        }
+        thread::sleep(POLL);
+    }
+    false
+}
+
+/// Only stale, token-shaped regular files are eligible.  In particular a
+/// symlink is never followed or removed.  The age fence avoids unlinking a
+/// helper which a rollback relaunch is still executing.
+pub(crate) fn cleanup_old_helpers(data: &Path, older_than: Duration) -> io::Result<()> {
+    let dir = data.join(HELPER_DIR);
+    let meta = match fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() || fs::canonicalize(&dir)? != dir {
+        return Err(invalid("helper directory is unsafe"));
+    }
+    let now = SystemTime::now();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !valid_token(name) {
+            continue;
+        }
+        let meta = fs::symlink_metadata(&path)?;
+        if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|time| now.duration_since(time).ok())
+            .map(|age| age >= older_than)
+            .unwrap_or(false);
+        if old {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
 fn ack(data: &Path, token: &str) -> io::Result<()> {
     atomic_write(&data.join(ACK), token.as_bytes())
 }
@@ -428,6 +770,30 @@ fn handoff(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()
 }
 
 fn recover(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()> {
+    recover_with_wait(data, journal, layout, None)
+}
+
+fn recover_with_wait(
+    data: &Path,
+    journal: &mut Journal,
+    layout: &Layout,
+    recovery_wait_pid: Option<u32>,
+) -> io::Result<()> {
+    // A recovery helper is launched by the shell which still has the old
+    // target open. Capture that shell's identity before waiting; a PID alone
+    // is never sufficient to authorize a rename.
+    if let Some(pid) = recovery_wait_pid {
+        let expected = fs::canonicalize(executable_for_target(&layout.target))
+            .unwrap_or_else(|_| executable_for_target(&layout.target));
+        let identity = process_identity(pid)
+            .ok_or_else(|| invalid("recovery shell identity could not be captured"))?;
+        if Path::new(&identity.image) != expected {
+            return Err(invalid(
+                "recovery shell does not match the target executable",
+            ));
+        }
+        wait_for_identities(&[(pid, &identity)], HANDOFF_WAIT)?;
+    }
     // Recovery observes the recorded old identities before touching either
     // copy. This preserves the handoff fence even if the helper itself died.
     if let (Some(shell), Some(worker)) = (&journal.old_shell_identity, &journal.old_worker_identity)
@@ -464,9 +830,10 @@ fn recover(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()
         }
         journal.phase = Phase::Failed;
         journal_write(data, journal)?;
-        return write_failure(
+        return finish_failure(
             data,
             journal,
+            layout,
             "interrupted publish restored the previous application",
         );
     }
@@ -534,6 +901,96 @@ fn publish_candidate(data: &Path, journal: &mut Journal, layout: &Layout) -> io:
 fn continue_transaction(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()> {
     publish_candidate(data, journal, layout)?;
     launch_and_wait(data, journal, layout)
+}
+
+pub(crate) fn target_for_current_exe(exe: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        exe.parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| exe.to_path_buf())
+    }
+    #[cfg(windows)]
+    {
+        exe.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| exe.to_path_buf())
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    {
+        exe.to_path_buf()
+    }
+}
+
+pub(crate) fn journal_matches_current_target(journal: &Journal, exe: &Path) -> bool {
+    let current = fs::canonicalize(target_for_current_exe(exe))
+        .unwrap_or_else(|_| target_for_current_exe(exe));
+    Path::new(&journal.target) == current
+}
+
+/// Called only after the worker RPC is installed.  A normal startup can never
+/// manufacture this marker: all values are bound to the pending transaction,
+/// the current process, and the native package version.
+pub(crate) fn publish_health(
+    data: &Path,
+    current_exe: &Path,
+    token: &str,
+    nonce: &str,
+) -> io::Result<bool> {
+    publish_health_for_target(
+        data,
+        current_exe,
+        token,
+        nonce,
+        &target_for_current_exe(current_exe),
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn publish_health_for_target(
+    data: &Path,
+    current_exe: &Path,
+    token: &str,
+    nonce: &str,
+    target: &Path,
+) -> io::Result<bool> {
+    if !valid_token(token) || !valid_token(nonce) {
+        return Ok(false);
+    }
+    let current_image = fs::canonicalize(current_exe).unwrap_or_else(|_| current_exe.to_path_buf());
+    let Some(identity) = process_identity(std::process::id()) else {
+        return Ok(false);
+    };
+    if Path::new(&identity.image) != current_image {
+        return Ok(false);
+    }
+    let Some(journal) = pending_journal(data)? else {
+        return Ok(false);
+    };
+    let canonical_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    if journal.token != token
+        || Path::new(&journal.target) != canonical_target
+        || !matches!(journal.phase, Phase::Launching | Phase::Launched)
+    {
+        return Ok(false);
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let health = Health {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        token: token.to_owned(),
+        nonce: nonce.to_owned(),
+        canonical_target: canonical_target.to_string_lossy().into_owned(),
+        new_shell_pid: std::process::id(),
+        timestamp,
+    };
+    let bytes = serde_json::to_vec(&health).map_err(|_| invalid("cannot encode health marker"))?;
+    atomic_write(&data.join(HEALTH), &bytes)?;
+    Ok(true)
 }
 
 fn executable_for_target(target: &Path) -> PathBuf {
@@ -784,7 +1241,9 @@ fn launch_and_wait(data: &Path, journal: &mut Journal, layout: &Layout) -> io::R
     journal_write(data, journal)?;
     let nonce = launch_nonce()?;
     let mut command = Command::new(&executable);
-    command.env("SCM_WORKBENCH_UPDATE_NONCE", &nonce);
+    command
+        .env("SCM_WORKBENCH_UPDATE_TOKEN", &journal.token)
+        .env("SCM_WORKBENCH_UPDATE_NONCE", &nonce);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -957,9 +1416,7 @@ fn rollback_prepared(data: &Path, journal: &mut Journal, layout: &Layout) -> io:
     if layout.target.exists() && layout.candidate.exists() {
         remove_authorized_tree(&layout.candidate, &layout.parent, &journal.candidate_name)?;
     }
-    journal.phase = Phase::Failed;
-    journal_write(data, journal)?;
-    write_failure(data, journal, "prepared update was not handed off")
+    finish_failure(data, journal, layout, "prepared update was not handed off")
 }
 
 fn rollback_after_failure(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()> {
@@ -993,14 +1450,18 @@ fn rollback_after_failure(data: &Path, journal: &mut Journal, layout: &Layout) -
         )?;
     }
     if !layout.target.exists() && layout.backup.exists() {
+        validate_tree(&layout.backup)?;
         rename_noreplace(&layout.backup, &layout.target)?;
     }
     if layout.target.exists() && layout.candidate.exists() {
         remove_authorized_tree(&layout.candidate, &layout.parent, &journal.candidate_name)?;
     }
-    journal.phase = Phase::Failed;
-    journal_write(data, journal)?;
-    write_failure(data, journal, "new application did not become healthy")
+    finish_failure(
+        data,
+        journal,
+        layout,
+        "new application did not become healthy",
+    )
 }
 
 fn cleanup_failed(data: &Path, journal: &Journal, layout: &Layout) -> io::Result<()> {
@@ -1017,6 +1478,7 @@ fn cleanup_failed(data: &Path, journal: &Journal, layout: &Layout) -> io::Result
         }
     }
     if !layout.target.exists() && layout.backup.exists() {
+        validate_tree(&layout.backup)?;
         rename_noreplace(&layout.backup, &layout.target)?;
     }
     if layout.target.exists() && layout.candidate.exists() {
@@ -1041,6 +1503,122 @@ fn write_failure(data: &Path, journal: &Journal, message: &str) -> io::Result<()
         return Err(invalid("update result exceeds 64 KiB"));
     }
     atomic_write(&data.join(RESULT), &bytes)
+}
+
+fn target_is_launchable(target: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(target) else {
+        return false;
+    };
+    if !meta.file_type().is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelaunchInvocation {
+    pub executable: PathBuf,
+    pub data: PathBuf,
+    pub removed_env: Vec<&'static str>,
+}
+
+#[cfg(test)]
+static RELAUNCH_INVOCATIONS: OnceLock<Mutex<Vec<RelaunchInvocation>>> = OnceLock::new();
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn take_relaunch_invocations() -> Vec<RelaunchInvocation> {
+    RELAUNCH_INVOCATIONS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .drain(..)
+        .collect()
+}
+
+#[cfg(test)]
+fn spawn_old_target(executable: &Path, data: &Path) -> io::Result<()> {
+    RELAUNCH_INVOCATIONS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(RelaunchInvocation {
+            executable: executable.to_path_buf(),
+            data: data.to_path_buf(),
+            removed_env: vec!["SCM_WORKBENCH_UPDATE_TOKEN", "SCM_WORKBENCH_UPDATE_NONCE"],
+        });
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn spawn_old_target(executable: &Path, data: &Path) -> io::Result<()> {
+    let mut command = Command::new(executable);
+    command
+        .env_remove("SCM_WORKBENCH_UPDATE_TOKEN")
+        .env_remove("SCM_WORKBENCH_UPDATE_NONCE")
+        .env("SCM_WORKBENCH_DATA", data)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    command.spawn().map(|_| ())
+}
+
+/// Record the failure before relaunching.  The journal is removed before the
+/// child is spawned: if the old shell starts quickly it must not select this
+/// recovery transaction again.  A fixture or damaged install with no
+/// launchable executable still gets the durable failure result, but is never
+/// reported as success.
+fn finish_failure(
+    data: &Path,
+    journal: &mut Journal,
+    layout: &Layout,
+    message: &str,
+) -> io::Result<()> {
+    journal.phase = Phase::Failed;
+    journal_write(data, journal)?;
+    write_failure(data, journal, message)?;
+    let executable = executable_for_target(&layout.target);
+    let launchable = target_is_launchable(&executable);
+    // Remove the durable marker before starting the old shell, so the
+    // relaunch cannot immediately select the same recovery transaction. This
+    // ordering is required even for a test seam or a damaged install where
+    // the old executable is not launchable.
+    let journal_path = data.join(JOURNAL);
+    match fs::symlink_metadata(&journal_path) {
+        Ok(meta) if meta.file_type().is_file() => {
+            fs::remove_file(journal_path)?;
+            sync_dir(data)?;
+        }
+        Ok(_) => return Err(invalid("update journal is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Unit tests use the seam even for the hermetic directory-shaped Linux
+    // fixture; production only relaunches an actual executable.
+    if launchable || cfg!(test) {
+        // The transaction is already durably failed.  A spawn failure must
+        // not turn that record into a false success or revive the journal.
+        let _ = spawn_old_target(&executable, data);
+    }
+    Ok(())
 }
 
 fn remove_authorized_tree(path: &Path, parent: &Path, expected_name: &str) -> io::Result<()> {
@@ -1326,6 +1904,15 @@ mod tests {
         let mut bad = good.clone();
         bad.push("extra".into());
         assert!(parse_cli(&bad).unwrap().is_err());
+        let mut recover = good;
+        recover[7] = "recover".into();
+        recover.extend(["--wait-pid".into(), "42".into()]);
+        assert_eq!(
+            parse_cli(&recover).unwrap().unwrap().recovery_wait_pid,
+            Some(42)
+        );
+        recover[9] = "0".into();
+        assert!(parse_cli(&recover).unwrap().is_err());
     }
 
     #[test]
@@ -1334,6 +1921,70 @@ mod tests {
         assert!(!valid_token(&"A".repeat(64)));
         assert!(!valid_token(&"a".repeat(63)));
         assert!(!valid_token(&format!("{}z", "a".repeat(63))));
+    }
+
+    #[test]
+    fn launch_request_requires_exact_bounded_schema() {
+        let dir = std::env::temp_dir().join(format!(
+            "scm-request-{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let good = format!(r#"{{"version":1,"token":"{}"}}"#, token());
+        fs::write(dir.join(REQUEST), good).unwrap();
+        assert_eq!(read_launch_request(&dir).unwrap().unwrap().token, token());
+        fs::write(
+            dir.join(REQUEST),
+            format!(r#"{{"version":1,"token":"{}","extra":true}}"#, token()),
+        )
+        .unwrap();
+        assert!(read_launch_request(&dir).is_err());
+        fs::write(dir.join(REQUEST), b"not-json").unwrap();
+        assert!(read_launch_request(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_request_symlink_is_not_actionable() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!(
+            "scm-request-link-{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let target = dir.join("request");
+        let link = dir.join(REQUEST);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        fs::write(&target, format!(r#"{{"version":1,"token":"{}"}}"#, token())).unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(read_launch_request(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_copy_is_atomic_verified_and_preserves_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "scm-helper-copy-{}",
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let source = dir.join("source");
+        fs::write(&source, b"helper bytes").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o751)).unwrap();
+        let copied = materialize_helper(&source, &dir, &token()).unwrap();
+        assert_eq!(fs::read(&copied).unwrap(), b"helper bytes");
+        assert_eq!(
+            fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        assert_eq!(materialize_helper(&source, &dir, &token()).unwrap(), copied);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1533,6 +2184,72 @@ mod tests {
                 42,
                 now
             ));
+        }
+    }
+
+    #[test]
+    fn publish_health_requires_exact_pending_identity_and_writes_schema() {
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "old");
+        let mut journal = fixture.journal(Phase::Launched);
+        fixture.write_journal(&journal);
+        let current = std::env::current_exe().unwrap();
+        let token = token();
+        let nonce = "b".repeat(64);
+        assert!(publish_health_for_target(
+            &fixture.data,
+            &current,
+            &token,
+            &nonce,
+            &fixture.target
+        )
+        .unwrap());
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.data.join(HEALTH)).unwrap()).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 6);
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["token"], token);
+        assert_eq!(value["nonce"], nonce);
+        assert_eq!(
+            value["canonical_target"],
+            fixture.target.to_string_lossy().as_ref()
+        );
+        assert_eq!(value["new_shell_pid"], std::process::id());
+
+        for (bad_token, bad_nonce, bad_phase, call_target) in [
+            (
+                "c".repeat(64),
+                nonce.clone(),
+                Phase::Launched,
+                fixture.target.clone(),
+            ),
+            (
+                token.clone(),
+                "d".repeat(64),
+                Phase::CandidatePublished,
+                fixture.target.clone(),
+            ),
+            (
+                token.clone(),
+                nonce.clone(),
+                Phase::Launched,
+                fixture.backup.clone(),
+            ),
+        ] {
+            let _ = fs::remove_file(fixture.data.join(HEALTH));
+            journal.phase = bad_phase;
+            journal.token = token.clone();
+            journal.target = fixture.target.to_string_lossy().into_owned();
+            fixture.write_journal(&journal);
+            assert!(!publish_health_for_target(
+                &fixture.data,
+                &current,
+                &bad_token,
+                &bad_nonce,
+                &call_target
+            )
+            .unwrap());
+            assert!(!fixture.data.join(HEALTH).exists());
         }
     }
 
@@ -1796,10 +2513,8 @@ mod tests {
         recover(&fixture.data, &mut journal, &layout).unwrap();
 
         assert!(!fixture.candidate.exists());
-        assert_eq!(
-            read_journal(&fixture.data.join(JOURNAL)).unwrap().phase,
-            Phase::Failed
-        );
+        assert!(!fixture.data.join(JOURNAL).exists());
+        assert_failure_result(&fixture);
     }
 
     #[test]
@@ -1831,6 +2546,16 @@ mod tests {
         assert_restored_backup(&fixture);
         assert_eq!(journal.phase, Phase::Failed);
         assert_failure_result(&fixture);
+        let ours: Vec<_> = take_relaunch_invocations()
+            .into_iter()
+            .filter(|invocation| invocation.data == fixture.data)
+            .collect();
+        assert_eq!(ours.len(), 1);
+        assert!(!fixture.data.join(JOURNAL).exists());
+        assert_eq!(
+            ours[0].removed_env,
+            vec!["SCM_WORKBENCH_UPDATE_TOKEN", "SCM_WORKBENCH_UPDATE_NONCE"]
+        );
     }
 
     #[test]

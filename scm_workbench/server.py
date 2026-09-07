@@ -26,6 +26,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import queue
@@ -995,6 +996,11 @@ _UPDATE_STATE_MAX_BYTES = 128 * 1024
 # lease. Both this token and JOBS are guarded by JOBS_LOCK.
 _UPDATE_ADMISSION = False
 _UPDATE_ADMISSION_JOB = None
+# Set only after the candidate has been validated and the update transaction
+# is being handed to the external helper.  Ordinary jobs are admitted under
+# JOBS_LOCK, so this fence closes the last start-vs-handoff race.
+_UPDATE_QUIESCING = False
+_UPDATE_QUIESCING_JOB = None
 
 
 def _default_update_state() -> dict:
@@ -1066,27 +1072,45 @@ def _invalid_update_state() -> dict:
     return st
 
 
-def _own_bundle() -> str:
-    """The .app bundle this server runs out of (None for a dev checkout).
+def _bundle_shape(path: Path) -> bool:
+    """Accept only a complete release bundle, never a source checkout."""
+    try:
+        if path.is_symlink():
+            return False
+        path = path.resolve(strict=True)
+        def directory(value: Path) -> bool:
+            return value.is_dir() and not value.is_symlink()
+        def regular(value: Path) -> bool:
+            return value.is_file() and not value.is_symlink()
+        if sys.platform == "darwin":
+            return (path.suffix == ".app" and directory(path) and
+                    regular(path / "Contents/MacOS/SCM Workbench") and
+                    directory(path / "Contents/app/scm_workbench") and
+                    directory(path / "Contents/app/ui") and
+                    directory(path / "Contents/runtime"))
+        if os.name == "nt":
+            return (directory(path) and regular(path / "SCM Workbench.exe") and
+                    directory(path / "app/scm_workbench") and
+                    directory(path / "app/ui") and directory(path / "runtime"))
+    except (OSError, RuntimeError):
+        pass
+    return False
 
-    The install job needs the *path* of the bundle to swap, and it cannot
-    be asked for by an environment variable: the worker the Tauri shell
-    spawns inherits the shell's environment, which never carries one - and
-    a missing var read as "not packaged" is exactly the failure that made
-    a real install a silent no-op (the job downloaded, extracted, and ended
-    with "no app folder to swap" while the app sat untouched in
-    /Applications). The path is right here in sys.argv[0] instead:
-    <App>.app/Contents/MacOS/<exe>. The old env knob stays honored for
-    tests that set it explicitly."""
+
+def _own_bundle() -> Optional[str]:
+    """Find the canonical complete release bundle (None in development)."""
     if os.environ.get("SCM_WORKBENCH_BUNDLE"):
-        return os.environ["SCM_WORKBENCH_BUNDLE"]
+        hinted = Path(os.environ["SCM_WORKBENCH_BUNDLE"])
+        return str(hinted.resolve()) if _bundle_shape(hinted) else None
     if not os.environ.get("SCM_WORKBENCH_PACKAGED"):
         return None
     exe = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
     if exe:
-        for parent in exe.parents:
-            if parent.suffix == ".app":
-                return str(parent)
+        for parent in (exe, *exe.parents):
+            if ((sys.platform == "darwin" and parent.suffix == ".app") or
+                    (os.name == "nt" and _bundle_shape(parent))):
+                if _bundle_shape(parent):
+                    return str(parent.resolve())
     return None
 
 
@@ -1196,11 +1220,28 @@ def run_update_check() -> dict:
         return copy.deepcopy(st)
 
 
+def _poll_update_result(timeout: float = 60.0) -> None:
+    """Bounded startup poll: helper completion can race worker startup."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            if reconcile_update_result():
+                return
+        except Exception:
+            pass
+        if not (DATA_DIR / ".update-result.json").exists():
+            time.sleep(0.5)
+        else:
+            time.sleep(0.1)
+
+
 def _update_daemon() -> None:
     """Check at server start, then once a day while the app is open."""
-    time.sleep(5)  # let the window and its first paint land first
+    time.sleep(1)
+    _poll_update_result()
     while True:
         try:
+            reconcile_update_result()
             st = load_update_state()
             age = None if st.get("checked_at") is None else time.time() - float(st["checked_at"])
             if st.get("status") == "never" or age is None or age > UPDATE_CHECK_INTERVAL:
@@ -1228,7 +1269,7 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
         if _UPDATE_ADMISSION and _UPDATE_ADMISSION_JOB not in JOBS:
             _UPDATE_ADMISSION = False
             _UPDATE_ADMISSION_JOB = None
-        if _UPDATE_ADMISSION:
+        if _UPDATE_ADMISSION or _UPDATE_QUIESCING:
             return None, ["an update is already running; try again later"]
         st = load_update_state()
         if (not _valid_update_state(st) or st.get("status") != "update-available" or
@@ -2480,7 +2521,9 @@ def extras_card_names(info: dict) -> set:
 # ============================================================================
 
 JOBS: Dict[str, dict] = {}
-JOBS_LOCK = threading.Lock()
+# Re-entrant because the handoff commits its durable job record while holding
+# the same admission lock that ordinary jobs use.
+JOBS_LOCK = threading.RLock()
 
 
 def _line_wire(line: Any) -> Tuple[str, bool]:
@@ -2555,14 +2598,27 @@ def _notify_subscribers(job: dict, subscribers: list, message: tuple, *, termina
                     pass
 
 
-def _persist_jobs() -> None:
+def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> bool:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     with JOBS_LOCK:
-        rows = sorted(JOBS.values(), key=lambda j: j["ts"], reverse=True)[:100]
+        rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
+    def slim_row(j: dict) -> dict:
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration")
+                 if k in j}
+                | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
+
     slim = [
-        {k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration")}
-        for j in rows if j["status"] != "running" and j.get("duration") is not None
+        slim_row(j) for j in rows
+        if (j["status"] != "running" and j.get("duration") is not None)
+        or (j.get("kind") == "update" and j.get("status") == "handoff")
     ]
+    # A freshly launched worker may have no live JOBS entry.  Preserve its
+    # finalized persisted row explicitly, while giving that row precedence by
+    # ID and retaining every unrelated live job in the same atomic merge.
+    if finalized:
+        final_rows = [slim_row(j) for j in finalized if isinstance(j, dict)]
+        final_ids = {j.get("id") for j in final_rows}
+        slim = [j for j in slim if j.get("id") not in final_ids] + final_rows
     # Merge with rows persisted by earlier sessions: the in-memory map only
     # knows about *this* process's jobs, and rewriting the file from it alone
     # would silently erase the user's job history on every relaunch.
@@ -2572,15 +2628,147 @@ def _persist_jobs() -> None:
         old = []
     ids = {s["id"] for s in slim}
     try:
-        with open(JOBS_FILE, "w", encoding="utf-8") as f:
-            json.dump((slim + [o for o in old if o.get("id") not in ids])[:100], f, indent=1)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if JOBS_FILE.is_symlink():
+            if strict:
+                raise OSError("refusing to replace symlinked jobs file")
+            return False
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{JOBS_FILE.name}.", dir=str(DATA_DIR))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump((slim + [o for o in old if o.get("id") not in ids])[:100], f, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, JOBS_FILE)
+            try:
+                dir_fd = os.open(DATA_DIR, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        return True
     except Exception:
-        pass
+        if strict:
+            raise
+        return False
 
 
 def read_persisted_jobs() -> list:
     data = _try_read_json(JOBS_FILE)
     return data or []
+
+
+def _update_result_record(path: Path) -> Optional[dict]:
+    """Read the helper's one-shot result without following links."""
+    try:
+        meta = os.lstat(path)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_size > 64 * 1024:
+            return None
+        with open(path, "rb") as f:
+            raw = f.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            return None
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict) or set(value) != {"version", "token", "success", "expected_version", "message"}:
+            return None
+        token = value["token"]
+        expected = value["expected_version"]
+        message = value["message"]
+        if (value["version"] != 1 or not isinstance(token, str) or
+                not re.fullmatch(r"[0-9a-f]{64}", token) or
+                not isinstance(value["success"], bool) or
+                not isinstance(expected, str) or not expected or len(expected.encode()) > 128 or
+                updater.canonical_version(expected) != expected or
+                any(ord(c) < 0x20 or ord(c) == 0x7f for c in expected) or
+                not isinstance(message, str) or not message or len(message.encode()) > 256 or
+                any(ord(c) < 0x20 or ord(c) == 0x7f for c in message)):
+            return None
+        return value
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def reconcile_update_result() -> bool:
+    """Durably consume a matching helper result, if one is present.
+
+    The new shell has the token in its environment.  A rollback relaunch is
+    intentionally scrubbed of that environment, so the persisted handoff job
+    is the fallback lookup.  Invalid or stale records are left untouched.
+    """
+    global _UPDATE_QUIESCING, _UPDATE_QUIESCING_JOB
+    result_path = DATA_DIR / ".update-result.json"
+    result = _update_result_record(result_path)
+    if result is None:
+        return False
+    env_token = os.environ.get("SCM_WORKBENCH_UPDATE_TOKEN")
+    with JOBS_LOCK:
+        rows = list(JOBS.values()) + read_persisted_jobs()
+        matches = [j for j in rows if j.get("kind") == "update" and
+                   j.get("status") == "handoff" and
+                   j.get("update_token") == result["token"] and
+                   j.get("expected_version") == result["expected_version"]]
+        if env_token and env_token != result["token"]:
+            matches = []
+        current_version = updater.canonical_version(SERVER_VERSION)
+        if result["success"] and (current_version is None or
+                                   result["expected_version"] != current_version):
+            matches = []
+        if not matches:
+            return False
+        now = time.time()
+        for job in matches:
+            job["status"] = "ok" if result["success"] else "fail"
+            job["exit_code"] = 0 if result["success"] else 1
+            job["ended"] = now
+            job["duration"] = round(max(0.0, now - float(job.get("started", now))), 2)
+            job["result_message"] = result["message"]
+        if result["success"]:
+            state = _default_update_state()
+            state.update(status="up-to-date", current=SERVER_VERSION,
+                         latest=result["expected_version"], checked_at=now)
+        else:
+            state = _default_update_state()
+            state.update(status="error", current=SERVER_VERSION, checked_at=now,
+                         reason=result["message"])
+        try:
+            save_update_state(state)
+            _persist_jobs(strict=True, finalized=matches)
+        except Exception:
+            return False
+        expected_status = "ok" if result["success"] else "fail"
+        durable = next((j for j in read_persisted_jobs()
+                        if j.get("id") == matches[0].get("id") and
+                        j.get("status") == expected_status and
+                        j.get("update_token") == result["token"] and
+                        j.get("expected_version") == result["expected_version"]), None)
+        if durable is None:
+            return False
+        # Removing the marker is deliberately last: a crash before this point
+        # replays an idempotent terminalization on the next launch. The
+        # admission fence can be released once durable terminal state is
+        # verified, even if unlink itself is temporarily unavailable.
+        _UPDATE_QUIESCING = False
+        _UPDATE_QUIESCING_JOB = None
+        try:
+            os.unlink(result_path)
+            try:
+                fd = os.open(DATA_DIR, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        except OSError:
+            return False
+        return True
 
 
 def list_jobs() -> dict:
@@ -3425,6 +3613,9 @@ def _offset_save_intended(args: dict, prior: Optional[dict]) -> Optional[dict]:
 
 
 def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
+    with JOBS_LOCK:
+        if _UPDATE_QUIESCING:
+            return None, ["the app update is being handed off; try again after it restarts"]
     spec = get_manifest().get(kind)
     if not spec:
         return None, [f"Unknown job kind “{kind}”."]
@@ -3557,18 +3748,38 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         return None, _offset_errors([f"could not write job log: {exc}"])
     proc = None
     try:
-        proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **_proc_kwargs())
-        job["proc"] = proc
-        pump_thread = threading.Thread(
-            target=_pump, args=(job, proc, log_f), daemon=True,
-            name=f"job-pump-{job_id}",
-        )
+        # Keep the final admission check and publication under the same lock as
+        # update handoff.  An update can therefore never quiesce after this
+        # job passed the check but before it entered JOBS.
         with JOBS_LOCK:
+            if _UPDATE_QUIESCING:
+                raise RuntimeError("the app update is being handed off; try again after it restarts")
+            proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **_proc_kwargs())
+            job["proc"] = proc
+            pump_thread = threading.Thread(
+                target=_pump, args=(job, proc, log_f), daemon=True,
+                name=f"job-pump-{job_id}",
+            )
             job["pump_thread"] = pump_thread
             JOBS[job_id] = job
         pump_thread.start()
     except Exception as e:
+        if isinstance(e, RuntimeError) and str(e).startswith("the app update is being handed off"):
+            try:
+                log_f.close()
+            except Exception:
+                pass
+            if offset_lease:
+                try:
+                    OFFSET_LEASE.release()
+                except RuntimeError:
+                    pass
+            try:
+                Path(job["log_file"]).unlink()
+            except OSError:
+                pass
+            return None, [str(e)]
         if proc is not None:
             _terminate_and_reap(proc)
         if job.get("offset_save"):
@@ -3731,6 +3942,10 @@ def stop_all_jobs(timeout: float = 2.0) -> None:
     with JOBS_LOCK:
         active = []
         for job in JOBS.values():
+            # Handoff is owned by the external helper.  Killing or deleting
+            # this record here would strand its durable journal/result.
+            if job.get("status") == "handoff":
+                continue
             pump = job.get("pump_thread")
             if job.get("status") == "running" or (pump is not None and getattr(pump, "is_alive", lambda: False)()):
                 active.append(job)
@@ -4953,6 +5168,13 @@ def main():
                 pass
 
     settings = load_settings()
+    # The helper result is the only completion signal for an external handoff.
+    # Reconcile it before serving jobs so a newly launched shell cannot admit
+    # work while the old persisted update record is still marked handoff.
+    try:
+        reconcile_update_result()
+    except Exception as exc:
+        _diag(f"[updater] result reconciliation deferred: {exc}", error=True)
     # A process may have died after replacing canonical state but before its
     # SCM projection.  Roll that projection forward before serving requests.
     recovery_error = recover_offset_projection()
@@ -5021,7 +5243,9 @@ def main():
     except Exception:
         pass
 
-    # at start-up (and then once a day) — quietly check for a newer release
+    # At start-up (and then once a day) — quietly check for a newer release.
+    # The same daemon first polls the helper result so handoff completion is
+    # reconciled even when it lands just after this worker starts.
     threading.Thread(target=_update_daemon, daemon=True, name="updater").start()
 
     # Packaged app, first boot: the app fetches its own managed repo copies

@@ -11,8 +11,9 @@ module talks to the releases of the Workbench's own repository:
     in the meantime),
   * compare it with the running version,
   * on "update available" an in-process job downloads the right platform's
-    zip, extracts it, swaps it over the current app folder, relaunches the
-    new one and quits the old one.
+    zip, extracts it beside the installed app, and hands the candidate to the
+    native helper through a durable journal/request protocol. The helper owns
+    publication, health verification, rollback, and relaunch.
 
 The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
@@ -26,6 +27,7 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import struct
 import shutil
 import stat
@@ -184,6 +186,16 @@ class AuthRequiredError(UpdateError):
 # ----------------------------------------------------------------------------
 
 _VER_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.\-]+))?$")
+
+
+def canonical_version(s: str) -> str | None:
+    """Return the release version in the package's canonical spelling."""
+    match = _VER_RE.fullmatch(str(s or "").strip())
+    if not match:
+        return None
+    major, minor, patch = (int(match.group(i) or 0) for i in (1, 2, 3))
+    suffix = f"-{match.group(4)}" if match.group(4) else ""
+    return f"{major}.{minor}.{patch}{suffix}"
 
 
 def parse_version(s) -> tuple:
@@ -622,7 +634,7 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     raise OSError(error, os.strerror(error), destination)
 
 
-def extract_app(zip_path: Path, dest_dir: Path, log=print) -> Path:
+def extract_app(zip_path: Path, dest_dir: Path, log=print, *, publish_bundle_root: bool = False) -> Path:
     """Preflight a bounded ZIP, securely extract it, and publish atomically."""
     from scm_workbench import repo_sync
 
@@ -1026,14 +1038,21 @@ def extract_app(zip_path: Path, dest_dir: Path, log=print) -> Path:
             if os.path.lexists(dest_dir):
                 raise UpdateError(f"refusing to replace existing extraction directory {dest_dir}")
             try:
-                _rename_noreplace(stage, dest_dir)
+                # A macOS transaction's candidate is itself the .app bundle,
+                # not a wrapper directory.  Publishing the app directory as
+                # the token-derived sibling keeps the extraction off the data
+                # volume and gives Rust the exact target shape it validates.
+                source = stage / "SCM Workbench.app" if mac_ok and publish_bundle_root else stage
+                _rename_noreplace(source, dest_dir)
+                if source is not stage:
+                    stage.rmdir()
             except FileExistsError as exc:
                 raise UpdateError(f"refusing to replace existing extraction directory {dest_dir}") from exc
             except OSError as exc:
                 raise UpdateError(f"could not publish extracted app atomically: {exc}") from exc
             fsync_dir(dest_dir.parent)
             stage = None
-            return dest_dir / "SCM Workbench.app" if mac_ok else dest_dir
+            return dest_dir if (mac_ok and publish_bundle_root) else (dest_dir / "SCM Workbench.app" if mac_ok else dest_dir)
     except UpdateError:
         raise
     except (zipfile.BadZipFile, OSError, ValueError) as exc:
@@ -1137,6 +1156,148 @@ def clean_old_bundles(bundle: Path, log=print) -> None:
 # The install job (run in a server thread; `job` is the server's job dict)
 # ----------------------------------------------------------------------------
 
+JOURNAL_LIMIT = 64 * 1024
+UPDATE_SCHEMA_VERSION = 1
+_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _is_install_bundle(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return False
+        path = path.resolve(strict=True)
+        def directory(value: Path) -> bool:
+            return value.is_dir() and not value.is_symlink()
+        def regular(value: Path) -> bool:
+            return value.is_file() and not value.is_symlink()
+        if sys.platform == "darwin":
+            return (path.suffix == ".app" and directory(path) and
+                    regular(path / "Contents/MacOS/SCM Workbench") and
+                    directory(path / "Contents/app/scm_workbench") and
+                    directory(path / "Contents/app/ui") and directory(path / "Contents/runtime"))
+        return (os.name == "nt" and directory(path) and
+                regular(path / "SCM Workbench.exe") and
+                directory(path / "app/scm_workbench") and directory(path / "app/ui") and
+                directory(path / "runtime"))
+    except (OSError, RuntimeError):
+        return False
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _atomic_update_file(path: Path, value: bytes, *, limit: int = JOURNAL_LIMIT) -> None:
+    if len(value) > limit:
+        raise UpdateError("update handoff record exceeds 64 KiB")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise UpdateError(f"refusing to replace symlinked {path.name}")
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(value)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+        _fsync_dir(path.parent)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def _write_handoff_records(data: Path, token: str, expected: str, target: Path,
+                           shell_pid: int, worker_pid: int) -> None:
+    if not isinstance(token, str) or not _TOKEN_RE.fullmatch(token):
+        raise UpdateError("invalid update handoff token")
+    expected = canonical_version(expected)
+    if expected is None or len(expected.encode("utf-8")) > 128:
+        raise UpdateError("invalid expected update version")
+    if int(shell_pid) <= 0 or int(worker_pid) <= 0:
+        raise UpdateError("invalid update process identity")
+    parent = target.parent
+    journal = {
+        "version": UPDATE_SCHEMA_VERSION,
+        "token": token,
+        "phase": "prepared",
+        "expected_version": expected,
+        "target": str(target),
+        "candidate_name": f".SCM-Workbench-candidate-{token}",
+        "backup_name": f".SCM-Workbench-backup-{token}",
+        "old_shell_pid": int(shell_pid),
+        "old_worker_pid": int(worker_pid),
+    }
+    encoded = json.dumps(journal, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    _atomic_update_file(data / ".update-journal.json", encoded)
+    request = {"version": UPDATE_SCHEMA_VERSION, "token": token}
+    _atomic_update_file(data / ".update-launch-request.json",
+                        json.dumps(request, separators=(",", ":")).encode("ascii"),
+                        limit=4 * 1024)
+
+
+def _remove_handoff_files(data: Path, candidate: Path) -> None:
+    """Remove only this transaction's files; failure is reported to caller."""
+    for path in (data / ".update-launch-request.json", data / ".update-journal.json"):
+        if path.is_symlink():
+            raise UpdateError(f"refusing to remove symlinked {path.name}")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if candidate.exists() or candidate.is_symlink():
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise UpdateError("candidate extraction is not a directory")
+        shutil.rmtree(candidate)
+    _fsync_dir(data)
+
+
+def _begin_handoff(job: dict, plan: dict, token: str, target: Path,
+                   candidate: Path) -> None:
+    """Commit the handoff fence and its exact durable records atomically."""
+    from scm_workbench import server
+    with server.JOBS_LOCK:
+        others = [j for j in server.JOBS.values()
+                  if j is not job and j.get("status") == "running"]
+        if others:
+            raise UpdateError("another job is still running; the update was not handed off")
+        expected = canonical_version(plan.get("latest") or "")
+        if expected is None:
+            raise UpdateError("the release tag is not a valid version")
+        server._UPDATE_QUIESCING = True
+        server._UPDATE_QUIESCING_JOB = job.get("id")
+        job["status"] = "handoff"
+        job["update_token"] = token
+        job["expected_version"] = expected
+        # RLock makes the durable publication part of the same admission
+        # critical section: no ordinary job can slip in between the status and
+        # the journal/request records.
+        try:
+            server._persist_jobs(strict=True)
+            _write_handoff_records(server.DATA_DIR, token, job["expected_version"], target,
+                                   os.getppid(), os.getpid())
+        except Exception:
+            try:
+                _remove_handoff_files(server.DATA_DIR, candidate)
+            except Exception:
+                pass
+            job["status"] = "running"
+            job.pop("update_token", None)
+            job.pop("expected_version", None)
+            server._UPDATE_QUIESCING = False
+            server._UPDATE_QUIESCING_JOB = None
+            server._persist_jobs()
+            raise
+
+
 def run_job(job: dict, plan: dict, log_f) -> None:
     """Download + install a newer release, then hand over to the new app.
 
@@ -1178,6 +1339,8 @@ def run_job(job: dict, plan: dict, log_f) -> None:
             except Exception:
                 pass
 
+    candidate = None
+    handoff_committed = False
     try:
         # the UI's progress strip reads job["progress"]; until the first
         # stage sets it, the bar shows indeterminate so a slow first byte
@@ -1227,53 +1390,62 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
         download(asset["url"], dest, progress=progress, expected_asset=asset)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")
-        # 4) extract + verify (indeterminate: a zip of this shape has no
-        # cheap per-file counter, and the stage label is the information)
+        bundle = plan.get("bundle")
+        if not bundle or not _is_install_bundle(Path(bundle)):
+            fail("automatic updates require a complete packaged app; development checkouts are not installable")
+            return
+        old_bundle = Path(bundle).resolve(strict=True)
+        if not old_bundle.is_dir():
+            fail(f"the current app folder is not a directory ({old_bundle})")
+            return
+        # 4) extract directly into the token-bound sibling.  There is no
+        # staging directory in the data area and no legacy swap path.
+        token = secrets.token_hex(32)
+        candidate = old_bundle.parent / f".SCM-Workbench-candidate-{token}"
+        if candidate.exists() or candidate.is_symlink():
+            raise UpdateError("the update candidate path already exists")
         job["progress"] = {"stage": "extract", "done": 0, "total": 0}
         emit("Extracting the new app …")
-        new_bundle = extract_app(dest, work / "staging", log=emit)
+        new_bundle = extract_app(dest, candidate, log=emit, publish_bundle_root=True)
+        if Path(new_bundle).resolve() != candidate.resolve():
+            raise UpdateError("extraction did not publish the token-bound candidate")
         emit(f"    ready: {new_bundle}")
-        # 5) no bundle of our own (a dev run) — hand the files over instead
-        bundle = plan.get("bundle")
-        if not bundle:
-            finish(True,
-                   "Done — the new build is unpacked at\n    "
-                   f"    {new_bundle}\n"
-                   "    This server has no app folder to swap (running from a source\n"
-                   "    checkout), so move/copy it over your existing install manually.")
-            return
-        old_bundle = Path(bundle)
-        if not old_bundle.exists():
-            fail(f"the current app folder is gone ({old_bundle}) — not swapping")
-            return
-        # 6) the swap. The data area is a sibling of all this, never inside it.
-        job["progress"] = {"stage": "install", "done": 0, "total": 0}
-        emit(f"Installing over {old_bundle} — the app will close and reopen by itself in a few seconds.\n"
-             "    (Your data folder is not part of the app folder and stays as-is.)")
-        backup = swap_bundle(new_bundle, old_bundle, log=emit)
-        emit(f"    swapped — the previous version is kept at “{backup.name}” until the next launch")
-        # 7) relaunch the new one (detached, lands after we exit), then quit the
-        #    window host and ourselves — in that order on purpose.
-        relaunch_detached(old_bundle, log=emit)
-        stop_ancestors(log=emit)
-        if sys.platform == "darwin":
-            finish(True,
-                   "New version is starting. One thing to expect on macOS: the update re-signs\n"
-                   "    the app in place, so the relaunched copy reads to the system as brand new.\n"
-                   "    - If it is refused (\\u201cSCM Workbench cannot be opened\\u201d in\n"
-                   "      System Settings → Privacy & Security), click **Open Anyway** and reopen.\n"
-                   "    - If it opens but the window stays on its starting page, that is the\n"
-                   "      webview wedged by the fresh signature: quit the app fully and reopen it;\n"
-                   "      if that still does not load, a reboot clears it.\n"
-                   "    If a prompt asks about the local network, allow it too.\n"
-                   "    (If the window doesn't reopen within ~10 s, launch "
-                   f"{old_bundle} yourself — everything is already in place.)")
-        else:
-            finish(True, f"New version is starting. If the window doesn't reopen within ~10 s, "
-                          f"launch {old_bundle} yourself — everything is already in place.")
+        # 5) Persist the handoff fence and request while holding the same lock
+        # ordinary jobs use for admission.  From this point the old process
+        # never swaps, relaunches, stops ancestors, or reports success.
+        job["progress"] = {"stage": "handoff", "done": 0, "total": 0}
+        emit("Handing the candidate to the native updater …")
+        _begin_handoff(job, plan, token, old_bundle, candidate)
+        handoff_committed = True
+        emit("    handoff durable — the native helper will restart the app and verify its health")
+        return
     except UpdateError as e:
+        if handoff_committed:
+            return
+        if candidate is not None and not handoff_committed:
+            try:
+                if candidate.exists() or candidate.is_symlink():
+                    if candidate.is_symlink() or not candidate.is_dir():
+                        candidate.unlink()
+                    else:
+                        shutil.rmtree(candidate)
+                    _fsync_dir(candidate.parent)
+            except Exception as cleanup_error:
+                emit(f"    ! could not clean update candidate: {cleanup_error}")
         fail(str(e))
     except Exception as e:
+        if handoff_committed:
+            return
+        if candidate is not None:
+            try:
+                if candidate.exists() or candidate.is_symlink():
+                    if candidate.is_symlink() or not candidate.is_dir():
+                        candidate.unlink()
+                    else:
+                        shutil.rmtree(candidate)
+                    _fsync_dir(candidate.parent)
+            except Exception:
+                pass
         import traceback
         emit("    " + traceback.format_exc(limit=3).replace("\n", "\n    "))
         fail(f"the update failed: {e}")

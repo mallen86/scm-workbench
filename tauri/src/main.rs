@@ -119,7 +119,9 @@ fn main() {
     // Tauri setup creates windows, starts IPC, or touches the worker.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--update-helper") {
-        let _ = update_helper::run_cli(&args);
+        if update_helper::run_cli(&args).is_err() {
+            std::process::exit(2);
+        }
         return;
     }
     let worker_slot = WorkerSlot::default();
@@ -135,27 +137,86 @@ fn main() {
         .manage(WorkerRpc::default())
         .setup(|app| {
             let exe = std::env::current_exe().expect("current_exe");
-            let data = data_dir();
+            let requested_data = data_dir();
             // The per-user data area is created at launch, exactly as the old
             // bootstrap did: on a fresh machine the first thing the app ever
             // does is make its own home (settings, logs, managed repos live
             // here — never in the app folder, so updates can't touch it).
-            if let Err(e) = fs::create_dir_all(&data) {
+            if let Err(e) = fs::create_dir_all(&requested_data) {
                 let window = WebviewWindowBuilder::new(app, "main", loading_page())
                     .title("SCM Workbench")
                     .build()
                     .expect("failed to create the main window");
                 fail_window(
                     &window,
-                    &data,
+                    &requested_data,
                     "Its own files area couldn't be created — the app keeps its settings, work files and logs in a per-user folder, and it needs that folder to do anything.",
                     &format!("creating it failed with: {e}"),
                 );
                 return Ok(());
             }
+            let data = match update_helper::canonical_data_dir(&requested_data) {
+                Ok(data) => data,
+                Err(error) => {
+                    record(&requested_data.join("server-tauri.log"), &format!("[shell] validating data directory failed: {error}"));
+                    app.handle().exit(1);
+                    return Ok(());
+                }
+            };
             let root = app_root(&exe);
-            let py = worker_python(&root, &data);
 
+            // A shell which was interrupted during an update must not start a
+            // worker or create a window on top of the half-published tree.
+            // Malformed/unsafe journals fail closed.  Only the exact token +
+            // nonce pair written by launch_and_wait may bypass recovery.
+            let token = std::env::var("SCM_WORKBENCH_UPDATE_TOKEN").ok();
+            let nonce = std::env::var("SCM_WORKBENCH_UPDATE_NONCE").ok();
+            let pending = update_helper::pending_journal(&data);
+            let recovery = match (&token, &nonce, pending) {
+                (None, None, Ok(None)) => None,
+                (Some(token), Some(nonce), Ok(Some(journal)))
+                    if update_helper::valid_token(token)
+                        && update_helper::valid_token(nonce)
+                        && update_helper::journal_matches_current_target(&journal, &exe)
+                        && journal.token == *token
+                        && matches!(journal.phase, update_helper::Phase::Launching | update_helper::Phase::Launched) => None,
+                (Some(token), Some(nonce), Ok(Some(journal)))
+                    if update_helper::valid_token(token)
+                        && update_helper::valid_token(nonce)
+                        && update_helper::journal_matches_current_target(&journal, &exe) => Some(Ok(journal)),
+                (Some(_), Some(_), Ok(Some(_))) => Some(Err("new-shell update identity did not match the pending transaction".to_owned())),
+                (None, None, Ok(Some(journal)))
+                    if startup_recovery_phase(journal.phase)
+                        && update_helper::journal_matches_current_target(&journal, &exe) => Some(Ok(journal)),
+                (None, None, Ok(Some(_))) => Some(Err("pending update journal target does not match this shell".to_owned())),
+                (_, _, Ok(Some(_))) => Some(Err("update identity is incomplete or invalid".to_owned())),
+                (_, _, Ok(None)) => Some(Err("update identity is present but the journal is missing".to_owned())),
+                (_, _, Err(error)) => Some(Err(format!("update journal validation failed: {error}"))),
+            };
+            if let Some(decision) = recovery {
+                match decision {
+                    Ok(journal) => {
+                        let result = update_helper::materialize_helper(&exe, &data, &journal.token)
+                            .and_then(|helper| update_helper::spawn_helper(
+                                &helper, &data, &journal.token,
+                                update_helper::Mode::Recover, Some(std::process::id()),
+                            ).map(|_| ()));
+                        if let Err(error) = result {
+                            record(&data.join("server-tauri.log"), &format!("[shell] update recovery could not start: {error}"));
+                            app.handle().exit(1);
+                        } else {
+                            app.handle().exit(0);
+                        }
+                    }
+                    Err(error) => {
+                        record(&data.join("server-tauri.log"), &format!("[shell] update startup failed closed: {error}"));
+                        app.handle().exit(1);
+                    }
+                }
+                return Ok(());
+            }
+
+            let py = worker_python(&root, &data);
             let window = WebviewWindowBuilder::new(app, "main", loading_page())
                 .title("SCM Workbench")
                 .min_inner_size(940.0, 600.0)
@@ -188,6 +249,23 @@ fn main() {
                 Ok((mut child, stdin, stdout)) => match rpc.install(stdin, stdout) {
                     Ok(()) => {
                         let _ = slot.lock().ok().and_then(|mut g| g.replace(child));
+                        if let (Some(token), Some(nonce)) = (token.as_deref(), nonce.as_deref()) {
+                            match update_helper::publish_health(&data, &exe, token, nonce) {
+                                Ok(true) => record(&data.join("server-tauri.log"), "[shell] published update health"),
+                                Ok(false) => record(&data.join("server-tauri.log"), "[shell] update health was not authorized by the pending journal"),
+                                Err(error) => record(&data.join("server-tauri.log"), &format!("[shell] update health failed: {error}")),
+                            }
+                        }
+                        // This is deliberately after worker setup: a valid
+                        // request is the only thing which may hand off this
+                        // shell, and an invalid request must never stop it.
+                        let _ = update_helper::cleanup_old_helpers(&data, Duration::from_secs(60));
+                        let request_app = app_handle.clone();
+                        let request_data = data.clone();
+                        let request_exe = exe.clone();
+                        thread::spawn(move || {
+                            watch_update_requests(request_app, request_data, request_exe)
+                        });
                         let w = window.clone();
                         let watch_rpc = rpc.clone();
                         thread::spawn(move || watch_worker(app_handle, slot, w, watch_rpc));
@@ -236,6 +314,86 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("while running the app");
+}
+
+fn startup_recovery_phase(_phase: update_helper::Phase) -> bool {
+    // Every valid journal phase is actionable by the helper.  Healthy,
+    // Completed, and Failed are cleanup/finalization states, not a license to
+    // boot a second worker over the transaction.
+    true
+}
+
+/// Poll the bounded, exact launch request only after worker setup succeeded.
+/// A request remains pending if helper launch or its ten-second handoff ack
+/// fails; no malformed request can make this process exit.
+fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
+    let mut attempted = None::<(String, Instant)>;
+    const RETRY_COOLDOWN: Duration = Duration::from_secs(2);
+    loop {
+        if let Ok(Some(request)) = update_helper::read_launch_request(&data) {
+            let can_attempt = attempted
+                .as_ref()
+                .map(|(token, retry)| token != &request.token || Instant::now() >= *retry)
+                .unwrap_or(true);
+            if can_attempt {
+                let prepared = update_helper::pending_journal(&data)
+                    .ok()
+                    .flatten()
+                    .map(|journal| {
+                        journal.phase == update_helper::Phase::Prepared
+                            && journal.token == request.token
+                    })
+                    .unwrap_or(false);
+                if prepared {
+                    let attempt_started = std::time::SystemTime::now();
+                    attempted = Some((request.token.clone(), Instant::now() + RETRY_COOLDOWN));
+                    if let Err(error) = update_helper::remove_ack(&data) {
+                        record(
+                            &data.join("server-tauri.log"),
+                            &format!("[shell] update ACK cleanup failed: {error}"),
+                        );
+                        return;
+                    }
+                    let handoff =
+                        update_helper::materialize_helper(&current_exe, &data, &request.token)
+                            .and_then(|helper| {
+                                update_helper::spawn_helper(
+                                    &helper,
+                                    &data,
+                                    &request.token,
+                                    update_helper::Mode::Handoff,
+                                    None,
+                                )
+                                .map(|_| ())
+                            });
+                    if handoff.is_ok()
+                        && update_helper::wait_for_ack_since(
+                            &data,
+                            &request.token,
+                            Duration::from_secs(10),
+                            attempt_started,
+                        )
+                    {
+                        // The ACK is durable evidence that the external helper
+                        // owns the transaction. Remove the one-shot request
+                        // before allowing this shell to close; a cleanup
+                        // failure is terminal for the watcher, never a reason
+                        // to exit the still-running shell.
+                        if let Err(error) = update_helper::remove_launch_request(&data) {
+                            record(
+                                &data.join("server-tauri.log"),
+                                &format!("[shell] launch request cleanup failed: {error}"),
+                            );
+                            return;
+                        }
+                        app.exit(0);
+                        return;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// The data area: %LOCALAPPDATA%\scm-workbench (Windows),
