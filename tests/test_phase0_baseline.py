@@ -293,6 +293,16 @@ class HttpContractTests(unittest.TestCase):
             self.assertIn("groups", spec, kind)
             self.assertIn("cwd", spec, kind)
 
+    def test_fetch_manifest_keeps_picker_below_source_and_preferences_collapsed(self):
+        status, manifest = self.request("GET", "/api/manifest")
+        self.assertEqual(status, 200)
+        groups = manifest["fetch:mtg"]["groups"]
+        self.assertEqual(groups[0]["simple_rows"], [
+            ["deck_source"],
+            ["deck_file", "deck_name", "deck_text", "deck_url"],
+        ])
+        self.assertTrue(groups[2]["collapsible"])
+
     def test_preview_delegates_to_upstream_script_paths(self):
         status, preview = self.request("GET", "/api/preview?" + urllib.parse.urlencode({
             "kind": "create_pdf",

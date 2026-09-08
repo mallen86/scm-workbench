@@ -972,6 +972,12 @@ def build_manifest(info: dict) -> dict:
         groups = [
             {
                 "title": "Decklist",
+                # Keep the source selector above its conditional picker/editor
+                # when the fetch form uses the flat simple-mode layout.
+                "simple_rows": [
+                    ["deck_source"],
+                    ["deck_file", "deck_name", "deck_text", "deck_url"],
+                ],
                 "options": [
                     _opt("deck_source", "Source", "segment",
                          choices=[["file", "Existing file"], ["paste", "Paste text"], ["url", "URL"]], default="file"),

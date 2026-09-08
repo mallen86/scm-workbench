@@ -19,6 +19,7 @@ def main():
     transport_path = UI / "decklist-transport.js"
     transport = transport_path.read_text(encoding="utf-8")
     fetch = (UI / "pages" / "fetch.js").read_text(encoding="utf-8")
+    forms = (UI / "forms.js").read_text(encoding="utf-8")
     core = (UI / "core.js").read_text(encoding="utf-8")
     other_ui = "\n".join(
         path.read_text(encoding="utf-8")
@@ -37,6 +38,10 @@ def main():
         return fail("UI directly invokes the dialog open plugin")
     if "/api/decklists/import" in other_ui:
         return fail("packaged UI can bypass the decklist transport facade")
+    if "if (g.collapsible) appendCollapsibleGroup(g)" not in forms:
+        return fail("simple fetch forms no longer keep preference groups collapsed")
+    if 'kind === "clean_up" ? { keepForms: true } : {}' not in forms:
+        return fail("clear-images refresh can discard the live fetch form and strand its preview")
 
     node = shutil.which("node")
     if not node:

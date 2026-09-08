@@ -369,10 +369,22 @@ export function formCard(kind, opts = {}) {
     ));
   }
 
+  const appendCollapsibleGroup = g => {
+    const os = (g.options || []).filter(o => !o.simple_only);
+    if (!os.some(o => o.show ? o.show(args) : true)) return;
+    const adv = el("div", { class: "adv" });
+    adv.append(
+      el("button", { class: "adv-head", type: "button", onclick: () => adv.classList.toggle("open") },
+        el("span", { class: "arr" }, ico("arrow")), g.title),
+      el("div", { class: "adv-body" }, groupInner(os, kind, args)),
+    );
+    card.append(adv);
+  };
+
   if (opts.flat) {
-    // Flat layout: no group headers, no collapsible wrappers, no card title
-    // of its own. In simple mode only the options flagged `simple` in the
-    // manifest make it in (the everyday ones); everything else keeps its
+    // Flat layout: no ordinary group headers or card title of its own. In
+    // simple mode only the options flagged `simple` in the manifest make it
+    // in (the everyday ones); everything else keeps its
     // default behind the scenes. Each group becomes one form row; a
     // kind-level `simple_rows` list (create_pdf, fetch:*) names which
     // groups hold which option rows, in order. A group that names its own
@@ -426,27 +438,18 @@ export function formCard(kind, opts = {}) {
       if (!row.childElementCount) return;
       card.append(row);
     };
-    // one frow per group, in manifest order. `rows` (the kind-level
-    // simple_rows) documents the section's layout on the server; every group
-    // still renders, so a stale manifest from an older server (with groups
-    // the rows don't name) is fully covered too.
-    (spec.groups || []).forEach(g => placeGroup(g, g.options?.map(o => o.key) || []));
+    // one frow per ordinary group, in manifest order. Keep explicitly
+    // collapsible preference groups collapsed in simple mode too: simplifying
+    // the main form must not promote infrequently-used settings into it.
+    for (const g of spec.groups || []) {
+      if (g.collapsible) appendCollapsibleGroup(g);
+      else placeGroup(g, g.options?.map(o => o.key) || []);
+    }
   } else {
     for (const g of spec.groups || []) {
       const os = (g.options || []).filter(o => !o.simple_only);   // simple-only options never appear in the advanced form
-      if (g.collapsible) {
-        const any = os.some(o => o.show ? o.show(args) : true);
-        if (!any) continue;
-        const adv = el("div", { class: "adv" });
-        adv.append(
-          el("button", { class: "adv-head", type: "button", onclick: () => adv.classList.toggle("open") },
-            el("span", { class: "arr" }, ico("arrow")), g.title),
-          el("div", { class: "adv-body" }, groupInner(os, kind, args)),
-        );
-        card.append(adv);
-      } else {
-        card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(os, kind, args));
-      }
+      if (g.collapsible) appendCollapsibleGroup(g);
+      else card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(os, kind, args));
     }
   }
 
@@ -548,7 +551,11 @@ export async function doRun(kind, btn, opts = {}) {
       refreshJobs();
       if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over
       if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
-        setTimeout(() => import("./info.js").then(({ refreshInfo }) => refreshInfo()), 2500);
+        // clean_up changes image inventory, not form choices. Preserve the live
+        // fetch form object so its completion preview cannot serialize
+        // `undefined` and remain stuck at “Waiting for the server”.
+        const refreshOptions = kind === "clean_up" ? { keepForms: true } : {};
+        setTimeout(() => import("./info.js").then(({ refreshInfo }) => refreshInfo(refreshOptions)), 2500);
       }
       if (kind.startsWith("fetch:")) {
         // keep the user's form state (pasted decklists etc.) alive
