@@ -18,6 +18,9 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/../scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
+      - name: Record build revision
+        id: build_meta
+        run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
       - name: Assert the release architecture
         run: test "$(uname -m)" = "arm64"
       - uses: actions/setup-python@v5
@@ -379,7 +382,7 @@ jobs:
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
-          name: scm-workbench-macos
+          name: scm-workbench-macos-${{ steps.build_meta.outputs.short_sha }}
           path: build/macos/scm-workbench-macos.dmg
           # GitHub wraps Actions artifacts in a transport ZIP. The file inside
           # is the standard DMG users open; release downloads are the raw DMG.
@@ -388,7 +391,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: scm-workbench-macos-update
+          name: scm-workbench-macos-update-${{ steps.build_meta.outputs.short_sha }}
           path: build/macos/scm-workbench-macos.zip
           retention-days: 1
   windows:
@@ -402,6 +405,11 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}\..\scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
+      - name: Record build revision
+        id: build_meta
+        shell: pwsh
+        run: |
+          "short_sha=$(git rev-parse --short=7 HEAD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
       - name: Assert the release architecture
         shell: pwsh
         run: |
@@ -589,7 +597,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: scm-workbench-windows
+          name: scm-workbench-windows-${{ steps.build_meta.outputs.short_sha }}
           path: build/windows/scm-workbench-windows.zip
           retention-days: 1  # see the macos step above
 
