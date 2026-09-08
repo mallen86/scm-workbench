@@ -104,6 +104,8 @@ export const S = {
   plugin: "mtg",
   activeJobId: null,
   jobs: [],
+  startedJobIds: {},  // latest job started in this UI session, keyed by kind
+  jobArgs: {},        // immutable form snapshot keyed by job id
   es: null,                 // retained for compatibility with older page code
   esIdx: 0,
   jobSub: null,

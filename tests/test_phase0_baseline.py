@@ -302,6 +302,9 @@ class HttpContractTests(unittest.TestCase):
             ["deck_file", "deck_name", "deck_text", "deck_url"],
         ])
         self.assertTrue(groups[2]["collapsible"])
+        toggles = [o for o in groups[2]["options"] if o["type"] == "toggle"]
+        self.assertEqual(len(toggles), 7)
+        self.assertTrue(all(o["width"] == "quarter" for o in toggles))
 
     def test_preview_delegates_to_upstream_script_paths(self):
         status, preview = self.request("GET", "/api/preview?" + urllib.parse.urlencode({
@@ -313,6 +316,14 @@ class HttpContractTests(unittest.TestCase):
         self.assertIn("create_pdf.py", preview["cmd"])
         self.assertFalse(preview["errors"])
         self.assertFalse(preview["no_front_images"])
+
+        status, preview = self.request("GET", "/api/preview?" + urllib.parse.urlencode({
+            "kind": "create_pdf",
+            "args": json.dumps({"card_size": "extra", "paper_size": "letter"}),
+        }))
+        self.assertEqual(status, 200)
+        self.assertFalse(preview["errors"])
+        self.assertNotIn("SCM_EXTRA_LAYOUTS is set automatically", "\n".join(preview["warnings"]))
 
         status, preview = self.request("GET", "/api/preview?" + urllib.parse.urlencode({
             "kind": "extras_generate", "args": json.dumps({"mode": "missing"}),

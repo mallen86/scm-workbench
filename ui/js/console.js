@@ -115,6 +115,7 @@ export function toggleConsole() {
   if (uiMode() === "simple") return;   // simple mode has no console — pages show their own status strip
   const c = $("#console");
   c.hidden = !c.hidden;
+  document.body.classList.toggle("console-open", !c.hidden);
   if (!c.hidden) {
     c.classList.remove("closed");
     if (S.activeJobId) attachStream(S.activeJobId, true);
@@ -126,6 +127,7 @@ export function openConsole(id) {
   if (uiMode() === "simple") return;   // simple mode has no console — pages show their own status strip
   const c = $("#console");
   c.hidden = false;
+  document.body.classList.add("console-open");
   requestAnimationFrame(() => c.classList.remove("closed"));
   S.activeJobId = id;
   renderConsoleTabs();
@@ -359,6 +361,7 @@ export function bindConsole() {
   $("#console-close").onclick = () => {
     const c = $("#console");
     c.classList.add("closed");
+    document.body.classList.remove("console-open");
     closeStream();
     setTimeout(() => { c.hidden = true; }, 220);
   };

@@ -532,10 +532,11 @@ export async function doRun(kind, btn, opts = {}) {
   }
   if (btn) { btn.disabled = true; btn.innerHTML = ""; btn.append(el("span", { class: "spinner" }), " Starting…"); }
   let startFailed = false;
+  const runArgs = opts.args !== undefined ? opts.args : S.forms[kind];
   try {
     let j;
     try {
-      j = await jobs.start(kind, opts.args !== undefined ? opts.args : S.forms[kind]);
+      j = await jobs.start(kind, runArgs);
     } catch (error) {
       startFailed = true;
       toast("err", error?.message || "Failed to start job");
@@ -553,6 +554,11 @@ export async function doRun(kind, btn, opts = {}) {
       const j0 = { id: j.job.id, ts: Date.now() / 1000, kind, title: j.job.title,
                    status: "running", exit_code: null, cmd: j.job.cmd,
                    warnings, outputs: [] };
+      // Keep the latest run and the exact submitted settings across page
+      // navigation. The PDF completion actions and progress total must describe
+      // the job that ran, not whatever happens to be in the live form later.
+      S.startedJobIds[kind] = j0.id;
+      S.jobArgs[j0.id] = JSON.parse(JSON.stringify(runArgs || {}));
       const i = (S.jobs || []).findIndex(x => x.id === j0.id);
       if (i >= 0) S.jobs[i] = { ...S.jobs[i], ...j0 };
       else S.jobs = [j0, ...(S.jobs || [])];

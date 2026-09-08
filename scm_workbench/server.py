@@ -1008,13 +1008,13 @@ def build_manifest(info: dict) -> dict:
                     _opt("ignore_set", "Exclude sets", "chips", default=[]),
                     _opt("prefer_lang", "Preferred languages (printed code)", "choice_chips",
                          choices=[[l, l.upper()] for l in MTG_LANGS], default=[]),
-                    _opt("prefer_older_sets", "Prefer older sets", "toggle", default=False),
-                    _opt("prefer_showcase", "Prefer showcase art", "toggle", default=False),
-                    _opt("prefer_extra_art", "Prefer full / borderless / extended art", "toggle", default=False),
-                    _opt("prefer_ub", "Prefer Universe Beyond", "toggle", default=False),
-                    _opt("ignore_ub", "Exclude Universe Beyond", "toggle", default=False),
-                    _opt("tokens", "Also fetch related tokens", "toggle", default=False),
-                    _opt("ignore_set_and_collector_number", "Ignore set & collector numbers", "toggle", default=False),
+                    _opt("prefer_older_sets", "Prefer older sets", "toggle", default=False, width="quarter"),
+                    _opt("prefer_showcase", "Prefer showcase art", "toggle", default=False, width="quarter"),
+                    _opt("prefer_extra_art", "Prefer full / borderless / extended art", "toggle", default=False, width="quarter"),
+                    _opt("prefer_ub", "Prefer Universe Beyond", "toggle", default=False, width="quarter"),
+                    _opt("ignore_ub", "Exclude Universe Beyond", "toggle", default=False, width="quarter"),
+                    _opt("tokens", "Also fetch related tokens", "toggle", default=False, width="quarter"),
+                    _opt("ignore_set_and_collector_number", "Ignore set & collector numbers", "toggle", default=False, width="quarter"),
                 ],
             })
         return groups
@@ -4604,7 +4604,6 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 extra_file = (extras / "assets" / "layouts_extra.json") if extras else None
                 if extra_file and extra_file.is_file():
                     env["SCM_EXTRA_LAYOUTS"] = str(extra_file)
-                    warnings.append(f"Extras size “{v}” detected — SCM_EXTRA_LAYOUTS is set automatically.")
                 else:
                     errors.append(f"“{v}” comes from scm-extras, but its layouts file can’t be found.")
                 break

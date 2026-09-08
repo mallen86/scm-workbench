@@ -307,6 +307,11 @@ class ExtractionTests(unittest.TestCase):
         # the existing transactional in-app updater on tagged releases.
         self.assertIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
+        self.assertIn("actions: write", workflow)
+        upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
+        cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
+        self.assertGreater(cleanup_at, upload_at)
+        self.assertIn('gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"', workflow)
 
     def test_other_top_level_shapes_are_rejected_without_publish(self):
         bad_shapes = [

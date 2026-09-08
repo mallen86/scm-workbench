@@ -369,6 +369,18 @@ class UpdaterDownloadTests(unittest.TestCase):
                 self.assertEqual(dest.read_bytes(), b"old")
                 self.assert_no_partial(dest)
 
+    def test_download_without_content_length_reports_unknown_progress_total(self):
+        asset = self.asset()
+        dest = self.dest()
+        response = FakeResponse(b"new", headers={}, url=asset["url"])
+        progress = []
+        with patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(updater.download(asset["url"], dest, progress=lambda done, total: progress.append((done, total)),
+                                              expected_asset=asset), 3)
+        self.assertEqual(progress, [(0, 0), (3, 0)])
+        self.assertEqual(dest.read_bytes(), b"new")
+        self.assertTrue(response.closed)
+
     def test_download_requires_exact_stream_size_and_cleans_failed_partials(self):
         asset = self.asset()
         for label, body in (("under", b"ab"), ("over", b"abcd")):

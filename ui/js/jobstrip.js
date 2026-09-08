@@ -20,8 +20,10 @@ export function jobStrip(kind, opts = {}) {
     body,
   );
 
-  // only jobs started after this page was rendered count as "this page's"
-  // run — a finished job from yesterday must not pin a success banner here.
+  // A timestamp remains the fallback for callers outside doRun(). Jobs
+  // started by this UI are also remembered in S.startedJobIds, so navigating
+  // away while one runs and returning after it finishes still shows its
+  // completion actions without reviving a job from an earlier app session.
   const t0 = Date.now() / 1000 - 1;
 
   // ---- live progress from the job's own stream ---------------------------
@@ -31,35 +33,52 @@ export function jobStrip(kind, opts = {}) {
   // "Fetched 42/101 images" per batch) moves the bar to the real fraction.
   // If no such line ever arrives the bar keeps its indeterminate slide.
   let subscription = null, esJobId = null, lastX = 0, lastY = 0;
+  let imageDone = 0, imageTotal = 0;
   const closeEs = () => { if (subscription) { try { subscription.close(); } catch {} subscription = null; } };
 
   const attachProgress = (job) => {
     if (subscription && esJobId === job.id) return;
     closeEs();
     esJobId = job.id;
-    lastX = 0; lastY = 0;
+    lastX = 0; lastY = 0; imageDone = 0; imageTotal = 0;
+    const showProgress = (x, y) => {
+      if (y <= 0 || x > y || (y === lastY && x < lastX)) return;
+      lastX = x; lastY = y;
+      if (!strip.isConnected) return;
+      const pct = Math.min(100, Math.round(x / y * 100));
+      bar.style.setProperty("--pct", pct + "%");
+      strip.classList.add("prog");
+      label.textContent = `${opts.runningLabel || "Working"}  ·  ${x}/${y} (${pct}%)`;
+    };
+    if (opts.progressTotal) {
+      Promise.resolve(opts.progressTotal(job)).then(total => {
+        if (esJobId !== job.id) return;
+        imageTotal = Number(total) || 0;
+        if (imageDone && imageTotal) showProgress(imageDone, imageTotal);
+      }).catch(() => {}); // an unknown total deliberately leaves the cycling bar
+    }
     subscription = jobs.subscribe(job.id, {
       after: 0,
       onLine: d => {
-        const m = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
-        if (!m) return;
-        const x = +m[1], y = +m[2];
-        if (y <= 0 || x > y) return;
-        if (y === lastY && x < lastX) return;      // replay/overlap — never move backwards
-        lastX = x; lastY = y;
-        if (!strip.isConnected) return;
-        const pct = Math.min(100, Math.round(x / y * 100));
-        bar.style.setProperty("--pct", pct + "%");
-        strip.classList.add("prog");
-        label.textContent = `${opts.runningLabel || "Working"}  ·  ${x}/${y} (${pct}%)`;
+        const fraction = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
+        if (fraction) return showProgress(+fraction[1], +fraction[2]);
+        const image = /^\s*Image\s+(\d+)\s*:/i.exec(d.s);
+        if (!image) return;
+        imageDone = Math.max(imageDone, +image[1]);
+        if (imageTotal) showProgress(imageDone, imageTotal);
       },
       onDone: d => {
-        // flip to the final state now, instead of waiting for the 2 s poll
-        const j = (S.jobs || []).find(x => x.id === esJobId);
-        if (j) { j.status = d.status; j.exit_code = d.exit_code; }
+        // Refresh the canonical row before painting: the terminal stream event
+        // has status but not output paths, and those paths power “Open PDF”.
         const id = esJobId;
+        const j = (S.jobs || []).find(x => x.id === id);
+        if (j) { j.status = d.status; j.exit_code = d.exit_code; }
         closeEs(); esJobId = null;
-        if (id) paint();
+        if (!id) return;
+        jobs.list().then(result => {
+          S.jobs = result.jobs || S.jobs;
+          paint();
+        }).catch(() => paint());
       },
       onError: error => { if (strip.isConnected) toast("warn", `Job output: ${error.message || error}`); },
       onGap: () => { if (strip.isConnected) toast("warn", "Some earlier job output was truncated."); },
@@ -95,7 +114,8 @@ export function jobStrip(kind, opts = {}) {
         return;
       }
       closeEs();
-      const done = jobs.find(j => j.ts >= t0);
+      const remembered = S.startedJobIds?.[kind];
+      const done = (remembered && jobs.find(j => j.id === remembered)) || jobs.find(j => j.ts >= t0);
       if (!done) { strip.hidden = true; strip.className = "jobstrip"; return; }
       // same job already painted? don't tear the body down and re-run onOk
       // every 2 s (it re-appends buttons and would restart any async work).

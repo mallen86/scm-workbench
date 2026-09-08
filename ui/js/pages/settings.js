@@ -72,6 +72,7 @@ function showWhatsNew(tag, releaseUrl) {
 import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, setTheme, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
+  let repoInitPending = false;
   const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";
   const pickSource = async (v) => {
     if (!v) return;
@@ -190,16 +191,24 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       };
       acts.append(checkBtn, upBtn);
     } else if (row.mode === "external") {
-      const dlBtn = el("button", { class: "btn sm" }, ico("download"), "Also keep a managed copy");
+      const initRunning = (S.jobs || []).some(j => j.kind === "repo_init" && j.status === "running");
+      const dlBtn = el("button", { class: "btn sm", disabled: initRunning,
+        title: initRunning ? "A managed-copy download is already running" : null }, ico("download"), "Also keep a managed copy");
       dlBtn.onclick = async () => {
+        if (repoInitPending || S.repoInitPending || dlBtn.disabled ||
+            (S.jobs || []).some(j => j.kind === "repo_init" && j.status === "running")) {
+          dlBtn.disabled = true; return;
+        }
+        repoInitPending = true; S.repoInitPending = true; dlBtn.disabled = true;
         const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
         title: `Download a managed copy of ${row.name}`,
         text: simple
           ? "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched); it will follow the latest main."
           : "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched). Pick the source above first if you want it to track something other than the latest main.",
         okLabel: "Download", icon: "download" } });
-        if (!job) return;
+        if (!job) { repoInitPending = false; S.repoInitPending = false; dlBtn.disabled = false; return; }
         watchJobDone(job.id, async () => {
+          repoInitPending = false; S.repoInitPending = false;
           await refreshInfo({ keepForms: true });
           const fresh = (S.info.repos || []).find(x => x.key === row.key);
           if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
@@ -207,14 +216,22 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       };
       acts.append(dlBtn, el("span", { class: "small faint" }, "Your own clone stays as it is — the managed copy is the one the Workbench updates for you."));
     } else {
-      const dlBtn = el("button", { class: "btn sm primary" }, ico("download"), "Download latest (managed copy)");
+      const initRunning = (S.jobs || []).some(j => j.kind === "repo_init" && j.status === "running");
+      const dlBtn = el("button", { class: "btn sm primary", disabled: initRunning,
+        title: initRunning ? "A managed-copy download is already running" : null }, ico("download"), "Download latest (managed copy)");
       dlBtn.onclick = async () => {
+        if (repoInitPending || S.repoInitPending || dlBtn.disabled ||
+            (S.jobs || []).some(j => j.kind === "repo_init" && j.status === "running")) {
+          dlBtn.disabled = true; return;
+        }
+        repoInitPending = true; S.repoInitPending = true; dlBtn.disabled = true;
         const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
         title: `Download ${row.name}`,
         text: `Fetches a complete copy into the Workbench's data folder. The first download can be large — silhouette-card-maker is a few hundred MB (it includes the upstream docs site and test material).`,
         okLabel: "Download", icon: "download" } });
-        if (!job) return;
+        if (!job) { repoInitPending = false; S.repoInitPending = false; dlBtn.disabled = false; return; }
         watchJobDone(job.id, async () => {
+          repoInitPending = false; S.repoInitPending = false;
           await refreshInfo({ keepForms: true });
           const fresh = (S.info.repos || []).find(x => x.key === row.key);
           if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));

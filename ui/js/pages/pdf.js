@@ -38,6 +38,12 @@ PAGES.pdf = (root) => {
   wrap.append(jobStrip("create_pdf", {
     icon: "pdf",
     runningLabel: "Creating your PDF",
+    progressTotal: async job => {
+      const f = S.jobArgs?.[job.id] || S.forms.create_pdf || {};
+      const listing = await listFiles(f.front_dir || "game/front", true);
+      // A truncated bounded listing cannot provide an honest denominator.
+      return listing.truncated ? 0 : (listing.found ?? listing.items.length);
+    },
     onOk: (done, body) => {
       const out = (done.outputs || [])[0];
       body.append(el("div", { class: "js-msg ok" },
@@ -71,7 +77,7 @@ PAGES.pdf = (root) => {
       // the cutting template that matches this exact PDF (paper + card size,
       // borderless family when the form is borderless) - resolved server-side
       // so the answer is the same in both modes
-      const f = S.forms.create_pdf || {};
+      const f = S.jobArgs?.[done.id] || S.forms.create_pdf || {};
       if (f.card_size && f.paper_size) {
         resolveTemplate(f.paper_size, f.card_size, !!f.borderless)
           .then(t => {

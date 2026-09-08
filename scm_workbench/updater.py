@@ -547,8 +547,13 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
                 raise UpdateError("download size does not match the release asset")
         done = 0
         digest = hashlib.sha256()
+        # The release metadata size remains the integrity boundary, but only
+        # advertise a determinate total when the download response itself
+        # confirms it. GitHub/CDN responses without Content-Length must keep
+        # the UI's cycling progress animation rather than implying precision.
+        progress_total = expected_size if raw_length is not None else 0
         if progress is not None:
-            progress(0, expected_size)
+            progress(0, progress_total)
         with open(part_name, "wb") as f:
             while True:
                 remaining = deadline - time.monotonic()
@@ -562,7 +567,7 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
                 f.write(b)
                 digest.update(b)
                 if progress is not None:
-                    progress(done, expected_size)
+                    progress(done, progress_total)
             if done != expected_size:
                 raise UpdateError("download ended before the release asset size")
             if expected_digest and digest.hexdigest().lower() != expected_digest.split(":", 1)[1].lower():
@@ -1381,12 +1386,14 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         last = {"t": 0.0}
 
         def progress(done: int, total: int) -> None:
+            # total=0 means the CDN omitted Content-Length. Publish that shape
+            # immediately so the client deliberately stays indeterminate.
+            job["progress"] = {"stage": "download", "done": done, "total": total}
             if total and (time.time() - last["t"]) > 1.0:
                 last["t"] = time.time()
                 # raw numbers only: the UI derives the speed/eta line the way
                 # the repo-prep bar does (it needs the timestamps, which only
                 # the client side has)
-                job["progress"] = {"stage": "download", "done": done, "total": total}
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
         download(asset["url"], dest, progress=progress, expected_asset=asset)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")

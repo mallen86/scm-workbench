@@ -182,7 +182,10 @@ body.mode-simple .nav-item[data-simple-hide] { display: none; }
    Main / topbar
    ========================================================================== */
 
-.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; transition: padding-bottom 0.22s cubic-bezier(0.3, 0.9, 0.4, 1); }
+/* The advanced console is a fixed sibling of the app. Reserve its full height
+   inside main while open so the page viewport ends above, not behind, it. */
+body:not(.mode-simple).console-open .main { padding-bottom: 330px; }
 
 .topbar {
   height: 56px; flex: 0 0 56px;

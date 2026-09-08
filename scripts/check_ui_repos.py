@@ -45,6 +45,11 @@ def main() -> int:
             return fail(f"settings page is missing {marker}")
     if "finally" not in page or "checkBtn.disabled = false" not in page:
         return fail("repository check button is not restored in finally")
+    for marker in ('j.kind === "repo_init" && j.status === "running"',
+                   "repoInitPending || S.repoInitPending || dlBtn.disabled",
+                   "repoInitPending = true; S.repoInitPending = true; dlBtn.disabled = true;"):
+        if marker not in page:
+            return fail(f"managed-copy download admission is missing {marker}")
     for path in sorted(UI.rglob("*.js")):
         source = path.read_text(encoding="utf-8")
         if path != FACADE and re.search(r'(?:api|fetch)\s*\(\s*["\']/api/repos/', source):

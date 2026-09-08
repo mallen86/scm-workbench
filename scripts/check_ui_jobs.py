@@ -15,6 +15,9 @@ def main() -> int:
         return 1
     forms = (ROOT / "ui" / "js" / "forms.js").read_text(encoding="utf-8")
     console = (ROOT / "ui" / "js" / "console.js").read_text(encoding="utf-8")
+    jobstrip = (ROOT / "ui" / "js" / "jobstrip.js").read_text(encoding="utf-8")
+    pdf = (ROOT / "ui" / "js" / "pages" / "pdf.js").read_text(encoding="utf-8")
+    theme = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
     if "j.job?.warnings" not in forms or "catch (error)" not in forms or "startFailed" not in forms:
         print("FAIL: doRun does not preserve nested warnings and start errors")
         return 1
@@ -24,6 +27,23 @@ def main() -> int:
         return 1
     if "typeof handlers === \"number\"" in jobs:
         print("FAIL: subscribe retains undocumented positional argument mangling")
+        return 1
+    for marker in ("S.startedJobIds[kind]", "S.jobArgs[j0.id]"):
+        if marker not in forms:
+            print(f"FAIL: form runs do not preserve navigation state: {marker}")
+            return 1
+    for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
+                   "S.startedJobIds?.[kind]", "jobs.list().then(result"):
+        if marker not in jobstrip:
+            print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
+            return 1
+    for marker in ("progressTotal: async job", "S.jobArgs?.[done.id]", "resolveTemplate(f.paper_size, f.card_size, !!f.borderless)"):
+        if marker not in pdf:
+            print(f"FAIL: PDF progress or completion actions are missing {marker}")
+            return 1
+    if 'document.body.classList.add("console-open")' not in console or \
+            "body:not(.mode-simple).console-open .main" not in theme:
+        print("FAIL: advanced console does not reserve page space")
         return 1
     for path in sorted(UI.rglob("*.js")):
         if path.name == "jobs.js":
