@@ -313,62 +313,83 @@ jobs:
           sleep 5  # let in-flight writers land before the seal, not after
           codesign --force --deep --sign - "SCM Workbench.app"
           rm -f sign-marker && touch sign-marker
-      - name: Zip
+      - name: Build the drag-to-Applications installer
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
-          # The zip carries the app alone, at its root: no wrapper folder,
-          # no companion script. (An earlier revision shipped a
-          # "First run on Mac" beside it; the quarantine gates that
-          # file the same way it gates the app, so it was a second
-          # P&S-allow in disguise and got dropped.) The first launch is
-          # one "Open Anyway" for the app itself in System Settings →
-          # Privacy & Security, remembered by the machine; a Developer ID
-          # + notarization is the only way to make that click disappear.
-          #
-          # -y is load-bearing, not stylistic: the pbs runtime carries
-          # symlinks (bin/python → python3.13, the pkgconfig aliases, the
-          # libpython version link, …) and the seal hashes them *as links*.
-          # Plain `zip -r` follows them and stores the *target's* bytes
-          # under the link's name (bin/python becomes a 17 MB Mach-O), so
-          # every machine that unzips it sees a seal its own files no
-          # longer match - "damaged", with no button. That is precisely
-          # what broke every mac zip of this architecture until -y.
+          root=".dmg-root"
+          rm -rf "$root" scm-workbench-macos.dmg
+          mkdir "$root"
+          # ditto preserves the signed bundle's symlinks and metadata. The
+          # Applications alias gives the mounted image the standard macOS
+          # install interaction: drag the app icon onto Applications.
+          ditto "SCM Workbench.app" "$root/SCM Workbench.app"
+          ln -s /Applications "$root/Applications"
+          touch "$root/.metadata_never_index"
+          codesign --verify --verbose=2 "$root/SCM Workbench.app"
+          hdiutil create -quiet -ov -format UDZO -volname "SCM Workbench" \
+            -srcfolder "$root" scm-workbench-macos.dmg
+          rm -rf "$root"
+      - name: Build the automatic-update payload
+        # The user-facing installer is the DMG. The app's existing
+        # transactional updater still consumes this exact ZIP on tagged
+        # releases; it is not uploaded as the manual-build artifact.
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/build/macos"
+          # -y is load-bearing: the bundled Python runtime contains symlinks,
+          # and following them makes the unzipped bundle fail its code seal.
           zip -y -qr scm-workbench-macos.zip "SCM Workbench.app"
-      - name: Verify what the zip actually ships
-        # The checks above read the bundle's tree as it stood *then*; the
-        # seal that matters is on the zip's own bytes. This step has caught
-        # both failure classes this pipeline has had: writes that land in
-        # the sealed tree after the last seal (a broken pre-zip snapshot),
-        # and the zip's own encoding diverging from the tree it archived
-        # (the symlink dereferencing above - where the disk was pristine
-        # and only the archive lied). Unpack the artifact and verify it; on
-        # failure, dump the violations and any bundle file newer than the
-        # re-seal's marker, so the next red build points at its cause.
+      - name: Verify the installer and automatic-update payload
+        # Verify the bytes users and the updater actually receive, rather than
+        # trusting only the pre-container bundle tree.
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
+          mount="$(mktemp -d /private/tmp/scm-workbench-dmg.XXXXXX)"
+          cleanup() {
+            hdiutil detach "$mount" -quiet >/dev/null 2>&1 || true
+            rmdir "$mount" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach -quiet -readonly -nobrowse -mountpoint "$mount" scm-workbench-macos.dmg
+          test -d "$mount/SCM Workbench.app"
+          test -L "$mount/Applications"
+          test "$(readlink "$mount/Applications")" = "/Applications"
+          codesign --verify --verbose=2 "$mount/SCM Workbench.app"
+          case "$(file -b "$mount/SCM Workbench.app/Contents/MacOS/SCM Workbench")" in
+            *arm64*) ;;
+            *) echo "DMG does not contain an arm64 shell" >&2; exit 1 ;;
+          esac
+          hdiutil detach "$mount" -quiet
+          rmdir "$mount"
+          trap - EXIT
+
           mkdir -p .zipcheck
           unzip -q scm-workbench-macos.zip -d .zipcheck
           app=".zipcheck/SCM Workbench.app"
           if ! codesign --verify --verbose=2 "$app" > .zipcheck/verify.log 2>&1; then
-            echo "---- the zipped bundle fails codesign --verify: ----"
+            echo "---- the automatic-update bundle fails codesign --verify: ----"
             cat .zipcheck/verify.log
-            echo "---- bundle files written after the last seal (the writer's footprint): ----"
+            echo "---- bundle files written after the last seal: ----"
             find "$app" -newer sign-marker 2>/dev/null | sed "s|^$app/||" | head -50
             exit 1
           fi
-          echo "the zipped bundle verifies clean: what ships is what the signature covers"
-      - name: Upload artifact
+          echo "the DMG and automatic-update ZIP both carry the sealed arm64 app"
+      - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
           name: scm-workbench-macos
+          path: build/macos/scm-workbench-macos.dmg
+          # GitHub wraps Actions artifacts in a transport ZIP. The file inside
+          # is the standard DMG users open; release downloads are the raw DMG.
+          retention-days: 1
+      - name: Upload macOS automatic-update payload
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: scm-workbench-macos-update
           path: build/macos/scm-workbench-macos.zip
-          # The release job consumes the artifact in the same minutes, so a
-          # 1-day retention is plenty; it also keeps the account's 500 MB
-          # free artifact-storage allowance from filling up with a ~180 MB
-          # zip per platform per run for the full 90-day default. (Valid
-          # range: 1-90; 0 = repo default.)
           retention-days: 1
   windows:
     runs-on: windows-latest  # x64 release target
@@ -591,4 +612,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.zip scm-workbench-windows.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip scm-workbench-windows.zip --clobber

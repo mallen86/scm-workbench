@@ -148,19 +148,21 @@ stays closed, and separately assert that no WebView request occurred.
 
 The supported release matrix is **macOS ARM64 only** and **Windows x64 only**:
 there is no Intel/universal macOS artifact and no ARM Windows artifact. The
-macOS workflow uses the current ad-hoc signature and no notarization; current
-Windows artifacts are unsigned. Those signing tradeoffs, including the
-expected macOS **Open Anyway** and Windows SmartScreen prompts, are explicitly
+macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG and
+retains a ZIP only as the in-app updater's transactional payload; it does not
+notarize either. Current Windows artifacts are unsigned. Those signing
+tradeoffs, including the expected macOS **Open Anyway** and Windows SmartScreen
+prompts, are explicitly
 accepted for the current first slice. Do not add Developer ID/notarization or
 an OV certificate as part of this work.
 
 ## Releasing a new version
 
-**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then builds the macOS ARM64 and Windows x64 archives and attaches them to the GitHub release.
+**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG, its automatic-update payload, and the portable Windows x64 ZIP to the GitHub release.
 
 ```bash
 git tag v0.1.1
-git push origin v0.1.1        # CI builds both archives and publishes the release
+git push origin v0.1.1        # CI builds both platform packages and publishes the release
 ```
 
 For a local build, run `python scripts/inject_version.py v0.1.1` before building; with no tag in sight it keeps the version the repository declares.

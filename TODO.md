@@ -4,4 +4,4 @@
 - [x] The decklist source and picker are in 2 columns but it also didn't used to be like this. The decklist picker should be under the decklist source.
 
 # Features
-- The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's impelement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (I think this is a .dmg file?). Windows should stay as the "portable" solution.
+- [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

@@ -289,6 +289,16 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(windows.name, "windows-staging")
         self.assertTrue((windows / "SCM Workbench.exe").is_file())
 
+        workflow = (Path(__file__).resolve().parents[1] /
+                    ".github/workflows/package.yml").read_text(encoding="utf-8")
+        self.assertIn("scm-workbench-macos.dmg", workflow)
+        self.assertIn('ln -s /Applications "$root/Applications"', workflow)
+        self.assertIn("hdiutil create", workflow)
+        # The DMG is the manual installer; retain the exact ZIP consumed by
+        # the existing transactional in-app updater on tagged releases.
+        self.assertIn("scm-workbench-macos.zip", workflow)
+        self.assertIn("scm-workbench-windows.zip", workflow)
+
     def test_other_top_level_shapes_are_rejected_without_publish(self):
         bad_shapes = [
             ("mac-missing-macos", [("SCM Workbench.app/Contents/Resources/x", b"x")]),

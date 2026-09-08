@@ -6,7 +6,8 @@ The app is **ad-hoc signed, not notarized** (a Developer ID + notarization is
 the only way to make this step disappear, and it is not available yet).
 So a freshly downloaded copy is gated by macOS:
 
-1. Double-click **SCM Workbench.app** (or the zip, then the app inside it).
+1. Open **scm-workbench-macos.dmg**, drag **SCM Workbench** onto the
+   **Applications** icon, eject the disk image, and open the installed app.
 2. If macOS says *"couldn't be opened / is from an unknown developer"*, go to
    **System Settings → Privacy & Security**, scroll to the bottom, and click
    **"Open Anyway"** for SCM Workbench.
@@ -15,13 +16,10 @@ So a freshly downloaded copy is gated by macOS:
 
 Two things that make this step feel broken:
 
-- **Don't run it from `~/Downloads`.** An app downloaded over the web and
-  launched straight from Downloads is *translocated* by macOS: it runs from a
-  temporary copy under `/private/var/folders/.../AppTranslocation/...` instead
-  of from your folder, and the per-copy state (including the local-network
-  allow below) is keyed to that temporary identity. Every fresh download is a
-  fresh identity. The clean flow is: **move the app (drag it, in Finder) to
-  Applications**, then run it from there.
+- **Don't run the app from the mounted installer or `~/Downloads`.** macOS can
+  *translocate* a downloaded app and run a temporary copy under
+  `/private/var/folders/.../AppTranslocation/...`. Always use the copy you
+  dragged into Applications, then eject the disk image.
 - The allow in step 2 is per *signature*. Each release is re-signed with a new
   ad-hoc seal, so **each new version gets its one "Open Anyway"**. This is
   true of the in-app updater too: it swaps the bundle in place, the new seal
