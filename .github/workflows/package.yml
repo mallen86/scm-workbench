@@ -15,7 +15,7 @@ jobs:
     env:
       # Keep Cargo outputs outside the checkout; frontendDist embeds only the
       # bounded ui/ tree, never repository source or build artifacts.
-      CARGO_TARGET_DIR: ${{ runner.temp }}/scm-workbench-tauri-target
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
       - name: Assert the release architecture
@@ -375,7 +375,7 @@ jobs:
     env:
       # Keep Cargo's generated target tree outside the checkout; frontendDist
       # embeds only the bounded ui/ tree.
-      CARGO_TARGET_DIR: ${{ runner.temp }}\scm-workbench-tauri-target
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\scm-workbench-tauri-target
     steps:
       - uses: actions/checkout@v4
       - name: Assert the release architecture
