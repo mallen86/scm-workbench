@@ -157,8 +157,16 @@ export function jobStrip(kind, opts = {}) {
     paint();
   };
   clearInterval(S.timers[tk]);
-  S.timers[tk] = setInterval(tick, 2000);
+  S.timers[tk] = setInterval(tick, 500);
   paint();
+  // Navigation can rebuild this strip between the terminal event and the
+  // next global jobs poll. Fetch the canonical row immediately so completed
+  // output actions appear after one local request, not a multi-second timer.
+  jobs.list().then(result => {
+    if (!strip.isConnected) return;
+    S.jobs = result.jobs || S.jobs;
+    paint();
+  }).catch(() => {});
 
   return strip;
 }

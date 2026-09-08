@@ -50,11 +50,14 @@ def main() -> int:
         "export function firstBootPageNeeded()",
         "!S.firstBootDismissed",
         "S.info?.server?.is_packaged",
-        "S.info.server.active",
         "some(r => !r.deployed)",
         'native?.dataset.prepAll === "true"',
         'ready ? "ready"',
         'ready ? "Downloaded and ready"',
+        "const indeterminate = !det && !ready",
+        'bar.classList.toggle("indet", indeterminate)',
+        'fill.style.width = indeterminate ? "" : pct + "%"',
+        "setTimeout(tick, 750)",
     ):
         if marker not in prep:
             return fail(f"preparation state contract is missing: {marker}")
@@ -67,6 +70,12 @@ def main() -> int:
         "wrap.__patch = updatePrepRows",
         "Explore while setup continues",
         "Setup needs your attention",
+        "async function retrySetup(button)",
+        'j.kind === "repo_init" || j.kind === "repo_update"',
+        'doRun("repo_init", null',
+        '"Retry setup"',
+        'startPrepWatcher();',
+        'go("preparing", null, { push: false, anim: false });',
     ):
         if marker not in page:
             return fail(f"first-boot page is missing: {marker}")

@@ -33,10 +33,13 @@ def main() -> int:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
             return 1
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
-                   "S.startedJobIds?.[kind]", "jobs.list().then(result"):
+                   "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)"):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
+    if jobstrip.count("jobs.list().then(result") < 2:
+        print("FAIL: rebuilt job strips do not immediately refresh canonical completion state")
+        return 1
     for marker in ("progressTotal: async job", "S.jobArgs?.[done.id]", "resolveTemplate(f.paper_size, f.card_size, !!f.borderless)"):
         if marker not in pdf:
             print(f"FAIL: PDF progress or completion actions are missing {marker}")

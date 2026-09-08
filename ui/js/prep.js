@@ -33,6 +33,7 @@ export function repoReady(key) {
 export function prepActive() {
   if (!S.info || !S.info.server.is_packaged) return false;
   if (S.info.server.active) return true;
+  if ((S.jobs || []).some(j => (j.kind === "repo_init" || j.kind === "repo_update") && j.status === "running")) return true;
   return (S.info.repos || []).some(r => !r.deployed || r.progress);
 }
 
@@ -41,8 +42,11 @@ export function prepActive() {
 // bootstrap. Later checks/updates keep using the dashboard/sidebar progress
 // UI, and standalone-browser startup remains unchanged.
 export function firstBootPageNeeded() {
+  // Keep the welcome page available after a failed first pass too. It owns
+  // the retry action; requiring bootstrap.active here used to skip the page
+  // precisely when a download had already failed.
   return !S.firstBootDismissed && !!S.info?.server?.is_packaged &&
-    !!S.info.server.active && (S.info.repos || []).some(r => !r.deployed);
+    (S.info.repos || []).some(r => !r.deployed);
 }
 
 
@@ -174,8 +178,13 @@ export function updatePrepRows() {
     row.children[0].textContent = r.name + "  —  " + stage;
     row.children[1].textContent = ready ? "Downloaded and ready" : prepMeta(r);
     const bar = row.children[2], fill = bar.firstElementChild;
-    bar.classList.toggle("indet", !det && waiting);
-    fill.style.width = det ? pct + "%" : "0%";
+    // Unknown-length active downloads have progress but no total. They need
+    // the same cycling treatment as a waiting row, not an empty static bar.
+    const indeterminate = !det && !ready;
+    bar.classList.toggle("indet", indeterminate);
+    // Do not leave an inline 0% width on the fill: inline styles beat the
+    // stylesheet's .indet width and make the cycling animation invisible.
+    fill.style.width = indeterminate ? "" : pct + "%";
   }
   if (!native && !rows.length) removeGlobalStrip();
 }
@@ -198,7 +207,7 @@ export function startPrepWatcher() {
   const tick = async () => {
     if (!prepActive()) { removeGlobalStrip(); _prepTimer = null; return; }
     const before = prepSignature();
-    _prepTimer = setTimeout(tick, 2500);
+    _prepTimer = setTimeout(tick, 750);
     try {
       await refreshInfo({ keepForms: true, jobs: false });
       const now = prepSignature();

@@ -10,6 +10,8 @@
 - [x] In the fetch card art page with Magic selected, the MTG card preferences expansion settings have all the toggles in individual rows. Use the standard 4 column layout.
 - [x] In advanced mode when you open the console it overlaps the pages. Make sure the console doesn't overlap pages.
 - [x] If you start the create PDF job and change pages and the job finishes, you don't get the open pdf button.
+    - [x] The initial bug is fixed but it takes far too long for the job to show up after changes pages. I timed about 2.5 seconds for the "Done" box to show up after changing from fetch card art back to create pdf. Let's tighten the timings so it shows up significantly quicker.
+- [x] The most recent initial setup of the app from sha f23211d failed to initialize the main repo. A subsequent initalization from the settings was successful but in the event this happens again add retry logic to the getting started page.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
