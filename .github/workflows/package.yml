@@ -462,7 +462,9 @@ jobs:
         # the app runs and after the normal close path.
         run: |
           $ws = (Resolve-Path .).Path
-          $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
+          $requestedData = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
+          New-Item -ItemType Directory -Force $requestedData | Out-Null
+          $env:SCM_WORKBENCH_DATA = (Resolve-Path $requestedData).Path
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $stdout = Join-Path $env:RUNNER_TEMP "wb-shell-stdout.log"
@@ -527,7 +529,9 @@ jobs:
         # closed port are the evidence; no broad process kill is used.
         run: |
           $ws = (Resolve-Path .).Path
-          $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-reap-data"
+          $requestedData = Join-Path $env:RUNNER_TEMP "wb-reap-data"
+          New-Item -ItemType Directory -Force $requestedData | Out-Null
+          $env:SCM_WORKBENCH_DATA = (Resolve-Path $requestedData).Path
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru

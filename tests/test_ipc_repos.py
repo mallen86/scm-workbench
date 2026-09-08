@@ -278,7 +278,8 @@ class RepoIpcTests(unittest.TestCase):
             with lock:
                 count["active"] += 1
                 count["peak"] = max(count["peak"], count["active"])
-                entered.set()
+                if count["active"] == 2:
+                    entered.set()
             self.assertTrue(release.wait(3))
             with lock:
                 count["active"] -= 1
