@@ -16,7 +16,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -42,19 +41,18 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 ///
 /// The worker is the app's only long-lived child and it in turn spawns the
 /// job processes the user runs; a plain `kill` leaves those running. So we
-/// terminate the group the child was placed in: its own process group on
-/// macOS (a SIGKILL to the group reaches every descendant). On Windows the
-/// tree is contained by the job object assigned at spawn; the application
-/// keeps that handle until shutdown, so this is a no-op there and the direct
-/// child's death is what matters.
+/// terminate the group the child was placed in: its verified worker process
+/// group on macOS. Upstream jobs intentionally have their own groups and Python
+/// reaps them on protocol EOF before this fallback. On Windows the complete tree
+/// is contained by the retained kill-on-close job object.
 ///
-/// Safe to call unconditionally: on a child that was never grouped it does
-/// nothing but a harmless signal to a pid that may already be reaped.
+/// Callers must still own an unreaped Child; signalling a stale numeric PID or
+/// process-group identifier is forbidden.
 fn kill_worker_tree(child: &Child) {
     #[cfg(target_os = "macos")]
     {
-        // The child sits in the process group created in spawn_worker (pgid ==
-        // its own pid). `kill(-pgid, SIGKILL)` from libc signals the whole group.
+        // The ready handshake proves pgid == pid. `kill(-pgid, SIGKILL)`
+        // terminates the worker group after cooperative upstream-job cleanup.
         unsafe {
             let pid = child.id() as libc::pid_t;
             libc::kill(-pid, libc::SIGKILL);
@@ -66,18 +64,12 @@ fn kill_worker_tree(child: &Child) {
     }
 }
 
-/// Loopback port the worker binds. 8038 (not the legacy 8037) so the
-/// prototype can never collide with a still-running legacy server child.
-const WORKER_PORT: u16 = 8038;
-
 /// Type shared with the watchdog thread: the live worker child, if any.
 type WorkerSlot = Arc<Mutex<Option<Child>>>;
 
-/// Reap the worker on *any* drop of the last handle to the slot — a backstop
-/// so the child can never outlive the shell: a normal close goes through the
-/// `CloseRequested` path, but a hard kill (Activity Monitor / End Task,
-/// `kill -9`, a crash) skips it, and without this the worker is reparented
-/// to init (`PPID 1`) and holds its port, wedging the *next* launch.
+/// Reap the worker whenever application state is dropped during normal
+/// unwinding. A hard shell kill cannot run Rust destructors; kernel closure of
+/// protocol stdin is the independent worker-side backstop for that path.
 ///
 /// On macOS the worker is also put in its own process group (see
 /// `spawn_worker`) so a signal reaches every grandchild too; on Windows it is
@@ -103,8 +95,12 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         if let Some(mut child) = self.slot.lock().ok().and_then(|mut g| g.take()) {
-            // Kill the process group / job first (reaches grandchildren), then
-            // the direct child, then reap it.
+            // A reaped Child must never be signalled after its PID is reusable.
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            // Kill the process group / job first, then the direct child and
+            // reap it. Python handles separately-grouped upstream jobs on EOF.
             kill_worker_tree(&child);
             let _ = child.kill();
             let _ = child.wait();
@@ -431,14 +427,6 @@ fn main() {
             // CloseRequested still takes the slot first, making shutdown
             // idempotent while retaining the Drop backstop for hard exits.
 
-            // We own the port: if a previous (hard-killed) instance left its
-            // worker listening, stop it; if a foreign program has the port, we
-            // decline to start rather than evict it.
-            if let Err(e) = claim_worker_port(WORKER_PORT, &log_path) {
-                fail_window(&window, &data, "This app's port is held by another program.", &e);
-                return Ok(());
-            }
-
             // The managed Worker keeps the slot reaped if no close event
             // fires, while the explicit close path remains authoritative.
             match spawn_worker(&data, &root, &log_path, &py, worker) {
@@ -490,9 +478,9 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The window goes, the worker goes with it: kill the whole tree
-            // (process group / job object) so no grandchild is left holding the
-            // port, then reap the direct child.
+            // The window goes, protocol EOF first gives Python a bounded
+            // chance to reap its jobs. Native process-group/job-object
+            // termination remains the fallback and hard-exit backstop.
             if let WindowEvent::CloseRequested { .. } = event {
                 window.app_handle().state::<WorkerRpc>().shutdown();
                 if let Some(mut child) = window
@@ -502,9 +490,27 @@ fn main() {
                     .ok()
                     .and_then(|mut g| g.take())
                 {
-                    kill_worker_tree(&child);
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // Closing protocol stdin lets Python stop and reap its
+                    // separately-grouped upstream jobs before the worker exits.
+                    // Fall back to the native process-tree backstop only if
+                    // bounded cooperative shutdown does not complete.
+                    let deadline = Instant::now() + Duration::from_secs(6);
+                    let mut exited = false;
+                    while Instant::now() < deadline {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                exited = true;
+                                break;
+                            }
+                            Ok(None) => thread::sleep(Duration::from_millis(50)),
+                            Err(_) => break,
+                        }
+                    }
+                    if !exited {
+                        kill_worker_tree(&child);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 }
             }
         })
@@ -680,9 +686,9 @@ fn worker_python(root: &Path, data: &Path) -> PathBuf {
     candidates.into_iter().next().unwrap_or_default()
 }
 
-/// Spawn the UI server as a supervised child: protocol stdio is piped to
-/// WorkerRpc, stderr remains in the server log, and the data area is pinned
-/// via env (same contract as before).
+/// Spawn the Python worker as a supervised child: protocol stdio is piped to
+/// WorkerRpc, stderr remains in the worker log, and the data area is pinned
+/// via env. The worker runs the stdio-only `--ipc` mode.
 fn spawn_worker(
     data: &Path,
     root: &Path,
@@ -713,8 +719,6 @@ fn spawn_worker(
         .arg("utf8")
         .arg("-m")
         .arg("scm_workbench.server")
-        .arg("--port")
-        .arg(WORKER_PORT.to_string())
         .arg("--no-browser")
         .arg("--ipc");
     // The package is importable from the app root (dev) or from <root>/app
@@ -738,12 +742,10 @@ fn spawn_worker(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    // macOS: put the worker in its OWN process group (pgid == its pid) so the
-    // kill in kill_worker_tree / the close path reaches the worker *and every
-    // job it spawns* with one signal. `setpgid(0,0)` from the child's entry
-    // is the standard "new session/group for this child" idiom; we do it in
-    // the parent via the post-spawn call below instead, because the worker is
-    // launched with a redirected stdio and we want the group set immediately.
+    // macOS: retain the post-spawn parent setpgid attempt. Exec can win that
+    // race, so the Python worker also establishes and verifies pgid == pid
+    // before its private ready handshake. Upstream jobs use their own groups
+    // and are reaped cooperatively on protocol EOF.
     let child = cmd.spawn()?;
 
     // Assign the child before doing any further startup work. The job handle
@@ -771,20 +773,24 @@ fn spawn_worker(
     let _ = worker;
 
     // macOS: move the (already running) worker into its own process group so
-    // `kill(-pgid, SIGKILL)` reaches it and every job it spawns. Done from the
+    // `kill(-pgid, SIGKILL)` reaches the worker. Done from the
     // *parent* after spawn, via setpgid(child_pid, child_pid) — a parent may
     // regroup its direct child, and this is the form that does not touch the
     // child's exec. (The pre-spawn `posix_spawnattr_setpgid` route failed on
     // the runner: an exception in the pre-exec hook aborts the whole spawn.)
-    // If it can't be grouped we simply skip — reaping the direct child still
-    // happens in the Drop backstop below, we just lose the grandchild sweep.
+    // If exec wins, record the miss; the worker's self-grouping and exact
+    // readiness response are the mandatory fallback before UI admission.
     #[cfg(target_os = "macos")]
     {
         let pid = child.id() as libc::pid_t;
-        // setpgid(pid,0) == "new group whose id is pid"; only valid while the
-        // child has not yet changed its own group. Best-effort, non-fatal.
-        unsafe {
-            libc::setpgid(pid, pid);
+        // setpgid(pid,pid) is valid only before the child execs or after the
+        // worker has made itself group leader.
+        let grouped = unsafe { libc::setpgid(pid, pid) };
+        if grouped != 0 {
+            record(
+                log_path,
+                "[shell] parent setpgid raced worker exec; awaiting worker self-grouping",
+            );
         }
     }
 
@@ -936,28 +942,20 @@ mod embedded_tests {
     }
 
     #[test]
-    fn transitional_readiness_requires_port_and_owned_child() {
-        assert!(owned_worker_ready_state(true, true));
-        assert!(!owned_worker_ready_state(false, true));
-        assert!(!owned_worker_ready_state(true, false));
-        assert!(!owned_worker_ready_state(false, false));
-    }
-
-    #[test]
     fn navigation_policy_rejects_loopback_and_external_urls() {
         assert!(is_embedded_url(&embedded_index_url()));
         let mut spa_route = embedded_index_url();
         spa_route.set_path("/pdf");
         assert!(is_embedded_url(&spa_route));
         assert!(!is_embedded_url(
-            &Url::parse("http://127.0.0.1:8038/").unwrap()
+            &Url::parse("http://127.0.0.1:9999/").unwrap()
         ));
         assert!(!is_embedded_url(
             &Url::parse("https://example.com/").unwrap()
         ));
         #[cfg(windows)]
         for unsafe_url in [
-            "http://tauri.localhost:8038/",
+            "http://tauri.localhost:9999/",
             "http://user@tauri.localhost/",
             "http://sub.tauri.localhost/",
         ] {
@@ -965,7 +963,7 @@ mod embedded_tests {
         }
         #[cfg(not(windows))]
         for unsafe_url in [
-            "tauri://localhost:8038/",
+            "tauri://localhost:9999/",
             "tauri://user@localhost/",
             "tauri://sub.localhost/",
         ] {
@@ -996,91 +994,23 @@ mod windows_tests {
     }
 }
 
-/// Transitional readiness requires both the loopback listener and the child
-/// this launch placed in its supervised slot. A foreign listener alone is
-/// never accepted; the next slice removes this port check with the listener.
-fn owned_worker_ready_state(port_ready: bool, owns_child: bool) -> bool {
-    port_ready && owns_child
+fn take_exited_worker(slot: &WorkerSlot) -> Option<std::process::ExitStatus> {
+    let mut guard = slot.lock().ok()?;
+    let status = guard.as_mut()?.try_wait().ok()??;
+    // try_wait has reaped the process. Remove the stale Child immediately so
+    // Drop can never signal a recycled PID/process-group identifier.
+    guard.take();
+    Some(status)
 }
 
-fn owned_worker_ready(slot: &WorkerSlot) -> bool {
-    owned_worker_ready_state(
-        port_open(WORKER_PORT),
-        slot.lock().ok().map(|g| g.is_some()).unwrap_or(false),
-    )
-}
-
-/// Wait until the worker answers on the transitional loopback port (or it
-/// dies), then show the already-embedded UI. Keep watching: if the worker
-/// dies later, the embedded window says so instead of going quiet.
+/// Wait for the worker's bounded native handshake (or a child failure), then
+/// show the already-embedded UI. The RPC timeout bounds startup failure UX.
 fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: WorkerRpc) {
-    // The child died before the initial readiness check (spawn succeeded, the
-    // worker bailed in its first instants). The old page said "ended before
-    // it was ready" - true, but it leaves the user staring at a dead window
-    // when the real problem is usually the port being held by a leftover
-    // (the macOS window, denied the network, can never say "the port is
-    // busy" for itself, because its own webview is the thing that's denied;
-    // this check is the honest substitute). Name it.
-    if let Some(code) = slot
-        .lock()
-        .ok()
-        .and_then(|mut g| g.as_mut().and_then(|c| c.try_wait().ok()).flatten())
-    {
-        let _ = app.run_on_main_thread({
-            let w = window.clone();
-            let d = data_dir();
-            move || {
-                let held = port_open(WORKER_PORT);
-                fail_window(
-                    &w,
-                    &d,
-                    if held {
-                        "The worker died at start-up, and its port (8038) is already taken by a program this launch did not start. The window can't use that listener, and it will not kill one it didn't spawn."
-                    } else {
-                        "The part of the app that does the work ended before it was ready."
-                    },
-                    &format!(
-                        "(exit code {code})\nA held port is usually a worker left over from a previous launch - close any SCM Workbench windows, and if this keeps happening, delete the app's own data area (the path below) and open it fresh.\n{}",
-                        log_tail(&d, 20)
-                    ),
-                );
-            }
-        });
-        rpc.shutdown();
-        return;
-    }
-
-    let mut up = false;
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while !up && Instant::now() < deadline {
-        if owned_worker_ready(&slot) {
-            up = true;
-            break;
-        }
-        // Worker already gone?
-        if let Some(code) = slot
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|c| c.try_wait().ok()).flatten())
-        {
-            let _ = app.run_on_main_thread({
-                let w = window.clone();
-                let d = data_dir();
-                move || {
-                    fail_window(
-                        &w,
-                        &d,
-                        "The part of the app that does the work ended before it was ready.",
-                        &format!("(exit code {code})\n{}", log_tail(&d, 20)),
-                    );
-                }
-            });
-            rpc.shutdown();
-            return;
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    if !up {
+    let readiness = rpc.ready();
+    if let Err(error) = readiness {
+        let code = take_exited_worker(&slot)
+            .map(|status| format!(" (exit code {status})"))
+            .unwrap_or_default();
         let _ = app.run_on_main_thread({
             let w = window.clone();
             let d = data_dir();
@@ -1088,8 +1018,8 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
                 fail_window(
                     &w,
                     &d,
-                    "The part of the app that does the work took too long to become ready.",
-                    &log_tail(&d, 20),
+                    "The part of the app that does the work could not become ready.",
+                    &format!("{error}{code}\n{}", log_tail(&d, 20)),
                 );
             }
         });
@@ -1100,8 +1030,8 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
     let _ = app.run_on_main_thread({
         let w = window.clone();
         move || {
-            // Keep the WebView on the Tauri asset origin. The worker's HTTP
-            // listener remains transitional IPC support, never a UI origin.
+            // Readiness was established over the supervised native protocol;
+            // the WebView remains on the embedded Tauri asset origin.
             let _ = w.navigate(embedded_index_url());
         }
     });
@@ -1109,11 +1039,7 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
     // Crash watcher: poll the child; if it exits, surface it.
     loop {
         thread::sleep(Duration::from_secs(2));
-        match slot
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|c| c.try_wait().ok()).flatten())
-        {
+        match take_exited_worker(&slot) {
             Some(code) => {
                 let _ = app.run_on_main_thread({
                     let w = window.clone();
@@ -1135,145 +1061,11 @@ fn watch_worker(app: AppHandle, slot: WorkerSlot, window: WebviewWindow, rpc: Wo
     }
 }
 
-/// Make this instance the sole owner of the worker port.
-///
-/// A previous instance whose window was killed hard (End Task, a crash) can
-/// leave its python worker behind, still listening — the window is what
-/// normally reaps it. If our port is held by one of our own process kinds
-/// (a python worker or this app's exe) we stop it and take the port. If it
-/// belongs to anything else we refuse to start: we do not displace an
-/// unrelated program's port.
-fn claim_worker_port(port: u16, log_file: &Path) -> Result<(), String> {
-    if !port_open(port) {
-        return Ok(());
-    }
-    #[cfg(windows)]
-    {
-        let out = Command::new("netstat")
-            .args(["-ano"])
-            .output()
-            .map_err(|e| format!("could not inspect port {port}: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let want = format!(":{port}");
-        let pids: Vec<u32> = text
-            .lines()
-            .filter(|l| l.contains(&want) && l.contains("LISTENING"))
-            .filter_map(|l| l.split_whitespace().last())
-            .filter_map(|p| p.parse::<u32>().ok())
-            .collect();
-        for pid in pids {
-            let line = Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
-                .unwrap_or_default();
-            let name = line
-                .split(',')
-                .next()
-                .unwrap_or("")
-                .trim_matches('"')
-                .to_string();
-            let ours = name == "python.exe" || name == "scm workbench.exe";
-            record(
-                log_file,
-                &format!(
-                    "[shell] port {port} is held by pid {pid} ({name}) — {}",
-                    if ours {
-                        "a leftover from a previous instance; stopping it"
-                    } else {
-                        "not one of our process kinds"
-                    }
-                ),
-            );
-            if !ours {
-                return Err(format!(
-                    "port {port} is in use by another program (pid {pid}, {name}) — close that program and try again"
-                ));
-            }
-            let _ = Command::new("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
-                .status();
-        }
-        for _ in 0..20 {
-            if !port_open(port) {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        Err(format!(
-            "port {port} is still in use after stopping the previous instance — try again in a moment"
-        ))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // lsof names the listener; a leftover of this app's own kind is
-        // stopped, a foreign holder declines the start (same contract as
-        // Windows above).
-        let out = Command::new("lsof")
-            .args(["-i", &format!(":{port}"), "-sTCP:LISTEN", "-t", "-n", "-P"])
-            .output()
-            .map_err(|e| format!("could not inspect port {port}: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let pids: Vec<u32> = text
-            .lines()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .collect();
-        for pid in pids {
-            let line = Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "comm="])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default();
-            let name = line.rsplit('/').next().unwrap_or(line.as_str()).to_string();
-            let ours = name.starts_with("python") || name == "SCM Workbench";
-            record(
-                log_file,
-                &format!(
-                    "[shell] port {port} is held by pid {pid} ({name}) — {}",
-                    if ours {
-                        "a leftover from a previous instance; stopping it"
-                    } else {
-                        "not one of our process kinds"
-                    }
-                ),
-            );
-            if !ours {
-                return Err(format!(
-                    "port {port} is in use by another program (pid {pid}, {name}) — close that program and try again"
-                ));
-            }
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-        }
-        for _ in 0..20 {
-            if !port_open(port) {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        Err(format!(
-            "port {port} is still in use after stopping the previous instance — try again in a moment"
-        ))
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = log_file;
-        Err(format!(
-            "port {port} is in use — another instance (or program) is holding it; close it and try again"
-        ))
-    }
-}
-
 /// Append one line to the app log (best effort — logging must never panic the shell).
 fn record(path: &Path, line: &str) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{line}");
     }
-}
-
-fn port_open(port: u16) -> bool {
-    TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
 /// Replace the window contents with a plain, loud error page. Must be called

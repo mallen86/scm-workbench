@@ -3,7 +3,6 @@
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -31,6 +30,7 @@ class FlushCapture(io.BytesIO):
 class IpcProtocolTests(unittest.TestCase):
     def test_success_methods_and_one_flush_per_line(self):
         fake = {
+            "ready": {"ready": True, "process_group": True},
             "info": {"fixture": "info"},
             "manifest": {"fixture": "manifest"},
             "settings.get": {"fixture": "settings"},
@@ -45,18 +45,20 @@ class IpcProtocolTests(unittest.TestCase):
         with mock.patch.object(server, "get_info", return_value=fake["info"]), \
              mock.patch.object(server, "get_manifest", return_value=fake["manifest"]), \
              mock.patch.object(server, "load_settings", return_value=fake["settings.get"]), \
+             mock.patch.object(server, "_IPC_PROCESS_GROUP_READY", True), \
              mock.patch.object(ipc.sys, "stderr", diagnostics), \
              mock.patch.object(ipc.sys, "stdout", process_stdout):
             ipc.serve_stdio(io.BytesIO(source), output)
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(responses, [
-            {"id": "0", "ok": True, "result": fake["info"]},
-            {"id": "1", "ok": True, "result": fake["manifest"]},
-            {"id": "2", "ok": True, "result": fake["settings.get"]},
+            {"id": "0", "ok": True, "result": fake["ready"]},
+            {"id": "1", "ok": True, "result": fake["info"]},
+            {"id": "2", "ok": True, "result": fake["manifest"]},
+            {"id": "3", "ok": True, "result": fake["settings.get"]},
         ])
-        self.assertEqual(output.flushes, 3)
+        self.assertEqual(output.flushes, 4)
         self.assertEqual(diagnostics.getvalue().splitlines(), [
-            "[ipc] served info", "[ipc] served manifest", "[ipc] served settings.get",
+            "[ipc] served ready", "[ipc] served info", "[ipc] served manifest", "[ipc] served settings.get",
         ])
         self.assertNotIn("[ipc]", output.getvalue().decode())
         self.assertEqual(process_stdout.getvalue(), "")
@@ -197,7 +199,48 @@ class IpcProtocolTests(unittest.TestCase):
                 else:
                     os.environ["SCM_WORKBENCH_DATA"] = old_env
 
-    def test_ipc_eof_stops_server_process(self):
+    def test_main_selects_ipc_before_http_bind_and_preserves_standalone_bind(self):
+        settings = json.loads(json.dumps(server.DEFAULT_SETTINGS))
+        settings["auto_open_browser"] = False
+        with mock.patch.object(server.sys, "argv", ["server", "--ipc", "--no-browser"]), \
+             mock.patch.object(server, "load_settings", return_value=settings), \
+             mock.patch.object(server, "reconcile_update_result"), \
+             mock.patch.object(server, "recover_offset_projection", return_value=None), \
+             mock.patch.object(server, "effective_dirs", return_value=(None, None)), \
+             mock.patch.object(server, "_in_wsl", return_value=False), \
+             mock.patch.object(server, "_update_daemon"), \
+             mock.patch.object(server, "_IPC_PROCESS_GROUP_READY", False), \
+             mock.patch.object(server.os, "setpgid", create=True), \
+             mock.patch.object(server.os, "getpgrp", return_value=123, create=True), \
+             mock.patch.object(server.os, "getpid", return_value=123), \
+             mock.patch.object(server, "start_http", side_effect=AssertionError("IPC must not bind HTTP")) as start_http, \
+             mock.patch("scm_workbench.ipc.serve_stdio") as serve_stdio:
+            server.main()
+        start_http.assert_not_called()
+        serve_stdio.assert_called_once()
+
+        class FakeHTTPServer:
+            server_address = ("127.0.0.1", 43210)
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        with mock.patch.object(server.sys, "argv", ["server", "--no-browser"]), \
+             mock.patch.object(server, "load_settings", return_value=settings), \
+             mock.patch.object(server, "reconcile_update_result"), \
+             mock.patch.object(server, "recover_offset_projection", return_value=None), \
+             mock.patch.object(server, "effective_dirs", return_value=(None, None)), \
+             mock.patch.object(server, "_in_wsl", return_value=False), \
+             mock.patch.object(server, "_update_daemon"), \
+             mock.patch.object(server, "start_http", return_value=FakeHTTPServer()) as start_http, \
+             mock.patch.object(server, "_diag"):
+            server.main()
+        start_http.assert_called_once_with("127.0.0.1", server.DEFAULT_PORT)
+
+    def test_ipc_eof_stops_server_process_without_starting_http(self):
         with tempfile.TemporaryDirectory(prefix="scm-workbench-ipc-eof-") as temp:
             env = dict(os.environ, SCM_WORKBENCH_DATA=temp, SCM_WORKBENCH_NO_BOOTSTRAP="1")
             process = subprocess.Popen(
@@ -206,20 +249,22 @@ class IpcProtocolTests(unittest.TestCase):
                 env=env,
             )
             try:
-                banner = []
-                while True:
-                    line = process.stderr.readline().decode("utf-8", "replace")
-                    if not line:
-                        break
-                    banner.append(line)
-                    if "UI:  http://" in line:
-                        break
-                ui_line = next(line for line in banner if "UI:  http://" in line)
-                match = re.search(r"UI:\s+http://[^:]+:(\d+)", ui_line)
-                self.assertIsNotNone(match)
-                with urllib.request.urlopen("http://127.0.0.1:%s/api/settings" % match.group(1), timeout=5) as response:
-                    self.assertEqual(json.loads(response.read())["port"], server.DEFAULT_PORT)
-                self.assertEqual(process.poll(), None)
+                request = json.dumps({"id": "ready", "method": "ready", "params": {}}).encode() + b"\n"
+                process.stdin.write(request)
+                process.stdin.flush()
+                response = json.loads(process.stdout.readline())
+                self.assertEqual(response, {"id": "ready", "ok": True, "result": {
+                    "ready": True, "process_group": True}})
+                self.assertIsNone(process.poll())
+
+                # --ipc intentionally ignores --port and never creates an HTTP
+                # listener; the packaged worker port must remain closed.
+                for port in (8038,):
+                    with self.subTest(port=port):
+                        with self.assertRaises(OSError):
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/up", timeout=0.2):
+                                pass
+
                 process.stdin.close()
                 process.wait(timeout=5)
                 self.assertEqual(process.returncode, 0)

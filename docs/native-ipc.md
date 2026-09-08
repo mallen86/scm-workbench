@@ -1,8 +1,8 @@
-# Native IPC: the first slice
+# Native IPC: final cutover slice 2
 
-This document describes the **current first native IPC slice**. It is a
-transitional boundary, not a claim that the Workbench's HTTP transport has
-been removed.
+This document describes the **current native IPC boundary**. Packaged workers
+use only the bounded JSON-lines transport; the standalone browser path remains
+available when the server is launched without `--ipc`.
 
 ## Architecture
 
@@ -11,14 +11,16 @@ The packaged app has one Tauri shell and one supervised Python worker:
 ```text
 SCM Workbench (Tauri native webview)
   └─ Python -m scm_workbench.server --ipc --no-browser
-       ├─ stdin/stdout: bounded JSON-lines RPC
-       └─ 127.0.0.1:8038: transitional standalone-browser compatibility
-                           listener (never the packaged WebView origin)
+       └─ stdin/stdout: bounded JSON-lines RPC
 ```
 
+The IPC worker does not bind a TCP socket. The standalone browser path is a
+separate invocation of `python -m scm_workbench.server` without `--ipc`.
+
 The worker is one process, not a native server plus a second Python server.
-It continues to own Workbench behavior and binds its existing loopback HTTP
-server as transitional compatibility support for standalone-browser flows.
+It owns Workbench behavior and reads bounded native requests from stdin. It
+never starts an HTTP listener in packaged mode. Standalone-browser flows retain
+the existing HTTP server when launched without `--ipc`.
 The packaged Tauri window stays inside the bounded embedded `ui/` frontend
 distribution (`index.html` and root-relative assets); it does not navigate to
 worker HTTP. The native
@@ -57,8 +59,12 @@ A request has this exact shape:
 ```
 
 `id` must be a non-empty string, `method` must be an allowed string, and
-`params` must be a JSON object. The exact public `wb_rpc` allowlist contains
-twenty-seven methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`params` must be a JSON object. The private shell startup handshake is `ready`
+with `{}` parameters and an exact
+`{"ready":true,"process_group":true}` result; the worker emits that result
+only after POSIX process-group containment is established (Windows relies on
+the retained kill-on-close job object). It is not exposed through public
+`wb_rpc`. The exact public `wb_rpc` allowlist contains twenty-seven methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
@@ -477,7 +483,9 @@ stdin and stdout pipes. It:
   oversized frames, and maps unknown error codes safely; and
 * applies a 10-second default call timeout. Worker EOF, a broken pipe, or a
   timeout marks the worker unavailable and wakes pending calls instead of
-  hanging the webview.
+  hanging the webview. Startup uses the private `ready` handshake once; a
+  child death or timeout produces the bounded embedded failure page rather
+  than a listener retry or an unbounded wait.
 
 The webview reaches one narrow Tauri command, `wb_rpc`. The Tauri capability
 ACL grants `allow-wb-rpc` to the embedded main window; there is no remote
@@ -488,11 +496,12 @@ a general native escape hatch.
 
 The shell supervises the same single worker for its entire lifetime. Closing
 the window or a hard shell exit reaps it and its descendants: macOS uses a
-process group and Windows uses a kill-on-close job object. The worker is
-started with `--ipc --no-browser`; it does not start another worker or browser.
+process group and Windows uses a kill-on-close job object; the IPC worker
+also exits when its direct shell supervisor disappears. The worker is started
+with `--ipc --no-browser`; it does not start another worker or browser.
 When the IPC input reaches EOF, the worker's shutdown callback terminates every
 active upstream job, waits/reaps each process, and joins every output-pump
-thread before the HTTP worker exits; no upstream job is left behind.
+thread before the IPC worker exits; no upstream job is left behind.
 
 Each installed pair of worker pipes has a session generation. EOF, malformed
 output, and pending-call failure are applied only to the generation that saw
@@ -558,9 +567,10 @@ deletion is native in packaged windows and retains only POST
 `/api/fs` for standalone browsers. Browser update routes remain compatibility
 endpoints. The repository HTTP routes remain the browser fallback only; a
 packaged native failure never retries them. The packaged smoke test treats the
-six native IPC markers as rendered-UI evidence and rejects any worker HTTP
-request other than its explicit `/up` liveness probe. Browser-mode HTTP
-fallback remains allowed, and native failure never retries over HTTP.
+six native IPC markers as rendered-UI evidence, requires port 8038 to remain
+closed while the app runs and after it exits, and rejects every worker HTTP
+request. Browser-mode HTTP fallback remains allowed, and native failure never
+retries over HTTP.
 
 ### App updates and release notes
 
@@ -611,7 +621,7 @@ latest entry):
 | Surface | Current transport | Status |
 | --- | --- | --- |
 | Bootstrap `info`, `manifest`, `settings.get` reads | Tauri → worker JSON-lines | **This first slice** |
-| Static assets, `/`, `/up`, and worker-origin routes | HTTP | Standalone-browser compatibility only; packaged assets/routes are embedded |
+| Static assets and worker-origin compatibility routes | Standalone HTTP only | Available when launched without `--ipc`; packaged assets/routes are embedded |
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
@@ -631,11 +641,9 @@ slice. New UI features must go through the transport adapter (`api()` and its
 native route selection), not add a direct `fetch()` that bypasses the boundary.
 When an endpoint group is migrated, it needs parity coverage against HTTP,
 Python and Tauri allowlist updates, UI selection tests, and a packaged smoke
-check before its HTTP path is removed. Keep the worker HTTP listener for
-standalone-browser compatibility until every relative call has a native
-transport or an explicit compatibility proxy. The packaged WebView itself
-must remain on the embedded origin; do not infer listener removal from this
-first slice.
+check before its HTTP path is removed. Standalone browser compatibility is a
+separate server invocation without `--ipc`; the packaged worker never binds
+that listener. The packaged WebView itself must remain on the embedded origin.
 
 ## Upstream ownership
 
@@ -672,16 +680,16 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 ```
 
 The packaged smoke checks use temporary data and
-`SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live, the
-embedded index/assets rendered, all three bootstrap reads, `preview`,
-`jobs.list`, and the startup-local `updates.get` read used native IPC, no
-WebView HTTP request reached the transitional listener, and the worker is
-reaped. The six startup markers are exactly the rendered-UI contract (`info`,
+`SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live while
+port 8038 remains closed, the embedded index/assets rendered, all three
+bootstrap reads, `preview`, `jobs.list`, and the startup-local `updates.get`
+read used native IPC, no WebView HTTP request occurred, and the worker is
+reaped on both soft close and hard shell termination. The six startup markers are exactly the rendered-UI contract (`info`,
 `manifest`, `settings.get`, `jobs.list`, `preview`, and `updates.get`); settings
 and offset writes do not add a startup mutation or fake marker. The static
 embedded check verifies the `/ui/...` asset tree and SPA route set. The
-standalone worker HTTP listener remains available for browser compatibility;
-port closure is intentionally not claimed by this slice.
+Standalone worker HTTP remains available for browser compatibility only when
+launched without `--ipc`; packaged port closure is part of the smoke contract.
 No repository startup marker is added: the six startup IPC markers remain the
 complete packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.

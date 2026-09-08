@@ -39,8 +39,8 @@ developer was prevented from opening" — click **Open Anyway**, then launch it
 again. This gate can return after an in-app update because the updater applies
 a fresh ad-hoc signature.
 
-The WebView now loads embedded assets and talks to its worker through native
-IPC, so **Local Network permission is not required**. If the worker cannot
+The WebView loads embedded assets and talks to its worker through native
+IPC. The packaged worker binds no TCP listener, so **Local Network permission is not required**. If the worker cannot
 start, the splash changes to an in-place diagnostic page with **Try again** and
 **Copy report** controls. Use that report and the path it displays rather than
 re-downloading: a quarantined copy that passed the shipped signature check is
@@ -48,17 +48,10 @@ not repaired by downloading the same bytes again. If macOS leaves the newly
 signed WebView in a stale state, quit every SCM Workbench instance and reopen
 it; reboot only if that does not clear the system state.
 
-## "The worker died at start-up, and its port (8038) is already taken…"
+## "The worker did not become ready"
 
-That page means a **leftover** from a previous instance (a window that was
-hard-killed, or a translocated copy that was cleaned up) is still holding the
-port, and this launch correctly declined to kill a process it didn't spawn.
-Fixes, in order:
-
-1. Quit any SCM Workbench windows that are still open (⌘Q — not just
-   closing the window if the app is still in the Dock).
-2. If it persists: delete the app's data area and open it fresh. The path is
-   on the page; it is typically
-   `~/Library/Application Support/scm-workbench`.
-3. If *that* persists, the stale listener can be found with:
-   `lsof -nP -i :8038 -sTCP:LISTEN` — the pid shown is the holder.
+The shell uses a bounded native JSON-lines handshake and shows the worker log
+in the embedded failure page if the child dies or times out. It does not probe,
+claim, or reclaim a TCP port. Quit any other SCM Workbench windows (⌘Q), then
+use **Try again**; if the problem persists, the report's data path is the
+place to inspect.

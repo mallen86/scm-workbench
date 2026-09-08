@@ -7,6 +7,7 @@ Zero dependencies beyond the Python standard library. Run:
     python -m scm_workbench.server             # starts on http://127.0.0.1:8037
     python -m scm_workbench.server --port 9000  # different port
     python -m scm_workbench.server --no-browser  # don't auto-open a browser tab
+    python -m scm_workbench.server --ipc --no-browser  # supervised native worker, no HTTP
 
 The UI shells out to the Python scripts in the two sister repos (auto-detected
 next to this folder, overridable in Settings) and streams their output live in
@@ -47,6 +48,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 from typing import Any, Dict, List, Optional, Tuple
 
+# `python -m scm_workbench.server` executes this file as `__main__`. Register
+# that live module under its package name before importing the IPC adapter, so
+# the adapter cannot create a second server module with independent jobs,
+# settings caches, readiness state, or shutdown hooks.
+if __name__ == "__main__":
+    sys.modules["scm_workbench.server"] = sys.modules[__name__]
+
 from scm_workbench import repo_sync, updater
 
 # The one version constant the whole app reports (About-card line, banner,
@@ -60,6 +68,7 @@ DEFAULT_PORT = 8037
 # True only while this process owns the native child JSON-lines transport.
 # stdout is reserved for protocol frames in that mode.
 _IPC_MODE = False
+_IPC_PROCESS_GROUP_READY = False
 
 # Native job responses and SSE frames share these conservative wire limits.
 # Log files remain complete on disk; only transmitted lines are clipped.
@@ -5142,6 +5151,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "ended": None,
         "duration": None,
         "proc": None,
+        "proc_lock": threading.Lock(),
+        "proc_reaped": False,
         "pump_thread": None,
         "scm_path": str(cwd) if cwd else None,
         "offset_lease": offset_lease,
@@ -5239,7 +5250,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 pass
             return None, [str(e)]
         if proc is not None:
-            _terminate_and_reap(proc)
+            _terminate_and_reap(proc, job.get("proc_lock"))
+            job["proc_reaped"] = proc.poll() is not None
         if job.get("offset_save"):
             try:
                 state = _load_offset_state_strict()
@@ -5265,27 +5277,85 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     return job, []
 
 
-def _terminate_and_reap(proc: subprocess.Popen) -> None:
-    """Stop a child after pump failure, and wait before releasing its lease."""
-    try:
-        if proc.poll() is None:
-            if os.name != "nt":
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except Exception:
-                    proc.terminate()
-            else:
-                proc.terminate()
-    except Exception:
-        try: proc.terminate()
-        except Exception: pass
-    try:
-        proc.wait(timeout=2)
-    except Exception:
-        try: proc.kill()
-        except Exception: pass
-        try: proc.wait(timeout=1)
-        except Exception: pass
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Force the exact managed job tree; never leave its grandchildren."""
+    if os.name != "nt":
+        try:
+            # _proc_kwargs creates every managed job with PGID == PID. Kill
+            # the group in one operation instead of waiting on its leader;
+            # a TERM-resistant grandchild must not escape when the leader exits.
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, OSError):
+            pass
+    else:
+        # Never pass a reaped/reusable PID to taskkill. During packaged app
+        # shutdown the outer Tauri job object remains the descendant backstop.
+        if proc.poll() is not None:
+            return
+        # taskkill targets this exact still-managed PID and its descendants;
+        # shell=False and CREATE_NO_WINDOW avoid a command shell or console.
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,
+                timeout=3,
+                check=False,
+                shell=False,
+            )
+            if completed.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    proc.kill()
+
+
+def _terminate_and_reap(proc: subprocess.Popen, proc_lock=None) -> None:
+    """Stop/reap a job while excluding every competing PID signal path."""
+    lock_context = proc_lock if proc_lock is not None else contextlib.nullcontext()
+    with lock_context:
+        try:
+            if proc.poll() is None:
+                _kill_process_group(proc)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                _kill_process_group(proc)
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+
+
+def _wait_job_process(job: dict, proc: subprocess.Popen) -> int:
+    """Reap under the per-job signal lock so PID reuse cannot race kill_job."""
+    proc_lock = job.setdefault("proc_lock", threading.Lock())
+    poll = getattr(proc, "poll", None)
+    if not callable(poll):
+        # Deterministic test/embedding doubles may expose only wait(). Real
+        # subprocess.Popen instances always take the nonblocking path below.
+        with proc_lock:
+            rc = proc.wait()
+            job["proc_reaped"] = True
+            return rc
+    while True:
+        with proc_lock:
+            rc = poll()
+            if rc is not None:
+                job["proc_reaped"] = True
+                return rc
+        time.sleep(0.02)
 
 
 def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
@@ -5295,7 +5365,7 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         for line in iter(proc.stdout.readline, b""):
             s = line.decode("utf-8", "replace").rstrip("\r\n")
             _append_job_line(job, s, log_f=log_f)
-        rc = proc.wait()
+        rc = _wait_job_process(job, proc)
         with JOBS_LOCK:
             kill_requested = bool(job.get("kill_requested"))
             pump_lines = list(job.get("log_lines") or [])
@@ -5356,7 +5426,8 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
     except Exception as exc:
         # A logging/decoding/persistence failure must never release the lease
         # while the child can still read or write the shared SCM projection.
-        _terminate_and_reap(proc)
+        _terminate_and_reap(proc, job.get("proc_lock"))
+        job["proc_reaped"] = proc.poll() is not None
         try:
             _append_job_line(job, f"job pump failed: {exc}", log_f=log_f)
         except Exception:
@@ -5398,20 +5469,24 @@ def kill_job(job_id: str) -> bool:
         job = JOBS.get(job_id)
         if not job or job.get("status") != "running" or job.get("proc") is None:
             return False
-        job["kill_requested"] = True
         proc = job["proc"]
-    try:
-        if os.name != "nt":
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
-                proc.terminate()
-        else:
-            # CREATE_NEW_PROCESS_GROUP is retained by _proc_kwargs; terminate
-            # is the portable Windows fallback for controlled child fixtures.
-            proc.terminate()
-    except Exception:
-        pass
+        proc_lock = job.setdefault("proc_lock", threading.Lock())
+
+    # The pump uses this same lock for its only poll/reap operation. Therefore
+    # a PID/PGID cannot become reusable between this liveness check and the
+    # exact managed-tree signal below.
+    with proc_lock:
+        if job.get("proc_reaped") or proc.poll() is not None:
+            job["proc_reaped"] = True
+            return False
+        with JOBS_LOCK:
+            if job.get("status") != "running" or job.get("proc") is not proc:
+                return False
+            job["kill_requested"] = True
+        try:
+            _kill_process_group(proc)
+        except Exception:
+            pass
     return True
 
 
@@ -5445,7 +5520,7 @@ def stop_all_jobs(timeout: float = 2.0) -> None:
             proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
             try:
-                proc.kill()
+                _kill_process_group(proc)
             except Exception:
                 pass
             try:
@@ -7336,7 +7411,7 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
 
 
 def main():
-    global _IPC_MODE
+    global _IPC_MODE, _IPC_PROCESS_GROUP_READY
     ap = argparse.ArgumentParser(description="SCM Workbench — local UI for silhouette-card-maker + scm-extras")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default=None,
@@ -7344,7 +7419,7 @@ def main():
                          "so the Windows host can also reach the server)")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
     ap.add_argument("--ipc", action="store_true",
-                    help="Also serve the native newline-delimited JSON child protocol")
+                    help="Run the native newline-delimited JSON child protocol without HTTP")
     args = ap.parse_args()
     _IPC_MODE = bool(args.ipc)
 
@@ -7387,7 +7462,63 @@ def main():
         # platform keeps the loopback-only default.
         host = "0.0.0.0" if _in_wsl() else "127.0.0.1"
 
-    # Bind before emitting the banner so --port 0 can report the actual port.
+    def _start_background_tasks() -> None:
+        # These tasks are independent of transport.  In IPC mode they remain
+        # daemonized so the protocol reader is the worker's only lifetime
+        # owner; EOF below performs the authoritative job shutdown.
+        threading.Thread(target=_update_daemon, daemon=True, name="updater").start()
+        if os.environ.get("SCM_WORKBENCH_PACKAGED") == "1" and not os.environ.get("SCM_WORKBENCH_NO_BOOTSTRAP"):
+            from scm_workbench import bootstrap as _first_boot
+
+            def _first_boot_then() -> None:
+                _first_boot.run_first_boot(
+                    DATA_DIR,
+                    log=lambda message="": _diag(message),
+                )
+                invalidate_manifest_cache()
+
+            threading.Thread(
+                target=_first_boot_then, daemon=True, name="first-boot",
+            ).start()
+
+    if args.ipc:
+        # IPC workers have no browser compatibility listener at all.  Keep
+        # stdout exclusively for the bounded JSON-lines protocol and let EOF
+        # own the same supervised job shutdown as the native shell.
+        from scm_workbench import ipc
+
+        def _ipc_eof() -> None:
+            stop_all_jobs()
+
+        # The parent's post-spawn setpgid is intentionally retained, but exec
+        # can win that race on POSIX. The worker therefore establishes and
+        # verifies its own group before acknowledging readiness. If startup
+        # fails before here no upstream job has been admitted, so direct-child
+        # cleanup remains sufficient.
+        if os.name != "nt":
+            try:
+                os.setpgid(0, 0)
+            except (AttributeError, OSError) as exc:
+                # A worker already launched as a session/group leader may get
+                # EPERM from the idempotent setpgid call; its observed group is
+                # the security property, not that syscall's return value.
+                if not (hasattr(os, "getpgrp") and os.getpgrp() == os.getpid()):
+                    _diag(f"[ipc] process-group setup failed: {exc}", error=True)
+                    raise SystemExit(1) from exc
+            if os.getpgrp() != os.getpid():
+                _diag("[ipc] process-group setup failed: worker is not group leader", error=True)
+                raise SystemExit(1)
+            _IPC_PROCESS_GROUP_READY = True
+        if os.name == "nt":
+            _IPC_PROCESS_GROUP_READY = True
+        _start_background_tasks()
+        try:
+            ipc.serve_stdio(on_eof=_ipc_eof)
+        finally:
+            stop_all_jobs()
+        return
+
+    # Standalone mode retains the ordinary HTTP/browser path unchanged.
     server = start_http(host, port)
     actual_port = server.server_address[1]
 
@@ -7417,67 +7548,21 @@ def main():
         w("\n  Local only — not exposed to your network. Ctrl+C to stop.\n")
     _diag(out.getvalue())
 
-    ipc_eof = None
-    if args.ipc:
-        # Import after the HTTP server is bound: this is one supervised child,
-        # with the compatibility HTTP transport and native transport sharing
-        # the same authoritative server functions. EOF owns shutdown as well
-        # as merely waking the request loop, so no upstream child survives a
-        # native shell disappearing.
-        from scm_workbench import ipc
-        ipc_eof = threading.Event()
-        def _ipc_eof() -> None:
-            stop_all_jobs()
-            ipc_eof.set()
-        ipc.start_thread(on_eof=_ipc_eof)
-
-    # Record this server's pid so a future launcher can spot (and stop) an
-    # orphaned UI server left over from a previous launch.
+    # Record this server's pid only for standalone HTTP mode.  An IPC worker
+    # has no listener for a future launcher to reclaim.
     try:
         (DATA_DIR / "server.pid").write_text(str(os.getpid()), encoding="ascii")
     except Exception:
         pass
 
-    # At start-up (and then once a day) — quietly check for a newer release.
-    # The same daemon first polls the helper result so handoff completion is
-    # reconciled even when it lands just after this worker starts.
-    threading.Thread(target=_update_daemon, daemon=True, name="updater").start()
+    _start_background_tasks()
 
-    # Packaged app, first boot: the app fetches its own managed repo copies
-    # (the UI is already up — the dashboard banner shows the live progress
-    # from bootstrap.json; see bootstrap.run_first_boot). Dev checkouts keep
-    # the classic behavior: no automatic cloning, Settings drives it.
-    if os.environ.get("SCM_WORKBENCH_PACKAGED") == "1" and not os.environ.get("SCM_WORKBENCH_NO_BOOTSTRAP"):
-        from scm_workbench import bootstrap as _first_boot
-
-        def _first_boot_then() -> None:
-            _first_boot.run_first_boot(
-                DATA_DIR,
-                log=lambda message="": _diag(message),
-            )
-            # The manifest cache was built at startup from whatever the repos
-            # held then (nothing, on a true first boot), and the mtime signal
-            # it uses can be older than every write the bootstrap just made —
-            # so rebuild it explicitly now the clones are in place.
-            invalidate_manifest_cache()
-
-        threading.Thread(
-            target=_first_boot_then, daemon=True, name="first-boot",
-        ).start()
-
-    if not args.ipc and not args.no_browser and settings.get("auto_open_browser", True):
+    if not args.no_browser and settings.get("auto_open_browser", True):
         threading.Timer(0.4, _open_browser, args=(browser_url,)).start()
 
     try:
-        if ipc_eof is None:
-            # Preserve the ordinary HTTP server path exactly.
-            server.serve_forever()
-        else:
-            # A short timeout keeps EOF responsive while retaining the normal
-            # ThreadingHTTPServer handler behavior, including SSE requests.
-            server.timeout = 0.2
-            while not ipc_eof.is_set():
-                server.handle_request()
+        # Preserve the ordinary HTTP server path exactly.
+        server.serve_forever()
     except KeyboardInterrupt:
         _diag("\nBye.")
     finally:

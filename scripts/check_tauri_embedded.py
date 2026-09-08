@@ -19,6 +19,8 @@ def fail(message: str) -> None:
 
 if CONFIG["build"]["frontendDist"] != "../ui":
     fail("frontendDist must embed only the bounded UI tree")
+if "devUrl" in CONFIG["build"]:
+    fail("packaged/source Tauri must not retain a loopback devUrl")
 if "remote" in CAPABILITY:
     fail("the packaged capability must not grant a worker HTTP remote origin")
 for page in ("loading.html", "index.html"):
@@ -32,6 +34,14 @@ if "{origin}/index.html" not in MAIN:
     fail("ready navigation does not target the embedded index")
 if "window.location.replace" in MAIN or "window.location.href" in MAIN:
     fail("the shell must not navigate the WebView with window.location")
+# Packaged workers are stdio-only.  Keeping these checks here prevents a
+# future startup edit from reintroducing port reclamation (which could kill an
+# unrelated process) or a second transport accidentally.
+for forbidden in ("WORKER_PORT", "claim_worker_port", "port_open", "lsof", "netstat", "taskkill", ".arg(\"--port\")"):
+    if forbidden in MAIN:
+        fail(f"packaged shell must not reclaim or depend on a worker port: {forbidden}")
+if ".arg(\"--ipc\")" not in MAIN:
+    fail("worker is not started in IPC mode")
 if ".on_navigation(is_embedded_url)" not in MAIN:
     fail("the WebView navigation policy is not asset-only")
 try:

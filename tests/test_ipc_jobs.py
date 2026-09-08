@@ -1,6 +1,12 @@
 """Deterministic native job protocol and bounded-stream checks."""
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -113,6 +119,81 @@ class NativeJobsTests(unittest.TestCase):
         kill.assert_called_once_with("a")
         proc.wait.assert_called()
         pump.join.assert_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group fallback")
+    def test_force_kill_targets_the_jobs_fixed_process_group(self):
+        proc = mock.Mock(pid=12345)
+        with mock.patch.object(server.os, "killpg") as killpg:
+            server._kill_process_group(proc)
+        killpg.assert_called_once_with(12345, signal.SIGKILL)
+        proc.kill.assert_not_called()
+
+    def test_windows_force_kill_targets_exact_managed_pid_tree(self):
+        proc = mock.Mock(pid=4321)
+        proc.poll.return_value = None
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(server.os, "name", "nt"), \
+             mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            server._kill_process_group(proc)
+        self.assertEqual(run.call_args.args[0], ["taskkill", "/PID", "4321", "/T", "/F"])
+        self.assertFalse(run.call_args.kwargs["shell"])
+        proc.kill.assert_not_called()
+
+        reaped = mock.Mock(pid=4321)
+        reaped.poll.return_value = 0
+        with mock.patch.object(server.os, "name", "nt"), \
+             mock.patch.object(server.subprocess, "run") as stale_run:
+            server._kill_process_group(reaped)
+        stale_run.assert_not_called()
+        reaped.kill.assert_not_called()
+
+    def test_kill_job_never_signals_an_already_reaped_pid(self):
+        proc = mock.Mock(pid=777)
+        proc.poll.return_value = 0
+        server.JOBS["a"].update(
+            proc=proc, status="running", proc_lock=threading.Lock(),
+            proc_reaped=True,
+        )
+        with mock.patch.object(server, "_kill_process_group") as force:
+            self.assertFalse(server.kill_job("a"))
+        force.assert_not_called()
+        self.assertNotIn("kill_requested", server.JOBS["a"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group integration")
+    def test_kill_job_reaps_a_term_resistant_grandchild_group(self):
+        script = (
+            "import subprocess,sys,time; "
+            "p=subprocess.Popen([sys.executable,'-c',"
+            "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)']); "
+            "print(p.pid,flush=True); time.sleep(60)"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script], stdout=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        grandchild = int(proc.stdout.readline().strip())
+        server.JOBS["a"].update(proc=proc, status="running")
+        try:
+            self.assertTrue(server.kill_job("a"))
+            proc.wait(timeout=3)
+            for _ in range(40):
+                state = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(grandchild)],
+                    text=True, capture_output=True,
+                ).stdout.strip()
+                if not state or state.startswith("Z"):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("grandchild survived the managed job-group kill")
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=3)
 
 
 if __name__ == "__main__":

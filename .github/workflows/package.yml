@@ -118,11 +118,10 @@ jobs:
           fi
           # The Info.plist: the bundle's identity (identifier + version
           # straight from the pinned tauri.conf.json, so the About panel
-          # matches the app's reported version), the icon, and the WKWebView
-          # opt-in that current macOS requires for plain-HTTP loopback
-          # (the UI is served by the app's own worker, so *local*
-          # networking is the only rule it needs). The template lives in the
-          # repo; sed fills the version.
+          # matches the app's reported version), and the icon. The WebView
+          # uses the embedded Tauri asset origin; the packaged worker is
+          # stdio-only and requires no local-network permission. The template
+          # lives in the repo; sed fills the version.
           version=$(python3 -c "import json; print(json.load(open('$ws/tauri/tauri.conf.json'))['version'])")
           sed "s/__VERSION__/$version/" "$ws/tauri/Info.plist.template" > "$app/Contents/Info.plist"
       - name: Sign the bundle (ad-hoc)
@@ -149,23 +148,9 @@ jobs:
           done
           codesign --force --deep --sign - "$app"
       - name: Smoke test - embedded UI and native IPC
-        # The smoke proves two separate things: /up proves the transitional
-        # worker is live, while the six IPC markers prove that the embedded
-        # index and its root-relative embedded assets invoked native calls.
-        # The worker HTTP listener is deliberately still present for browser
-        # compatibility; this check does not claim that port is closed.
+        # The six IPC markers are rendered-UI evidence.  The packaged worker
+        # has no HTTP listener: port 8038 must stay closed for the whole run.
         # NO_BOOTSTRAP keeps the test hermetic (no 570 MB repo clone in CI).
-        # Before launch, importing the bundled job dependencies also proves
-        # the runtime is self-contained and loadable on arm64.
-        #
-        # The payload (app/, runtime/) lives under Contents/ - inside the
-        # code-signature seal the Sign step made. Anything that runs from
-        # there (and anything it wakes) can write back into that sealed
-        # tree after the seal was made; the Re-seal step below folds such
-        # writes into a fresh seal, and the zip gate verifies the archived
-        # bytes - so a download can never carry a seal the tree no longer
-        # matches. This run is kept write-free where possible (the env var
-        # stops the pyc compiles, the precheck and the worker included).
         run: |
           set -uo pipefail
           ws="$GITHUB_WORKSPACE"
@@ -175,62 +160,89 @@ jobs:
           data="$(mktemp -d /private/tmp/scm-workbench-smoke.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
+          port_closed() {
+            python3 - "$1" <<'PY'
+          import socket, sys
+          sock = socket.socket()
+          sock.settimeout(0.2)
+          try:
+              sock.connect(("127.0.0.1", int(sys.argv[1])))
+          except OSError:
+              raise SystemExit(0)
+          finally:
+              sock.close()
+          raise SystemExit(1)
+          PY
+          }
+          worker_alive() {
+            pgrep -f "$app/Contents/runtime/python/install/bin/python3.13.*scm_workbench.server" >/dev/null 2>&1
+          }
           "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/smoke.log" 2>&1 &
           app_pid=$!
-          worker_ok=""
           ipc_ok=""
           for i in $(seq 1 90); do
             sleep 1
-            if [ -z "$worker_ok" ] && curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then
-              worker_ok=1
-              echo "smoke: the worker answers on 127.0.0.1:8038"
+            if ! port_closed 8038; then
+              echo "smoke FAILED: packaged worker opened port 8038" >&2
+              exit 1
             fi
-            # These native IPC markers are rendered-UI evidence: they are
-            # emitted only after the embedded index's JavaScript invokes the
-            # worker bridge. There is intentionally no WebKit/worker-origin
-            # marker in this smoke now that the WebView never visits HTTP.
-            if [ -n "$worker_ok" ] && grep -q "\[ipc\] served info" "$data/server-tauri.log" 2>/dev/null \
+            if worker_alive && grep -q "\[ipc\] served ready" "$data/server-tauri.log" 2>/dev/null \
+               && grep -q "\[ipc\] served info" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served manifest" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served settings.get" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served jobs.list" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served preview" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served updates.get" "$data/server-tauri.log" 2>/dev/null; then
               ipc_ok=1
+              break
             fi
-            if [ -n "$ipc_ok" ]; then break; fi
           done
-          # A *soft* kill here is deliberate for the smoke test: it exercises the
-          # normal CloseRequested path (the window closes cleanly). The separate
-          # "Reap check" step below is what proves the hard-kill path reaps too.
-          kill "$app_pid" 2>/dev/null || true
-          if [ -z "$worker_ok" ]; then
+          if [ -z "$ipc_ok" ]; then
             echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
-            echo "smoke FAILED: the worker never answered" >&2
-            exit 1
-          fi
-          if [ -z "$ipc_ok" ]; then
-            echo "---- server log (last 80) ----"; tail -80 "$data/server-tauri.log" 2>/dev/null || true
             echo "smoke FAILED: the embedded UI did not produce all six native IPC markers" >&2
+            kill -9 "$app_pid" 2>/dev/null || true
             exit 1
           fi
-          # The only HTTP traffic expected in this transitional slice is the
-          # explicit /up liveness probe above. Any other worker request would
-          # mean the WebView escaped the embedded Tauri asset origin.
-          if grep -E '^\[workbench\] "(GET|POST) /' "$data/server-tauri.log" \
-              | grep -v '"GET /up HTTP/' >/dev/null 2>&1; then
-            echo "---- server log ----"; cat "$data/server-tauri.log" >&2
+          # Soft close proof: send the native application a quit AppleEvent so
+          # Tauri runs its window/EOF cleanup rather than relying on SIGTERM.
+          if ! osascript -e "tell application \"$app\" to quit"; then
+            echo "smoke FAILED: could not request native app close" >&2
+            kill -9 "$app_pid" 2>/dev/null || true
+            exit 1
+          fi
+          for i in $(seq 1 60); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          if kill -0 "$app_pid" 2>/dev/null; then
+            echo "smoke FAILED: native app close did not exit" >&2
+            kill -9 "$app_pid" 2>/dev/null || true
+            exit 1
+          fi
+          wait "$app_pid" 2>/dev/null || true
+          sleep 1
+          if worker_alive; then
+            echo "smoke FAILED: soft close left the supervised worker running" >&2
+            pgrep -fl "$app/Contents/runtime/python/install/bin/python3.13.*scm_workbench.server" >&2 || true
+            exit 1
+          fi
+          if ! port_closed 8038; then
+            echo "smoke FAILED: port 8038 opened or remained open after soft close" >&2
+            exit 1
+          fi
+          # No worker HTTP request is possible in this mode; any such log line
+          # would indicate an escaped WebView transport.
+          if grep -E '^\[workbench\] "(GET|POST) /' "$data/server-tauri.log" >/dev/null 2>&1; then
+            cat "$data/server-tauri.log" >&2
             echo "smoke FAILED: the embedded WebView made an HTTP request" >&2
             exit 1
           fi
-          echo "smoke: worker up, embedded index/assets rendered, six native IPC markers observed, and no WebView HTTP request"
+          echo "smoke: embedded index/assets rendered, six native IPC markers observed, port stayed closed, and soft close reaped the worker"
       - name: Reap check - a hard-killed app must not orphan its worker
-        # The inverse of the blank-window class: a worker that outlives the app
-        # (PPID 1, port still held) wedges the *next* launch. The old smoke
-        # cleaned up with a soft kill and then had to pkill the runtime by
-        # hand - the comment there literally says "the hard kill above orphans
-        # it". That is now the failure mode we refuse: hard-kill the shell and
-        # assert the worker reaped itself, with no manual pkill to rescue it.
+        # Hard termination cannot run CloseRequested.  Process identity and
+        # the closed port are the evidence; no broad process reclamation is
+        # permitted.
         run: |
           set -uo pipefail
           ws="$GITHUB_WORKSPACE"
@@ -239,41 +251,53 @@ jobs:
           data="$(mktemp -d /private/tmp/scm-workbench-reap.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
+          port_closed() {
+            python3 - "$1" <<'PY'
+          import socket, sys
+          sock = socket.socket()
+          sock.settimeout(0.2)
+          try:
+              sock.connect(("127.0.0.1", int(sys.argv[1])))
+          except OSError:
+              raise SystemExit(0)
+          finally:
+              sock.close()
+          raise SystemExit(1)
+          PY
+          }
+          worker_alive() {
+            pgrep -f "$app/Contents/runtime/python/install/bin/python3.13.*scm_workbench.server" >/dev/null 2>&1
+          }
           "$app/Contents/MacOS/SCM Workbench" > "$ws/build/macos/reap.log" 2>&1 &
           app_pid=$!
-          # wait (bounded, ~5s is plenty - the worker binds in well under a
-          # second) for the worker to come up on the loopback port
           worker_ok=""
-          for i in $(seq 1 10); do
+          for i in $(seq 1 20); do
             sleep 0.5
-            if curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then worker_ok=1; break; fi
+            if ! port_closed 8038; then
+              echo "reap FAILED: packaged worker opened port 8038" >&2
+              kill -9 "$app_pid" 2>/dev/null || true
+              exit 1
+            fi
+            if worker_alive && grep -q "\[ipc\] served ready" "$data/server-tauri.log" 2>/dev/null; then worker_ok=1; break; fi
           done
           if [ -z "$worker_ok" ]; then
-            # A worker that never comes up is a *startup* problem - the smoke
-            # step above already covers that class and would have failed the
-            # run. We can't prove reaping without a live worker, so report and
-            # move on rather than mask a startup regression as "reaping failed".
             echo "---- reap.log ----"; cat "$ws/build/macos/reap.log" 2>/dev/null || true
-            echo "reap: SKIPPED - the worker never came up on its own, so there is nothing to reap (startup is covered by the smoke step above)"
+            echo "reap FAILED: the worker never completed the native handshake" >&2
             kill -9 "$app_pid" 2>/dev/null || true
-            exit 0
+            exit 1
           fi
-          # the whole point: HARD-kill the shell (the Activity-Monitor case) and
-          # confirm the worker is gone on its own. No pkill in between.
           kill -9 "$app_pid" 2>/dev/null || true
-          # give the shell's exit a beat to run its teardown
           sleep 1
-          # the worker is the bundle's runtime python running scm_workbench.server
-          if pgrep -f "$app/Contents/runtime/python" >/dev/null 2>&1; then
-            echo "reap FAILED: a worker outlived the hard-killed app (it would orphan to init and wedge the next launch)" >&2
-            pgrep -fl "$app/Contents/runtime/python" >&2 || true
+          if worker_alive; then
+            echo "reap FAILED: a worker outlived the hard-killed app" >&2
+            pgrep -fl "$app/Contents/runtime/python/install/bin/python3.13.*scm_workbench.server" >&2 || true
             exit 1
           fi
-          if curl -sf "http://127.0.0.1:8038/up" >/dev/null 2>&1; then
-            echo "reap FAILED: the worker still answers on 8038 after the app died" >&2
+          if ! port_closed 8038; then
+            echo "reap FAILED: port 8038 remained open after hard termination" >&2
             exit 1
           fi
-          echo "reap: hard-killed the app, the worker reaped itself, the port is free - no orphan"
+          echo "reap: hard-killed the app, native worker reaped, and port stayed closed"
       - name: Re-seal the bundle after the smoke test
         # The smoke run is the last thing that executes from the bundle, and
         # a straggler it wakes can keep writing after the Sign step's seal.
@@ -431,11 +455,9 @@ jobs:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
       - name: Smoke test - embedded UI and native IPC
-        # /up proves the transitional worker is live; the six native IPC
-        # markers prove the embedded index and root-relative assets rendered.
-        # The worker HTTP listener remains transitional browser support, so
-        # this smoke does not claim that port is closed. NO_BOOTSTRAP keeps
-        # the test hermetic (no 570 MB repo clone in CI).
+        # The six IPC markers prove the embedded UI rendered.  A packaged
+        # worker has no HTTP listener, so port 8038 is checked closed while
+        # the app runs and after the normal close path.
         run: |
           $ws = (Resolve-Path .).Path
           $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
@@ -446,17 +468,12 @@ jobs:
           $ipcOk = $false
           for ($i = 0; $i -lt 90; $i++) {
             Start-Sleep -Seconds 1
-            if (-not $workerOk) {
-              try {
-                Invoke-WebRequest -Uri "http://127.0.0.1:8038/up" -TimeoutSec 2 -UseBasicParsing | Out-Null
-                $workerOk = $true
-                Write-Host "smoke: the worker answers on 127.0.0.1:8038"
-              } catch { }
-            }
+            $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
+            if ($port.TcpTestSucceeded) { throw "smoke: packaged worker opened port 8038" }
             if (Test-Path $log) {
+              $workerOk = [bool](-not $proc.HasExited -and (Select-String -Path $log -Pattern '\[ipc\] served ready' -Quiet))
               # These markers are emitted only after the embedded index's
-              # JavaScript invokes the worker bridge, so they are rendered-UI
-              # evidence without relying on a worker-origin WebView request.
+              # JavaScript invokes the native bridge.
               $ipcOk = [bool]((Select-String -Path $log -Pattern '\[ipc\] served info' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served manifest' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served settings\.get' -Quiet) -and
@@ -466,35 +483,55 @@ jobs:
             }
             if ($workerOk -and $ipcOk) { break }
           }
-          if (-not $workerOk) { throw "smoke: the worker never answered on 127.0.0.1:8038" }
+          if (-not $workerOk) { throw "smoke: the worker never completed the native handshake" }
           if (-not $ipcOk) { throw "smoke: the embedded UI did not produce all six native IPC markers" }
           if (Test-Path $log) {
-            # The /up liveness probe above is the only expected worker HTTP
-            # request. Any other request means the WebView escaped the
-            # embedded Tauri asset origin.
-            $httpRequests = Get-Content $log | Where-Object { $_ -match '^\[workbench\] "(GET|POST) /' -and $_ -notmatch '"GET /up HTTP/' }
-            if ($httpRequests) {
-              Get-Content $log
-              throw "smoke: the embedded WebView made an HTTP request"
-            }
-            # No WebKit marker is expected: the WebView never visits worker HTTP.
-            if (Select-String -Path $log -Pattern 'webview session on / \(WebKit\)' -Quiet) {
-              Get-Content $log
-              throw "smoke: a WebView HTTP navigation was observed"
-            }
+            $httpRequests = Get-Content $log | Where-Object { $_ -match '^\[workbench\] "(GET|POST) /' }
+            if ($httpRequests) { Get-Content $log; throw "smoke: the embedded WebView made an HTTP request" }
           }
-          Write-Host "smoke: worker up, embedded index/assets rendered, six native IPC markers observed, and no WebView HTTP request"
-          $proc | Stop-Process -Force
-          $proc.WaitForExit()
+          # Soft close proof: close the native window and verify the job object
+          # reaps the worker without force-killing it.
+          if (-not $proc.CloseMainWindow()) { throw "smoke: could not request a soft close" }
+          if (-not $proc.WaitForExit(15000)) { throw "smoke: soft close did not exit" }
           Start-Sleep -Seconds 2
-          # The worker is contained by the existing Windows job-object
-          # supervision. Assert that it reaped itself; do not manually kill it
-          # here, since that would mask a broken containment guarantee.
           $remaining = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
             Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" }
-          if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "smoke: the supervised worker outlived the app" }
+          if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "smoke: the supervised worker outlived soft close" }
           $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
-          if ($port.TcpTestSucceeded) { throw "smoke: port 8038 remains open after the app exited" }
+          if ($port.TcpTestSucceeded) { throw "smoke: port 8038 remains open after soft close" }
+          Write-Host "smoke: embedded index/assets rendered, six native IPC markers observed, port stayed closed, and soft close reaped the worker"
+      - name: Reap check - a hard-killed app must not orphan its worker
+        # Hard termination bypasses CloseRequested. Process identity and the
+        # closed port are the evidence; no broad process kill is used.
+        run: |
+          $ws = (Resolve-Path .).Path
+          $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-reap-data"
+          $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
+          $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
+          $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
+          $ready = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
+            if ($port.TcpTestSucceeded) { $proc.Kill(); throw "reap FAILED: packaged worker opened port 8038" }
+            if (Test-Path $log) {
+              $ready = [bool](-not $proc.HasExited -and (Select-String -Path $log -Pattern '\[ipc\] served ready' -Quiet))
+            }
+            if ($ready) { break }
+          }
+          if (-not $ready) {
+            $proc.Kill()
+            throw "reap FAILED: worker never completed the native handshake"
+          }
+          $proc.Kill()
+          $proc.WaitForExit()
+          Start-Sleep -Seconds 2
+          $remaining = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+            Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" }
+          if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "reap FAILED: worker outlived hard termination" }
+          $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
+          if ($port.TcpTestSucceeded) { throw "reap FAILED: port 8038 remained open after hard termination" }
+          Write-Host "reap: hard-killed the app, native worker reaped, and port stayed closed"
       - name: Zip
         run: |
           $app = Join-Path (Resolve-Path .).Path "build\windows"

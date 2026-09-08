@@ -4,8 +4,7 @@
   "version": "0.3.6",
   "identifier": "com.mallen.scmworkbench",
   "build": {
-    "frontendDist": "../ui",
-    "devUrl": "http://127.0.0.1:8038"
+    "frontendDist": "../ui"
   },
   "app": {
     "windows": [],

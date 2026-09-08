@@ -32,6 +32,7 @@ MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
 # Private methods are accepted by the child protocol for narrow native
 # helpers, but are deliberately absent from Rust's public wb_rpc allowlist.
 PRIVATE_METHODS = frozenset((
+    "ready",
     "files.export_selected", "files.export_poll", "files.export_cancel",
     "fs.delete_images_start", "fs.delete_images_poll",
 ))
@@ -93,9 +94,14 @@ def dispatch(request: dict) -> dict:
     from scm_workbench import server
 
     try:
-        if method in ("info", "manifest", "settings.get", "jobs.list", "updates.get", "updates.start") and params:
+        if method in ("ready", "info", "manifest", "settings.get", "jobs.list", "updates.get", "updates.start") and params:
             return _bad_params(request_id, f"{method} does not accept parameters")
-        if method == "info":
+        if method == "ready":
+            result = {
+                "ready": True,
+                "process_group": bool(server._IPC_PROCESS_GROUP_READY),
+            }
+        elif method == "info":
             result = server.get_info()
         elif method == "manifest":
             result = server.get_manifest()

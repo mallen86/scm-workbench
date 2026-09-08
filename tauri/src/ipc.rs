@@ -136,6 +136,23 @@ impl WorkerRpc {
         }
     }
 
+    /// Complete the private startup handshake.  This is intentionally not in
+    /// the public WebView allowlist: only the shell may establish readiness.
+    pub(crate) fn ready(&self) -> Result<(), String> {
+        let result = self.call_unchecked("ready", json!({}))?;
+        let object = result
+            .as_object()
+            .ok_or_else(|| "malformed worker readiness response".to_string())?;
+        if object.len() == 2
+            && object.get("ready").and_then(Value::as_bool) == Some(true)
+            && object.get("process_group").and_then(Value::as_bool) == Some(true)
+        {
+            Ok(())
+        } else {
+            Err("malformed worker readiness response".to_string())
+        }
+    }
+
     pub fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         validate_method(method)?;
         if method == "fs.delete_images" {
@@ -681,6 +698,7 @@ mod tests {
             "fs.delete_images_start",
             "fs.delete_images_poll",
             "server.shutdown",
+            "ready",
             "__import__",
         ] {
             assert_eq!(validate_method(method), Err("unknown method".into()));
@@ -796,10 +814,7 @@ mod tests {
         let rpc = WorkerRpc::with_timeout(Duration::from_millis(10));
         rpc.inner.available.store(true, Ordering::Release);
         let started = std::time::Instant::now();
-        assert_eq!(
-            rpc.call("info", json!({})),
-            Err("worker unavailable".into())
-        );
+        assert_eq!(rpc.ready(), Err("worker unavailable".into()));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -908,12 +923,13 @@ mod tests {
     #[test]
     fn pipe_round_trip_correlates_response_and_handles_eof() {
         let mut child = python_child(
-            "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'id':r['id'],'ok':True,'result':{'method':r['method']}}), flush=True)\n",
+            "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n result={'ready':True,'process_group':True} if r['method']=='ready' else {'method':r['method']}\n print(json.dumps({'id':r['id'],'ok':True,'result':result}), flush=True)\n",
         );
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let rpc = WorkerRpc::with_timeout(Duration::from_millis(500));
         rpc.install(stdin, stdout).unwrap();
+        rpc.ready().unwrap();
         assert_eq!(
             rpc.call("manifest", json!({})).unwrap()["method"],
             "manifest"
