@@ -392,6 +392,9 @@ jobs:
           path: build/macos/scm-workbench-macos.zip
           retention-days: 1
   windows:
+    # Temporarily disabled while Windows packaging is debugged on a native
+    # Windows machine. Keep the job definition intact for an easy re-enable.
+    if: ${{ false }}
     runs-on: windows-latest  # x64 release target
     env:
       # Keep Cargo's generated target tree outside the checkout; frontendDist
@@ -592,7 +595,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [macos, windows]
+    needs: [macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -603,8 +606,9 @@ jobs:
       - name: Attach the built artifacts to the release
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
-        # the tag push, or from the GitHub UI. This job only adds the two
-        # build artifacts to it. If no release exists for the tag, a bare one
+        # the tag push, or from the GitHub UI. While Windows packaging is
+        # disabled, this job adds only the macOS installer and updater payload.
+        # If no release exists for the tag, a bare one
         # is created as a fallback so the artifacts are never lost.
         # (--repo on every call: this job has no checkout for gh to infer
         #  the owner/repo from.)
@@ -612,4 +616,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip scm-workbench-windows.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip --clobber
