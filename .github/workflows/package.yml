@@ -423,6 +423,9 @@ jobs:
         run: |
           cargo run --quiet -- --update-helper --data-dir C:\definitely\not-canonical\..\data --token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --mode invalid
           if ($LASTEXITCODE -eq 0) { throw "invalid helper mode was accepted" }
+          # The nonzero status above is the expected assertion result. Clear it
+          # so the pwsh action wrapper does not convert success into a failure.
+          $global:LASTEXITCODE = 0
       - name: Build the Tauri shell
         # --features custom-protocol is what `cargo tauri build` passes: it
         # makes Tauri serve the window's initial page from its embedded asset
