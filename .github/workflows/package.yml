@@ -319,20 +319,10 @@ jobs:
       - name: Build the drag-to-Applications installer
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/build/macos"
-          root=".dmg-root"
-          rm -rf "$root" scm-workbench-macos.dmg
-          mkdir "$root"
-          # ditto preserves the signed bundle's symlinks and metadata. The
-          # Applications alias gives the mounted image the standard macOS
-          # install interaction: drag the app icon onto Applications.
-          ditto "SCM Workbench.app" "$root/SCM Workbench.app"
-          ln -s /Applications "$root/Applications"
-          touch "$root/.metadata_never_index"
-          codesign --verify --verbose=2 "$root/SCM Workbench.app"
-          hdiutil create -quiet -ov -format UDZO -volname "SCM Workbench" \
-            -srcfolder "$root" scm-workbench-macos.dmg
-          rm -rf "$root"
+          "$GITHUB_WORKSPACE/scripts/build_macos_dmg.sh" \
+            "$GITHUB_WORKSPACE/build/macos/SCM Workbench.app" \
+            "$GITHUB_WORKSPACE/tauri/dmg-background.png" \
+            "$GITHUB_WORKSPACE/build/macos/scm-workbench-macos.dmg"
       - name: Build the automatic-update payload
         # The user-facing installer is the DMG. The app's existing
         # transactional updater still consumes this exact ZIP on tagged
@@ -359,6 +349,9 @@ jobs:
           test -d "$mount/SCM Workbench.app"
           test -L "$mount/Applications"
           test "$(readlink "$mount/Applications")" = "/Applications"
+          test -f "$mount/.DS_Store"
+          test -f "$mount/.background/background.png"
+          test ! -e "$mount/.metadata_never_index"
           codesign --verify --verbose=2 "$mount/SCM Workbench.app"
           case "$(file -b "$mount/SCM Workbench.app/Contents/MacOS/SCM Workbench")" in
             *arm64*) ;;

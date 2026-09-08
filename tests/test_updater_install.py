@@ -289,11 +289,20 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(windows.name, "windows-staging")
         self.assertTrue((windows / "SCM Workbench.exe").is_file())
 
-        workflow = (Path(__file__).resolve().parents[1] /
-                    ".github/workflows/package.yml").read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/package.yml").read_text(encoding="utf-8")
+        builder = (root / "scripts/build_macos_dmg.sh").read_text(encoding="utf-8")
+        background = (root / "tauri/dmg-background.png").read_bytes()
         self.assertIn("scm-workbench-macos.dmg", workflow)
-        self.assertIn('ln -s /Applications "$root/Applications"', workflow)
-        self.assertIn("hdiutil create", workflow)
+        self.assertIn("scripts/build_macos_dmg.sh", workflow)
+        self.assertIn('ln -s /Applications "$root/Applications"', builder)
+        self.assertIn('set position of item "SCM Workbench.app" to {170, 225}', builder)
+        self.assertIn('set position of item "Applications" to {490, 225}', builder)
+        self.assertIn('set background picture of viewOptions', builder)
+        self.assertNotIn(".metadata_never_index", builder)
+        self.assertEqual(background[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(tuple(int.from_bytes(background[n:n + 4], "big")
+                               for n in (16, 20)), (660, 400))
         # The DMG is the manual installer; retain the exact ZIP consumed by
         # the existing transactional in-app updater on tagged releases.
         self.assertIn("scm-workbench-macos.zip", workflow)
