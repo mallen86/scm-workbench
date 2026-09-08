@@ -148,8 +148,8 @@ jobs:
           done
           codesign --force --deep --sign - "$app"
       - name: Smoke test - embedded UI and native IPC
-        # The six IPC markers are rendered-UI evidence.  The packaged worker
-        # has no HTTP listener: port 8038 must stay closed for the whole run.
+        # Private ready plus five public UI IPC markers are render evidence.
+        # The packaged worker has no HTTP listener: port 8038 must stay closed.
         # NO_BOOTSTRAP keeps the test hermetic (no 570 MB repo clone in CI).
         run: |
           set -uo pipefail
@@ -191,7 +191,6 @@ jobs:
                && grep -q "\[ipc\] served manifest" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served settings.get" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served jobs.list" "$data/server-tauri.log" 2>/dev/null \
-               && grep -q "\[ipc\] served preview" "$data/server-tauri.log" 2>/dev/null \
                && grep -q "\[ipc\] served updates.get" "$data/server-tauri.log" 2>/dev/null; then
               ipc_ok=1
               break
@@ -200,7 +199,7 @@ jobs:
           if [ -z "$ipc_ok" ]; then
             echo "---- smoke.log ----"; cat "$ws/build/macos/smoke.log" || true
             echo "---- server log ----"; cat "$data/server-tauri.log" 2>/dev/null || true
-            echo "smoke FAILED: the embedded UI did not produce all six native IPC markers" >&2
+            echo "smoke FAILED: the embedded UI did not produce ready plus five public native IPC markers" >&2
             kill -9 "$app_pid" 2>/dev/null || true
             exit 1
           fi
@@ -238,7 +237,7 @@ jobs:
             echo "smoke FAILED: the embedded WebView made an HTTP request" >&2
             exit 1
           fi
-          echo "smoke: embedded index/assets rendered, six native IPC markers observed, port stayed closed, and soft close reaped the worker"
+          echo "smoke: embedded UI emitted ready plus five public IPC markers, port stayed closed, and soft close reaped the worker"
       - name: Reap check - a hard-killed app must not orphan its worker
         # Hard termination cannot run CloseRequested.  Process identity and
         # the closed port are the evidence; no broad process reclamation is
@@ -455,8 +454,8 @@ jobs:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
       - name: Smoke test - embedded UI and native IPC
-        # The six IPC markers prove the embedded UI rendered.  A packaged
-        # worker has no HTTP listener, so port 8038 is checked closed while
+        # Private ready plus five public UI IPC markers prove rendering.
+        # A packaged worker has no HTTP listener, so port 8038 is checked while
         # the app runs and after the normal close path.
         run: |
           $ws = (Resolve-Path .).Path
@@ -478,13 +477,12 @@ jobs:
                 (Select-String -Path $log -Pattern '\[ipc\] served manifest' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served settings\.get' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served jobs\.list' -Quiet) -and
-                (Select-String -Path $log -Pattern '\[ipc\] served preview' -Quiet) -and
                 (Select-String -Path $log -Pattern '\[ipc\] served updates\.get' -Quiet))
             }
             if ($workerOk -and $ipcOk) { break }
           }
           if (-not $workerOk) { throw "smoke: the worker never completed the native handshake" }
-          if (-not $ipcOk) { throw "smoke: the embedded UI did not produce all six native IPC markers" }
+          if (-not $ipcOk) { throw "smoke: the embedded UI did not produce ready plus five public native IPC markers" }
           if (Test-Path $log) {
             $httpRequests = Get-Content $log | Where-Object { $_ -match '^\[workbench\] "(GET|POST) /' }
             if ($httpRequests) { Get-Content $log; throw "smoke: the embedded WebView made an HTTP request" }
@@ -499,7 +497,7 @@ jobs:
           if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "smoke: the supervised worker outlived soft close" }
           $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
           if ($port.TcpTestSucceeded) { throw "smoke: port 8038 remains open after soft close" }
-          Write-Host "smoke: embedded index/assets rendered, six native IPC markers observed, port stayed closed, and soft close reaped the worker"
+          Write-Host "smoke: embedded UI emitted ready plus five public IPC markers, port stayed closed, and soft close reaped the worker"
       - name: Reap check - a hard-killed app must not orphan its worker
         # Hard termination bypasses CloseRequested. Process identity and the
         # closed port are the evidence; no broad process kill is used.

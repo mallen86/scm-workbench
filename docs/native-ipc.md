@@ -567,10 +567,10 @@ deletion is native in packaged windows and retains only POST
 `/api/fs` for standalone browsers. Browser update routes remain compatibility
 endpoints. The repository HTTP routes remain the browser fallback only; a
 packaged native failure never retries them. The packaged smoke test treats the
-six native IPC markers as rendered-UI evidence, requires port 8038 to remain
-closed while the app runs and after it exits, and rejects every worker HTTP
-request. Browser-mode HTTP fallback remains allowed, and native failure never
-retries over HTTP.
+private `ready` handshake plus five unconditional public UI IPC markers as
+rendered-UI evidence, requires port 8038 to remain closed while the app runs
+and after it exits, and rejects every worker HTTP request. Browser-mode HTTP
+fallback remains allowed, and native failure never retries over HTTP.
 
 ### App updates and release notes
 
@@ -681,17 +681,19 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 
 The packaged smoke checks use temporary data and
 `SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live while
-port 8038 remains closed, the embedded index/assets rendered, all three
-bootstrap reads, `preview`, `jobs.list`, and the startup-local `updates.get`
-read used native IPC, no WebView HTTP request occurred, and the worker is
-reaped on both soft close and hard shell termination. The six startup markers are exactly the rendered-UI contract (`info`,
-`manifest`, `settings.get`, `jobs.list`, `preview`, and `updates.get`); settings
-and offset writes do not add a startup mutation or fake marker. The static
-embedded check verifies the `/ui/...` asset tree and SPA route set. The
-Standalone worker HTTP remains available for browser compatibility only when
-launched without `--ipc`; packaged port closure is part of the smoke contract.
-No repository startup marker is added: the six startup IPC markers remain the
-complete packaged smoke contract. The lower-layer Python, Rust, and Node
+port 8038 remains closed, the embedded index/assets rendered, the private
+`ready` handshake and five unconditional public reads (`info`, `manifest`,
+`settings.get`, `jobs.list`, and `updates.get`) used native IPC, no WebView HTTP
+request occurred, and the worker is reaped on both soft close and hard shell
+termination. `preview` is intentionally not a startup marker: with hermetic
+fresh data there is no SCM repository, so the Fetch form that requests a
+preview is not mounted. Settings and offset writes likewise do not add startup
+mutations or fake markers. The static embedded check verifies the `/ui/...`
+asset tree and SPA route set. The standalone worker HTTP remains available for
+browser compatibility only when launched without `--ipc`; packaged port
+closure is part of the smoke contract. No repository startup marker is added;
+the private handshake plus five public startup markers remain the complete
+packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.
 Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
