@@ -14,7 +14,8 @@
      info.js      refreshInfo() and the boot-failure banner
      pages/*.js   one module per page (dashboard, fetch, pdf, offset, ...)
    ========================================================================== */
-import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import { getTauriInvoke } from "./transport.js";import { getUpdates } from "./updates-transport.js";import "./pages/dashboard.js";
+import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, go } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { firstBootPageNeeded, startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import { getTauriInvoke } from "./transport.js";import { getUpdates } from "./updates-transport.js";import "./pages/dashboard.js";
+import "./pages/preparing.js";
 import "./pages/fetch.js";
 import "./pages/pdf.js";
 import "./pages/offset.js";
@@ -57,7 +58,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (attempt) await new Promise(r => setTimeout(r, 800 + 700 * attempt));
     try {
       await refreshInfo();
-      bootPage();
+      if (firstBootPageNeeded()) go("preparing", null, { push: false });
+      else bootPage();
       startJobsPoll();
       startPrepWatcher();
       return;

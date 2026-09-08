@@ -1156,6 +1156,43 @@ body.mode-simple .console { display: none; }
   .theme-switch { margin: 0; }
 }
 
+/* ---- dedicated packaged first-launch screen ------------------------------ */
+.first-boot-page {
+  position: relative;
+  width: min(780px, 100%);
+  margin: clamp(18px, 7vh, 72px) auto 32px;
+  padding: clamp(26px, 5vw, 54px);
+  text-align: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 46%),
+    var(--surface-1);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .18);
+}
+.first-boot-close {
+  position: absolute; top: 16px; right: 16px;
+  width: 34px; height: 34px; padding: 7px;
+  display: grid; place-items: center;
+  color: var(--faint); background: transparent;
+  border: 1px solid transparent; border-radius: 9px; cursor: pointer;
+}
+.first-boot-close:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+.first-boot-close .ic { width: 18px; height: 18px; }
+.first-boot-mark {
+  width: 62px; height: 62px; margin: 0 auto 18px;
+  display: grid; place-items: center;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 18px;
+}
+.first-boot-mark .ic { width: 30px; height: 30px; }
+.first-boot-page h1 { margin: 0; font-size: clamp(25px, 4vw, 36px); letter-spacing: -.025em; }
+.first-boot-lead { max-width: 620px; margin: 12px auto 26px; color: var(--muted); line-height: 1.6; }
+.first-boot-progress { text-align: left; margin: 0; }
+.first-boot-progress .repoprog { margin-top: 18px; }
+.first-boot-actions { margin-top: 24px; display: flex; justify-content: center; align-items: center; gap: 14px; flex-wrap: wrap; }
+
 /* ---- first-launch preparation banner (packaged app) ---------------------- */
 .prep-phase {
   margin-top: 10px;

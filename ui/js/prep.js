@@ -37,6 +37,15 @@ export function prepActive() {
 }
 
 
+// The dedicated welcome screen is reserved for the packaged first-launch
+// bootstrap. Later checks/updates keep using the dashboard/sidebar progress
+// UI, and standalone-browser startup remains unchanged.
+export function firstBootPageNeeded() {
+  return !S.firstBootDismissed && !!S.info?.server?.is_packaged &&
+    !!S.info.server.active && (S.info.repos || []).some(r => !r.deployed);
+}
+
+
 // Structural identity: only the card's VISIBILITY is structural ("busy" =
 // something on screen, "done" = card must go). Row appearance, stage flips,
 // counters and speed are all patched in place — the bars never leave, so the
@@ -143,19 +152,30 @@ export function updatePrepRows() {
   const container = native || globalStrip();
   if (!container) return;
   retargetProws(container);
-  const rows = (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
+  // The first-boot page keeps both repositories visible so a finished row
+  // becomes a reassuring 100% “ready” row instead of disappearing. Existing
+  // dashboard/sidebar progress remains compact and shows only active work.
+  const showAll = native?.dataset.prepAll === "true";
+  const rows = showAll
+    ? (S.info.repos || [])
+    : (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
   ensurePrepRows(rows, container);
   for (const r of rows) {
     const row = S.prows[r.key];
     if (!row) continue;
     const p = r.progress || {};
-    const det = p.total > 0;
-    const pct = det ? Math.min(100, Math.round(100 * (p.done || 0) / p.total)) : 0;
-    row.children[0].textContent = r.name + "  —  " + (STAGE_NAMES[p.stage] || p.stage || "working");
-    row.children[1].textContent = prepMeta(r);
+    const ready = !r.progress && !!r.deployed;
+    const waiting = !r.progress && !r.deployed && !!S.info.server.active;
+    const det = ready || p.total > 0;
+    const pct = ready ? 100 : (p.total > 0
+      ? Math.min(100, Math.round(100 * (p.done || 0) / p.total)) : 0);
+    const stage = ready ? "ready" : waiting ? "waiting to start" :
+      (STAGE_NAMES[p.stage] || p.stage || "setup did not finish");
+    row.children[0].textContent = r.name + "  —  " + stage;
+    row.children[1].textContent = ready ? "Downloaded and ready" : prepMeta(r);
     const bar = row.children[2], fill = bar.firstElementChild;
-    bar.classList.toggle("indet", !det);
-    if (det) fill.style.width = pct + "%";
+    bar.classList.toggle("indet", !det && waiting);
+    fill.style.width = det ? pct + "%" : "0%";
   }
   if (!native && !rows.length) removeGlobalStrip();
 }

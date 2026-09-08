@@ -423,7 +423,7 @@ export function formCard(kind, opts = {}) {
           const sub = el("div", { class: "frow" });
           for (const k of rkeys) {
             const o = (g.options || []).find(x => x.key === k);
-            if (o && visible()) draw(o, k, sub);
+            if (o && visible(o)) draw(o, k, sub);
           }
           fill(sub);
           if (sub.childElementCount) row.append(sub);
@@ -431,19 +431,28 @@ export function formCard(kind, opts = {}) {
       } else {
         for (const k of keys) {
           const o = (g.options || []).find(x => x.key === k);
-          if (o && visible()) draw(o, k, row);
+          if (o && visible(o)) draw(o, k, row);
         }
         fill(row);
       }
       if (!row.childElementCount) return;
       card.append(row);
     };
-    // one frow per ordinary group, in manifest order. Keep explicitly
-    // collapsible preference groups collapsed in simple mode too: simplifying
-    // the main form must not promote infrequently-used settings into it.
-    for (const g of spec.groups || []) {
-      if (g.collapsible) appendCollapsibleGroup(g);
-      else placeGroup(g, g.options?.map(o => o.key) || []);
+    if (kind === "create_pdf" && rows.length) {
+      // PDF's everyday options span several advanced groups, so its
+      // kind-level row plan deliberately flattens across those groups. This
+      // also gives simple-only controls (such as MPCFill Crop) their one
+      // intended home without exposing the advanced collapsible sections.
+      const simpleGroup = { options: (spec.groups || []).flatMap(g => g.options || []) };
+      for (const keys of rows) placeGroup(simpleGroup, keys);
+    } else {
+      // one frow per ordinary fetch group, in manifest order. Keep explicitly
+      // collapsible preference groups collapsed in simple mode too: simplifying
+      // the main form must not promote infrequently-used settings into it.
+      for (const g of spec.groups || []) {
+        if (g.collapsible) appendCollapsibleGroup(g);
+        else placeGroup(g, g.options?.map(o => o.key) || []);
+      }
     }
   } else {
     for (const g of spec.groups || []) {

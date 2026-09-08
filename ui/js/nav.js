@@ -5,7 +5,7 @@ import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo }
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
-    dashboard: "Dashboard", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
+    dashboard: "Dashboard", preparing: "Getting ready", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
@@ -18,6 +18,8 @@ export function setNav(page) {
 export function pageFromPath() {
   const p = location.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
   if (p === "") return "dashboard";
+  // The preparation screen is session-transient, never a bookmarkable route.
+  if (p === "preparing") return null;
   return p in PAGES ? p : null;
 }
 

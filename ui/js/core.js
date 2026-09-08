@@ -108,6 +108,7 @@ export const S = {
   esIdx: 0,
   jobSub: null,
   timers: {},
+  firstBootDismissed: false,
 };
 
 
