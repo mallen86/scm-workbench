@@ -465,13 +465,26 @@ jobs:
           $env:SCM_WORKBENCH_DATA = Join-Path $env:RUNNER_TEMP "wb-smoke-data"
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
-          $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
+          $stdout = Join-Path $env:RUNNER_TEMP "wb-shell-stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "wb-shell-stderr.log"
+          $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          function Test-WorkbenchPort {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $attempt = $client.ConnectAsync("127.0.0.1", 8038)
+              return $attempt.Wait(250) -and $client.Connected
+            } catch {
+              return $false
+            } finally {
+              $client.Dispose()
+            }
+          }
           $workerOk = $false
           $ipcOk = $false
           for ($i = 0; $i -lt 90; $i++) {
             Start-Sleep -Seconds 1
-            $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
-            if ($port.TcpTestSucceeded) { throw "smoke: packaged worker opened port 8038" }
+            if (Test-WorkbenchPort) { throw "smoke: packaged worker opened port 8038" }
             if (Test-Path $log) {
               $workerOk = [bool](-not $proc.HasExited -and (Select-String -Path $log -Pattern '\[ipc\] served ready' -Quiet))
               # These markers are emitted only after the embedded index's
@@ -484,8 +497,17 @@ jobs:
             }
             if ($workerOk -and $ipcOk) { break }
           }
-          if (-not $workerOk) { throw "smoke: the worker never completed the native handshake" }
-          if (-not $ipcOk) { throw "smoke: the embedded UI did not produce ready plus five public native IPC markers" }
+          if (-not $workerOk -or -not $ipcOk) {
+            Write-Host "shell exited: $($proc.HasExited)"
+            if ($proc.HasExited) { Write-Host "shell exit code: $($proc.ExitCode)" }
+            foreach ($diagnostic in @($log, $stdout, $stderr)) {
+              Write-Host "---- $diagnostic ----"
+              if (Test-Path $diagnostic) { Get-Content $diagnostic }
+            }
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            if (-not $workerOk) { throw "smoke: the worker never completed the native handshake" }
+            throw "smoke: the embedded UI did not produce ready plus five public native IPC markers"
+          }
           if (Test-Path $log) {
             $httpRequests = Get-Content $log | Where-Object { $_ -match '^\[workbench\] "(GET|POST) /' }
             if ($httpRequests) { Get-Content $log; throw "smoke: the embedded WebView made an HTTP request" }
@@ -498,8 +520,7 @@ jobs:
           $remaining = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
             Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" }
           if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "smoke: the supervised worker outlived soft close" }
-          $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
-          if ($port.TcpTestSucceeded) { throw "smoke: port 8038 remains open after soft close" }
+          if (Test-WorkbenchPort) { throw "smoke: port 8038 remains open after soft close" }
           Write-Host "smoke: embedded UI emitted ready plus five public IPC markers, port stayed closed, and soft close reaped the worker"
       - name: Reap check - a hard-killed app must not orphan its worker
         # Hard termination bypasses CloseRequested. Process identity and the
