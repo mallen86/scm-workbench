@@ -24,6 +24,8 @@ def main() -> int:
     if not PAGE.is_file():
         return fail("offset page is missing")
     page = PAGE.read_text(encoding="utf-8")
+    nav = (UI / "nav.js").read_text(encoding="utf-8")
+    index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
     for required in (
         "export async function setOffset",
         "export async function deleteOffset",
@@ -42,6 +44,18 @@ def main() -> int:
     ):
         if marker not in page:
             return fail(f"offset page is missing {marker}")
+    for marker in (
+        'import { go, uiMode } from "../nav.js";',
+        'if (uiMode() !== "simple") wrap.append(formCard("offset_pdf"',
+        'if (uiMode() !== "simple") patchOffsetForm()',
+    ):
+        if marker not in page:
+            return fail(f"simple offset page contract is missing {marker}")
+    if 'SIMPLE_PAGES = ["fetch", "pdf", "offset", "settings"]' not in nav:
+        return fail("simple navigation does not allow the offset page")
+    offset_link = '<a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>'
+    if offset_link not in index:
+        return fail("offset navigation item is still hidden in simple mode")
     for path in sorted(UI.rglob("*.js")):
         if path == FACADE:
             continue

@@ -1,7 +1,7 @@
 /* pages/offset — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { setOffset, deleteOffset } from "../offset-transport.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
+import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { setOffset, deleteOffset } from "../offset-transport.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* =============================== offset page ============================== */
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
@@ -40,7 +40,9 @@ PAGES.offset = (root) => {
 
   wrap.append(offsetsBySizeCard());
 
-  wrap.append(formCard("offset_pdf", { icon: "target" }));
+  // Simple mode keeps calibration and the saved global/per-paper corrections,
+  // but omits the separate advanced workflow that modifies an existing PDF.
+  if (uiMode() !== "simple") wrap.append(formCard("offset_pdf", { icon: "target" }));
 
   const cal = el("div", { class: "card" });
   cal.append(el("div", { class: "card-head" },
@@ -72,7 +74,7 @@ PAGES.offset = (root) => {
   if (!S.info.scm.calibration.length) grid.append(el("div", { class: "empty" }, "No calibration PDFs found."));
   cal.append(grid);
   wrap.append(cal);
-  wrap.__patch = () => patchOffsetForm();
+  wrap.__patch = () => { if (uiMode() !== "simple") patchOffsetForm(); };
   return wrap;
 };
 

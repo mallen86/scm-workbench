@@ -18,3 +18,4 @@
 - [x] Create a page that's only used on a fresh boot to show the repos being downloaded. The page should be able to be closed out so the user can navigate around if they want but this should be a nice way to ease people in.
 - [x] When the create PDF job is running, make the progress bar a real progress bar. The script outputs which image has been added by number ("Image 1: xyz.png", "Image 2: abc.png") and we can get the total from the number of images in the front image directory.
 - [x] When the create PDF job has finished, along side the open PDF button that appears add a button to open the cutting template based on the PDF settings were used.
+- [x] Add the Offset & calibration workflow to the simple mode. Keep the global offset, paper specific offset, and the calibration sheets sections but leave out the offset pdf section

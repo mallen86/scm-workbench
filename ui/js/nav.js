@@ -125,7 +125,7 @@ export function setTheme(theme) {
    paths. Real paths stay in job.cmd for the engine. */
 
 
-export const SIMPLE_PAGES = ["fetch", "pdf", "settings"];   // what the nav keeps in simple mode
+export const SIMPLE_PAGES = ["fetch", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
 
 
 export function uiMode() {
@@ -168,9 +168,9 @@ export async function setUiMode(mode) {
   const page = S.page || "dashboard";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
-    toast("ok", "Simple — just the essentials: fetch the art, make the PDF.");
+    toast("ok", "Simple — just the essentials: fetch the art, make the PDF, and calibrate your printer.");
   } else {
-    if (page === "pdf" || page === "settings") go(page, null, { push: false }); // re-render with the new form size / settings cards
+    if (page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
     toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
   }
   // keepForms: a mode switch is a layout change, not a content change — the
