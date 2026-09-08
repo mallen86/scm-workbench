@@ -1880,6 +1880,7 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::process::Child;
     use std::time::Duration;
 
@@ -1889,11 +1890,12 @@ mod tests {
 
     #[test]
     fn cli_is_strict_and_rejects_extra_paths() {
+        let data_dir = std::env::temp_dir().join("scm-update-cli-data");
         let good = vec![
             "app".into(),
             "--update-helper".into(),
             "--data-dir".into(),
-            "/tmp/data".into(),
+            data_dir.to_string_lossy().into_owned(),
             "--token".into(),
             token(),
             "--mode".into(),
