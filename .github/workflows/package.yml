@@ -619,8 +619,8 @@ jobs:
       - name: Attach the built artifacts to the release
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
-        # the tag push, or from the GitHub UI. This job adds the macOS DMG
-        # installer and the portable Windows package. If no
+        # the tag push, or from the GitHub UI. This job adds the macOS
+        # installer/updater payloads and the portable Windows package. If no
         # release exists for the tag, a bare one
         # is created as a fallback so the artifacts are never lost.
         # (--repo on every call: this job has no checkout for gh to infer
@@ -629,7 +629,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip scm-workbench-windows.zip --clobber
       - name: Delete Actions artifacts after release attachment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

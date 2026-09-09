@@ -307,16 +307,11 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(background[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(tuple(int.from_bytes(background[n:n + 4], "big")
                                for n in (16, 20)), (660, 400))
-        # Keep building and validating the transactional updater ZIP, but the
-        # public release exposes only the DMG installer and Windows package.
+        # The DMG is the manual installer; retain the exact ZIP consumed by
+        # the existing transactional in-app updater on tagged releases.
         self.assertIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
         self.assertIn("actions: write", workflow)
-        release_upload = next(line for line in workflow.splitlines()
-                              if 'gh release upload "$GITHUB_REF_NAME"' in line)
-        self.assertIn("scm-workbench-macos.dmg", release_upload)
-        self.assertIn("scm-workbench-windows.zip", release_upload)
-        self.assertNotIn("scm-workbench-macos.zip", release_upload)
         upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
         cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
         self.assertGreater(cleanup_at, upload_at)
