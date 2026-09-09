@@ -392,6 +392,30 @@ class RepoSyncBoundsTests(unittest.TestCase):
              patch.object(repo_sync, "_DESCRIPTOR_IO", False):
             self.assert_repo_error(repo_sync._secure_hash_file, directory)
 
+    def test_windows_path_comparison_normalizes_verbatim_spellings(self):
+        ordinary = r"C:\Users\Mike\AppData\Local\scm-workbench"
+        self.assertEqual(
+            repo_sync._windows_normalized_path(ordinary),
+            repo_sync._windows_normalized_path("\\\\?\\" + ordinary),
+        )
+        unc = r"\\server\share\scm-workbench"
+        self.assertEqual(
+            repo_sync._windows_normalized_path(unc),
+            repo_sync._windows_normalized_path(r"\\?\UNC\server\share\scm-workbench"),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle integration")
+    def test_windows_checked_open_accepts_verbatim_expected_path(self):
+        root = Path(self.temp.name) / "verbatim-root"
+        root.mkdir()
+        verbatim_root = Path("\\\\?\\" + str(root.resolve()))
+        target = verbatim_root / "child.bin"
+        with repo_sync._windows_open_checked(
+                target, write=True, create_parents=True,
+                expected_root=verbatim_root, expected_path=target) as fh:
+            fh.write(b"payload")
+        self.assertEqual((root / "child.bin").read_bytes(), b"payload")
+
     def test_safe_paths_download_destinations_and_root_escape(self):
         root = Path(self.temp.name) / "root"
         root.mkdir()

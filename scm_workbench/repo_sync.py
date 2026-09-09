@@ -242,6 +242,17 @@ _DESCRIPTOR_IO = (
 _WINDOWS_FALLBACK = os.name == "nt"
 
 
+def _windows_normalized_path(path) -> str:
+    """Return one comparison spelling for ordinary and verbatim Win32 paths."""
+    import ntpath
+    value = os.fspath(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return ntpath.normcase(ntpath.normpath(value))
+
+
 def _windows_final_path(kernel32, handle):
     import ctypes
     size = 512
@@ -252,11 +263,7 @@ def _windows_final_path(kernel32, handle):
             raise RepoError("could not resolve Windows file handle")
         if got < size - 1:
             value = buf.value
-            if value.startswith("\\\\?\\UNC\\"):
-                value = "\\\\" + value[8:]
-            elif value.startswith("\\\\?\\"):
-                value = value[4:]
-            return os.path.normcase(os.path.normpath(value))
+            return _windows_normalized_path(value)
         size *= 2
     raise RepoError("Windows file handle path is too long")
 
@@ -351,7 +358,7 @@ def _windows_open_checked(path: Path, write=False, create_parents=False,
             if final != root_final and not final.startswith(prefix):
                 raise RepoError("Windows handle escaped its trusted root")
         if exact is not None:
-            expected_norm = os.path.normcase(os.path.normpath(str(exact)))
+            expected_norm = _windows_normalized_path(exact)
             if final != expected_norm:
                 # The supplied spelling may be an 8.3 short-name alias (e.g.
                 # a RUNNER~1-style directory) of the object the handle
@@ -365,8 +372,7 @@ def _windows_open_checked(path: Path, write=False, create_parents=False,
                     resolved = os.path.realpath(os.fspath(exact))
                 except OSError:
                     resolved = None
-                if resolved is None or \
-                        os.path.normcase(os.path.normpath(resolved)) != final:
+                if resolved is None or _windows_normalized_path(resolved) != final:
                     raise RepoError("Windows handle resolved to an unexpected path")
 
     candidate = Path(path)
@@ -2584,7 +2590,7 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
         if info.attrs & REPARSE or bool(info.attrs & DIRECTORY) != require_dir:
             raise RepoError("refusing a Windows reparse or non-directory rename path")
         final = _windows_final_path(kernel32, handle)
-        if final != os.path.normcase(os.path.normpath(str(expected))):
+        if final != _windows_normalized_path(expected):
             raise RepoError("Windows rename handle escaped its trusted path")
 
     parent = Path(parent)
