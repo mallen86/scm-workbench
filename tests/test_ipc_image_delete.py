@@ -230,6 +230,7 @@ class ImageDeleteTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue((target / "one.bin").exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX unlink failure seam")
     def test_partial_application_failure_reports_deleted_names(self):
         target = self.image_dir()
         real_unlink = server.os.unlink

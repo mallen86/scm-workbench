@@ -236,7 +236,8 @@ class ExtractionTests(unittest.TestCase):
         ])
         destination = self.extract(entries, name="valid-links.zip")
         self.assertTrue((destination / "runtime/links/target").is_symlink())
-        self.assertEqual(os.readlink(destination / "runtime/links/target"), "../target.txt")
+        expected_target = r"..\target.txt" if os.name == "nt" else "../target.txt"
+        self.assertEqual(os.readlink(destination / "runtime/links/target"), expected_target)
         self.assertEqual((destination / "runtime/links/target").read_text(), "payload")
         self.assertEqual((destination / "runtime/links/second").read_text(), "payload")
 
@@ -274,7 +275,10 @@ class ExtractionTests(unittest.TestCase):
         destination = self.extract(self.zips.windows([
             ("app/scm_workbench/run.sh", b"#!/bin/sh", stat.S_IFREG | 0o755),
         ]), name="modes.zip")
-        self.assertEqual(stat.S_IMODE((destination / "app/scm_workbench/run.sh").stat().st_mode), 0o755)
+        extracted = destination / "app/scm_workbench/run.sh"
+        self.assertEqual(extracted.read_bytes(), b"#!/bin/sh")
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(extracted.stat().st_mode), 0o755)
 
     def test_mac_and_windows_release_shapes_match_the_actual_workflows(self):
         mac = self.extract(self.zips.mac([

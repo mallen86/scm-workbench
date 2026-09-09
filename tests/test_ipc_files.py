@@ -577,7 +577,7 @@ class ArtifactExportTests(unittest.TestCase):
         raced = {"done": False}
 
         def race(src, dst, **kwargs):
-            if not raced["done"] and dst == "race.pdf":
+            if not raced["done"] and Path(dst).name == "race.pdf":
                 raced["done"] = True
                 (parent / "race.pdf").write_bytes(b"external")
                 raise FileExistsError

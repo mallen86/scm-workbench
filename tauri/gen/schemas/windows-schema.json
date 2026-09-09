@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the wb_decklist_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-decklist-import",
+          "markdownDescription": "Enables the wb_decklist_import command without any pre-configured scope."
+        },
+        {
           "description": "Enables the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "allow-wb-restart",
@@ -195,6 +201,12 @@
           "markdownDescription": "Enables the wb_save_artifact command without any pre-configured scope."
         },
         {
+          "description": "Denies the wb_decklist_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-decklist-import",
+          "markdownDescription": "Denies the wb_decklist_import command without any pre-configured scope."
+        },
+        {
           "description": "Denies the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "deny-wb-restart",
@@ -205,6 +217,12 @@
           "type": "string",
           "const": "deny-wb-rpc",
           "markdownDescription": "Denies the wb_rpc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_save_artifact command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-save-artifact",
+          "markdownDescription": "Denies the wb_save_artifact command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

@@ -115,6 +115,7 @@ class HttpContractTests(unittest.TestCase):
         server.LOGS_DIR = cls.fixture.data / "logs"
         server.PER_SIZE_OFFSETS_FILE = cls.fixture.data / "offsets_by_size.json"
         server.UPDATE_STATE_FILE = cls.fixture.data / "update-state.json"
+        server._IPC_MODE = False
         os.environ["SCM_WORKBENCH_DATA"] = str(cls.fixture.data)
         server.MANIFEST_CACHE.clear()
         server._INFO_SNAP.clear()
@@ -138,6 +139,7 @@ class HttpContractTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
+        server._IPC_MODE = False
         settings = json.loads(json.dumps(server.DEFAULT_SETTINGS))
         settings.update({
             "scm_dir": str(self.fixture.scm),

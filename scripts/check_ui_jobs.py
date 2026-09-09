@@ -155,7 +155,14 @@ const realSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (fn, delay) => realSetTimeout(fn, 0);
 let exhaustionErrors = 0;
 const closeF = jobs.subscribe("exhaust", { onError: () => exhaustionErrors++ });
-await new Promise(r => realSetTimeout(r, 40));
+// Wait for the logical outcome, not a wall-clock constant: coarse OS timer
+// resolution (e.g. Windows) can stretch the zero-delay retry cycles, so the
+// bounded wait below tolerates slow ticks while still failing a hub that never
+// exhausts (or that is noisy) within five seconds.
+const exhaustionDeadline = Date.now() + 5000;
+while (exhaustionErrors < 2 && Date.now() < exhaustionDeadline) {
+  await new Promise(r => realSetTimeout(r, 100));
+}
 closeF();
 globalThis.setTimeout = realSetTimeout;
 if (exhaustionErrors !== 2) fail("native retry exhaustion was not finite or was noisy");

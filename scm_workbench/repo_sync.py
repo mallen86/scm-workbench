@@ -400,6 +400,8 @@ def _windows_open_checked(path: Path, write=False, create_parents=False,
         handle, error = create(expected, access, CREATE_NEW, directory=directory)
         new_file = handle is not None
     if handle is None:
+        if error in (2, 3):
+            raise FileNotFoundError(error, os.strerror(error), str(expected))
         raise RepoError("could not open Windows file safely")
     try:
         check(handle, root_final, exact=expected, directory=directory)
@@ -748,6 +750,20 @@ def _json_payload(value) -> bytes:
     return json.dumps(value, indent=1, ensure_ascii=False).encode("utf-8")
 
 
+def _replace_metadata_file(source: Path, destination: Path) -> None:
+    """Replace metadata despite short-lived Windows reader sharing locks."""
+    attempts = 20 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if (attempt + 1 >= attempts or
+                    getattr(exc, "winerror", None) not in (5, 32, 33)):
+                raise
+            time.sleep(0.01)
+
+
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     """Atomically replace a file, retaining the exact bytes supplied."""
     path = Path(path)
@@ -763,7 +779,7 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        _replace_metadata_file(tmp, path)
         try:
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -2484,12 +2500,12 @@ def _tx_from_journal(key, payload):
 
 
 def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
-    """Rename a directory through verified Windows handles.
+    """Rename a directory through a verified Windows source handle.
 
-    FILE_RENAME_INFO's RootDirectory makes the destination relative to the
-    already-open parent handle, rather than resolving a second path.  This is
-    intentionally kept as a separate seam so Windows packaging tests can mock
-    the API calls without running on Windows.
+    The Win32 FILE_RENAME_INFO implementation requires RootDirectory to be
+    null, so the destination is an absolute, validated sibling path. The
+    retained parent handle denies delete sharing during the no-replace rename.
+    This remains a separate seam for platform-specific tests.
     """
     if os.name != "nt":
         raise RepoError("Windows sibling rename called on a non-Windows host")
@@ -2516,6 +2532,7 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
     kernel32.CloseHandle.restype = wintypes.BOOL
     GENERIC_READ, DELETE = 0x80000000, 0x00010000
     SHARE = 1 | 2 | 4
+    SHARE_WITHOUT_DELETE = 1 | 2
     OPEN_EXISTING = 3
     OPEN_REPARSE = 0x00200000
     BACKUP = 0x02000000
@@ -2531,8 +2548,8 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
                     ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
                     ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
 
-    def create(path, access):
-        handle = kernel32.CreateFileW(str(path), access, SHARE, None, OPEN_EXISTING,
+    def create(path, access, share=SHARE):
+        handle = kernel32.CreateFileW(str(path), access, share, None, OPEN_EXISTING,
                                      OPEN_REPARSE | BACKUP, None)
         value = handle.value if hasattr(handle, "value") else handle
         if value in (None, INVALID):
@@ -2551,7 +2568,7 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
 
     parent = Path(parent)
     safe_destination(parent)
-    parent_handle, error = create(parent, GENERIC_READ)
+    parent_handle, error = create(parent, GENERIC_READ, SHARE_WITHOUT_DELETE)
     if parent_handle is None:
         raise RepoError("could not open Windows rename parent")
     source_handle = None
@@ -2567,20 +2584,20 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
             raise RepoError("deployment destination already exists")
         if destination_error not in (2, 3):
             raise RepoError("could not verify Windows rename destination")
-        encoded = dst_name.encode("utf-16-le")
+        encoded = str(parent / dst_name).encode("utf-16-le")
         class _RenameHeader(ctypes.Structure):
             _fields_ = [("replace", wintypes.BOOL), ("root", HANDLE),
                         ("length", wintypes.DWORD), ("name", wintypes.WCHAR * 1)]
         name_offset = _RenameHeader.name.offset
-        buffer = ctypes.create_string_buffer(name_offset + len(encoded))
+        buffer = ctypes.create_string_buffer(name_offset + len(encoded) + ctypes.sizeof(wintypes.WCHAR))
         header = ctypes.cast(buffer, ctypes.POINTER(_RenameHeader)).contents
         header.replace = False
-        header.root = parent_handle
+        header.root = None
         header.length = len(encoded)
         ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
         if not kernel32.SetFileInformationByHandle(source_handle, FILE_RENAME_INFO,
                                                    buffer, ctypes.sizeof(buffer)):
-            raise RepoError("Windows handle-relative directory rename failed")
+            raise RepoError("Windows handle rename failed")
         if not kernel32.FlushFileBuffers(parent_handle):
             # FlushFileBuffers can be unsupported for some filesystem handles;
             # publication remains process-crash safe, not power-loss absolute.

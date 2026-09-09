@@ -262,16 +262,34 @@ class DeploymentTests(unittest.TestCase):
                     patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
                     patch.object(repo_sync, "resolve_target", return_value=target):
                 if failure in ("backup", "publish"):
-                    original_rename = repo_sync.os.rename
                     rename_calls = [0]
-                    def rename(src, dst):
-                        if failure == "backup" and Path(dst) == captured["tx"]["backup"]:
-                            raise OSError("backup rename")
-                        if failure == "publish" and Path(dst) == captured["tx"]["repo"] and not rename_calls[0]:
-                            rename_calls[0] += 1
-                            raise OSError("publish rename")
-                        return original_rename(src, dst)
-                    context = patch.object(repo_sync.os, "rename", side_effect=rename)
+                    if os.name == "nt":
+                        original_rename = repo_sync._windows_rename_sibling
+
+                        def rename(parent, src, dst):
+                            if failure == "backup" and dst == captured["tx"]["backup"].name:
+                                raise repo_sync.RepoError("backup rename")
+                            if (failure == "publish" and dst == captured["tx"]["repo"].name
+                                    and not rename_calls[0]):
+                                rename_calls[0] += 1
+                                raise repo_sync.RepoError("publish rename")
+                            return original_rename(parent, src, dst)
+
+                        context = patch.object(
+                            repo_sync, "_windows_rename_sibling", side_effect=rename)
+                    else:
+                        original_rename = repo_sync.os.rename
+
+                        def rename(src, dst):
+                            if failure == "backup" and Path(dst) == captured["tx"]["backup"]:
+                                raise OSError("backup rename")
+                            if (failure == "publish" and Path(dst) == captured["tx"]["repo"]
+                                    and not rename_calls[0]):
+                                rename_calls[0] += 1
+                                raise OSError("publish rename")
+                            return original_rename(src, dst)
+
+                        context = patch.object(repo_sync.os, "rename", side_effect=rename)
                 elif failure == "manifest":
                     context = patch.object(repo_sync, "save_manifest", side_effect=repo_sync.RepoError("manifest"))
                 else:
@@ -574,10 +592,11 @@ class DeploymentTests(unittest.TestCase):
         (source / "link.txt").symlink_to(outside)
         with self.assertRaises(repo_sync.RepoError):
             repo_sync._clone_tree(source, Path(self.temp.name) / "symlink-dest")
-        special = source / "fifo"
-        os.mkfifo(special)
-        with self.assertRaises(repo_sync.RepoError):
-            repo_sync._validate_tree(source)
+        if hasattr(os, "mkfifo"):
+            special = source / "fifo"
+            os.mkfifo(special)
+            with self.assertRaises(repo_sync.RepoError):
+                repo_sync._validate_tree(source)
 
     def test_streamed_tar_download_cap_closes_response_and_cleans_destination(self):
         class Response:

@@ -275,10 +275,55 @@ fn validate_data_dir(input: &Path) -> io::Result<PathBuf> {
         return Err(invalid("data directory is not a directory"));
     }
     let canonical = fs::canonicalize(input)?;
-    if canonical != input {
+    if !same_path_spelling(&canonical, input) {
         return Err(invalid("data directory is not canonical"));
     }
     Ok(canonical)
+}
+
+fn same_path_spelling(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        windows_without_verbatim_prefix(left) == windows_without_verbatim_prefix(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+/// `std::fs::canonicalize` adds the Win32 verbatim prefix (`\\?\`) even when
+/// its input is the ordinary absolute path supplied by LOCALAPPDATA,
+/// `Path.resolve()`, or PowerShell's Resolve-Path. That representation change
+/// is not a path change, so remove only that prefix for lexical equality
+/// checks. Canonical verbatim paths are still returned and used for all I/O.
+#[cfg(windows)]
+fn windows_without_verbatim_prefix(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let ordinary = if wide.starts_with(VERBATIM_UNC) {
+        let mut value = vec![b'\\' as u16, b'\\' as u16];
+        value.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
+        value
+    } else if wide.starts_with(VERBATIM) {
+        wide[VERBATIM.len()..].to_vec()
+    } else {
+        wide
+    };
+    PathBuf::from(OsString::from_wide(&ordinary))
 }
 
 fn reject_symlink_components(path: &Path) -> io::Result<()> {
@@ -324,19 +369,19 @@ fn validate_layout(journal: &Journal) -> io::Result<Layout> {
         return Err(invalid("target must be an absolute canonical path"));
     }
     reject_symlink_components(&target)?;
-    let parent = target
+    let supplied_parent = target
         .parent()
         .ok_or_else(|| invalid("target has no parent"))?;
-    let parent = fs::canonicalize(parent)?;
+    let parent = fs::canonicalize(supplied_parent)?;
     let name = target
         .file_name()
         .and_then(OsStr::to_str)
         .ok_or_else(|| invalid("target has invalid basename"))?;
-    if target.parent() != Some(parent.as_path()) || !valid_target_basename(name) {
+    if !same_path_spelling(supplied_parent, &parent) || !valid_target_basename(name) {
         return Err(invalid("target parent or application basename is invalid"));
     }
     let target = parent.join(name);
-    if target != Path::new(&journal.target) {
+    if !same_path_spelling(&target, Path::new(&journal.target)) {
         return Err(invalid("target is not canonical"));
     }
     if fs::symlink_metadata(&target)
@@ -489,7 +534,10 @@ pub(crate) fn materialize_helper(
     let dir = data.join(HELPER_DIR);
     fs::create_dir_all(&dir)?;
     let dir_meta = fs::symlink_metadata(&dir)?;
-    if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() || fs::canonicalize(&dir)? != dir {
+    if !dir_meta.is_dir()
+        || dir_meta.file_type().is_symlink()
+        || !same_path_spelling(&fs::canonicalize(&dir)?, &dir)
+    {
         return Err(invalid("helper directory is not a canonical directory"));
     }
     let destination = dir.join(token);
@@ -710,7 +758,10 @@ pub(crate) fn cleanup_old_helpers(data: &Path, older_than: Duration) -> io::Resu
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if !meta.is_dir() || meta.file_type().is_symlink() || fs::canonicalize(&dir)? != dir {
+    if !meta.is_dir()
+        || meta.file_type().is_symlink()
+        || !same_path_spelling(&fs::canonicalize(&dir)?, &dir)
+    {
         return Err(invalid("helper directory is unsafe"));
     }
     let now = SystemTime::now();
@@ -927,7 +978,7 @@ pub(crate) fn target_for_current_exe(exe: &Path) -> PathBuf {
 pub(crate) fn journal_matches_current_target(journal: &Journal, exe: &Path) -> bool {
     let current = fs::canonicalize(target_for_current_exe(exe))
         .unwrap_or_else(|_| target_for_current_exe(exe));
-    Path::new(&journal.target) == current
+    same_path_spelling(Path::new(&journal.target), &current)
 }
 
 /// Called only after the worker RPC is installed.  A normal startup can never
@@ -971,7 +1022,7 @@ fn publish_health_for_target(
     };
     let canonical_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     if journal.token != token
-        || Path::new(&journal.target) != canonical_target
+        || !same_path_spelling(Path::new(&journal.target), &canonical_target)
         || !matches!(journal.phase, Phase::Launching | Phase::Launched)
     {
         return Ok(false);
@@ -2445,6 +2496,38 @@ mod tests {
         assert_eq!(layout.target, fixture.target);
         assert_eq!(layout.candidate, fixture.candidate);
         assert_eq!(layout.backup, fixture.backup);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_windows_paths_match_their_verbatim_canonical_forms() {
+        let data = std::env::temp_dir().join(format!(
+            "scm-update-ordinary-path-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&data).unwrap();
+        let expected = fs::canonicalize(&data).unwrap();
+        assert_ne!(
+            data, expected,
+            "the fixture must exercise the verbatim prefix"
+        );
+        assert_eq!(validate_data_dir(&data).unwrap(), expected);
+        fs::remove_dir_all(data).unwrap();
+
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "old");
+        make_application(&fixture.candidate, "new");
+        let mut journal = fixture.journal(Phase::Prepared);
+        journal.target = windows_without_verbatim_prefix(&fixture.target)
+            .to_string_lossy()
+            .into_owned();
+        let layout = validate_layout(&journal).unwrap();
+        assert_eq!(layout.target, fixture.target);
+        assert!(same_path_spelling(
+            Path::new(&journal.target),
+            &fixture.target
+        ));
     }
 
     #[test]

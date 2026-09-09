@@ -14,6 +14,10 @@ from unittest.mock import patch
 from scm_workbench import server, updater
 
 
+def current_asset_name():
+    return "scm-workbench-windows.zip" if os.name == "nt" else "scm-workbench-macos.zip"
+
+
 class FakeResponse:
     def __init__(self, body=b"", *, status=200, headers=None, url=None, chunked=False):
         self.body = body
@@ -492,7 +496,7 @@ class UpdaterJobTests(unittest.TestCase):
 
     @staticmethod
     def asset(tag="v2.0.0"):
-        name = "scm-workbench-macos.zip"
+        name = current_asset_name()
         return {
             "id": 7,
             "tag": tag,
@@ -618,9 +622,10 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(list(Path(self.temp.name).glob(".update-state.json.*.tmp")), [])
 
     def test_update_check_is_singleflight_and_waiters_get_same_result(self):
+        asset_name = current_asset_name()
         asset = {
-            "id": 4, "tag": "v2.0.0", "name": "scm-workbench-macos.zip",
-            "url": "https://github.com/owner/workbench/releases/download/v2.0.0/scm-workbench-macos.zip",
+            "id": 4, "tag": "v2.0.0", "name": asset_name,
+            "url": "https://github.com/owner/workbench/releases/download/v2.0.0/" + asset_name,
             "size": 10, "digest": None,
         }
         release = {"tag": "v2.0.0", "name": "two", "body": "notes", "published": "",
@@ -656,12 +661,13 @@ class UpdateStateTests(unittest.TestCase):
 
     def test_update_check_generation_order_publishes_newer_result(self):
         def release(tag, name):
+            asset_name = current_asset_name()
             return {
                 "tag": tag, "name": name, "body": "", "published": "",
                 "url": "", "assets": [{
-                    "id": 1, "tag": tag, "name": "scm-workbench-macos.zip",
+                    "id": 1, "tag": tag, "name": asset_name,
                     "url": "https://github.com/owner/workbench/releases/download/"
-                           + tag + "/scm-workbench-macos.zip",
+                           + tag + "/" + asset_name,
                     "size": 1, "digest": None,
                 }],
             }

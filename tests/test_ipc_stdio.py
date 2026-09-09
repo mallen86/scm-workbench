@@ -13,7 +13,8 @@ class ExternalProcessStdioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "file.txt"
             path.write_text("fixture", encoding="utf-8")
-            with mock.patch.object(server.sys, "platform", "darwin"), \
+            with mock.patch.object(server.os, "name", "posix"), \
+                 mock.patch.object(server.sys, "platform", "darwin"), \
                  mock.patch.object(server.subprocess, "Popen") as popen:
                 self.assertIsNone(server.reveal_path(path))
                 self.assertIsNone(server.open_path(path))

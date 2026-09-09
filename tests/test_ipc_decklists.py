@@ -233,13 +233,15 @@ class DecklistImportTests(unittest.TestCase):
         names = ["bad\nname.txt", "CON", "CON.txt", "README.md",
                  server.DECKLIST_TEMP_PREFIX + "chosen.tmp", "a/b.txt"]
         for index, name in enumerate(names):
-            if "/" in name:
-                with self.assertRaises(server.DecklistImportError):
-                    server._decklist_name(name)
-                continue
-            path = self.source(name, b"x")
-            result = self.native(path, "name-%d" % index)["result"]
-            self.assertFalse(result["ok"], name)
+            with self.assertRaises(server.DecklistImportError):
+                server._decklist_name(name)
+            # Windows itself refuses control characters in file names. Exercise
+            # the source-handle boundary as well for every name the host can
+            # represent; the pure validator above covers the rest.
+            if "/" not in name and not any(ord(c) < 0x20 for c in name):
+                path = self.source(name, b"x")
+                result = self.native(path, "name-%d" % index)["result"]
+                self.assertFalse(result["ok"], name)
         accepted = "é" * 127 + "a"  # exactly 255 UTF-8 bytes
         self.assertEqual(len(accepted.encode("utf-8")), server.DECKLIST_NAME_MAX_BYTES)
         self.assertEqual(server._decklist_name(accepted), accepted)

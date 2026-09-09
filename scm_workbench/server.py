@@ -461,7 +461,8 @@ def _open_decklist_source(source_path: str):
             raise DecklistImportError("selected source is a reparse point or unavailable")
         try:
             import msvcrt
-            fd = msvcrt.open_osfhandle(raw_handle, os.O_RDONLY)
+            fd = msvcrt.open_osfhandle(
+                raw_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         except Exception as exc:
             kernel32.CloseHandle(handle)
             raise DecklistImportError("could not open selected decklist") from exc
@@ -535,14 +536,16 @@ def import_decklist(source_path: str) -> dict:
                     if directory_fd is None:
                         temp_fd = os.open(
                             candidate_path,
-                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                            getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0),
                             0o600,
                         )
                         temp_path = candidate_path
                     else:
                         temp_fd = os.open(
                             candidate_name,
-                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                            getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0),
                             0o600,
                             dir_fd=directory_fd,
                         )
@@ -3766,7 +3769,16 @@ def _snapshot_artifacts(job: dict) -> list:
                     break
             if not safe:
                 continue
-            st = os.stat(candidate, follow_symlinks=False)
+            if os.name == "nt":
+                # Opening the handle first makes NTFS finalize a newly-created
+                # file's change timestamp before the immutable snapshot is
+                # recorded. A path stat immediately after the producer closes
+                # can otherwise carry a transient ctime that changes on the
+                # grant's first verification open.
+                snapshot_fd, st = _open_windows_regular_file(candidate)
+                os.close(snapshot_fd)
+            else:
+                st = os.stat(candidate, follow_symlinks=False)
             if not stat.S_ISREG(st.st_mode) or st.st_size < 0 or st.st_size > ARTIFACT_MAX_BYTES:
                 continue
             identity = _artifact_identity(st)
@@ -4072,11 +4084,15 @@ def _open_windows_artifact_parent(parent: Path) -> list:
         if not parts:
             raise ArtifactExportError("destination parent is invalid")
         current = Path(parts[0])
-        for part in parts[1:]:
+        for index, part in enumerate(parts[1:]):
             current /= part
+            # DELETE access on the final directory makes the omitted
+            # FILE_SHARE_DELETE meaningful on current Windows: an
+            # attributes-only handle does not prevent the directory rename.
+            desired_access = 0x00010080 if index == len(parts[1:]) - 1 else 0x00000080
             handle = kernel32.CreateFileW(
                 str(current),
-                0x00000080,  # FILE_READ_ATTRIBUTES
+                desired_access,  # FILE_READ_ATTRIBUTES, plus DELETE on parent
                 0x00000001 | 0x00000002,  # share read/write, deliberately not delete
                 None,
                 3,  # OPEN_EXISTING
@@ -4189,9 +4205,9 @@ def _copy_artifact(snapshot: dict, destination: str, cancelled=None) -> dict:
                 temp_name = f"{ARTIFACT_EXPORT_PREFIX}{secrets.token_hex(12)}.tmp"
                 try:
                     if parent_fd >= 0:
-                        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent_fd)
+                        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0), 0o600, dir_fd=parent_fd)
                     else:
-                        temp_fd = os.open(str(dest_path.parent / temp_name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        temp_fd = os.open(str(dest_path.parent / temp_name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
                     break
                 except FileExistsError:
                     continue
@@ -6324,7 +6340,7 @@ def _delete_images_windows(root: Path, candidate: Path, root_identity_expected: 
                 handle = open_handle(current, access_dir, flags_dir)
             except OSError as exc:
                 if index == len(parts) - 1:
-                    if getattr(exc, "winerror", None) in (2, 3):
+                    if getattr(exc, "winerror", None) in (2, 3) or exc.errno in (2, 3):
                         return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
                     # A regular file cannot be opened with LIST_DIRECTORY;
                     # inspect the final object with an attributes-only handle
@@ -6336,13 +6352,16 @@ def _delete_images_windows(root: Path, candidate: Path, root_identity_expected: 
                     handles.append(leaf_handle)
                     leaf = info(leaf_handle)
                     if leaf.attrs & 0x400:
-                        raise _image_delete_error("path contains a symlink or reparse point") from exc
+                        raise _image_delete_error(
+                            "path is outside the SCM checkout or contains a symlink/reparse point",
+                            403) from exc
                     return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
                 raise _image_delete_error("path contains an unsafe component") from exc
             handles.append(handle)
             record = info(handle)
             if record.attrs & 0x400:
-                raise _image_delete_error("path contains a symlink or reparse point")
+                raise _image_delete_error(
+                    "path is outside the SCM checkout or contains a symlink/reparse point", 403)
             if not record.attrs & 0x10:
                 if index == len(parts) - 1:
                     return {"ok": True, "deleted": 0, "names": [], "dir": str(candidate)}
@@ -6406,10 +6425,19 @@ def _delete_images_windows(root: Path, candidate: Path, root_identity_expected: 
                 if identity(record) != item["identity"] or not _image_header_is_image(read_head(child_handle)):
                     raise _image_delete_error("an image changed before deletion", deleted=len(deleted), names=deleted, directory=candidate)
                 disposition = _DispositionEx(1 | 2)  # DELETE | POSIX_SEMANTICS
-                # SetFileInformationByHandle requires the raw HANDLE value on
-                # some ctypes/Python Windows combinations.
-                if not kernel32.SetFileInformationByHandle(raw(child_handle), 22,
-                                                            ctypes.byref(disposition), ctypes.sizeof(disposition)):
+                # FileDispositionInfoEx is class 21 (22 is FileRenameInfoEx).
+                # Fall back to the original disposition class for filesystems
+                # which do not implement POSIX deletion; both paths delete the
+                # exact object represented by this verified handle.
+                deleted_by_handle = kernel32.SetFileInformationByHandle(
+                    raw(child_handle), 21, ctypes.byref(disposition), ctypes.sizeof(disposition))
+                if not deleted_by_handle:
+                    class _Disposition(ctypes.Structure):
+                        _fields_ = [("delete_file", wintypes.BOOL)]
+                    legacy = _Disposition(True)
+                    deleted_by_handle = kernel32.SetFileInformationByHandle(
+                        raw(child_handle), 4, ctypes.byref(legacy), ctypes.sizeof(legacy))
+                if not deleted_by_handle:
                     raise _image_delete_error("stable handle deletion is unavailable", deleted=len(deleted), names=deleted, directory=candidate)
                 deleted.append(item["name"])
             finally:

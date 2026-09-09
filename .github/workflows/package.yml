@@ -389,14 +389,14 @@ jobs:
           path: build/macos/scm-workbench-macos.zip
           retention-days: 1
   windows:
-    # Temporarily disabled while Windows packaging is debugged on a native
-    # Windows machine. Keep the job definition intact for an easy re-enable.
-    if: ${{ false }}
     runs-on: windows-latest  # x64 release target
     env:
       # Keep Cargo's generated target tree outside the checkout; frontendDist
       # embeds only the bounded ui/ tree.
       CARGO_TARGET_DIR: ${{ github.workspace }}\..\scm-workbench-tauri-target
+      # Make source/check-script decoding independent of the runner's legacy
+      # Windows ANSI code page. The packaged worker also runs in UTF-8 mode.
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Record build revision
@@ -562,11 +562,21 @@ jobs:
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
+          function Test-WorkbenchPort {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $attempt = $client.ConnectAsync("127.0.0.1", 8038)
+              return $attempt.Wait(250) -and $client.Connected
+            } catch {
+              return $false
+            } finally {
+              $client.Dispose()
+            }
+          }
           $ready = $false
           for ($i = 0; $i -lt 20; $i++) {
             Start-Sleep -Milliseconds 500
-            $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
-            if ($port.TcpTestSucceeded) { $proc.Kill(); throw "reap FAILED: packaged worker opened port 8038" }
+            if (Test-WorkbenchPort) { $proc.Kill(); throw "reap FAILED: packaged worker opened port 8038" }
             if (Test-Path $log) {
               $ready = [bool](-not $proc.HasExited -and (Select-String -Path $log -Pattern '\[ipc\] served ready' -Quiet))
             }
@@ -582,8 +592,7 @@ jobs:
           $remaining = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
             Where-Object { $_.ExecutablePath -like "$ws\build\windows\runtime\*" }
           if ($remaining) { $remaining | Format-List ProcessId,ExecutablePath; throw "reap FAILED: worker outlived hard termination" }
-          $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 8038 -WarningAction SilentlyContinue
-          if ($port.TcpTestSucceeded) { throw "reap FAILED: port 8038 remained open after hard termination" }
+          if (Test-WorkbenchPort) { throw "reap FAILED: port 8038 remained open after hard termination" }
           Write-Host "reap: hard-killed the app, native worker reaped, and port stayed closed"
       - name: Zip
         run: |
@@ -598,7 +607,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [macos]
+    needs: [macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -610,9 +619,9 @@ jobs:
       - name: Attach the built artifacts to the release
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
-        # the tag push, or from the GitHub UI. While Windows packaging is
-        # disabled, this job adds only the macOS installer and updater payload.
-        # If no release exists for the tag, a bare one
+        # the tag push, or from the GitHub UI. This job adds the macOS
+        # installer/updater payloads and the portable Windows package. If no
+        # release exists for the tag, a bare one
         # is created as a fallback so the artifacts are never lost.
         # (--repo on every call: this job has no checkout for gh to infer
         #  the owner/repo from.)
@@ -620,7 +629,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip scm-workbench-windows.zip --clobber
       - name: Delete Actions artifacts after release attachment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

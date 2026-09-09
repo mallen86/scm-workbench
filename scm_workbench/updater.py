@@ -982,7 +982,9 @@ def extract_app(zip_path: Path, dest_dir: Path, log=print, *, publish_bundle_roo
                         target = repo_sync.safe_path(stage, relative)
                         if os.path.lexists(target):
                             bad("duplicate extracted path")
-                        os.symlink(member["payload"], target)
+                        link_target = (member["payload"].replace("/", "\\")
+                                       if os.name == "nt" else member["payload"])
+                        os.symlink(link_target, target)
                 except UpdateError:
                     raise
                 except OSError as exc:
