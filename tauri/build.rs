@@ -6,6 +6,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "wb_restart",
             "wb_rpc",
+            "wb_pick_repo_directory",
             "wb_decklist_import",
             "wb_save_artifact",
         ]),

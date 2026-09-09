@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = json.loads((ROOT / "tauri/tauri.conf.json").read_text(encoding="utf-8"))
 MAIN = (ROOT / "tauri/src/main.rs").read_text(encoding="utf-8")
+BUILD = (ROOT / "tauri/build.rs").read_text(encoding="utf-8")
 CAPABILITY = json.loads((ROOT / "tauri/capabilities/default.json").read_text(encoding="utf-8"))
 
 
@@ -23,6 +24,13 @@ if "devUrl" in CONFIG["build"]:
     fail("packaged/source Tauri must not retain a loopback devUrl")
 if "remote" in CAPABILITY:
     fail("the packaged capability must not grant a worker HTTP remote origin")
+if 'async fn wb_pick_repo_directory(window: WebviewWindow)' not in MAIN or \
+        'wb_pick_repo_directory,' not in MAIN:
+    fail("the native repository folder picker is not registered")
+if '"wb_pick_repo_directory"' not in BUILD:
+    fail("the repository folder picker permission is not generated")
+if "allow-wb-pick-repo-directory" not in CAPABILITY.get("permissions", []):
+    fail("the main window is not granted the repository folder picker")
 for page in ("loading.html", "index.html"):
     if f'WebviewUrl::App("{page}"' not in MAIN:
         # loading_page is currently the only constructor; the index path is

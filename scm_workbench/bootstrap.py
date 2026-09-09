@@ -18,10 +18,10 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
-def _bootstrap_one(repo_sync, key, log) -> None:
+def _bootstrap_one(repo_sync, key, log) -> bool:
     """One repo of a bootstrap pass: the deployed check, a *safe* re-deploy
     if the tree drifted, or the first-ever fetch. Never raises — a failure
     just means the app keeps working with what it has, and the user can
@@ -36,46 +36,48 @@ def _bootstrap_one(repo_sync, key, log) -> None:
         # path can never be a data-loss path again.
         try:
             if repo_sync.verify_deployed(key):
-                return
+                return True
             log(f"\n[bootstrap] the managed {meta['name']} copy no longer matches its recorded "
                 f"state — re-deploying it now (your decklists, images and output are "
                 f"staged and restored around the swap, so nothing is lost) …")
             repo_sync.cmd_init(key, log=log, force_redeploy=True)
             log(f"[bootstrap] {meta['name']} re-synced — continuing.")
-            return
+            return True
         except Exception as e:
             log(f"[bootstrap] {meta['name']} state check failed ({e}) — leaving the copy as-is.")
-        return
+        return False
     log(f"\n[bootstrap] first launch — fetching the newest {meta['name']} "
         f"({meta['owner']}/{meta['repo']}) into the Workbench data area …")
     t0 = time.time()
     try:
         repo_sync.cmd_init(key, log=log)
         log(f"[bootstrap] {meta['name']} done in {time.time() - t0:.0f}s.")
+        return True
     except Exception as e:
         log(f"[bootstrap] could not fetch {meta['name']} yet ({e}).")
         log("[bootstrap] no problem — the app still works; open Settings → "
             "“Managed repo copies” and press “Download latest” when you're online.")
         log("[bootstrap] (existing sister folders next to this app are still detected normally)")
+        return False
 
 
-def bootstrap_managed_repos(repo_sync, log: Optional[Callable[[str], None]] = None) -> None:
+def bootstrap_managed_repos(repo_sync, log: Optional[Callable[[str], None]] = None) -> Dict[str, bool]:
     """Fetch newest managed copies on first launch; never fatal.
 
     The sequential pass — the legacy stub launcher's behaviour, unchanged."""
     if log is None:
         log = print
-    for key in repo_sync.REPOS:
-        _bootstrap_one(repo_sync, key, log)
+    return {key: _bootstrap_one(repo_sync, key, log) for key in repo_sync.REPOS}
 
 
 _flag_lock = threading.Lock()
 
 
-def _write_flag(data: Path, pending: List[str], done: List[str], phase: str) -> None:
+def _write_flag(data: Path, pending: List[str], done: List[str], phase: str,
+                failed: Optional[List[str]] = None) -> None:
     try:
         (data / "bootstrap.json").write_text(
-            json.dumps({"pending": pending, "done": done, "phase": phase}),
+            json.dumps({"pending": pending, "done": done, "failed": failed or [], "phase": phase}),
             encoding="utf-8",
         )
     except Exception:
@@ -95,21 +97,37 @@ def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> N
         log = print
     from scm_workbench import repo_sync
 
+    keys = list(repo_sync.REPOS.keys())
+    results: Dict[str, bool] = {}
+
     def blog(s: str = "") -> None:
         # every transcript line also refreshes the UI's status (the dashboard
         # banner polls /api/info, which reads this flag)
         line = str(s).strip()
         if line:
             with _flag_lock:
-                _write_flag(data, keys, [], line[:140])
+                pending = [key for key in keys if key not in results]
+                done = [key for key in keys if results.get(key)]
+                failed = [key for key in keys if results.get(key) is False]
+                _write_flag(data, pending, done, line[:140], failed)
         log(s)
 
-    keys = list(repo_sync.REPOS.keys())
+    def worker(key: str) -> None:
+        success = _bootstrap_one(repo_sync, key, blog)
+        with _flag_lock:
+            results[key] = success
+            pending = [item for item in keys if item not in results]
+            done = [item for item in keys if results.get(item)]
+            failed = [item for item in keys if results.get(item) is False]
+            _write_flag(data, pending, done,
+                        "getting ready …" if pending else ("done" if not failed else "setup incomplete"),
+                        failed)
+
     with _flag_lock:
         _write_flag(data, keys, [], "getting ready …")
     threads = [
         threading.Thread(
-            target=_bootstrap_one, args=(repo_sync, key, blog),
+            target=worker, args=(key,),
             daemon=True, name=f"first-boot-{key}",
         )
         for key in keys
@@ -118,6 +136,8 @@ def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> N
         t.start()
     for t in threads:
         t.join()
-    with _flag_lock:
-        _write_flag(data, [], keys, "done")
-    log("[bootstrap] first-launch preparation finished — the UI now sees the managed copies.")
+    failed = [key for key in keys if results.get(key) is False]
+    if failed:
+        log("[bootstrap] first-launch preparation incomplete — retry the failed managed copies.")
+    else:
+        log("[bootstrap] first-launch preparation finished — the UI now sees the managed copies.")

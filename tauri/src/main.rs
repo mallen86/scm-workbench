@@ -137,6 +137,45 @@ fn embedded_index_url() -> Url {
     Url::parse(&format!("{origin}/index.html")).expect("embedded Tauri URL is valid")
 }
 
+/// Native repository selection owns the directory picker. Browsers cannot
+/// provide an absolute filesystem path, so this command is intentionally
+/// separate from worker RPC and available only to the embedded app window.
+#[tauri::command]
+async fn wb_pick_repo_directory(window: WebviewWindow) -> Result<Value, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Select repository folder")
+        .pick_folder(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "repository folder picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "repository folder picker failed".to_string()))?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected path is unavailable".to_string())?;
+    let selected_path = path
+        .to_str()
+        .ok_or_else(|| "selected path is not valid UTF-8".to_string())?;
+    if selected_path.as_bytes().len() > 4096 {
+        return Err("selected path exceeds 4096 UTF-8 bytes".to_string());
+    }
+    if selected_path
+        .chars()
+        .any(|character| character.is_control() || character == '\u{7f}')
+    {
+        return Err("selected path contains control characters".to_string());
+    }
+    Ok(Value::String(selected_path.to_string()))
+}
+
 /// Native decklist import owns the picker. The callback-based dialog is
 /// intentionally bridged to an async command: no blocking picker runs on the
 /// Tauri main thread, and the worker receives only the selected path.
@@ -293,7 +332,13 @@ fn main() {
     let worker_slot = WorkerSlot::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![wb_restart, ipc::wb_rpc, wb_decklist_import, wb_save_artifact])
+        .invoke_handler(tauri::generate_handler![
+            wb_restart,
+            ipc::wb_rpc,
+            wb_pick_repo_directory,
+            wb_decklist_import,
+            wb_save_artifact
+        ])
         .manage(worker_slot.clone())
         .manage(Worker {
             slot: worker_slot,

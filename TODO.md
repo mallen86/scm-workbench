@@ -12,8 +12,8 @@
 - [x] If you start the create PDF job and change pages and the job finishes, you don't get the open pdf button.
     - [x] The initial bug is fixed but it takes far too long for the job to show up after changes pages. I timed about 2.5 seconds for the "Done" box to show up after changing from fetch card art back to create pdf. Let's tighten the timings so it shows up significantly quicker.
 - [x] The most recent initial setup of the app from sha f23211d failed to initialize the main repo. A subsequent initalization from the settings was successful but in the event this happens again add retry logic to the getting started page.
-- The initial repo sync can fail with "repository metadata changed during deployment, retry" in the tauri log. Ensure this doesn't happen unless there's a real issue with the github repo.
-- Even if the initial repo sync fails there's a toast that says everything is ready to use.
+- [x] The initial repo sync can fail with "repository metadata changed during deployment, retry" in the tauri log. Ensure this doesn't happen unless there's a real issue with the github repo.
+- [x] Even if the initial repo sync fails there's a toast that says everything is ready to use.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
@@ -21,4 +21,4 @@
 - [x] When the create PDF job is running, make the progress bar a real progress bar. The script outputs which image has been added by number ("Image 1: xyz.png", "Image 2: abc.png") and we can get the total from the number of images in the front image directory.
 - [x] When the create PDF job has finished, along side the open PDF button that appears add a button to open the cutting template based on the PDF settings were used.
 - [x] Add the Offset & calibration workflow to the simple mode. Keep the global offset, paper specific offset, and the calibration sheets sections but leave out the offset pdf section
-- Add a browse button to select the silhouette-card-maker and scm-extras repos in the advanced settings. It's currently just an input box but being able to browse for the location is much more user friendly.
+- [x] Add a browse button to select the silhouette-card-maker and scm-extras repos in the advanced settings. It's currently just an input box but being able to browse for the location is much more user friendly.

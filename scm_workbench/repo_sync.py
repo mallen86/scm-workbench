@@ -2955,13 +2955,8 @@ def _build_tx(key, old_state_raw, old_manifest_raw, target, source, source_sig):
 
 def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, target_sha):
     new_manifest_raw = _json_payload(new_manifest)
-    new_state_raw = _json_payload(new_state)
-    tx["state_after"] = _tx_snapshot(tx, "state-after.bin", new_state_raw)
     tx["manifest_after"] = _tx_snapshot(tx, "manifest-after.bin", new_manifest_raw)
-    tx["state_after_raw"] = new_state_raw
     tx["manifest_after_raw"] = new_manifest_raw
-    tx["state_after_entry"] = _state_entry(new_state_raw, tx["key"])
-    _journal_write(tx, "prepared", {"target_sha": target_sha})
     mutated = False
     try:
         # Lock order is repo-operation -> settings-source -> global state.  The
@@ -2969,14 +2964,29 @@ def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, ta
         # backed source cannot change after this final fence.
         with _settings_source_lock():
             with _state_lock():
-                # This is the stale-target fence.  It also prevents an
-                # unrelated state client from being overwritten by the merge.
-                if (_raw_metadata(state_file()) != old_state_raw or
-                        _raw_metadata(manifest_file(tx["key"])) != old_manifest_raw):
+                current_state_raw = _raw_metadata(state_file())
+                current_manifest_raw = _raw_metadata(manifest_file(tx["key"]))
+                # Fence changes to this repository, while allowing the other
+                # managed repository to publish after our initial snapshot.
+                # The fresh whole-state bytes become this transaction's
+                # rollback baseline so unrelated entries are never lost.
+                if (_state_entry(current_state_raw, tx["key"]) != tx["state_before_entry"] or
+                        current_manifest_raw != old_manifest_raw):
                     raise RepoError("repository metadata changed during deployment; retry")
-                current_source, _ = _source_snapshot(tx["key"], _load_state_for_mutation())
+                current_state = _load_state_for_mutation()
+                current_source, _ = _source_snapshot(tx["key"], current_state)
                 if current_source != tx["source"]:
                     raise RepoError("repository source changed during deployment; retry")
+                new_entry = copy.deepcopy(new_state.get(tx["key"])) if tx["key"] in new_state else None
+                new_state_raw = _state_with_entry(current_state_raw, tx["key"], new_entry)
+                new_state = json.loads(new_state_raw.decode("utf-8"))
+                old_state_raw = current_state_raw
+                tx["old_state_raw"] = old_state_raw
+                tx["state_before"] = _tx_snapshot(tx, "state-before.bin", old_state_raw)
+                tx["state_after"] = _tx_snapshot(tx, "state-after.bin", new_state_raw)
+                tx["state_after_raw"] = new_state_raw
+                tx["state_after_entry"] = _state_entry(new_state_raw, tx["key"])
+                _journal_write(tx, "prepared", {"target_sha": target_sha})
                 _validate_tree(tx["candidate"])
                 if os.path.lexists(tx["candidate"]) and tx["candidate"].is_symlink():
                     raise RepoError("refusing a symbolic link candidate")

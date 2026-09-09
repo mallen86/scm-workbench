@@ -120,6 +120,47 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(repo_sync.verify_deployed("scm"))
         self.assert_no_transaction_artifacts()
 
+    def test_parallel_initial_deployments_merge_unrelated_state_entries(self):
+        repo_sync.set_source("scm", "main")
+        repo_sync.set_source("extras", "main")
+        archives = {
+            "scm": self.tar_path({"scm.txt": b"scm"}, "scm.tar.gz"),
+            "extras": self.tar_path({"extras.txt": b"extras"}, "extras.tar.gz"),
+        }
+        original_publish = repo_sync._publish_tx
+        publish_barrier = threading.Barrier(2)
+        results, errors = {}, []
+
+        def synchronized_publish(*args, **kwargs):
+            publish_barrier.wait(3)
+            return original_publish(*args, **kwargs)
+
+        def deploy(key):
+            try:
+                results[key] = repo_sync.cmd_init(
+                    key, tarball=archives[key], log=lambda *_: None)
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target()), \
+                patch.object(repo_sync, "_publish_tx", side_effect=synchronized_publish):
+            threads = [threading.Thread(target=deploy, args=(key,)) for key in ("scm", "extras")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(errors, [])
+        self.assertTrue(results["scm"]["ok"])
+        self.assertTrue(results["extras"]["ok"])
+        state = repo_sync.load_state()
+        self.assertEqual(state["scm"]["deployed"]["sha"], SHA1)
+        self.assertEqual(state["extras"]["deployed"]["sha"], SHA1)
+        self.assertEqual((repo_sync.repo_dir("scm") / "scm.txt").read_bytes(), b"scm")
+        self.assertEqual((repo_sync.repo_dir("extras") / "extras.txt").read_bytes(), b"extras")
+        self.assert_no_transaction_artifacts()
+
     def test_diff_update_handles_add_modify_delete_rename_and_preserves_users(self):
         old = {
             "README.md": b"readme", "added-later.txt": b"old add",
@@ -324,25 +365,26 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(repo_sync.load_state()["scm"]["source"], "feature")
         self.assert_no_transaction_artifacts()
 
-    def test_other_repo_state_edit_is_preserved_by_stale_fence(self):
-        before_tree, before_meta, target = self.update_failure_fixture()
+    def test_other_repo_state_edit_is_merged_during_publication(self):
+        _before_tree, _before_meta, target = self.update_failure_fixture()
         original_publish = repo_sync._publish_tx
 
-        def stale(tx, *args):
+        def concurrent_other_repo_publish(tx, *args):
             state = repo_sync.load_state()
             state["extras"] = {"marker": "concurrent"}
             repo_sync.save_state(state)
             return original_publish(tx, *args)
 
         with patch.object(repo_sync, "resolve_target", return_value=target), \
-                patch.object(repo_sync, "_publish_tx", side_effect=stale), \
+                patch.object(repo_sync, "_publish_tx", side_effect=concurrent_other_repo_publish), \
                 patch.object(repo_sync, "compare", return_value=self.basic_compare()), \
-                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
-                self.assertRaises(repo_sync.RepoError):
-            repo_sync.cmd_update("scm", log=lambda *_: None)
-        self.assertEqual(self.tree_bytes(repo_sync.repo_dir("scm")), before_tree)
-        self.assertEqual(repo_sync.load_state()["extras"]["marker"], "concurrent")
-        self.assertEqual(repo_sync._raw_metadata(repo_sync.manifest_file("scm")), before_meta[1])
+                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]):
+            result = repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((repo_sync.repo_dir("scm") / "tracked.txt").read_bytes(), b"new")
+        state = repo_sync.load_state()
+        self.assertEqual(state["scm"]["deployed"]["sha"], target["sha"])
+        self.assertEqual(state["extras"]["marker"], "concurrent")
         self.assert_no_transaction_artifacts()
 
     def test_f016_windows_rename_uses_handle_safe_seam(self):

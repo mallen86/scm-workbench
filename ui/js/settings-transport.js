@@ -26,6 +26,25 @@ function checkedResult(data, status = 0) {
 }
 
 
+export function canPickRepoDirectory(scope = typeof window === "undefined" ? null : window) {
+  return !!getTauriInvoke(scope);
+}
+
+
+/** Open the app-owned directory picker. Browser tabs cannot expose absolute paths. */
+export async function pickRepoDirectory() {
+  const invoke = getTauriInvoke();
+  if (!invoke) throw new Error("repository picker requires the app window");
+  const selected = await invoke("wb_pick_repo_directory", {});
+  if (selected === null) return null;
+  if (typeof selected !== "string" || !selected || new TextEncoder().encode(selected).length > 4096 ||
+      /[\u0000-\u001f\u007f]/.test(selected)) {
+    throw new Error("native repository picker returned an invalid path");
+  }
+  return selected;
+}
+
+
 /** Persist a partial settings object through the native or browser boundary. */
 export async function setSettings(changes) {
   const invoke = getTauriInvoke();

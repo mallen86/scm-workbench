@@ -212,7 +212,13 @@ export function startPrepWatcher() {
       await refreshInfo({ keepForms: true, jobs: false });
       const now = prepSignature();
       if (now !== before) {
-        if (now === "done") toast("ok", "Your repos are ready — every page is live.");
+        if (now === "done") {
+          const repos = S.info.repos || [];
+          const allReady = repos.length > 0 && repos.every(r => r.deployed);
+          toast(allReady ? "ok" : "warn", allReady
+            ? "Your repos are ready — every page is live."
+            : "Setup did not finish — retry the missing repositories.");
+        }
         go(S.page || "dashboard", null, { push: false, anim: false });
       } else {
         updatePrepRows();

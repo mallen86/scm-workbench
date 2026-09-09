@@ -1,12 +1,34 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
 // URL reaches the OS browser. A release link must remain on GitHub and have
 // the server's release URL shape; credentials, redirects, and extra data are
 // never accepted.
+function repoPathControl(input, label) {
+  if (!canPickRepoDirectory()) return input;
+  const browse = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-label": `Browse for ${label}`,
+    onclick: async () => {
+      browse.disabled = true;
+      try {
+        const selected = await pickRepoDirectory();
+        if (selected !== null) input.value = selected;
+      } catch (error) {
+        toast("err", error?.message || "Could not open the repository folder picker");
+      } finally {
+        browse.disabled = false;
+      }
+    },
+  }, ico("folder"), "Browse…");
+  return el("div", { class: "repo-path-control" }, input, browse);
+}
+
+
 function serverReleaseUrl(value) {
   if (typeof value !== "string" || !value) return null;
   try {
@@ -316,8 +338,8 @@ PAGES.settings = (root) => {
   const scmI = el("input", { class: "input mono", value: s.scm_dir || "", placeholder: "auto: ../silhouette-card-maker" });
   const exI = el("input", { class: "input mono", value: s.extras_dir || "", placeholder: "auto: ../scm-extras" });
   rc.append(el("div", { class: "frow" },
-    el("div", { class: "field w-half" }, el("label", {}, "silhouette-card-maker"), scmI),
-    el("div", { class: "field w-half" }, el("label", {}, "scm-extras"), exI),
+    el("div", { class: "field w-half" }, el("label", {}, "silhouette-card-maker"), repoPathControl(scmI, "silhouette-card-maker")),
+    el("div", { class: "field w-half" }, el("label", {}, "scm-extras"), repoPathControl(exI, "scm-extras")),
   ));
   rc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px; align-items:center" },
     el("button", { class: "btn primary", onclick: async () => {

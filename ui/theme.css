@@ -386,6 +386,9 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 32px; 
 select.input option { background: var(--surface); color: var(--text); }
 .input.mono { font-family: var(--mono); font-size: 12.5px; }
 .input.disabled, .input:disabled { opacity: 0.5; }
+.repo-path-control { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.repo-path-control .input { flex: 1 1 auto; min-width: 0; }
+.repo-path-control .btn { flex: none; }
 
 /* number with steppers */
 .numwrap { position: relative; display: flex; align-items: center; }

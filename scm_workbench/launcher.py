@@ -143,10 +143,10 @@ def first_boot_bootstrap(data: Path, log) -> None:
 
     flag = data / "bootstrap.json"
 
-    def set_flag(pending, done):
+    def set_flag(pending, done, failed=None, phase="…"):
         try:
             flag.write_text(
-                json.dumps({"pending": pending, "done": done, "phase": "…"}),
+                json.dumps({"pending": pending, "done": done, "failed": failed or [], "phase": phase}),
                 encoding="utf-8")
         except Exception:
             pass
@@ -158,12 +158,18 @@ def first_boot_bootstrap(data: Path, log) -> None:
         log(s)
 
     set_flag(["scm", "extras"], [])
+    results = {key: True for key in repo_sync.REPOS}
     try:
         if not os.environ.get("SCM_WORKBENCH_NO_BOOTSTRAP"):
-            bootstrap_managed_repos(repo_sync, log=blog)
+            results = bootstrap_managed_repos(repo_sync, log=blog)
     finally:
-        set_flag([], ["scm", "extras"])
-        log("[launcher] first-launch preparation finished — the UI now sees the managed copies.")
+        done = [key for key in repo_sync.REPOS if results.get(key)]
+        failed = [key for key in repo_sync.REPOS if results.get(key) is False]
+        set_flag([], done, failed, "done" if not failed else "setup incomplete")
+        if failed:
+            log("[launcher] first-launch preparation incomplete — retry the failed managed copies.")
+        else:
+            log("[launcher] first-launch preparation finished — the UI now sees the managed copies.")
 
 
 def main() -> None:

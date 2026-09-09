@@ -165,6 +165,18 @@ state/projection transaction described below:
   Validation happens before any write, so a rejected change cannot partially
   update settings.
 
+### Repository directory picker
+
+`wb_pick_repo_directory` is a no-argument Tauri command, not a public
+`wb_rpc` method. Rust opens a parented directory dialog and returns the selected
+absolute UTF-8 path to the embedded Settings page; cancellation returns JSON
+`null`. Paths are capped at 4096 UTF-8 bytes and control characters are rejected
+before the UI can place the value in a settings field. Persistence still goes
+through the bounded `settings.set` operation. Standalone browsers retain the
+editable path inputs but do not display a browse control because browser file
+APIs cannot provide a usable absolute directory path. A selected native bridge
+never retries through HTTP after a failure.
+
 ### Decklist import
 
 `wb_decklist_import` is a no-argument Tauri command, not a public `wb_rpc`
@@ -631,6 +643,7 @@ latest entry):
 | Artifact export (`files.export_*` / `/api/files/save`) | Native grant + parented dialog; standalone HTTP compatibility only | Packaged IPC rejects the HTTP route. Grants are 64-hex, one-use after success, TTL 300 s, max 32; source is a successful create/offset/calibration PDF snapshot below that job's pinned SCM root (regular, stable, <=4 GiB). Copies use 64 KiB chunks, 2 workers, 8 active operations, 32 retained results, no overwrite/mkdir, and bounded collision suffixes. Browser mode has no picker; its explicit compatibility route requires an existing destination parent. |
 | Image deletion (`fs.delete_images` / `/api/fs`) | Tauri JSON-lines in packaged windows; POST `/api/fs` in standalone browsers | SCM-only, bounded preflight, stable POSIX dirfds or Windows handles; packaged HTTP rejects before path work |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
+| Repository directory selection | Rust-owned parented folder dialog | Packaged Advanced Settings uses `wb_pick_repo_directory`; cancellation is `null`, selected paths remain bounded settings values, and standalone browsers keep manual path entry only |
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |
 | Global and per-size offsets (`offset.set`, `offset.delete`) | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; canonical state/projection lease is preserved |
 | Updates metadata, checks, release notes, and update-start | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP compatibility remains; transactional replacement lifecycle is unchanged |

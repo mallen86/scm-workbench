@@ -27,6 +27,10 @@ def main() -> int:
     dashboard = (UI / "pages" / "dashboard.js").read_text(encoding="utf-8")
 
     for required in (
+        'export function canPickRepoDirectory(',
+        'export async function pickRepoDirectory()',
+        'invoke("wb_pick_repo_directory", {})',
+        'repository picker requires the app window',
         'export async function setSettings(changes)',
         'method: "settings.set"',
         'params: { changes }',
@@ -48,7 +52,7 @@ def main() -> int:
 
     for path, marker in (
         (nav_path, 'import { setSettings } from "./settings-transport.js";'),
-        (UI / "pages" / "settings.js", 'import { setSettings } from "../settings-transport.js";'),
+        (UI / "pages" / "settings.js", 'import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";'),
         (UI / "pages" / "dashboard.js", 'import { setSettings } from "../settings-transport.js";'),
     ):
         if marker not in path.read_text(encoding="utf-8"):
@@ -58,6 +62,9 @@ def main() -> int:
         (nav, 'then(() => setSettings({ theme }))'),
         (settings, 'setSettings({ defaults:'),
         (settings, 'setSettings({ scm_dir:'),
+        (settings, 'repoPathControl(scmI, "silhouette-card-maker")'),
+        (settings, 'repoPathControl(exI, "scm-extras")'),
+        (settings, 'const selected = await pickRepoDirectory();'),
         (settings, 'setSettings({ python:'),
         (dashboard, 'setSettings({ onboarded: true })'),
         (dashboard, 'setSettings({ scm_dir:'),
@@ -109,14 +116,35 @@ if (JSON.stringify(nativeResult) !== JSON.stringify({ saved: true }) ||
       method: "wb_rpc", rpc: { method: "settings.set", params: { changes } }, receiver: internals,
     }) || fetchCalls) fail("native settings payload or HTTP isolation is incorrect");
 
+const pickerCalls = [];
+internals.invoke = function(method, args) {
+  pickerCalls.push({ method, args, receiver: this });
+  return Promise.resolve("/picked/scm");
+};
+if (!facade.canPickRepoDirectory() || await facade.pickRepoDirectory() !== "/picked/scm" ||
+    JSON.stringify(pickerCalls[0]) !== JSON.stringify({
+      method: "wb_pick_repo_directory", args: {}, receiver: internals,
+    }) || fetchCalls) fail("native repository picker command or binding is wrong");
+internals.invoke = () => Promise.resolve(null);
+if (await facade.pickRepoDirectory() !== null) fail("repository picker cancellation was not preserved");
+
 internals.invoke = () => Promise.reject(new Error("native down"));
 let nativeRejected = false;
 try { await facade.setSettings({ ui_mode: "simple" }); } catch (error) { nativeRejected = error.message === "native down"; }
 if (!nativeRejected || fetchCalls) fail("native settings rejection silently fell back to HTTP");
+let pickerRejected = false;
+try { await facade.pickRepoDirectory(); } catch (error) { pickerRejected = error.message === "native down"; }
+if (!pickerRejected || fetchCalls) fail("native picker rejection silently fell back to HTTP");
 
 // Browser mode posts the patch itself, and both HTTP and application-level
 // failures become rejected promises.
 delete globalThis.window;
+if (facade.canPickRepoDirectory()) fail("browser was reported as picker-capable");
+let browserPickerRejected = false;
+try { await facade.pickRepoDirectory(); } catch (error) {
+  browserPickerRejected = error.message === "repository picker requires the app window";
+}
+if (!browserPickerRejected || fetchCalls) fail("browser repository picker did not fail closed");
 const requests = [];
 globalThis.fetch = async (url, options) => {
   requests.push({ url, options });
