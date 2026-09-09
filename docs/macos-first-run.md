@@ -14,10 +14,12 @@ So a freshly downloaded copy is gated by macOS:
 3. Open the app once more. It works from then on — the allow is remembered by
    the machine, not per copy.
 
-The in-app updater now prefers the signed `scm-workbench-macos.dmg`: it
-mounts it read-only, copies the validated app out, detaches it, and then hands
-the candidate to the native updater. Releases also retain
-`scm-workbench-macos.zip` as a legacy bridge for older checked metadata.
+The in-app updater uses the signed `scm-workbench-macos.dmg`: it mounts the
+image read-only, copies the validated app out, detaches it, and then hands the
+candidate to the native updater. Version 0.3.7 cannot install this format and
+its legacy ZIP validator rejects valid leading-dot runtime paths, so upgrading
+from 0.3.7 requires one final manual DMG installation. Later versions update
+from the DMG automatically.
 
 Two things that make this step feel broken:
 

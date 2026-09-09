@@ -542,8 +542,8 @@ release metadata as text nodes. Downloads have a 60-second total deadline, a 1 G
 ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
 and SHA-256 verification when GitHub supplies a digest. A completed download is
 published from a unique temporary file only after validation. On macOS the updater
-prefers exactly one `scm-workbench-macos.dmg` and keeps exactly one
-`scm-workbench-macos.zip` as a legacy bridge. DMGs are attached only with fixed
+requires exactly one `scm-workbench-macos.dmg`; Windows requires its exact portable
+ZIP. DMGs are attached only with fixed
 `/usr/bin/hdiutil` arguments (`-readonly -noautoopen -nobrowse`), parsed through
 bounded plist data, copied through a no-follow safe tree walk, and detached before
 any candidate publication or handoff. The mounted app's identity, version,

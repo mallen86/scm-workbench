@@ -172,6 +172,16 @@ class ExtractionTests(unittest.TestCase):
                 self.assert_rejected(extra, name="collision-" + label + ".zip",
                                      dest="collision-" + label + "-dest")
 
+    def test_leading_dot_components_are_portable_and_extract_safely(self):
+        destination = self.extract(self.zips.mac([
+            ("SCM Workbench.app/Contents/runtime/python/lib/.empty", b""),
+            ("SCM Workbench.app/Contents/runtime/python/site-packages/PIL/.dylibs/libimage.dylib", b"library"),
+        ]), dest="dotfiles")
+        self.assertTrue((destination / "Contents/runtime/python/lib/.empty").is_file())
+        self.assertEqual(
+            (destination / "Contents/runtime/python/site-packages/PIL/.dylibs/libimage.dylib").read_bytes(),
+            b"library")
+
     def test_windows_reserved_names_trailing_dots_spaces_and_ads_are_rejected(self):
         names = ("CON", "PRN.txt", "AUX", "NUL", "COM1", "LPT9", "file.",
                  "file ", "directory/name.", "directory/name ", "file:stream")
@@ -310,15 +320,15 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(background[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(tuple(int.from_bytes(background[n:n + 4], "big")
                                for n in (16, 20)), (660, 400))
-        # The DMG is the manual installer; retain the exact ZIP consumed by
-        # the existing transactional in-app updater on tagged releases.
-        self.assertIn("scm-workbench-macos.zip", workflow)
+        # macOS publishes the same standard DMG for manual and in-app
+        # installation; only Windows retains a ZIP payload.
+        self.assertNotIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
         self.assertIn("actions: write", workflow)
         release_upload = next(line for line in workflow.splitlines()
                               if 'gh release upload "$GITHUB_REF_NAME"' in line)
         self.assertIn("scm-workbench-macos.dmg", release_upload)
-        self.assertIn("scm-workbench-macos.zip", release_upload)
+        self.assertNotIn("scm-workbench-macos.zip", release_upload)
         self.assertIn("scm-workbench-windows.zip", release_upload)
         upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
         cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
@@ -551,8 +561,8 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.old_repo = updater.UPDATE_REPO
         updater.UPDATE_REPO = "owner/workbench"
         self.asset = {
-            "id": 9, "tag": "v2.0.0", "name": "scm-workbench-macos.zip",
-            "url": "https://github.com/owner/workbench/releases/download/v2.0.0/scm-workbench-macos.zip",
+            "id": 9, "tag": "v2.0.0", "name": "scm-workbench-macos.dmg",
+            "url": "https://github.com/owner/workbench/releases/download/v2.0.0/scm-workbench-macos.dmg",
             "size": 1, "digest": None,
         }
 

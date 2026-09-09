@@ -23,7 +23,7 @@ function updStrip() {
   if (_updStrip && _updStrip.isConnected) return _updStrip;
   const foot = $(".sidebar-foot");
   if (!foot) return null;
-  _updStrip = el("div", { class: "repoprog", id: "updateprog" },
+  _updStrip = el("div", { class: "repoprog", id: "updateprog", "aria-live": "polite" },
     el("div", { class: "rp-head" }, "Updating SCM Workbench…"),
     el("div", { class: "rp-row" },
       el("div", { class: "rp-label" }),
@@ -68,6 +68,43 @@ function updateStrip(job) {
   meta.textContent = text;
 }
 
+async function finishUpdateStrip(job) {
+  const strip = updStrip();
+  if (!strip) return;
+  const head = strip.children[0];
+  const row = strip.children[1];
+  const [label, meta, bar] = row.children;
+  const failed = job.status === "fail" || job.status === "killed";
+  strip.classList.toggle("failed", failed);
+  strip.classList.toggle("done", job.status === "ok");
+  if (job.status === "handoff") {
+    head.textContent = "Installing SCM Workbench…";
+    label.textContent = "Restarting into the new version";
+    meta.textContent = "The app will close and reopen when installation is ready.";
+    bar.classList.add("indet");
+    return;
+  }
+  bar.classList.remove("indet");
+  bar.firstElementChild.style.width = "100%";
+  if (job.status === "ok") {
+    head.textContent = "SCM Workbench update complete";
+    label.textContent = "Update finished";
+    meta.textContent = "The new version is ready.";
+    return;
+  }
+  head.textContent = failed ? "SCM Workbench update failed" : "SCM Workbench update stopped";
+  label.textContent = job.status === "killed" ? "Update stopped" : "Update failed";
+  let detail = job.status === "killed" ? "The update was stopped." : "The update did not finish.";
+  try {
+    const result = await jobs.log(job.id);
+    const lines = (result.lines || []).map(line => String(line).trim()).filter(Boolean);
+    const specific = [...lines].reverse().find(line => /^!\s+/.test(line)) ||
+      [...lines].reverse().find(line => !/^✕\s+exited\b/.test(line) && !/^\$\s+/.test(line));
+    if (specific) detail = specific.replace(/^!\s+/, "");
+  } catch { /* the stable terminal status is still useful without its log */ }
+  if (_updStrip === strip && strip.isConnected) meta.textContent = detail;
+}
+
 export function startUpdateStrip(jobId) {
   stopUpdateStrip();
   const tick = async () => {
@@ -77,8 +114,8 @@ export function startUpdateStrip(jobId) {
     if (!j) return;
     updateStrip(j);
     if (j.status !== "running") {
-      updateStrip(j);
-      stopUpdateStrip();
+      if (_updTimer) { clearInterval(_updTimer); _updTimer = null; }
+      await finishUpdateStrip(j);
     }
   };
   tick();

@@ -304,19 +304,15 @@ jobs:
       - name: Re-seal the bundle after the smoke test
         # The smoke run is the last thing that executes from the bundle, and
         # a straggler it wakes can keep writing after the Sign step's seal.
-        # (The v0.3.0 zip is the standing example: nine pbs runtime files -
-        # bin/python{,3,-config}, idle3, pydoc3, both .pc files, libpython's
-        # .a and the man page - were re-written from the pbs archive *after*
-        # the seal, so the zipped bundle read "damaged" on every machine.)
-        # Re-sign now, whatever has landed is inside the fresh seal; the
-        # marker moves to this seal, and the zip gate below judges the
-        # archived bytes against it - and names the writer on failure.
+        # (The v0.3.0 package is the standing example: nine pbs runtime files
+        # were re-written from the pbs archive *after* the seal, so the copied
+        # bundle read "damaged" on every machine.) Re-sign now so whatever has
+        # landed is covered by the fresh seal before the DMG is assembled.
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/build/macos"
           sleep 5  # let in-flight writers land before the seal, not after
           codesign --force --deep --sign - "SCM Workbench.app"
-          rm -f sign-marker && touch sign-marker
       - name: Build the drag-to-Applications installer
         run: |
           set -euo pipefail
@@ -324,17 +320,7 @@ jobs:
             "$GITHUB_WORKSPACE/build/macos/SCM Workbench.app" \
             "$GITHUB_WORKSPACE/tauri/dmg-background.png" \
             "$GITHUB_WORKSPACE/build/macos/scm-workbench-macos.dmg"
-      - name: Build the legacy macOS updater bridge
-        # The user-facing installer and current in-app updater payload is the
-        # DMG. Keep this exact ZIP for releases so older clients can still
-        # complete an update while they migrate to DMG-first selection.
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/build/macos"
-          # -y is load-bearing: the bundled Python runtime contains symlinks,
-          # and following them makes the unzipped bundle fail its code seal.
-          zip -y -qr scm-workbench-macos.zip "SCM Workbench.app"
-      - name: Verify the installer and legacy updater bridge
+      - name: Verify the installer
         # Verify the bytes users and the updater actually receive, rather than
         # trusting only the pre-container bundle tree.
         run: |
@@ -361,18 +347,7 @@ jobs:
           hdiutil detach "$mount" -quiet
           rmdir "$mount"
           trap - EXIT
-
-          mkdir -p .zipcheck
-          unzip -q scm-workbench-macos.zip -d .zipcheck
-          app=".zipcheck/SCM Workbench.app"
-          if ! codesign --verify --verbose=2 "$app" > .zipcheck/verify.log 2>&1; then
-            echo "---- the legacy updater bundle fails codesign --verify: ----"
-            cat .zipcheck/verify.log
-            echo "---- bundle files written after the last seal: ----"
-            find "$app" -newer sign-marker 2>/dev/null | sed "s|^$app/||" | head -50
-            exit 1
-          fi
-          echo "the DMG and legacy updater ZIP both carry the sealed arm64 app"
+          echo "the DMG carries the sealed arm64 app"
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
@@ -380,13 +355,6 @@ jobs:
           path: build/macos/scm-workbench-macos.dmg
           # GitHub wraps Actions artifacts in a transport ZIP. The file inside
           # is the standard DMG users open; release downloads are the raw DMG.
-          retention-days: 1
-      - name: Upload legacy macOS updater bridge
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
-        with:
-          name: scm-workbench-macos-update-${{ steps.build_meta.outputs.short_sha }}
-          path: build/macos/scm-workbench-macos.zip
           retention-days: 1
   windows:
     runs-on: windows-latest  # x64 release target
@@ -620,8 +588,8 @@ jobs:
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
         # the tag push, or from the GitHub UI. This job adds the macOS
-        # DMG installer/current updater payload, its legacy ZIP bridge, and
-        # the portable Windows package. If no release exists for the tag, a bare one
+        # DMG installer/updater payload and the portable Windows package. If
+        # no release exists for the tag, a bare one
         # is created as a fallback so the artifacts are never lost.
         # (--repo on every call: this job has no checkout for gh to infer
         #  the owner/repo from.)
@@ -629,7 +597,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-macos.zip scm-workbench-windows.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip --clobber
       - name: Delete Actions artifacts after release attachment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

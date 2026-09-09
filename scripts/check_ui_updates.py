@@ -9,6 +9,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "ui" / "js"
 FACADE = UI / "updates-transport.js"
+UPDATER_UI = UI / "updater-ui.js"
 PAGE = UI / "pages" / "settings.js"
 
 
@@ -21,6 +22,7 @@ def main():
     if not FACADE.is_file():
         return fail("updates transport facade is missing")
     source = FACADE.read_text(encoding="utf-8")
+    updater_ui = UPDATER_UI.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
     for marker in (
         "export function getUpdates()", "export function checkUpdates(force = false)",
@@ -34,11 +36,17 @@ def main():
             return fail(f"updates facade is missing {marker}")
     if 'import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";' not in page:
         return fail("settings page does not import the updates facade")
-    for marker in ("getUpdates()", "checkUpdates(!fresh)", "getUpdateNotes(tag)", "startUpdateRequest()",
+    for marker in ("getUpdates()", "checkUpdates(true)", "getUpdateNotes(tag)", "startUpdateRequest()",
                    "let checkPending = false", "checkPending = true", "checkPending = false",
-                   "if (checkPending || st.checking)"):
+                   "if (checkPending || st.checking)", 'setBtn("Check for updates", doCheck)'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
+    if "checkUpdates(!fresh)" in page:
+        return fail("manual update checks still reuse the scheduled-check cache")
+    for marker in ("async function finishUpdateStrip(job)", "await jobs.log(job.id)",
+                   "await finishUpdateStrip(j)", 'head.textContent = failed ? "SCM Workbench update failed"'):
+        if marker not in updater_ui:
+            return fail(f"update progress strip is missing {marker}")
     app = (UI / "app.js").read_text(encoding="utf-8")
     for marker in ('import { getTauriInvoke } from "./transport.js";',
                    'import { getUpdates } from "./updates-transport.js";',
@@ -57,6 +65,7 @@ def main():
     script = r'''
 import fs from "node:fs";
 const source = fs.readFileSync(process.argv[2], "utf8");
+const updaterSource = fs.readFileSync(process.argv[3], "utf8");
 const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
 const transport = dataUrl(`export function getTauriInvoke() {
   const i = globalThis.window && globalThis.window.__TAURI_INTERNALS__;
@@ -115,9 +124,62 @@ if (requests.length !== 4 || requests[0].url !== "/api/updates" || requests[1].o
 globalThis.fetch = async (url, options) => ({ ok: false, status: 400, json: async () => ({ ok: false, errors: ["busy"] }) });
 const browserBusy = await updates.startUpdate();
 if (browserBusy.ok !== false || browserBusy.errors[0] !== "busy") fail("browser start application rejection changed");
-console.log("ok: native/browser update transport, bounded polling, memoization, and failure isolation pass");
+
+// The global strip is Simple mode's only update transcript. A terminal update
+// must stop polling but remain visible with its specific failure, and a later
+// update must replace that retained result.
+class Classes {
+  constructor(value = "") { this.values = new Set(String(value).split(/\s+/).filter(Boolean)); }
+  add(...names) { names.forEach(name => this.values.add(name)); }
+  remove(...names) { names.forEach(name => this.values.delete(name)); }
+  contains(name) { return this.values.has(name); }
+  toggle(name, force) { if (force === undefined ? !this.contains(name) : force) this.add(name); else this.remove(name); }
+}
+class Element {
+  constructor(tag, attrs = {}, children = []) {
+    this.tag = tag; this.children = []; this.textContent = ""; this.isConnected = true;
+    this.classList = new Classes(attrs.class); this.style = {}; this.dataset = {};
+    this.append(...children); Object.assign(this, Object.fromEntries(Object.entries(attrs).filter(([key]) => key !== "class")));
+  }
+  append(...children) { for (const child of children.flat()) { if (child instanceof Element) this.children.push(child); else if (child != null) this.textContent += String(child); } }
+  before(child) { globalThis.__insertedUpdateStrip = child; child.isConnected = true; }
+  remove() { this.isConnected = false; }
+  get firstElementChild() { return this.children[0] || null; }
+}
+globalThis.__updateFoot = new Element("footer");
+globalThis.__makeUpdateElement = (tag, attrs, children) => new Element(tag, attrs, children);
+let listedJob = { id: "update-1", kind: "update", title: "Update to v2", status: "fail", progress: { stage: "extract" } };
+globalThis.__updateJobs = {
+  list: async () => ({ jobs: [listedJob] }),
+  log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
+};
+const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); }`);
+const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
+const loadedUpdaterSource = updaterSource
+  .replace('from "./core.js"', `from "${updaterCore}"`)
+  .replace('from "./jobs.js"', `from "${updaterJobs}"`);
+const realInterval = globalThis.setInterval, realClearInterval = globalThis.clearInterval;
+let intervalCleared = false;
+globalThis.setInterval = fn => { globalThis.__updateTick = fn; return 41; };
+globalThis.clearInterval = id => { if (id === 41) intervalCleared = true; };
+const updaterUi = await import(dataUrl(loadedUpdaterSource));
+updaterUi.startUpdateStrip("update-1");
+await new Promise(resolve => realTimeout(resolve, 0));
+await new Promise(resolve => realTimeout(resolve, 0));
+const failedStrip = globalThis.__insertedUpdateStrip;
+const elementText = node => node.textContent + node.children.map(elementText).join(" ");
+if (!failedStrip?.isConnected || !elementText(failedStrip).includes("update failed") ||
+    !elementText(failedStrip).includes("archive contained an unsafe path") || !intervalCleared)
+  fail("terminal update failure did not remain visible with its log detail");
+listedJob = { id: "update-2", kind: "update", title: "Update to v3", status: "running", progress: { stage: "download", done: 2, total: 10 } };
+updaterUi.startUpdateStrip("update-2");
+await new Promise(resolve => realTimeout(resolve, 0));
+if (failedStrip.isConnected || !globalThis.__insertedUpdateStrip?.isConnected)
+  fail("a new update did not replace the retained terminal strip");
+globalThis.setInterval = realInterval; globalThis.clearInterval = realClearInterval;
+console.log("ok: update transport, forced manual checks, and persistent Simple-mode failure status pass");
 '''.strip()
-    result = subprocess.run([node, "--input-type=module", "-", str(FACADE)], input=script,
+    result = subprocess.run([node, "--input-type=module", "-", str(FACADE), str(UPDATER_UI)], input=script,
                             text=True, capture_output=True)
     if result.returncode:
         return fail("Node updates transport contract failed: " + (result.stderr or result.stdout).strip())

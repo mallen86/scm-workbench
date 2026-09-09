@@ -149,8 +149,8 @@ stays closed, and separately assert that no WebView request occurred.
 The supported release matrix is **macOS ARM64 only** and **Windows x64 only**:
 there is no Intel/universal macOS artifact and no ARM Windows artifact. The
 macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG,
-which is the in-app updater's primary payload. It also retains the matching
-ZIP as a legacy updater bridge; neither artifact is notarized. Current Windows artifacts are unsigned. Those signing
+which is also the sole in-app updater payload. The DMG is not notarized, and
+current Windows artifacts are unsigned. Those signing
 tradeoffs, including the expected macOS **Open Anyway** and Windows SmartScreen
 prompts, are explicitly
 accepted for the current first slice. Do not add Developer ID/notarization or
@@ -158,7 +158,7 @@ an OV certificate as part of this work.
 
 ## Releasing a new version
 
-**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG, the legacy macOS updater ZIP, and the portable Windows x64 ZIP to the GitHub release.
+**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG and the portable Windows x64 ZIP to the GitHub release.
 
 ```bash
 git tag v0.1.1

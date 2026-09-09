@@ -450,7 +450,6 @@ PAGES.settings = (root) => {
       }
       const st = r.state || {};
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
-      const stale = st.checked_at != null && (Date.now() / 1000 - st.checked_at) > 86400;
       const setBtn = (label, onClick, disabled = false, title = "") => {
         uBtn.textContent = "";
         uBtn.append(ico(disabled ? "clock" : "arrow"), el("span", {}, " " + label));
@@ -479,13 +478,9 @@ PAGES.settings = (root) => {
           break;
         case "up-to-date": {
           const latest = vv(st.latest || r.current);
-          if (!stale) {
-            setBtn("Up to date", null, true, "Rechecked at start-up and once a day while the app is open");
-            uStatus.replaceChildren("You're on the latest version — ", el("b", {}, latest), " is the newest release.");
-          } else {
-            setBtn("Check for updates", doCheck);
-            uStatus.replaceChildren("Last checked ", humanize(st.checked_at), " — you were on the latest (", latest, "). The automatic recheck is due; press to check now.");
-          }
+          setBtn("Check for updates", doCheck);
+          uStatus.replaceChildren("You're on the latest version — ", el("b", {}, latest),
+            " is the newest release. Press to check GitHub again now.");
           break;
         }
         case "update-available": {
@@ -520,16 +515,11 @@ PAGES.settings = (root) => {
       checkPending = true;
       uBtn.disabled = true;
       uStatus.textContent = "Asking GitHub for the newest release…";
-      const st0 = (await Promise.resolve().then(() => getUpdates()).catch(() => null))?.state || {};
-      const fresh = st0.checked_at != null && (Date.now() / 1000 - st0.checked_at) < 86400
-        && ["up-to-date", "update-available"].includes(st0.status);
-      if (!fresh) {
-        uStatus.textContent = "Asking GitHub for the newest release…";
-        uBtn.disabled = true;
-      }
       let r;
       try {
-        r = await checkUpdates(!fresh);
+        // A button click is an explicit refresh, not the scheduled daily
+        // check. Always bypass the persisted freshness cache.
+        r = await checkUpdates(true);
       } catch (e) {
         uStatus.textContent = "The check didn't get through — try again in a moment.";
       } finally {

@@ -3,8 +3,8 @@
 updater.py — check for, and install, newer versions of the SCM Workbench app.
 
 The app is packaged as a Tauri bundle and shipped as GitHub release assets
-(macOS: a drag-to-Applications DMG, plus a legacy app ZIP; Windows: a flat
-portable ZIP). This module talks to the releases of the Workbench's own repository:
+(macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP). This module
+talks to the releases of the Workbench's own repository:
 
   * fetch the newest release (the release repo is private, so the check
     can't see it until the repo is made public - no credentials anywhere
@@ -12,7 +12,7 @@ portable ZIP). This module talks to the releases of the Workbench's own reposito
   * compare it with the running version,
   * on "update available" an in-process job downloads the exact platform
     asset. macOS DMGs are mounted read-only and copied into a validated app
-    candidate; legacy ZIPs use the bounded extractor. The candidate is then
+    candidate; Windows ZIPs use the bounded extractor. The candidate is then
     handed to the native helper through a durable journal/request protocol.
     The helper owns publication, health verification, rollback, and relaunch.
 
@@ -61,10 +61,9 @@ ARCHIVE_NAME_MAX_BYTES = 4096
 ARCHIVE_COMPONENT_MAX_BYTES = 255
 ARCHIVE_COMPRESSION_RATIO_MAX = 200
 
-# macOS's release installer is the DMG.  The ZIP remains accepted only as a
-# legacy bridge for releases made before the DMG updater was deployed.
+# macOS uses its standard DMG for both manual and in-app installation.
+# Windows remains a portable ZIP application.
 MACOS_DMG_ASSET = "scm-workbench-macos.dmg"
-MACOS_LEGACY_ASSET = "scm-workbench-macos.zip"
 WINDOWS_ASSET = "scm-workbench-windows.zip"
 HDIUTIL = "/usr/bin/hdiutil"
 CODESIGN = "/usr/bin/codesign"
@@ -445,14 +444,12 @@ def latest_release(timeout: int = 25) -> dict:
 def pick_asset(release: dict, platform: str = None) -> dict:
     """Select one exact supported release asset.
 
-    A current macOS release has one DMG and may also carry one legacy ZIP.  A
-    ZIP is used only when the DMG is absent, so publishing the compatibility
-    bridge cannot accidentally make the DMG path ambiguous.  Windows keeps
-    its original exact ZIP-only selection.
+    macOS accepts exactly one DMG and Windows accepts exactly one portable
+    ZIP. Other package names never become implicit fallbacks.
     """
     platform = platform or (sys.platform if os.name != "nt" else "win32")
     if platform in ("darwin", "macos", "darwin-arm64", "macos-arm64"):
-        expected = (MACOS_DMG_ASSET, MACOS_LEGACY_ASSET)
+        expected = (MACOS_DMG_ASSET,)
         label = "darwin arm64"
     elif platform in ("win32", "windows", "windows-x64", "win64"):
         expected = (WINDOWS_ASSET,)
@@ -721,8 +718,14 @@ def extract_app(zip_path: Path, dest_dir: Path, log=print, *, publish_bundle_roo
             if folded in aliases and aliases[folded] != part:
                 bad("Unicode/case-fold-colliding path component")
             aliases[folded] = part
-            stem = part.rstrip(". ").split(".", 1)[0].casefold()
-            if not stem or stem in reserved_stems or ":" in part or part.endswith((".", " ")):
+            trimmed = part.rstrip(". ")
+            stem = trimmed.split(".", 1)[0].casefold()
+            # Leading-dot names such as .dylibs and .empty are valid on both
+            # Windows and macOS. Only an entirely dot/space component, a DOS
+            # device stem, an alternate-data-stream colon, or a trailing dot
+            # or space is non-portable.
+            if (not trimmed or (stem and stem in reserved_stems) or
+                    ":" in part or part.endswith((".", " "))):
                 bad("entry name has a Windows-unsafe component")
             normalized.append(part)
             parent_key = "/".join(normalized).casefold()
@@ -1577,7 +1580,7 @@ def prepare_asset(asset: dict, downloaded: Path, candidate: Path,
     name = asset.get("name") if isinstance(asset, dict) else None
     if name == MACOS_DMG_ASSET:
         return prepare_dmg(downloaded, candidate, expected_version, log=log)
-    if name == MACOS_LEGACY_ASSET or name == WINDOWS_ASSET:
+    if name == WINDOWS_ASSET:
         return extract_app(downloaded, candidate, log=log, publish_bundle_root=True)
     raise UpdateError("the release asset name is not supported")
 

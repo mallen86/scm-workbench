@@ -15,7 +15,7 @@ from scm_workbench import server, updater
 
 
 def current_asset_name():
-    return "scm-workbench-windows.zip" if os.name == "nt" else "scm-workbench-macos.zip"
+    return "scm-workbench-windows.zip" if os.name == "nt" else "scm-workbench-macos.dmg"
 
 
 class FakeResponse:
@@ -61,7 +61,7 @@ class UpdaterMetadataTests(unittest.TestCase):
 
     @staticmethod
     def release_raw(tag="v2.0.0", *, body="notes", assets=None, **extra):
-        asset_name = "scm-workbench-macos.zip"
+        asset_name = "scm-workbench-macos.dmg"
         assets = assets if assets is not None else [{
             "id": 7,
             "name": asset_name,
@@ -244,10 +244,12 @@ class UpdaterMetadataTests(unittest.TestCase):
             self.assertEqual(updater.latest_release()["body"], "valid")
 
     def test_pick_asset_requires_exact_architecture_name_and_unique_match(self):
-        mac = {"name": "scm-workbench-macos.zip", "id": 1}
+        mac = {"name": "scm-workbench-macos.dmg", "id": 1}
+        legacy = {"name": "scm-workbench-macos.zip", "id": 9}
         win = {"name": "scm-workbench-windows.zip", "id": 2}
         release = {"assets": [
             {"name": "scm-workbench-macos-arm64.zip"},
+            legacy,
             mac,
             win,
             {"name": "windows-debug.zip"},
@@ -260,22 +262,21 @@ class UpdaterMetadataTests(unittest.TestCase):
         for platform in ("linux", "darwin", "win32"):
             with self.subTest(platform=platform):
                 assets = list(release["assets"])
-                expected = "scm-workbench-macos.zip" if platform == "darwin" else "scm-workbench-windows.zip"
+                expected = "scm-workbench-macos.dmg" if platform == "darwin" else "scm-workbench-windows.zip"
                 assets.append({"name": expected})
                 with self.assertRaises(updater.UpdateError):
                     updater.pick_asset({"assets": assets}, platform)
         with self.assertRaises(updater.UpdateError):
             updater.pick_asset({"assets": [mac]}, "linux")
 
-    def test_macos_dmg_precedes_legacy_zip_and_compatible_duplicates_fail(self):
+    def test_macos_requires_dmg_and_never_falls_back_to_legacy_zip(self):
         dmg = {"name": updater.MACOS_DMG_ASSET, "id": 10}
-        legacy = {"name": updater.MACOS_LEGACY_ASSET, "id": 11}
+        legacy = {"name": "scm-workbench-macos.zip", "id": 11}
         self.assertIs(updater.pick_asset({"assets": [legacy, dmg]}, "darwin"), dmg)
-        self.assertIs(updater.pick_asset({"assets": [legacy]}, "darwin"), legacy)
+        with self.assertRaisesRegex(updater.UpdateError, "unambiguous"):
+            updater.pick_asset({"assets": [legacy]}, "darwin")
         with self.assertRaisesRegex(updater.UpdateError, "unambiguous"):
             updater.pick_asset({"assets": [dmg, dict(dmg, id=12)]}, "darwin")
-        with self.assertRaisesRegex(updater.UpdateError, "unambiguous"):
-            updater.pick_asset({"assets": [legacy, dict(legacy, id=12)]}, "darwin")
 
 
 class UpdaterDownloadTests(unittest.TestCase):
@@ -630,6 +631,17 @@ class UpdateStateTests(unittest.TestCase):
                 server.save_update_state(self.valid_state(checked_at=11.0))
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(list(Path(self.temp.name).glob(".update-state.json.*.tmp")), [])
+
+    def test_explicit_force_bypasses_a_fresh_cached_update_check(self):
+        fresh = self.valid_state(checked_at=time.time())
+        server.save_update_state(fresh)
+        checked = self.valid_state(latest="v3.0.0", checked_at=time.time())
+        with patch.object(server, "run_update_check", return_value=checked) as run:
+            cached = server._update_check_result(False)
+            forced = server._update_check_result(True)
+        self.assertTrue(cached["state"]["cached"])
+        self.assertEqual(forced, {"ok": True, "state": checked})
+        run.assert_called_once_with()
 
     def test_update_check_is_singleflight_and_waiters_get_same_result(self):
         asset_name = current_asset_name()

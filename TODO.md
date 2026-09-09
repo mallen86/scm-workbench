@@ -1,4 +1,7 @@
 # Bugs
+- [x] Keep self-update status and terminal failures visible in Simple mode after download progress ends.
+- [x] Ensure the manually-invoked update check always performs a fresh release check regardless of the scheduled-check cache.
+- [x] Fix the v0.4.0 macOS ZIP compatibility failure for v0.3.7 updaters, then make DMG the only macOS updater artifact for future releases.
 - [x] Deleting images in the fetch card art workflow using the clear card images button clears the images but changes the command preview to say "waiting for server". Toggling an option on and off brings the command preview back.
 - [x] The extra settings under the decklist format dropdown used to be in a collapsable region defaulting to collapsed but are now part of the main UI. Move them back to the collapsed section.
 - [x] The decklist source and picker are in 2 columns but it also didn't used to be like this. The decklist picker should be under the decklist source.
