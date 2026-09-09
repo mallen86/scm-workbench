@@ -163,7 +163,12 @@ class ArtifactExportTests(unittest.TestCase):
         self.assertEqual(server.job_outputs(job), [str(path)])
         self.assertEqual(server._snapshot_artifacts(job), [snap])
 
-        job["artifact_before"] = {str(path.resolve()): server._artifact_identity(path.stat())}
+        if os.name == "nt":
+            base_fd, base_st = server._open_windows_regular_file(path)
+            os.close(base_fd)
+        else:
+            base_st = path.stat()
+        job["artifact_before"] = {str(path.resolve()): server._artifact_identity(base_st)}
         self.assertEqual(server._snapshot_artifacts(job), [])
 
     def test_persisted_snapshots_mint_fresh_grants_but_legacy_rows_do_not(self):
@@ -611,8 +616,11 @@ class ArtifactExportTests(unittest.TestCase):
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
             request = urllib.request.Request(base + "/api/files/save", data=json.dumps({"src": str(source), "dest": str(destination / "x.pdf")}).encode(), headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(request, timeout=3) as response:
-                body = json.loads(response.read())
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    body = json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                self.fail("files/save returned HTTP %s: %s" % (error.code, error.read().decode(errors="replace")[:300]))
             self.assertEqual(body["ok"], True)
             self.assertEqual((destination / "x.pdf").read_bytes(), b"standalone")
 

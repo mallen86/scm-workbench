@@ -197,7 +197,11 @@ def safe_path(root: Path, relative: str) -> Path:
     relative = validate_repo_path(relative)
     root_input = Path(root)
     _ensure_no_symlink_components(root_input)
-    root = root_input if _WINDOWS_FALLBACK else root_input.resolve()
+    # Resolve the root into its canonical spelling (Windows 8.3 short-name
+    # parents such as RUNNER~1 expand to their long form); the returned
+    # candidate is built from that spelling, and containment is checked in
+    # the same resolved namespace on every platform.
+    root = root_input.resolve()
     _ensure_no_symlink_components(root)
     candidate = root.joinpath(*relative.split("/"))
     _ensure_no_symlink_components(candidate)
@@ -346,8 +350,24 @@ def _windows_open_checked(path: Path, write=False, create_parents=False,
             prefix = root_final.rstrip("\\") + "\\"
             if final != root_final and not final.startswith(prefix):
                 raise RepoError("Windows handle escaped its trusted root")
-        if exact is not None and final != os.path.normcase(os.path.normpath(str(exact))):
-            raise RepoError("Windows handle resolved to an unexpected path")
+        if exact is not None:
+            expected_norm = os.path.normcase(os.path.normpath(str(exact)))
+            if final != expected_norm:
+                # The supplied spelling may be an 8.3 short-name alias (e.g.
+                # a RUNNER~1-style directory) of the object the handle
+                # names; GetFinalPathNameByHandle reports the long form.
+                # Accept the mismatch only when the supplied path resolves
+                # on disk to exactly that form.  Symlinked components are
+                # still rejected: the walk above reparse-checks every parent
+                # and the leaf, so a resolved spelling that follows a link
+                # cannot equal the reparse point the handle references.
+                try:
+                    resolved = os.path.realpath(os.fspath(exact))
+                except OSError:
+                    resolved = None
+                if resolved is None or \
+                        os.path.normcase(os.path.normpath(resolved)) != final:
+                    raise RepoError("Windows handle resolved to an unexpected path")
 
     candidate = Path(path)
     checked = safe_destination(candidate)
@@ -2136,8 +2156,10 @@ def stash_user_data(repo: Path, dest: Path, log=print) -> list:
     Returns [(relpath, staged_path), …]."""
     repo = safe_destination(repo)
     dest = safe_destination(dest)
-    if not _WINDOWS_FALLBACK:
-        repo, dest = repo.resolve(), dest.resolve()
+    # Resolve into canonical spellings on every platform: Windows parents may
+    # be 8.3 short-name aliases (e.g. RUNNER~1) and mixing spellings breaks
+    # the relative_to containment walks below.
+    repo, dest = repo.resolve(), dest.resolve()
     dest.mkdir(parents=True, exist_ok=True)
     safe_destination(dest)
     saved = []
@@ -2169,8 +2191,7 @@ def restore_user_data(saved: list, repo: Path, log=print) -> None:
     """Put staged user files back into (a freshly replaced) tree. User data
     wins over any same-named upstream file."""
     repo = safe_destination(repo)
-    if not _WINDOWS_FALLBACK:
-        repo = repo.resolve()
+    repo = repo.resolve()
     for rel, sp in saved:
         rel = validate_repo_path(rel)
         safe_path(repo, rel)

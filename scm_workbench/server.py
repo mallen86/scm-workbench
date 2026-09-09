@@ -5184,10 +5184,20 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     before = {}
     for candidate in _artifact_expected_paths(job):
         try:
-            st = os.stat(candidate, follow_symlinks=False)
-            if stat.S_ISREG(st.st_mode) and not _is_reparse_or_symlink(os.lstat(candidate)):
+            if os.name == "nt":
+                # Take the pre-run baseline from an open handle: a path stat
+                # on Windows can report the volume's cached directory-entry
+                # timestamps, which lag the file's true change time after a
+                # fresh write and would make every unmodified output look new.
+                base_fd, st = _open_windows_regular_file(candidate)
+                os.close(base_fd)
+            else:
+                st = os.stat(candidate, follow_symlinks=False)
+                if _is_reparse_or_symlink(os.lstat(candidate)):
+                    continue
+            if stat.S_ISREG(st.st_mode):
                 before[str(candidate.resolve())] = _artifact_identity(st)
-        except OSError:
+        except (OSError, ArtifactExportError):
             pass
     if before:
         job["artifact_before"] = before
@@ -7132,6 +7142,17 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"ok": False, "errors": ["that source is not a stable regular file"]}, 400)
                     if st.st_size > ARTIFACT_MAX_BYTES:
                         return self._json({"ok": False, "errors": ["the source is too large"]}, 400)
+                    if os.name == "nt":
+                        # A path stat on Windows can report the volume's cached
+                        # directory-entry timestamps, which lag the file's true
+                        # MFT times after a fresh write.  The export guard
+                        # compares identities taken from an open handle, so take
+                        # this snapshot the same way to keep the two sides in
+                        # the same timestamp space.
+                        probe_fd, st = _open_windows_regular_file(source_path)
+                        os.close(probe_fd)
+                        if st.st_size > ARTIFACT_MAX_BYTES:
+                            return self._json({"ok": False, "errors": ["the source is too large"]}, 400)
                     parent = Path(dest).parent
                     if not parent.is_dir() or parent.is_symlink():
                         return self._json({"ok": False, "errors": ["destination folder must already exist"]}, 400)
