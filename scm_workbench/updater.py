@@ -30,12 +30,14 @@ import plistlib
 import posixpath
 import re
 import secrets
+import signal
 import struct
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -1135,39 +1137,87 @@ def _bounded_plist(value, *, depth=0, nodes=None):
 
 def _run_fixed_helper(args, *, timeout=DMG_COMMAND_TIMEOUT,
                       output_limit=DMG_COMMAND_OUTPUT_MAX):
-    """Run one fixed macOS helper without a shell and with bounded output."""
+    """Run one fixed macOS helper with a deadline and live output caps."""
     if not isinstance(args, list) or not args or args[0] not in (HDIUTIL, CODESIGN):
         raise UpdateError("the updater helper command is not approved")
-    stdout_file = tempfile.TemporaryFile()
-    stderr_file = tempfile.TemporaryFile()
+    if (isinstance(output_limit, bool) or not isinstance(output_limit, int) or
+            not 1 <= output_limit <= DMG_PLIST_MAX_BYTES):
+        raise UpdateError("the updater helper output limit is invalid")
     process = None
+    streams = []
+    buffers = [bytearray(), bytearray()]
+    overflow = threading.Event()
+    reader_error = []
+
+    def kill_process_group():
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def drain(stream, destination):
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    return
+                available = output_limit - len(destination)
+                if len(chunk) > available:
+                    destination.extend(chunk[:max(0, available)])
+                    overflow.set()
+                    kill_process_group()
+                    return
+                destination.extend(chunk)
+        except Exception as exc:
+            reader_error.append(exc)
+            kill_process_group()
+
     try:
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
-                                   stdout=stdout_file, stderr=stderr_file,
-                                   shell=False, close_fds=True)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   shell=False, close_fds=True, start_new_session=True)
+        streams = [process.stdout, process.stderr]
+        readers = [threading.Thread(target=drain, args=(stream, buffers[index]),
+                                    daemon=True, name=f"macos-updater-output-{index}")
+                   for index, stream in enumerate(streams)]
+        for reader in readers:
+            reader.start()
         try:
             process.wait(timeout=max(0.1, float(timeout)))
         except subprocess.TimeoutExpired as exc:
-            process.kill()
+            kill_process_group()
             try:
                 process.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
             raise UpdateError("the macOS updater helper timed out") from exc
-        def read_bounded(file):
-            file.seek(0)
-            value = file.read(output_limit + 1)
-            if len(value) > output_limit:
-                raise UpdateError("the macOS updater helper output is too large")
-            return value
-        return process.returncode, read_bounded(stdout_file), read_bounded(stderr_file)
+        finally:
+            for reader in readers:
+                reader.join(5)
+        if any(reader.is_alive() for reader in readers):
+            kill_process_group()
+            raise UpdateError("the macOS updater helper output did not close")
+        if reader_error:
+            raise UpdateError("the macOS updater helper output could not be read")
+        if overflow.is_set():
+            raise UpdateError("the macOS updater helper output is too large")
+        return process.returncode, bytes(buffers[0]), bytes(buffers[1])
     except UpdateError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise UpdateError(f"the macOS updater helper could not run: {exc}") from exc
     finally:
-        stdout_file.close()
-        stderr_file.close()
+        for stream in streams:
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def _dmg_mount_plist(output: bytes, mountpoint: Path) -> None:
@@ -1183,13 +1233,15 @@ def _dmg_mount_plist(output: bytes, mountpoint: Path) -> None:
         raise UpdateError("hdiutil returned no mount entities")
     mounts = [entity.get("mount-point") for entity in entities
               if isinstance(entity, dict) and "mount-point" in entity]
-    if mounts != [str(mountpoint)]:
-        raise UpdateError("hdiutil mounted the DMG at an unexpected path")
     try:
+        if (len(mounts) != 1 or not isinstance(mounts[0], str) or
+                not mounts[0] or not Path(mounts[0]).is_absolute() or
+                Path(mounts[0]).resolve(strict=True) != mountpoint.resolve(strict=True)):
+            raise OSError("mount path does not match the updater-owned directory")
         if not mountpoint.is_dir() or mountpoint.is_symlink():
             raise OSError("mountpoint is not a private directory")
-    except OSError as exc:
-        raise UpdateError(f"the DMG mountpoint is unsafe: {exc}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise UpdateError(f"hdiutil mounted the DMG at an unexpected path: {exc}") from exc
 
 
 def _attach_dmg(dmg: Path, mountpoint: Path) -> bytes:
@@ -1197,6 +1249,13 @@ def _attach_dmg(dmg: Path, mountpoint: Path) -> bytes:
             "-nobrowse", "-mountpoint", str(mountpoint), str(dmg)]
     status, stdout, _stderr = _run_fixed_helper(args, output_limit=DMG_PLIST_MAX_BYTES)
     if status != 0:
+        # hdiutil can return a failure after creating a mount. Detaching the
+        # updater-owned path is safe even when no mount was established and
+        # prevents a partial attach from surviving the failed update.
+        try:
+            _detach_dmg(mountpoint)
+        except UpdateError:
+            pass
         raise UpdateError("hdiutil could not attach the update DMG")
     return stdout
 
@@ -1290,18 +1349,18 @@ def _scan_dmg_tree(app: Path) -> dict:
     visit(app, "")
     for relative, record in records.items():
         if record["kind"] == "symlink":
-            target = records.get(record["resolved"])
-            if target is None:
-                raise UpdateError("the mounted app contains a dangling symlink")
-            if target["kind"] == "symlink":
-                seen = {relative}
-                while target["kind"] == "symlink":
-                    if record["resolved"] in seen:
-                        raise UpdateError("the mounted app contains a symlink cycle")
-                    seen.add(record["resolved"])
-                    target = records.get(target["resolved"])
-                    if target is None:
-                        raise UpdateError("the mounted app contains a dangling symlink")
+            current = record["resolved"]
+            seen = {relative}
+            while True:
+                if current in seen:
+                    raise UpdateError("the mounted app contains a symlink cycle")
+                seen.add(current)
+                target = records.get(current)
+                if target is None:
+                    raise UpdateError("the mounted app contains a dangling symlink")
+                if target["kind"] != "symlink":
+                    break
+                current = target["resolved"]
     return records
 
 
@@ -1408,6 +1467,20 @@ def _copy_dmg_tree(source: Path, stage: Path, records: dict) -> None:
         finally:
             if destination is not None:
                 destination.close()
+    # Restore directory modes after their children have been created. The
+    # private staging defaults stay restrictive until the complete tree is in
+    # place, and no chmod operation follows a symlink.
+    for relative, record in sorted(records.items(), key=lambda item: item[0].count("/"),
+                                   reverse=True):
+        if record["kind"] != "dir":
+            continue
+        path = stage if not relative else stage / relative
+        try:
+            os.chmod(path, record["mode"] or 0o755, follow_symlinks=False)
+        except (AttributeError, NotImplementedError):
+            os.chmod(path, record["mode"] or 0o755)
+        except OSError as exc:
+            raise UpdateError(f"could not restore mounted app directory mode {relative}: {exc}") from exc
 
 
 def _verify_macos_candidate(candidate: Path, expected_version: str) -> None:
@@ -1481,12 +1554,18 @@ def prepare_dmg(dmg: Path, candidate: Path, expected_version: str, log=print) ->
                 shutil.rmtree(stage, ignore_errors=True)
                 stage = None
             raise detach_error
+    published = False
     try:
         _rename_noreplace(stage, candidate)
         stage = None
+        published = True
         _verify_macos_candidate(candidate, expected_version)
         _fsync_dir(candidate.parent)
         return candidate
+    except Exception:
+        if published and candidate.is_dir() and not candidate.is_symlink():
+            shutil.rmtree(candidate, ignore_errors=True)
+        raise
     finally:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)

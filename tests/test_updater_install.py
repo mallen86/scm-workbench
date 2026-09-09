@@ -10,6 +10,8 @@ import contextlib
 import os
 import plistlib
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -313,6 +315,11 @@ class ExtractionTests(unittest.TestCase):
         self.assertIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
         self.assertIn("actions: write", workflow)
+        release_upload = next(line for line in workflow.splitlines()
+                              if 'gh release upload "$GITHUB_REF_NAME"' in line)
+        self.assertIn("scm-workbench-macos.dmg", release_upload)
+        self.assertIn("scm-workbench-macos.zip", release_upload)
+        self.assertIn("scm-workbench-windows.zip", release_upload)
         upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
         cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
         self.assertGreater(cleanup_at, upload_at)
@@ -433,6 +440,100 @@ class DmgPreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(updater.UpdateError, "detach"):
                 updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
         self.assertFalse(self.candidate.exists())
+
+    def test_failed_attach_attempts_cleanup_and_failed_signature_removes_candidate(self):
+        calls = []
+        with patch.object(updater, "_run_fixed_helper",
+                          side_effect=self.fake_helper(calls, attach_status=1)):
+            with self.assertRaisesRegex(updater.UpdateError, "attach"):
+                updater._attach_dmg(self.work / "update.dmg", self.work / "mount")
+        self.assertEqual([call[:2] for call in calls], [
+            [updater.HDIUTIL, "attach"], [updater.HDIUTIL, "detach"],
+        ])
+
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls)), \
+                patch.object(updater, "_verify_macos_candidate",
+                             side_effect=updater.UpdateError("bad signature")):
+            with self.assertRaisesRegex(updater.UpdateError, "signature"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertFalse(self.candidate.exists())
+
+    def test_dmg_accepts_safe_multi_hop_symlinks_and_rejects_cycles(self):
+        def safe_chain(app):
+            resources = app / "Contents/Resources"
+            resources.mkdir()
+            (resources / "target").write_bytes(b"ok")
+            (resources / "second").symlink_to("target")
+            (resources / "first").symlink_to("second")
+
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper",
+                             side_effect=self.fake_helper(calls, hostile=safe_chain)):
+            updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertEqual(os.readlink(self.candidate / "Contents/Resources/first"), "second")
+
+        self.candidate.rename(self.root / "prior-candidate")
+        def cycle(app):
+            resources = app / "Contents/Resources"
+            resources.mkdir()
+            (resources / "first").symlink_to("second")
+            (resources / "second").symlink_to("first")
+
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper",
+                             side_effect=self.fake_helper(calls, hostile=cycle)):
+            with self.assertRaisesRegex(updater.UpdateError, "symlink cycle"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertFalse(self.candidate.exists())
+
+    @unittest.skipUnless(os.name == "posix", "bounded helper test requires POSIX process groups")
+    def test_fixed_helper_enforces_live_output_cap_and_timeout(self):
+        with patch.object(updater, "HDIUTIL", sys.executable):
+            with self.assertRaisesRegex(updater.UpdateError, "output is too large"):
+                updater._run_fixed_helper(
+                    [sys.executable, "-c", "import os; os.write(1, b'x' * 131072)"],
+                    output_limit=1024)
+            started = time.monotonic()
+            with self.assertRaisesRegex(updater.UpdateError, "timed out"):
+                updater._run_fixed_helper(
+                    [sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1)
+            self.assertLess(time.monotonic() - started, 3)
+
+    @unittest.skipUnless(sys.platform == "darwin" and Path(updater.HDIUTIL).is_file() and
+                         Path(updater.CODESIGN).is_file(), "requires macOS disk-image tools")
+    def test_real_dmg_mount_copy_detach_and_candidate_validation(self):
+        source = self.root / "image-root"
+        contents = source / "SCM Workbench.app/Contents"
+        (contents / "MacOS").mkdir(parents=True)
+        (contents / "app/scm_workbench").mkdir(parents=True)
+        (contents / "app/ui").mkdir(parents=True)
+        (contents / "runtime").mkdir(parents=True)
+        executable = contents / "MacOS/SCM Workbench"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": "com.mallen.scmworkbench",
+            "CFBundleExecutable": "SCM Workbench",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "2.0.0",
+        }))
+        subprocess.run([updater.CODESIGN, "--force", "--deep", "--sign", "-",
+                        str(source / "SCM Workbench.app")], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dmg = self.work / "real.dmg"
+        subprocess.run([updater.HDIUTIL, "create", "-quiet", "-ov", "-format", "UDZO",
+                        "-fs", "HFS+", "-srcfolder", str(source), str(dmg)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        result = updater.prepare_dmg(dmg, self.candidate, "v2.0.0")
+
+        self.assertEqual(result, self.candidate)
+        self.assertTrue((result / "Contents/MacOS/SCM Workbench").is_file())
+        self.assertEqual(list(self.work.glob(".scm-workbench-mount-*")), [])
 
 
 class UpdateStartAdmissionTests(unittest.TestCase):

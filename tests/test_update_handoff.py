@@ -81,7 +81,7 @@ class HandoffRecordTests(unittest.TestCase):
                     "started": time.time(), "duration": None,
                 }
                 server.JOBS[job["id"]] = job
-                asset = {"name": "scm-workbench-macos.zip", "url": "https://example.invalid/a",
+                asset = {"name": "scm-workbench-macos.dmg", "url": "https://example.invalid/a",
                          "size": 1, "tag": "v2.0.0", "digest": None}
                 release = {"tag": "v2.0.0", "assets": [asset]}
 
@@ -89,7 +89,7 @@ class HandoffRecordTests(unittest.TestCase):
                     Path(destination).parent.mkdir(parents=True, exist_ok=True)
                     Path(destination).write_bytes(b"zip")
 
-                def fake_extract(_archive, destination, **_kwargs):
+                def fake_extract(_asset, _archive, destination, _expected_version, **_kwargs):
                     Path(destination).mkdir()
                     return Path(destination)
 
@@ -99,7 +99,7 @@ class HandoffRecordTests(unittest.TestCase):
                      patch.object(updater, "latest_release", return_value=release), \
                      patch.object(updater, "pick_asset", return_value=asset), \
                      patch.object(updater, "download", side_effect=fake_download), \
-                     patch.object(updater, "extract_app", side_effect=fake_extract), \
+                     patch.object(updater, "prepare_asset", side_effect=fake_extract) as prepare, \
                      patch.object(updater, "swap_bundle", side_effect=lambda *a, **k: legacy.append("swap")), \
                      patch.object(updater, "relaunch_detached", side_effect=lambda *a, **k: legacy.append("relaunch")), \
                      patch.object(updater, "stop_ancestors", side_effect=lambda *a, **k: legacy.append("stop")):
@@ -108,6 +108,8 @@ class HandoffRecordTests(unittest.TestCase):
                         "asset": asset, "bundle": str(bundle), "work": data / "update",
                     }, log)
                 self.assertEqual(job["status"], "handoff")
+                self.assertEqual(prepare.call_args.args[0], asset)
+                self.assertEqual(prepare.call_args.args[3], "v2.0.0")
                 self.assertTrue(server._UPDATE_QUIESCING)
                 self.assertEqual(legacy, [])
                 journal = json.loads((data / ".update-journal.json").read_text())
