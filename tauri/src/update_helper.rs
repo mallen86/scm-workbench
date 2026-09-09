@@ -2508,11 +2508,16 @@ mod tests {
         ));
         fs::create_dir_all(&data).unwrap();
         let expected = fs::canonicalize(&data).unwrap();
+        let ordinary = windows_without_verbatim_prefix(&expected);
         assert_ne!(
-            data, expected,
+            ordinary, expected,
             "the fixture must exercise the verbatim prefix"
         );
-        assert_eq!(validate_data_dir(&data).unwrap(), expected);
+        // Derive the ordinary spelling from the canonical fixture. Runner
+        // TEMP may itself contain an 8.3 component (for example RUNNER~1),
+        // which canonicalize legitimately expands in addition to adding the
+        // verbatim prefix; that alias is outside this regression's scope.
+        assert_eq!(validate_data_dir(&ordinary).unwrap(), expected);
         fs::remove_dir_all(data).unwrap();
 
         let fixture = Fixture::new();
