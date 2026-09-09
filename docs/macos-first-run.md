@@ -14,6 +14,11 @@ So a freshly downloaded copy is gated by macOS:
 3. Open the app once more. It works from then on — the allow is remembered by
    the machine, not per copy.
 
+The in-app updater now prefers the signed `scm-workbench-macos.dmg`: it
+mounts it read-only, copies the validated app out, detaches it, and then hands
+the candidate to the native updater. Releases also retain
+`scm-workbench-macos.zip` as a legacy bridge for older checked metadata.
+
 Two things that make this step feel broken:
 
 - **Don't run the app from the mounted installer or `~/Downloads`.** macOS can

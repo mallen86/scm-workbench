@@ -2,18 +2,19 @@
 """
 updater.py — check for, and install, newer versions of the SCM Workbench app.
 
-The app is packaged with Briefcase and shipped as a GitHub *release* zip
-(macOS: "SCM Workbench.app", Windows: "SCM Workbench.exe" + src/). This
-module talks to the releases of the Workbench's own repository:
+The app is packaged as a Tauri bundle and shipped as GitHub release assets
+(macOS: a drag-to-Applications DMG, plus a legacy app ZIP; Windows: a flat
+portable ZIP). This module talks to the releases of the Workbench's own repository:
 
   * fetch the newest release (the release repo is private, so the check
     can't see it until the repo is made public - no credentials anywhere
     in the meantime),
   * compare it with the running version,
-  * on "update available" an in-process job downloads the right platform's
-    zip, extracts it beside the installed app, and hands the candidate to the
-    native helper through a durable journal/request protocol. The helper owns
-    publication, health verification, rollback, and relaunch.
+  * on "update available" an in-process job downloads the exact platform
+    asset. macOS DMGs are mounted read-only and copied into a validated app
+    candidate; legacy ZIPs use the bounded extractor. The candidate is then
+    handed to the native helper through a durable journal/request protocol.
+    The helper owns publication, health verification, rollback, and relaunch.
 
 The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
@@ -25,6 +26,7 @@ Standard library only — same rule as the rest of the Workbench.
 import hashlib
 import json
 import os
+import plistlib
 import posixpath
 import re
 import secrets
@@ -56,6 +58,22 @@ ARCHIVE_SYMLINK_MAX_BYTES = 4 << 10
 ARCHIVE_NAME_MAX_BYTES = 4096
 ARCHIVE_COMPONENT_MAX_BYTES = 255
 ARCHIVE_COMPRESSION_RATIO_MAX = 200
+
+# macOS's release installer is the DMG.  The ZIP remains accepted only as a
+# legacy bridge for releases made before the DMG updater was deployed.
+MACOS_DMG_ASSET = "scm-workbench-macos.dmg"
+MACOS_LEGACY_ASSET = "scm-workbench-macos.zip"
+WINDOWS_ASSET = "scm-workbench-windows.zip"
+HDIUTIL = "/usr/bin/hdiutil"
+CODESIGN = "/usr/bin/codesign"
+DMG_COMMAND_TIMEOUT = 30
+DMG_COMMAND_OUTPUT_MAX = 64 * 1024
+DMG_PLIST_MAX_BYTES = 256 * 1024
+DMG_TREE_MAX_ENTRIES = 20_000
+DMG_TREE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+DMG_TREE_MAX_PATH_BYTES = 4096
+DMG_TREE_MAX_COMPONENT_BYTES = 255
+DMG_PLIST_MAX_FILE_BYTES = 256 * 1024
 
 # These remain environment-overridable for test fixtures and forks.  They are
 # validated at request time: configuration must not turn the API path into a
@@ -423,22 +441,36 @@ def latest_release(timeout: int = 25) -> dict:
 
 
 def pick_asset(release: dict, platform: str = None) -> dict:
-    """Select exactly the supported archive for one supported architecture."""
+    """Select one exact supported release asset.
+
+    A current macOS release has one DMG and may also carry one legacy ZIP.  A
+    ZIP is used only when the DMG is absent, so publishing the compatibility
+    bridge cannot accidentally make the DMG path ambiguous.  Windows keeps
+    its original exact ZIP-only selection.
+    """
     platform = platform or (sys.platform if os.name != "nt" else "win32")
     if platform in ("darwin", "macos", "darwin-arm64", "macos-arm64"):
-        expected = "scm-workbench-macos.zip"
+        expected = (MACOS_DMG_ASSET, MACOS_LEGACY_ASSET)
         label = "darwin arm64"
     elif platform in ("win32", "windows", "windows-x64", "win64"):
-        expected = "scm-workbench-windows.zip"
+        expected = (WINDOWS_ASSET,)
         label = "windows x64"
     else:
         raise UpdateError(f"the release has no installable archive for {platform}")
     assets = release.get("assets") if isinstance(release, dict) else None
-    matches = [a for a in (assets or []) if isinstance(a, dict) and a.get("name") == expected]
-    if len(matches) != 1:
-        names = ", ".join(str(a.get("name", "")) for a in (assets or []) if isinstance(a, dict)) or "none"
-        raise UpdateError(f"the release has no unambiguous {label} zip to install (assets: {names})")
-    return matches[0]
+    assets = assets if isinstance(assets, list) else []
+    matches = {
+        name: [a for a in assets if isinstance(a, dict) and a.get("name") == name]
+        for name in expected
+    }
+    if any(len(values) > 1 for values in matches.values()):
+        names = ", ".join(str(a.get("name", "")) for a in assets if isinstance(a, dict)) or "none"
+        raise UpdateError(f"the release has no unambiguous {label} asset (assets: {names})")
+    for name in expected:
+        if matches[name]:
+            return matches[name][0]
+    names = ", ".join(str(a.get("name", "")) for a in assets if isinstance(a, dict)) or "none"
+    raise UpdateError(f"the release has no unambiguous {label} asset (assets: {names})")
 
 
 # ----------------------------------------------------------------------------
@@ -1075,6 +1107,402 @@ def extract_app(zip_path: Path, dest_dir: Path, log=print, *, publish_bundle_roo
                     pass
 
 
+def _bounded_plist(value, *, depth=0, nodes=None):
+    """Reject pathological plist structures before inspecting their fields."""
+    if nodes is None:
+        nodes = [0]
+    nodes[0] += 1
+    if nodes[0] > 2048 or depth > 16:
+        raise UpdateError("the DMG Info.plist is too complex")
+    if isinstance(value, dict):
+        if len(value) > 256:
+            raise UpdateError("the DMG Info.plist has too many keys")
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key.encode("utf-8")) > 1024:
+                raise UpdateError("the DMG Info.plist has an invalid key")
+            _bounded_plist(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, (list, tuple)):
+        if len(value) > 256:
+            raise UpdateError("the DMG Info.plist has too many values")
+        for child in value:
+            _bounded_plist(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, str):
+        if len(value.encode("utf-8")) > 4096:
+            raise UpdateError("the DMG Info.plist has an oversized value")
+    elif not isinstance(value, (bytes, bytearray, int, float, bool, type(None))):
+        raise UpdateError("the DMG Info.plist has an unsupported value")
+
+
+def _run_fixed_helper(args, *, timeout=DMG_COMMAND_TIMEOUT,
+                      output_limit=DMG_COMMAND_OUTPUT_MAX):
+    """Run one fixed macOS helper without a shell and with bounded output."""
+    if not isinstance(args, list) or not args or args[0] not in (HDIUTIL, CODESIGN):
+        raise UpdateError("the updater helper command is not approved")
+    stdout_file = tempfile.TemporaryFile()
+    stderr_file = tempfile.TemporaryFile()
+    process = None
+    try:
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                                   stdout=stdout_file, stderr=stderr_file,
+                                   shell=False, close_fds=True)
+        try:
+            process.wait(timeout=max(0.1, float(timeout)))
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise UpdateError("the macOS updater helper timed out") from exc
+        def read_bounded(file):
+            file.seek(0)
+            value = file.read(output_limit + 1)
+            if len(value) > output_limit:
+                raise UpdateError("the macOS updater helper output is too large")
+            return value
+        return process.returncode, read_bounded(stdout_file), read_bounded(stderr_file)
+    except UpdateError:
+        raise
+    except OSError as exc:
+        raise UpdateError(f"the macOS updater helper could not run: {exc}") from exc
+    finally:
+        stdout_file.close()
+        stderr_file.close()
+
+
+def _dmg_mount_plist(output: bytes, mountpoint: Path) -> None:
+    if len(output) > DMG_PLIST_MAX_BYTES:
+        raise UpdateError("hdiutil returned an oversized mount plist")
+    try:
+        document = plistlib.loads(output)
+    except (plistlib.InvalidFileException, ValueError, TypeError, OverflowError) as exc:
+        raise UpdateError("hdiutil returned an invalid mount plist") from exc
+    _bounded_plist(document)
+    entities = document.get("system-entities") if isinstance(document, dict) else None
+    if not isinstance(entities, list):
+        raise UpdateError("hdiutil returned no mount entities")
+    mounts = [entity.get("mount-point") for entity in entities
+              if isinstance(entity, dict) and "mount-point" in entity]
+    if mounts != [str(mountpoint)]:
+        raise UpdateError("hdiutil mounted the DMG at an unexpected path")
+    try:
+        if not mountpoint.is_dir() or mountpoint.is_symlink():
+            raise OSError("mountpoint is not a private directory")
+    except OSError as exc:
+        raise UpdateError(f"the DMG mountpoint is unsafe: {exc}") from exc
+
+
+def _attach_dmg(dmg: Path, mountpoint: Path) -> bytes:
+    args = [HDIUTIL, "attach", "-plist", "-readonly", "-noautoopen",
+            "-nobrowse", "-mountpoint", str(mountpoint), str(dmg)]
+    status, stdout, _stderr = _run_fixed_helper(args, output_limit=DMG_PLIST_MAX_BYTES)
+    if status != 0:
+        raise UpdateError("hdiutil could not attach the update DMG")
+    return stdout
+
+
+def _detach_dmg(mountpoint: Path) -> None:
+    args = [HDIUTIL, "detach", str(mountpoint)]
+    status, _stdout, _stderr = _run_fixed_helper(args)
+    if status != 0:
+        raise UpdateError("hdiutil could not detach the update DMG")
+
+
+def _scan_dmg_tree(app: Path) -> dict:
+    """Scan an app without following links, returning a bounded safe manifest."""
+    try:
+        root_stat = app.lstat()
+    except OSError as exc:
+        raise UpdateError(f"could not inspect the mounted app: {exc}") from exc
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        raise UpdateError("the mounted SCM Workbench.app is not a real directory")
+    records = {"": {"kind": "dir", "mode": stat.S_IMODE(root_stat.st_mode)}}
+    total = [0]
+    def visit(directory: Path, parent: str) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise UpdateError(f"could not read the mounted app: {exc}") from exc
+        if len(entries) > DMG_TREE_MAX_ENTRIES:
+            raise UpdateError("the mounted app contains too many entries")
+        aliases = {}
+        for entry in sorted(entries, key=lambda item: item.name):
+            name = unicodedata.normalize("NFC", entry.name)
+            try:
+                encoded = name.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise UpdateError("the mounted app contains invalid UTF-8") from exc
+            stem = name.rstrip(". ").split(".", 1)[0].casefold()
+            if (not name or name in (".", "..") or "\\" in name or "/" in name or
+                    any(ord(char) < 0x20 or ord(char) == 0x7f for char in name) or
+                    len(encoded) > DMG_TREE_MAX_COMPONENT_BYTES or name.endswith((".", " ")) or
+                    ":" in name or stem in {"con", "prn", "aux", "nul"} or
+                    (stem.startswith("com") and stem[3:].isdigit()) or
+                    (stem.startswith("lpt") and stem[3:].isdigit())):
+                raise UpdateError("the mounted app contains an unsafe path component")
+            folded = name.casefold()
+            if folded in aliases:
+                raise UpdateError("the mounted app contains a case-fold/NFC collision")
+            aliases[folded] = name
+            relative = f"{parent}/{name}" if parent else name
+            if len(relative.encode("utf-8")) > DMG_TREE_MAX_PATH_BYTES:
+                raise UpdateError("the mounted app contains an oversized path")
+            path = directory / entry.name
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise UpdateError("could not inspect a mounted app entry") from exc
+            mode = info.st_mode
+            kind = stat.S_IFMT(mode)
+            if stat.S_ISDIR(mode):
+                records[relative] = {"kind": "dir", "mode": stat.S_IMODE(mode)}
+                visit(path, relative)
+            elif stat.S_ISREG(mode):
+                if info.st_size < 0 or info.st_size > DMG_TREE_MAX_BYTES:
+                    raise UpdateError("the mounted app contains an oversized file")
+                total[0] += info.st_size
+                if total[0] > DMG_TREE_MAX_BYTES:
+                    raise UpdateError("the mounted app is too large")
+                records[relative] = {"kind": "file", "mode": stat.S_IMODE(mode),
+                                     "size": info.st_size, "path": path}
+            elif stat.S_ISLNK(mode):
+                try:
+                    target = os.readlink(path)
+                except OSError as exc:
+                    raise UpdateError("could not read a mounted app symlink") from exc
+                if (not isinstance(target, str) or not target or "\\" in target or
+                        target.startswith("/") or target.startswith("//") or
+                        re.match(r"^[A-Za-z]:", target) or "\x00" in target or
+                        any(ord(char) < 0x20 or ord(char) == 0x7f for char in target) or
+                        len(target.encode("utf-8")) > DMG_TREE_MAX_PATH_BYTES):
+                    raise UpdateError("the mounted app contains an unsafe symlink")
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(relative), target))
+                if resolved == ".." or resolved.startswith("../"):
+                    raise UpdateError("the mounted app contains an escaping symlink")
+                records[relative] = {"kind": "symlink", "mode": stat.S_IMODE(mode),
+                                     "target": target, "resolved": resolved}
+            else:
+                raise UpdateError("the mounted app contains a special file")
+            if stat.S_IMODE(mode) & 0o7000:
+                raise UpdateError("the mounted app contains unsupported permission bits")
+            if len(records) > DMG_TREE_MAX_ENTRIES:
+                raise UpdateError("the mounted app contains too many entries")
+    visit(app, "")
+    for relative, record in records.items():
+        if record["kind"] == "symlink":
+            target = records.get(record["resolved"])
+            if target is None:
+                raise UpdateError("the mounted app contains a dangling symlink")
+            if target["kind"] == "symlink":
+                seen = {relative}
+                while target["kind"] == "symlink":
+                    if record["resolved"] in seen:
+                        raise UpdateError("the mounted app contains a symlink cycle")
+                    seen.add(record["resolved"])
+                    target = records.get(target["resolved"])
+                    if target is None:
+                        raise UpdateError("the mounted app contains a dangling symlink")
+    return records
+
+
+def _dmg_bundle_version(app: Path, records: dict, expected_version: str | None) -> None:
+    required = ("Contents", "Contents/MacOS", "Contents/MacOS/SCM Workbench",
+                "Contents/Info.plist", "Contents/app", "Contents/app/scm_workbench",
+                "Contents/app/ui", "Contents/runtime")
+    for relative in required:
+        record = records.get(relative)
+        if record is None or (relative.endswith(("Contents", "MacOS", "app",
+                                                 "scm_workbench", "ui", "runtime")) and
+                              record["kind"] != "dir"):
+            raise UpdateError("the mounted app has an incomplete SCM Workbench.app shape")
+    executable = records["Contents/MacOS/SCM Workbench"]
+    if executable["kind"] != "file" or not executable["size"] or not (executable["mode"] & 0o111):
+        raise UpdateError("the mounted app executable is invalid")
+    plist_record = records["Contents/Info.plist"]
+    if plist_record["kind"] != "file" or plist_record["size"] > DMG_PLIST_MAX_FILE_BYTES:
+        raise UpdateError("the mounted app Info.plist is invalid")
+    source_fd = None
+    try:
+        source_fd = os.open(plist_record["path"], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size != plist_record["size"]:
+            raise UpdateError("the mounted app Info.plist changed while reading")
+        payload = b""
+        while len(payload) <= DMG_PLIST_MAX_FILE_BYTES:
+            chunk = os.read(source_fd, DMG_PLIST_MAX_FILE_BYTES + 1 - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+    except UpdateError:
+        raise
+    except OSError as exc:
+        raise UpdateError("could not read the mounted app Info.plist") from exc
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+    if len(payload) > DMG_PLIST_MAX_FILE_BYTES:
+        raise UpdateError("the mounted app Info.plist is too large")
+    try:
+        document = plistlib.loads(payload)
+    except (plistlib.InvalidFileException, ValueError, TypeError, OverflowError) as exc:
+        raise UpdateError("the mounted app Info.plist is invalid") from exc
+    _bounded_plist(document)
+    if not isinstance(document, dict) or document.get("CFBundleIdentifier") != "com.mallen.scmworkbench" or \
+            document.get("CFBundleExecutable") != "SCM Workbench" or \
+            document.get("CFBundlePackageType") != "APPL" or \
+            any(field in document and document[field] != APP_NAME
+                for field in ("CFBundleName", "CFBundleDisplayName")):
+        raise UpdateError("the mounted app identity is not SCM Workbench")
+    if expected_version is not None:
+        version = canonical_version(document.get("CFBundleShortVersionString"))
+        expected = canonical_version(expected_version)
+        if version is None or expected is None or version != expected:
+            raise UpdateError("the mounted app version does not match the release")
+
+
+def _copy_dmg_tree(source: Path, stage: Path, records: dict) -> None:
+    from scm_workbench import repo_sync
+    for relative, record in sorted(records.items(), key=lambda item: (item[0].count("/"), item[0])):
+        if not relative:
+            continue
+        if record["kind"] == "dir":
+            repo_sync._secure_mkdir_relative(stage, relative, mode=0o700)
+            continue
+        if record["kind"] == "symlink":
+            target = record["target"]
+            target_path = repo_sync.safe_path(stage, relative)
+            if os.path.lexists(target_path):
+                raise UpdateError("the staged app contains a duplicate path")
+            os.symlink(target.replace("/", "\\") if os.name == "nt" else target, target_path)
+            continue
+        destination = None
+        source_path = record["path"]
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            source_fd = os.open(source_path, flags)
+            try:
+                source_stat = os.fstat(source_fd)
+                if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size != record["size"]:
+                    raise UpdateError("a mounted app file changed while copying")
+                destination = repo_sync._secure_open_relative(stage, relative, write=True,
+                                                              create_parents=True, mode=0o600)
+                remaining = record["size"]
+                while remaining:
+                    chunk = os.read(source_fd, min(1 << 20, remaining))
+                    if not chunk:
+                        raise UpdateError("a mounted app file ended while copying")
+                    destination.write(chunk)
+                    remaining -= len(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+                try:
+                    os.fchmod(destination.fileno(), record["mode"] or 0o644)
+                except (AttributeError, NotImplementedError):
+                    pass
+            finally:
+                os.close(source_fd)
+        except UpdateError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise UpdateError(f"could not safely copy mounted app file {relative}: {exc}") from exc
+        finally:
+            if destination is not None:
+                destination.close()
+
+
+def _verify_macos_candidate(candidate: Path, expected_version: str) -> None:
+    records = _scan_dmg_tree(candidate)
+    _dmg_bundle_version(candidate, records, expected_version)
+    status, _stdout, _stderr = _run_fixed_helper(
+        [CODESIGN, "--verify", "--deep", "--strict", str(candidate)])
+    if status != 0:
+        raise UpdateError("the update app failed macOS code-signature verification")
+
+
+def prepare_dmg(dmg: Path, candidate: Path, expected_version: str, log=print) -> Path:
+    """Mount, validate, copy, detach, and publish one untrusted DMG."""
+    if sys.platform != "darwin":
+        raise UpdateError("DMG updates are supported only on macOS")
+    from scm_workbench import repo_sync
+    dmg, candidate = Path(dmg), Path(candidate)
+    if not re.fullmatch(r"\.SCM-Workbench-candidate-[0-9a-f]{64}", candidate.name):
+        raise UpdateError("the DMG candidate is not token-bound")
+    try:
+        if dmg.is_symlink() or not dmg.is_file():
+            raise OSError("DMG is not a regular file")
+    except OSError as exc:
+        raise UpdateError(f"the update DMG is unsafe: {exc}") from exc
+    work = dmg.parent
+    mount = Path(tempfile.mkdtemp(prefix=".scm-workbench-mount-", dir=str(work)))
+    os.chmod(mount, 0o700)
+    stage = None
+    mounted = False
+    try:
+        mount_output = _attach_dmg(dmg, mount)
+        # A successful attach may have mounted the image even when its plist
+        # is malformed. Mark it before parsing so the finally block always
+        # attempts the matching detach.
+        mounted = True
+        _dmg_mount_plist(mount_output, mount)
+        apps = []
+        try:
+            entries = list(os.scandir(mount))
+        except OSError as exc:
+            raise UpdateError(f"could not read the mounted update DMG: {exc}") from exc
+        for entry in entries:
+            if entry.name == APP_NAME + ".app":
+                apps.append(Path(entry.path))
+            elif entry.name.casefold().endswith(".app"):
+                raise UpdateError("the update DMG contains an unexpected app bundle")
+        if len(apps) != 1:
+            raise UpdateError("the update DMG does not contain one SCM Workbench.app")
+        source = apps[0]
+        records = _scan_dmg_tree(source)
+        _dmg_bundle_version(source, records, expected_version)
+        if candidate.exists() or candidate.is_symlink():
+            raise UpdateError("the update candidate path already exists")
+        stage = Path(tempfile.mkdtemp(prefix=f".{candidate.name}-", dir=str(candidate.parent)))
+        repo_sync.safe_destination(stage)
+        _copy_dmg_tree(source, stage, records)
+        log("    copied and validated the mounted app")
+    finally:
+        detach_error = None
+        if mounted:
+            try:
+                _detach_dmg(mount)
+            except Exception as exc:
+                detach_error = exc
+        try:
+            mount.rmdir()
+        except OSError:
+            pass
+        if detach_error is not None:
+            if stage is not None:
+                shutil.rmtree(stage, ignore_errors=True)
+                stage = None
+            raise detach_error
+    try:
+        _rename_noreplace(stage, candidate)
+        stage = None
+        _verify_macos_candidate(candidate, expected_version)
+        _fsync_dir(candidate.parent)
+        return candidate
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def prepare_asset(asset: dict, downloaded: Path, candidate: Path,
+                  expected_version: str, log=print) -> Path:
+    """Prepare an exact validated asset without leaking format logic to jobs."""
+    name = asset.get("name") if isinstance(asset, dict) else None
+    if name == MACOS_DMG_ASSET:
+        return prepare_dmg(downloaded, candidate, expected_version, log=log)
+    if name == MACOS_LEGACY_ASSET or name == WINDOWS_ASSET:
+        return extract_app(downloaded, candidate, log=log, publish_bundle_root=True)
+    raise UpdateError("the release asset name is not supported")
+
+
 def swap_bundle(new_bundle: Path, old_bundle: Path, log=print) -> Path:
     """Replace old_bundle with new_bundle, retaining a rollback sibling."""
     parent = old_bundle.parent
@@ -1371,14 +1799,14 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 return
             finish(True, f"Nothing to do — v{plan.get('current')} is the latest release ({rel['tag']}).")
             return
-        # 2) the right zip.  Never fall back to the stale state asset: the
-        # reverified release and its tag must supply the install metadata.
+        # 2) the right exact asset. Never fall back to the stale state asset:
+        # the reverified release and its tag must supply the install metadata.
         try:
             asset = pick_asset({"tag": rel["tag"], "assets": rel["assets"]})
             if asset.get("tag") != rel["tag"]:
                 raise UpdateError("the release asset is not bound to the release tag")
         except (KeyError, TypeError, UpdateError) as exc:
-            fail(f"no installable zip is attached to the newest release ({exc})")
+            fail(f"no unambiguous installable asset is attached to the newest release ({exc})")
             return
         size_mb = asset.get("size", 0) / 1e6
         emit(f"Downloading {asset['name']} ({size_mb:.0f} MB) from the release …")
@@ -1407,15 +1835,16 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         if not old_bundle.is_dir():
             fail(f"the current app folder is not a directory ({old_bundle})")
             return
-        # 4) extract directly into the token-bound sibling.  There is no
-        # staging directory in the data area and no legacy swap path.
+        # 4) Prepare the exact asset through one format facade. DMGs are
+        # mounted and copied away before detach; ZIPs retain the legacy path.
+        # There is no staging directory in the data area and no legacy swap path.
         token = secrets.token_hex(32)
         candidate = old_bundle.parent / f".SCM-Workbench-candidate-{token}"
         if candidate.exists() or candidate.is_symlink():
             raise UpdateError("the update candidate path already exists")
         job["progress"] = {"stage": "extract", "done": 0, "total": 0}
         emit("Extracting the new app …")
-        new_bundle = extract_app(dest, candidate, log=emit, publish_bundle_root=True)
+        new_bundle = prepare_asset(asset, dest, candidate, rel["tag"], log=emit)
         if Path(new_bundle).resolve() != candidate.resolve():
             raise UpdateError("extraction did not publish the token-bound candidate")
         emit(f"    ready: {new_bundle}")

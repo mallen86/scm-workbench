@@ -267,6 +267,16 @@ class UpdaterMetadataTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.pick_asset({"assets": [mac]}, "linux")
 
+    def test_macos_dmg_precedes_legacy_zip_and_compatible_duplicates_fail(self):
+        dmg = {"name": updater.MACOS_DMG_ASSET, "id": 10}
+        legacy = {"name": updater.MACOS_LEGACY_ASSET, "id": 11}
+        self.assertIs(updater.pick_asset({"assets": [legacy, dmg]}, "darwin"), dmg)
+        self.assertIs(updater.pick_asset({"assets": [legacy]}, "darwin"), legacy)
+        with self.assertRaisesRegex(updater.UpdateError, "unambiguous"):
+            updater.pick_asset({"assets": [dmg, dict(dmg, id=12)]}, "darwin")
+        with self.assertRaisesRegex(updater.UpdateError, "unambiguous"):
+            updater.pick_asset({"assets": [legacy, dict(legacy, id=12)]}, "darwin")
+
 
 class UpdaterDownloadTests(unittest.TestCase):
     def setUp(self):

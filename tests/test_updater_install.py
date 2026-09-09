@@ -8,6 +8,7 @@ using a fixture archive: every hostile property is explicit in the central
 import json
 import contextlib
 import os
+import plistlib
 import stat
 import tempfile
 import threading
@@ -329,6 +330,109 @@ class ExtractionTests(unittest.TestCase):
             with self.subTest(shape=label):
                 self.assert_rejected(entries, name=f"shape-{label}.zip", message="app shape",
                                      dest=f"shape-{label}-dest")
+
+
+class DmgPreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-dmg-")
+        self.root = Path(self.temp.name)
+        self.work = self.root / "work"
+        self.work.mkdir()
+        (self.work / "update.dmg").write_bytes(b"dmg")
+        self.candidate = self.root / (".SCM-Workbench-candidate-" + "a" * 64)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def fake_helper(self, calls, *, hostile=None, detach_status=0, attach_status=0):
+        def run(args, **_kwargs):
+            calls.append(list(args))
+            if args[1] == "attach":
+                mount = Path(args[args.index("-mountpoint") + 1])
+                if attach_status:
+                    return attach_status, b"", b"failure"
+                app = mount / "SCM Workbench.app/Contents"
+                (app / "MacOS").mkdir(parents=True)
+                (app / "app/scm_workbench").mkdir(parents=True)
+                (app / "app/ui").mkdir(parents=True)
+                (app / "runtime").mkdir(parents=True)
+                (app / "MacOS/SCM Workbench").write_bytes(b"shell")
+                (app / "MacOS/SCM Workbench").chmod(0o755)
+                (app / "Info.plist").write_bytes(plistlib.dumps({
+                    "CFBundleIdentifier": "com.mallen.scmworkbench",
+                    "CFBundleExecutable": "SCM Workbench",
+                    "CFBundlePackageType": "APPL",
+                    "CFBundleShortVersionString": "2.0.0",
+                }))
+                if hostile:
+                    hostile(mount / "SCM Workbench.app")
+                return 0, plistlib.dumps({
+                    "system-entities": [{"mount-point": str(mount)}]
+                }), b""
+            if args[1] == "detach":
+                return detach_status, b"", b"detach failure"
+            return 0, b"", b""
+        return run
+
+    def test_dmg_mount_copy_detach_and_signature_use_fixed_helpers(self):
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls)):
+            result = updater.prepare_dmg(self.work / "update.dmg", self.candidate, "v2.0.0")
+        self.assertEqual(result, self.candidate)
+        self.assertTrue((result / "Contents/MacOS/SCM Workbench").is_file())
+        self.assertEqual([call[:2] for call in calls], [
+            [updater.HDIUTIL, "attach"], [updater.HDIUTIL, "detach"],
+            [updater.CODESIGN, "--verify"],
+        ])
+        attach = calls[0]
+        self.assertIn("-plist", attach)
+        self.assertIn("-readonly", attach)
+        self.assertIn("-noautoopen", attach)
+        self.assertIn("-nobrowse", attach)
+        self.assertFalse(any("/SCM Workbench.app" in str(arg) and arg == str(self.candidate)
+                             for call in calls for arg in call))
+        self.assertEqual(list(self.root.glob(".SCM-Workbench-candidate-" + "a" * 64 + "-*")), [])
+
+    def test_dmg_rejects_hostile_tree_and_never_publishes(self):
+        outside = self.root / "outside"
+        outside.write_text("secret")
+        def hostile(app):
+            (app / "Contents/Resources").mkdir()
+            (app / "Contents/Resources/escape").symlink_to(outside)
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls, hostile=hostile)):
+            with self.assertRaisesRegex(updater.UpdateError, "unsafe symlink"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertFalse(self.candidate.exists())
+        self.assertEqual(outside.read_text(), "secret")
+        self.assertEqual(calls[1][0:2], [updater.HDIUTIL, "detach"])
+
+    def test_dmg_bad_plist_still_detaches_and_mount_failure_never_detaches(self):
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_attach_dmg", return_value=b"not plist"), \
+                patch.object(updater, "_detach_dmg", side_effect=lambda mount: calls.append(mount)):
+            with self.assertRaisesRegex(updater.UpdateError, "plist"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.candidate.exists())
+
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_attach_dmg", side_effect=updater.UpdateError("attach failed")), \
+                patch.object(updater, "_detach_dmg") as detach:
+            with self.assertRaisesRegex(updater.UpdateError, "attach"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        detach.assert_not_called()
+
+    def test_dmg_detach_failure_blocks_publication(self):
+        calls = []
+        with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls, detach_status=1)):
+            with self.assertRaisesRegex(updater.UpdateError, "detach"):
+                updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
+        self.assertFalse(self.candidate.exists())
 
 
 class UpdateStartAdmissionTests(unittest.TestCase):
