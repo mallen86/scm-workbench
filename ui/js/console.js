@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -392,17 +392,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const s = await api("/api/settings");
     document.documentElement.dataset.theme = s.theme || "dark";
-    const simple = (s.ui_mode || "advanced") === "simple";
-    document.body.classList.toggle("mode-simple", simple);
-    $$(".mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
-    if (simple) $$("#nav .nav-sep").forEach(sep => {
-      let n = sep.nextElementSibling, any = false;
-      while (n && !n.classList.contains("nav-sep")) {
-        if (n.classList.contains("nav-item") && !n.hasAttribute("data-simple-hide")) { any = true; break; }
-        n = n.nextElementSibling;
-      }
-      sep.classList.toggle("hide", !any);
-    });
+    // the same one implementation the mode switch uses, so the first paint can
+    // never disagree with a later syncUiMode()
+    applySimpleNav((s.ui_mode || "advanced") === "simple");
   } catch { }
   $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (document.documentElement.dataset.theme || "dark")));
   // the first API call can fail transiently (server still starting up, or

@@ -23,7 +23,7 @@
 - [x] Trying to open a custom dxf on macos says "opening in its default app..." but then nothing happens. I have no default app set but the standard OS style "choose app" should show up. The expected behavior should work on mac and windows.
 - [x] The restart countdown was almost instant, like it was falling back to the test countdown and not the 8 seconds set by the const. Fix the countdown but change the const to 3 seconds, 8 is too long.
 - [x] "Welcome to the Workbench" made its way into the job history page. Move it to the initial repo sync screen such that it appears after the repo sync is done. It shouldn't appear anywhere else.
-- [ ] Move job history in the sidebar to between the workflow and system sections in simple mode and between cutting and reference in advanced mode.
+- [x] Move job history in the sidebar to between the workflow and system sections in simple mode and between cutting and reference in advanced mode.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

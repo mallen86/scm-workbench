@@ -55,9 +55,16 @@ def main() -> int:
     simple_pages = re.search(r'export const SIMPLE_PAGES = \[([^\]]*)\]', nav)
     if not simple_pages or '"offset"' not in simple_pages.group(1):
         return fail("simple navigation does not allow the offset page")
-    offset_link = '<a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>'
-    if offset_link not in index:
+    # The item must exist, stay visible in simple mode, and stay in the workflow
+    # section (asserted structurally: the exact attribute string would break on
+    # any unrelated markup change).
+    offset_link = re.search(r'<a class="nav-item"([^>]*data-page="offset"[^>]*)>', index)
+    if not offset_link:
+        return fail("offset navigation item is missing")
+    if "data-simple-hide" in offset_link.group(1):
         return fail("offset navigation item is still hidden in simple mode")
+    if 'data-section="workflow"' not in offset_link.group(1):
+        return fail("offset navigation item left the workflow section")
     for path in sorted(UI.rglob("*.js")):
         if path == FACADE:
             continue

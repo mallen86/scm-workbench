@@ -326,6 +326,134 @@ console.log("ok: job history page routing, manifest filtering, and settings rest
         detail = (result.stderr or result.stdout).strip()
         return fail(f"Node job history contract failed: {detail}")
     print(result.stdout.strip())
+
+    # --- Node contract for the sidebar order -------------------------------
+    # Job history has to read as "between workflow and system" in simple mode
+    # and "between cutting and reference" in advanced mode. One document order
+    # does both only because the separator answer is per section: this runs the
+    # real applySimpleNav against the real markup and checks the resulting
+    # visible order in both modes.
+    nav_script = r'''
+import fs from "node:fs";
+const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`;
+const index = fs.readFileSync(process.argv[2], "utf8");
+const navHtml = index.slice(index.indexOf('id="nav"'), index.indexOf("</nav>"));
+
+// Build the nav DOM from the shipped markup, in document order.
+const nodes = [];
+for (const m of navHtml.matchAll(/<(div|a)\b([^>]*)>/g)) {
+  const attrs = m[2];
+  const cls = (attrs.match(/class="([^"]*)"/) || [, ""])[1];
+  if (!cls.includes("nav-sep") && !cls.includes("nav-item")) continue;
+  const label = navHtml.slice(m.index, m.index + 200).match(/>([^<]*)</);
+  nodes.push({
+    kind: cls.includes("nav-sep") ? "sep" : "item",
+    section: (attrs.match(/data-section="([^"]*)"/) || [, null])[1],
+    page: (attrs.match(/data-page="([^"]*)"/) || [, cls.includes("nav-external") ? "docs" : null])[1],
+    label: (label ? label[1] : "").trim() || null,
+    simpleHide: /data-simple-hide/.test(attrs),
+    hidden: false,
+  });
+}
+const fail = message => { throw new Error(message); };
+if (!nodes.length) fail("the nav markup could not be read");
+for (const n of nodes.filter(n => n.kind === "sep"))
+  if (!n.section) fail(`the "${n.label}" separator has no data-section`);
+for (const n of nodes.filter(n => n.kind === "item"))
+  if (!n.section && n.page !== "history")
+    fail(`the "${n.label || n.page}" nav item has no data-section`);
+const historyNode = nodes.find(n => n.page === "history");
+if (!historyNode) fail("the nav markup has no job history item");
+if (historyNode.section) fail("job history must not belong to a section, or that section's header would open for it in simple mode");
+
+const asElement = n => ({
+  dataset: { section: n.section, page: n.page },
+  classList: { toggle: (name, on) => { if (name === "hide") n.hidden = !!on; }, contains: name => name === "hide" && n.hidden },
+  hasAttribute: name => name === "data-simple-hide" && n.simpleHide,
+});
+const modes = ["simple", "advanced"];
+const coreUrl = dataUrl(`
+  export const S = { info: { settings: { ui_mode: "advanced" } }, manifest: {}, jobs: [] };
+  export const $ = () => null;
+  export const PAGES = {};
+  export const iconize = () => {};
+  export const openUrl = () => Promise.resolve({ ok: true });
+  export const toast = () => {};
+  export const $$ = sel => {
+    if (sel === "#nav .nav-sep") return nodes.filter(n => n.kind === "sep").map(asElement);
+    if (sel === ".mode-switch .ms-btn") return modes.map(m => ({ dataset: { mode: m }, classList: { toggle: () => {} } }));
+    const section = /^#nav \\.nav-item\\[data-section="([^"]*)"\\]$/.exec(sel);
+    if (section) return nodes.filter(n => n.kind === "item" && n.section === section[1]).map(asElement);
+    return [];
+  };
+`);
+const navSource = fs.readFileSync(process.argv[3], "utf8")
+  .replace('from "./core.js"', `from "${coreUrl}"`)
+  .replace('from "./console.js"', `from "${dataUrl('export const toggleConsole = () => {}; export const refreshJobs = () => {};')}"`)
+  .replace('from "./info.js"', `from "${dataUrl('export const refreshInfo = () => Promise.resolve();')}"`)
+  .replace('from "./forms.js"', `from "${dataUrl('export const defaultArgs = () => ({}); export const restoreArgs = () => ({});')}"`)
+  .replace('from "./settings-transport.js"', `from "${dataUrl('export const setSettings = () => Promise.resolve();')}"`);
+globalThis.window = { addEventListener() {} };
+globalThis.document = { body: { classList: { toggle: () => {} } }, documentElement: { dataset: {} } };
+globalThis.location = { pathname: "/" };
+globalThis.history = { pushState() {}, replaceState() {} };
+globalThis.nodes = nodes; globalThis.asElement = asElement; globalThis.modes = modes;
+const nav = await import(dataUrl(navSource));
+
+const read = simple => {
+  for (const n of nodes) n.hidden = false;
+  nav.applySimpleNav(simple);
+  return {
+    separatorSections: nodes.filter(n => n.kind === "sep" && !n.hidden).map(n => n.section),
+    visibleItems: nodes.filter(n => n.kind === "item" && !(simple && n.simpleHide)).map(n => n.page),
+  };
+};
+
+const simple = read(true);
+if (JSON.stringify(simple.separatorSections) !== JSON.stringify(["workflow", "system"]))
+  fail(`simple mode shows the wrong section headers: ${JSON.stringify(simple.separatorSections)}`);
+const simpleOrder = ["fetch", "pdf", "offset", "history", "docs", "settings"];
+if (JSON.stringify(simple.visibleItems) !== JSON.stringify(simpleOrder))
+  fail(`simple mode order is ${JSON.stringify(simple.visibleItems)}, expected ${JSON.stringify(simpleOrder)}`);
+if (simple.visibleItems.indexOf("history") <= simple.visibleItems.indexOf("offset"))
+  fail("simple mode does not put job history after the workflow items");
+if (simple.visibleItems.indexOf("history") >= simple.visibleItems.indexOf("docs"))
+  fail("simple mode does not put job history before the system items");
+
+const advanced = read(false);
+if (JSON.stringify(advanced.separatorSections) !== JSON.stringify(["workflow", "cutting", "reference", "system"]))
+  fail(`advanced mode hides a section header: ${JSON.stringify(advanced.separatorSections)}`);
+const advancedOrder = ["fetch", "pdf", "offset", "templates", "extras", "history", "sizes", "utilities", "docs", "settings"];
+if (JSON.stringify(advanced.visibleItems) !== JSON.stringify(advancedOrder))
+  fail(`advanced mode order is ${JSON.stringify(advanced.visibleItems)}, expected ${JSON.stringify(advancedOrder)}`);
+
+console.log("ok: the sidebar keeps job history between workflow/system in simple mode and cutting/reference in advanced");
+'''.strip()
+    nav_result = subprocess.run(
+        [node, "--input-type=module", "-", str(index_path), str(nav_path)],
+        input=nav_script,
+        text=True,
+        capture_output=True,
+    )
+    if nav_result.returncode:
+        detail = (nav_result.stderr or nav_result.stdout).strip()
+        return fail(f"Node sidebar contract failed: {detail}")
+    print(nav_result.stdout.strip())
+
+    # One implementation owns the separator visibility; the early boot path in
+    # app.js/console.js must call it rather than scan siblings again.
+    for path in (app_path, console_path):
+        source = path.read_text(encoding="utf-8")
+        if "applySimpleNav(" not in source:
+            return fail(f"{path.relative_to(ROOT)} does not use the shared sidebar layout")
+        if "nextElementSibling" in source:
+            return fail(f"{path.relative_to(ROOT)} duplicates the separator scan")
+    for path in sorted(JS.rglob("*.js")):
+        if path == nav_path:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if 'classList.contains("nav-sep")' in source:
+            return fail(f"{path.relative_to(ROOT)} duplicates the separator scan")
     return 0
 
 

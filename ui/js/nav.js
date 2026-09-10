@@ -153,19 +153,27 @@ export function uiMode() {
 }
 
 
-/* body class + section separators + topbar switch state, all from one place */
-export function syncUiMode() {
-  const simple = uiMode() === "simple";
+/* One place owns the simple/advanced sidebar shape: the body class, which
+   section separators still have a visible item, and the mode-switch state.
+   It is a pure DOM function (it never reads S.info), so the early boot path
+   can call it before the settings read finishes. The separator answer comes
+   from each section's own items rather than from document order — that is
+   what lets Job history sit in the advanced Cutting/Reference gap and still
+   read as its own row in simple mode, where both sections are hidden. */
+export function applySimpleNav(simple) {
   document.body.classList.toggle("mode-simple", simple);
   $$("#nav .nav-sep").forEach(sep => {
-    let n = sep.nextElementSibling, any = false;
-    while (n && !n.classList.contains("nav-sep")) {
-      if (n.classList.contains("nav-item") && !(simple && n.hasAttribute("data-simple-hide"))) { any = true; break; }
-      n = n.nextElementSibling;
-    }
+    const section = sep.dataset.section;
+    const any = !!section && $$(`#nav .nav-item[data-section="${section}"]`)
+      .some(a => !(simple && a.hasAttribute("data-simple-hide")));
     sep.classList.toggle("hide", !any);
   });
   $$(".mode-switch .ms-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === (simple ? "simple" : "advanced")));
+}
+
+
+export function syncUiMode() {
+  applySimpleNav(uiMode() === "simple");
 }
 
 

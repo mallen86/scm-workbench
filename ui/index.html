@@ -21,20 +21,23 @@
       </div>
 
       <nav class="nav" id="nav">
+        <div class="nav-sep" data-section="workflow">Workflow</div>
+        <a class="nav-item" data-page="fetch" data-section="workflow"><span class="nav-ico" data-ico="download"></span>Fetch card art</a>
+        <a class="nav-item" data-page="pdf" data-section="workflow"><span class="nav-ico" data-ico="pdf"></span>Create PDF</a>
+        <a class="nav-item" data-page="offset" data-section="workflow"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>
+        <div class="nav-sep" data-section="cutting">Cutting</div>
+        <a class="nav-item" data-page="templates" data-section="cutting" data-simple-hide><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
+        <a class="nav-item" data-page="extras" data-section="cutting" data-simple-hide><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
+        <!-- Job history sits between the cutting and reference sections, which
+             also puts it between workflow and system in simple mode: the two
+             hidden sections collapse around it there. -->
         <a class="nav-item" data-page="history"><span class="nav-ico" data-ico="clock"></span>Job history</a>
-        <div class="nav-sep">Workflow</div>
-        <a class="nav-item" data-page="fetch"><span class="nav-ico" data-ico="download"></span>Fetch card art</a>
-        <a class="nav-item" data-page="pdf"><span class="nav-ico" data-ico="pdf"></span>Create PDF</a>
-        <a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>
-        <div class="nav-sep">Cutting</div>
-        <a class="nav-item" data-page="templates" data-simple-hide><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
-        <a class="nav-item" data-page="extras" data-simple-hide><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
-        <div class="nav-sep">Reference</div>
-        <a class="nav-item" data-page="sizes" data-simple-hide><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
-        <a class="nav-item" data-page="utilities" data-simple-hide><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
-        <div class="nav-sep">System</div>
-        <a class="nav-item nav-external" data-docs="https://alan-cha.github.io/silhouette-card-maker/" title="The silhouette-card-maker docs, opens in your browser"><span class="nav-ico" data-ico="book"></span>Documentation<span class="nav-ext" data-ico="external"></span></a>
-        <a class="nav-item" data-page="settings"><span class="nav-ico" data-ico="gear"></span>Settings</a>
+        <div class="nav-sep" data-section="reference">Reference</div>
+        <a class="nav-item" data-page="sizes" data-section="reference" data-simple-hide><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
+        <a class="nav-item" data-page="utilities" data-section="reference" data-simple-hide><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
+        <div class="nav-sep" data-section="system">System</div>
+        <a class="nav-item nav-external" data-section="system" data-docs="https://alan-cha.github.io/silhouette-card-maker/" title="The silhouette-card-maker docs, opens in your browser"><span class="nav-ico" data-ico="book"></span>Documentation<span class="nav-ext" data-ico="external"></span></a>
+        <a class="nav-item" data-page="settings" data-section="system"><span class="nav-ico" data-ico="gear"></span>Settings</a>
       </nav>
 
       <div class="sidebar-foot">
