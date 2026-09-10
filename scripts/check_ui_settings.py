@@ -25,6 +25,7 @@ def main() -> int:
     nav = nav_path.read_text(encoding="utf-8")
     settings = (UI / "pages" / "settings.js").read_text(encoding="utf-8")
     dashboard = (UI / "pages" / "dashboard.js").read_text(encoding="utf-8")
+    index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
 
     for required in (
         'export function canPickRepoDirectory(',
@@ -77,6 +78,10 @@ def main() -> int:
         return fail("repository path save does not confirm immediate application")
     if "The Python interpreter is in use for new jobs; port changes apply on next server start." not in settings:
         return fail("Python settings do not distinguish immediate job use from the startup-only port")
+    if 'el("label", {}, "Theme")' in settings or "setTheme(" in settings:
+        return fail("Advanced Settings still duplicates the sidebar theme control")
+    if 'id="theme-switch"' not in index or 'data-theme="dark"' not in index or 'data-theme="light"' not in index:
+        return fail("the canonical sidebar theme control is missing")
     for marker in (
         'let themeSelection = 0;',
         'let confirmedTheme = null;',

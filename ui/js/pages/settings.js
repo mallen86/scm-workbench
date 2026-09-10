@@ -91,7 +91,7 @@ function showWhatsNew(tag, releaseUrl) {
     }
   })();
 }
-import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, setTheme, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
+import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   let repoInitPending = false;
@@ -378,13 +378,8 @@ PAGES.settings = (root) => {
   const portI = el("input", { class: "input mono", type: "number", value: s.port || 8037, min: 1024, max: 65535 });
   const portW = el("span", { class: "numwrap" }, portI, numSteppers(portI, 1));
   pc.append(el("div", { class: "frow" },
-    el("div", { class: packaged ? "field w-half" : "field w-half" }, el("label", {}, packaged ? "Private Python" : "Python interpreter"), pyI),
+    el("div", { class: packaged ? "field w-full" : "field w-half" }, el("label", {}, packaged ? "Private Python" : "Python interpreter"), pyI),
     ...(packaged ? [] : [el("div", { class: "field w-quarter" }, el("label", {}, "Port"), portW)]),
-    el("div", { class: packaged ? "field w-half" : "field w-quarter" }, el("label", {}, "Theme"),
-      el("div", { class: "seg" },
-        el("button", { type: "button", class: s.theme === "dark" ? "active" : "", onclick: () => setTheme("dark") }, ico("moon"), " Dark"),
-        el("button", { type: "button", class: s.theme === "light" ? "active" : "", onclick: () => setTheme("light") }, ico("sun"), " Light"),
-      )),
   ));
   if (!packaged) {
     const autoI = el("input", { type: "checkbox", id: "set-auto-browser", checked: s.auto_open_browser });

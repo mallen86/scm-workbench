@@ -28,4 +28,4 @@
 - [x] Add the Offset & calibration workflow to the simple mode. Keep the global offset, paper specific offset, and the calibration sheets sections but leave out the offset pdf section
 - [x] Add a browse button to select the silhouette-card-maker and scm-extras repos in the advanced settings. It's currently just an input box but being able to browse for the location is much more user friendly.
 - [x] When an update has completed the download and is ready to restart the app, add a countdown notification saying as such. At the moment when the update downlaod finishes, the download progress box disappears and then a couple seconds later the app disappears.
-- [ ] Remove the light/dark mode toggle from the advanced settings. It's already in the sidebar for both versions so it doesn't need to be there.
+- [x] Remove the light/dark mode toggle from the advanced settings. It's already in the sidebar for both versions so it doesn't need to be there.
