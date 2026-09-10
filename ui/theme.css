@@ -251,8 +251,7 @@ body:not(.mode-simple).console-open .main { padding-bottom: 330px; }
   transition: border-color 0.15s ease;
 }
 .card + .card { margin-top: 24px; }
-.card + .status-grid { margin-top: 24px; }
-.card + .onboard, .onboard + .card, .onboard + .status-grid { margin-top: 24px; }
+.card + .onboard, .onboard + .card { margin-top: 24px; }
 
 /* ---- Settings > Managed repo copies: row header ------------------------- */
 .rc-head { display: grid; gap: 3px; }
@@ -701,49 +700,7 @@ select.input option { background: var(--surface); color: var(--text); }
 .papercard .pd { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
 
 /* ============================================================================
-   Quick actions (dashboard)
-   ========================================================================== */
-
-.qa-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 12px; }
-.qa {
-  display: flex; flex-direction: column; gap: 9px;
-  border: 1px solid var(--border-soft);
-  background: var(--surface-2);
-  border-radius: var(--radius);
-  padding: 17px;
-  cursor: pointer;
-  font-family: var(--sans);
-  color: var(--text);
-  text-align: left;
-  transition: transform 0.13s ease, border-color 0.13s ease, background 0.13s ease;
-}
-.qa:hover { transform: translateY(-2px); border-color: var(--border); background: var(--surface-3); }
-.qa .qa-ico {
-  width: 38px; height: 38px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--accent-soft); color: var(--accent);
-}
-.qa .qa-ico svg { width: 19px; height: 19px; }
-.qa .qa-t { font-size: 14px; font-weight: 700; }
-.qa .qa-d { font-size: 12px; color: var(--muted); line-height: 1.45; }
-
-/* status cards */
-.status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
-.statuscard {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  padding: 16px;
-  display: flex; gap: 12px; align-items: flex-start;
-}
-.statuscard .st-ico { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; }
-.statuscard .st-ico svg { width: 17px; height: 17px; }
-.statuscard .st-body { flex: 1; min-width: 0; }
-.statuscard .st-t { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
-.statuscard .st-d { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; word-break: break-all; font-family: var(--mono); }
-
-/* ============================================================================
-   Job list (recent jobs)
+   Job list (job history)
    ========================================================================== */
 
 .jobrow {
@@ -765,8 +722,8 @@ select.input option { background: var(--surface); color: var(--text); }
 .jobrow .jr-meta { text-align: right; flex: 0 0 auto; }
 .jobrow .jr-meta .t { font-size: 11px; color: var(--faint); }
 
-/* Job history rows: the same grammar as the dashboard list, plus the action
-   column (open the log, and the arrow that marks a row as restorable). */
+/* Job history rows: title, command, status and time, plus the action column
+   (open the log, and the arrow that marks a row as restorable). */
 .jobrow .jr-act { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .jobrow .jr-go { width: 18px; height: 18px; display: inline-flex; color: var(--faint); transition: color 0.12s, transform 0.12s; }
 .jobrow .jr-go svg { width: 100%; height: 100%; }
@@ -1264,8 +1221,8 @@ body.mode-simple .console { display: none; }
 /* The first-boot strip seats itself directly above the sidebar footer's
    divider line (prep.js). The nav above is the flexible part (flex:1, its
    own scrollbar), so the divider, the toggles and the rest of the chrome
-   never move when the strip comes and goes. The dashboard's own #repoprog
-   card still hosts the rows natively on the advanced dashboard page. */
+   never move when the strip comes and goes. The first-boot page hosts its
+   own #repoprog card, which retargets the same rows while it is up. */
 #repoprog-global {
   margin-bottom: 10px;
   display: grid; gap: 6px;

@@ -5,7 +5,7 @@ import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo }
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
-    dashboard: "Dashboard", preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
+    preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
@@ -13,11 +13,18 @@ export function setNav(page) {
 }
 
 
-// Each page has a real URL route (/pdf, /settings, …; dashboard is /) so
+// Each page has a real URL route (/pdf, /settings, …; job history is /) so
 // refreshing stays on the page and the browser back/forward buttons work.
+// The site root is the landing page, which is mode-aware: advanced opens on
+// the job history, simple keeps to the workflow and opens on the first step.
+export function rootPage() {
+  return uiMode() === "simple" ? "fetch" : "history";
+}
+
+
 export function pageFromPath() {
   const p = location.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
-  if (p === "") return "dashboard";
+  if (p === "") return rootPage();
   // The preparation screen is session-transient, never a bookmarkable route.
   if (p === "preparing") return null;
   return p in PAGES ? p : null;
@@ -40,20 +47,19 @@ export function go(page, prefill, { push = true, anim = true } = {}) {
   if (anim && pageEl.firstElementChild) pageEl.firstElementChild.classList.add("page-anim");
   $(".page-scroll").scrollTop = 0;
   if (push) {
-    const path = page === "dashboard" ? "/" : "/" + page;
+    const path = page === "history" ? "/" : "/" + page;
     if (location.pathname !== path) history.pushState({ page }, "", path);
   }
-  // the dashboard's and the job history page's lists are rebuilt by their
-  // render — fill them now so arriving there always shows the current jobs
-  // (the poll only repaints on change)
-  if (page === "dashboard" || page === "history") refreshJobs(true);
+  // the job history list is rebuilt by its render — fill it now so arriving
+  // there always shows the current jobs (the poll only repaints on change)
+  if (page === "history") refreshJobs(true);
 }
 
 window.addEventListener("popstate", () => {
   const page = pageFromPath();
   // simple mode: a history entry for a page that is hidden there lands on fetch
   if (uiMode() === "simple" && page && !SIMPLE_PAGES.includes(page)) return go("fetch", null, { push: false });
-  go(page || (uiMode() === "simple" ? "fetch" : "dashboard"), null, { push: false });
+  go(page || rootPage(), null, { push: false });
 });
 
 
@@ -65,9 +71,9 @@ export function bootPage() {
   if (uiMode() === "simple" && !SIMPLE_PAGES.includes(page)) {
     page = "fetch"; // in simple mode the app opens on the first workflow step
   }
-  const path = page ? (page === "dashboard" ? "/" : "/" + page) : "/";
-  if (location.pathname !== path) history.replaceState({ page: page || "dashboard" }, "", path);
-  go(page || "dashboard", null, { push: false });
+  const path = page ? (page === "history" ? "/" : "/" + page) : "/";
+  if (location.pathname !== path) history.replaceState({ page: page || rootPage() }, "", path);
+  go(page || rootPage(), null, { push: false });
 }
 
 
@@ -171,7 +177,7 @@ export async function setUiMode(mode) {
   }
   S.info.settings.ui_mode = mode;
   syncUiMode();
-  const page = S.page || "dashboard";
+  const page = S.page || "history";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
     toast("ok", "Simple: just the essentials. Fetch art, make the PDF, and calibrate your printer.");

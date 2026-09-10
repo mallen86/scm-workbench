@@ -2,7 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, S, el, toast } from "./core.js";import { refreshInfo } from "./info.js";import { go } from "./nav.js";
-/* ================================ dashboard ================================ */
+/* ============================ repo preparation ============================ */
 
 /* ---------------- repo prep state (first clone + updates) ------------------ */
 export const STAGE_NAMES = {
@@ -39,7 +39,7 @@ export function prepActive() {
 
 
 // The dedicated welcome screen is reserved for the packaged first-launch
-// bootstrap. Later checks/updates keep using the dashboard/sidebar progress
+// bootstrap. Later checks/updates keep using the sidebar progress
 // UI, and standalone-browser startup remains unchanged.
 export function firstBootPageNeeded() {
   // Keep the welcome page available after a failed first pass too. It owns
@@ -122,9 +122,9 @@ export function ensurePrepRows(rows, container) {
 }
 
 
-// The dashboard hosts the prep rows natively (#repoprog in its card). On
-// other pages — most importantly the simple-mode fetch landing, where a
-// first boot happens with no dashboard in sight — the same rows live in a
+// The first-boot page hosts the prep rows natively (#repoprog in its card).
+// On every other page — most importantly the simple-mode fetch landing, where
+// a first boot happens with no such page in sight — the same rows live in a
 // small fixed strip, so first-launch progress is never invisible.
 function globalStrip() {
   let s = $("#repoprog-global");
@@ -158,7 +158,7 @@ export function updatePrepRows() {
   retargetProws(container);
   // The first-boot page keeps both repositories visible so a finished row
   // becomes a reassuring 100% “ready” row instead of disappearing. Existing
-  // dashboard/sidebar progress remains compact and shows only active work.
+  // the sidebar strip remains compact and shows only active work.
   const showAll = native?.dataset.prepAll === "true";
   const rows = showAll
     ? (S.info.repos || [])
@@ -219,7 +219,7 @@ export function startPrepWatcher() {
             ? "Your repos are ready. Every page is live."
             : "Setup did not finish. Retry the missing repositories.");
         }
-        go(S.page || "dashboard", null, { push: false, anim: false });
+        go(S.page || "history", null, { push: false, anim: false });
       } else {
         updatePrepRows();
       }

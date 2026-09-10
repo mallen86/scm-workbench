@@ -99,7 +99,7 @@ export function iconize(root) {
 export const S = {
   info: null,
   manifest: {},
-  page: "dashboard",
+  page: "history",
   forms: {},          // kind -> {key: value}
   plugin: "mtg",
   activeJobId: null,

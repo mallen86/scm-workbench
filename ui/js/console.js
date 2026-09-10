@@ -60,9 +60,8 @@ export async function refreshJobs(forceRender = false) {
   const next = (await jobs.list()).jobs;
   // Redraw only when the job set actually changed (new job, status flip) —
   // the 4 s poll must not repaint an unchanged list (no blink). An explicit
-  // forceRender (used when the dashboard or history page is (re)entered)
-  // repaints once even though nothing changed — a freshly rendered page needs
-  // its list filled.
+  // forceRender (used when the job history page is (re)entered) repaints once
+  // even though nothing changed — a freshly rendered page needs its list.
   const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
   const changed = sig !== _lastJobsSig;
   S.jobs = next;
@@ -76,34 +75,8 @@ export async function refreshJobs(forceRender = false) {
     renderConsoleTabs();
   }
   setRevealButtons();
-  if (S.page === "dashboard" && (changed || forceRender)) {
-    const slot = $("#recent-jobs");
-    if (slot) {
-      slot.innerHTML = "";
-      if (!S.jobs.length) slot.append(el("div", { class: "empty" }, ico("clock"), "No jobs yet. Run something to see it here."));
-      else for (const j of S.jobs.slice(0, 6)) slot.append(jobRow(j));
-    }
-  }
-  // the dedicated history page owns the full list in both modes
+  // the job history page owns the full list in both modes
   if (S.page === "history" && (changed || forceRender)) renderJobHistory($("#job-history"));
-}
-
-
-export function jobRow(j) {
-  return el("div", {
-    class: "jobrow",
-    onclick: () => { openConsole(j.id); },
-  },
-    el("div", { class: "jr-ico" }, ico("terminal")),
-    el("div", { class: "jr-body" },
-      el("div", { class: "jr-t" }, j.title),
-      el("div", { class: "jr-cmd" }, displayCmd(j.cmd, j.kind) || ""),
-    ),
-    el("div", { class: "jr-meta" },
-      el("div", { class: `statusdot ${j.status}` }, j.status),
-      el("div", { class: "t" }, fmtTs(j.ts)),
-    ),
-  );
 }
 
 

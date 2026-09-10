@@ -1,7 +1,7 @@
 /* pages/templates — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { deleteTemplate } from "../template-transport.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* ============================== templates page ============================= */
+import { $, $$, PAGES, S, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { deleteTemplate } from "../template-transport.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";/* ============================== templates page ============================= */
 
 PAGES.templates = (root) => {
   const wrap = el("div", {});

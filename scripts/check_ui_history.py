@@ -67,9 +67,56 @@ def main() -> int:
 
     if 'history: "Job history"' not in nav:
         return fail("nav.js does not title the history route")
+    # The dashboard is gone: its job list, docs card, status grid and quick
+    # actions are not worth a page of their own now that history is dedicated
+    # and the docs link lives in the sidebar. / is the history page.
+    if (JS / "pages" / "dashboard.js").exists():
+        return fail("the dashboard page module still exists")
+    if "PAGES.dashboard" in nav or "PAGES.dashboard" in app:
+        return fail("the dashboard page is still registered")
+    if re.search(r'if \(p === ""\) return "dashboard";', nav) or 'page === "dashboard"' in nav:
+        return fail("the root route still resolves to the dashboard")
+    if 'data-page="dashboard"' in index:
+        return fail("index.html still has a dashboard nav item")
+    if "recent-jobs" in console or "recent-jobs" in nav:
+        return fail("the dashboard's recent-jobs list is still wired up")
+    for marker in ('export function rootPage()',
+                   'return uiMode() === "simple" ? "fetch" : "history";',
+                   'if (p === "") return rootPage();',
+                   'const path = page === "history" ? "/" : "/" + page;'):
+        if marker not in nav:
+            return fail(f"the root route does not open job history: {marker} is missing")
+    # The two cards a first run needs moved to the landing page with the
+    # dashboard's shared helpers split into their own modules.
+    for path, exports in ((JS / "repo-setup.js", ("export function connectCardNeeded(", "export function repoSetupCard(")),
+                          (JS / "onboarding.js", ("export function onboardCard(",))):
+        if not path.is_file():
+            return fail(f"{path.relative_to(ROOT)} is missing")
+        source = path.read_text(encoding="utf-8")
+        for export in exports:
+            if export not in source:
+                return fail(f"{path.relative_to(ROOT)} is missing {export}")
+    for marker in ('import { onboardCard } from "../onboarding.js";',
+                   'import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";',
+                   'if (connectCardNeeded()) wrap.append(repoSetupCard());',
+                   'else if (!S.info.settings.onboarded) wrap.append(onboardCard());'):
+        if marker not in page:
+            return fail(f"the landing page does not carry the first-run cards: {marker}")
+    # matrixCard used to live in the dashboard module; sizes is its only caller
+    sizes = (JS / "pages" / "sizes.js").read_text(encoding="utf-8")
+    if 'export function matrixCard(' not in sizes:
+        return fail("matrixCard did not move to the sizes page")
+    # matrixCard's variant switch calls $$() and iconize() — a missing import
+    # breaks the switch with a console error instead of a visible failure
+    if 'import { $, $$, PAGES, S, el, ico, iconize, pageHead } from "../core.js";' not in sizes:
+        return fail("the sizes page does not import the helpers matrixCard uses")
+    for name in ("offset", "pdf", "templates", "utilities"):
+        source = (JS / "pages" / f"{name}.js").read_text(encoding="utf-8")
+        if 'from "../repo-setup.js";' not in source:
+            return fail(f"{name}.js does not import the shared repo setup card")
     if 'export const SIMPLE_PAGES = ["history",' not in nav:
         return fail("simple mode does not offer the job history page")
-    if 'if (page === "dashboard" || page === "history") refreshJobs(true);' not in nav:
+    if 'if (page === "history") refreshJobs(true);' not in nav:
         return fail("go() does not refresh the job list when history opens")
     if 'export function restoreArgs(' not in forms:
         return fail("forms.js does not export restoreArgs")

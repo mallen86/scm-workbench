@@ -74,7 +74,7 @@ function showWhatsNew(tag, releaseUrl) {
       if (safeReleaseUrl) {
         // a raw <a> here would carry target="_blank" — the app's webview can't
         // spawn that (window.open is denied), and even href="#" bounces the
-        // whole app to the dashboard on a mis-click. The OS browser is the
+        // whole app away on a mis-click. The OS browser is the
         // honest target, and the app already has a sanctioned door for it.
         actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(safeReleaseUrl, "the release page"); } }, "Open on GitHub"));
       }

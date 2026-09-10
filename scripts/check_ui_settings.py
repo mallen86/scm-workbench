@@ -24,7 +24,8 @@ def main() -> int:
     nav_path = UI / "nav.js"
     nav = nav_path.read_text(encoding="utf-8")
     settings = (UI / "pages" / "settings.js").read_text(encoding="utf-8")
-    dashboard = (UI / "pages" / "dashboard.js").read_text(encoding="utf-8")
+    onboarding = (UI / "onboarding.js").read_text(encoding="utf-8")
+    repo_setup = (UI / "repo-setup.js").read_text(encoding="utf-8")
     index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
 
     for required in (
@@ -54,7 +55,8 @@ def main() -> int:
     for path, marker in (
         (nav_path, 'import { setSettings } from "./settings-transport.js";'),
         (UI / "pages" / "settings.js", 'import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";'),
-        (UI / "pages" / "dashboard.js", 'import { setSettings } from "../settings-transport.js";'),
+        (UI / "onboarding.js", 'import { setSettings } from "./settings-transport.js";'),
+        (UI / "repo-setup.js", 'import { setSettings } from "./settings-transport.js";'),
     ):
         if marker not in path.read_text(encoding="utf-8"):
             return fail(f"{path.relative_to(ROOT)} does not import the settings facade")
@@ -67,8 +69,8 @@ def main() -> int:
         (settings, 'repoPathControl(exI, "scm-extras")'),
         (settings, 'const selected = await pickRepoDirectory();'),
         (settings, 'setSettings({ python:'),
-        (dashboard, 'setSettings({ onboarded: true })'),
-        (dashboard, 'setSettings({ scm_dir:'),
+        (onboarding, 'setSettings({ onboarded: true })'),
+        (repo_setup, 'setSettings({ scm_dir:'),
     ):
         if marker not in source:
             return fail(f"settings caller is missing {marker}")
@@ -194,7 +196,7 @@ async function freshTheme(initial) {
   const coreUrl = dataUrl(`
     // unique state for theme case ${id}
     export const PAGES = {};
-    export const S = { info: { settings: { theme: ${JSON.stringify(initial)}, ui_mode: "advanced" } }, page: "dashboard" };
+    export const S = { info: { settings: { theme: ${JSON.stringify(initial)}, ui_mode: "advanced" } }, page: "history" };
     export const $ = () => ({ textContent: "", innerHTML: "", firstElementChild: null });
     export const $$ = () => [];
     export const iconize = () => {};

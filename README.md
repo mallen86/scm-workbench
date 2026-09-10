@@ -25,7 +25,7 @@ On first launch a window opens immediately, and the setup work (fetching the new
 
 | Page | What it does |
 | --- | --- |
-| **Dashboard** | repo status, quick actions, the cards-per-page matrix, recent jobs |
+| **Job history** | every run, live and from earlier sessions; click one to reopen its page with the exact settings it ran with |
 | **Fetch card art** | the card-art fetchers for every game: a decklist from a file (with the OS file picker), pasted text, or a URL — including the MTG preferences |
 | **Create PDF** | print-ready PDFs from your card images: sizes, registration, specialty layouts, fit & crop, PPI, quality, borderless and more |
 | **Offset & calibration** | calibration sheets, print-offset measurement, and a per-paper-size offset table |
@@ -36,7 +36,7 @@ On first launch a window opens immediately, and the setup work (fetching the new
 
 Everything runs as a tracked job: a live log, a stop button, a persistent history, and — before you run — a **command preview** of the exact command that will run. The preview doubles as a sanity check: the Create PDF button stays disabled, with a reason, while the front-images folder is empty.
 
-**Simple or Advanced** (the switch at the bottom of the sidebar, on every page). Advanced is the full set of options above. Simple is the essentials only: the navigation keeps Fetch card art, Create PDF and Settings, and the Create PDF form shrinks to the choices you actually use — card size and paper size on one row, the borderless / apply-saved-offset / front-only toggles on the next — with everything else at its defaults, so a simple run and an advanced run with the same visible settings produce the same command. The “Apply saved offset” switch is enabled only when an offset is saved for that paper size.
+**Simple or Advanced** (the switch at the bottom of the sidebar, on every page). Advanced is the full set of options above. Simple is the essentials only: the navigation keeps Job history, Fetch card art, Create PDF, Offset & calibration and Settings, and the Create PDF form shrinks to the choices you actually use, with everything else at its defaults. The “Apply saved offset” switch is enabled only when an offset is saved for that paper size.
 
 **Extras auto-wiring.** Using an scm-extras size such as `standard_mtg` normally requires exporting `SCM_EXTRA_LAYOUTS` by hand. The Workbench does it for you the moment you pick such a size, and the preview says so.
 

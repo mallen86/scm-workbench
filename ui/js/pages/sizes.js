@@ -1,7 +1,7 @@
 /* pages/sizes — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, el, pageHead } from "../core.js";import { go } from "../nav.js";import { matrixCard } from "./dashboard.js";PAGES.sizes = (root) => {
+import { $, $$, PAGES, S, el, ico, iconize, pageHead } from "../core.js";import { go } from "../nav.js";PAGES.sizes = (root) => {
   const wrap = el("div", {});
   wrap.append(pageHead("Sizes & layouts", "Every card size known to the repos, including extras, with scaled silhouettes and the full paper by card layout matrix."));
   wrap.append(el("div", { class: "section-label" }, "Card sizes"));
@@ -84,4 +84,57 @@ export function mm(sizeStr) {
   const m = /([\d.]+)\s*(mm|in)/.exec(String(sizeStr));
   if (!m) return parseFloat(sizeStr) || 0;
   return m[2] === "mm" ? parseFloat(m[1]) : parseFloat(m[1]) * 25.4;
+}
+
+
+/* The cards-per-page matrix, with its Default/Borderless switch. It lives on
+   this page now (the dashboard that used to share it is gone). */
+export function matrixCard(variant) {
+  const card = el("div", { class: "card" });
+  const seg = el("div", { class: "seg" });
+  for (const [v, lab] of [["default", "Default"], ["borderless", "Borderless"]]) {
+    seg.append(el("button", {
+      type: "button", class: variant === v ? "active" : "",
+      onclick: e => {
+        $$("#matrix-variant button").forEach(b => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        card.replaceChildren(head(), table(v));
+        iconize(card);
+      },
+    }, lab));
+  }
+  function head() {
+    return el("div", { class: "card-head" },
+      el("div", { class: "card-ico" }, ico("layers")),
+      el("div", { class: "grow" },
+        el("h2", {}, "Cards per page"),
+        el("p", {}, "Paper size by card size. Cells show columns by rows and the total."),
+      ),
+      el("div", { id: "matrix-variant" }, seg),
+    );
+  }
+  function table(v) {
+    const t = el("table", { class: "matrix" });
+    const papers = S.info.scm.paper_sizes;
+    t.append(el("tr", {}, el("th", { class: "rowhead" }, "Card size"),
+      ...papers.map(p => el("th", {}, p.name))));
+    let maxN = 0;
+    const rows = S.info.scm.card_sizes.map(c => {
+      const tr = el("tr", {}, el("th", { class: "rowhead" }, c.name));
+      for (const p of papers) {
+        const l = (S.info.scm.layouts[p.name]?.[c.name] || {})[v];
+        const n = l ? l.num_cols * l.num_rows : 0;
+        maxN = Math.max(maxN, n);
+        if (l) {
+          tr.append(el("td", { class: `d${Math.min(3, Math.floor(n / Math.max(1, maxN) * 3))}` },
+            `${l.num_cols}×${l.num_rows}`, el("span", { class: "sub" }, `${n} cards`)));
+        } else tr.append(el("td", { class: "na" }, "—"));
+      }
+      return tr;
+    });
+    t.append(...rows);
+    return t;
+  }
+  card.append(head(), table(variant));
+  return card;
 }

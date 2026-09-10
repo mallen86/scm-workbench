@@ -34,5 +34,5 @@
 - [x] Remove the light/dark mode toggle from the advanced settings. It's already in the sidebar for both versions so it doesn't need to be there.
 - [x] Allow deleting a custom created cutting template from the app. Just add an x button on top of the dxf button on the right with a confirmation box that pops up when pressed.
 - [x] Add a dedicated job history page. This should be availabe in simple and advanced mode and has a similar feel to the job history shown at the bottom of the dashboard in the advanced mode. In addition this should have the ability to click the job to go to the relevent page with the same settings used by the job. Ex: Create PDF job with poker card size, a4 paper, and borderless gets clicked in the job history and populates those settings in the create pdf page.
-- [ ] With the dedicated job history page the job history in the dashboard is no longer necessary which means the dashboard is largely unnecessary
+- [x] With the dedicated job history page the job history in the dashboard is no longer necessary which means the dashboard is largely unnecessary
 - [ ] Add a sidebar item for going to the scm documentation like in the dashboard. It should look just like the existing items but with the addition of the "opens in new tab" icon on the right side to signify that it will open a webpage. Available in both simple and advanced.
