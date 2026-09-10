@@ -60,7 +60,7 @@ def main() -> int:
         "setTimeout(tick, 750)",
         "const allReady = repos.length > 0 && repos.every(r => r.deployed);",
         'toast(allReady ? "ok" : "warn"',
-        '"Setup did not finish — retry the missing repositories."',
+        '"Setup did not finish. Retry the missing repositories."',
     ):
         if marker not in prep:
             return fail(f"preparation state contract is missing: {marker}")

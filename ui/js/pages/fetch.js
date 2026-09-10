@@ -6,11 +6,11 @@ import { canImportDecklist, importDecklist } from "../decklist-transport.js";imp
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Fetch card art", "Pick a game, give it a decklist (from the list, a file you browse to on disk, or pasted text) and a format. The plugin downloads the card images into game/front/ (and game/double_sided/ where applicable) — ready for the PDF step."));
+  wrap.append(pageHead("Fetch card art", "Choose a game, decklist, and format. Decklists can come from the list, a file, or pasted text. The plugin saves images to game/front/ and, when applicable, game/double_sided/ for the PDF step."));
   const picker = el("div", { class: "card" },
     el("div", { class: "card-head" },
       el("div", { class: "card-ico" }, ico("download")),
-      el("div", { class: "grow" }, el("h2", {}, "Game"), el("p", {}, "One plugin per game. Formats and options adapt to your pick.")),
+      el("div", { class: "grow" }, el("h2", {}, "Game"), el("p", {}, "Each game has one plugin. Formats and options match your selection.")),
     ),
   );
   const grid = el("div", { class: "plugin-grid" });
@@ -30,7 +30,7 @@ PAGES.fetch = (root) => {
 
   const kind = "fetch:" + S.plugin;
   if (!S.info.scm.found) {
-    wrap.append(el("div", { class: "banner err" }, el("span", { class: "b-ico" }, ico("alert")), el("span", { class: "grow" }, "SCM repo not connected — the plugins live inside it. Fix it in Settings.")));
+    wrap.append(el("div", { class: "banner err" }, el("span", { class: "b-ico" }, ico("alert")), el("span", { class: "grow" }, "SCM repo is not connected. Plugins are stored there. Fix this in Settings.")));
     return wrap;
   }
   wrap.append(formCard(kind, { icon: "download", flat: uiMode() === "simple", head: uiMode() !== "simple" }));
@@ -43,11 +43,11 @@ PAGES.fetch = (root) => {
   cc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("trash")),
     el("div", { class: "grow" }, el("h2", {}, "Starting a different deck?"),
-      el("p", {}, "Fetching never deletes existing images — clearing the folders first keeps old art out of the new PDF."))));
+      el("p", {}, "Fetching does not delete existing images. Clear the folders first to keep old art out of your new PDF."))));
   cc.append(el("div", { class: "runbar" },
-    el("span", { class: "rb-note" }, "Deletes every image in game/front/ and game/double_sided/ (card backs are kept). No undo."),
+    el("span", { class: "rb-note" }, "Deletes images in game/front/ and game/double_sided/. Card backs stay. This cannot be undone."),
     el("button", { class: "btn danger", onclick: async () => {
-      const ok = await confirmModal({ title: "Delete card images?", text: "Every image in game/front/ and game/double_sided/ will be permanently deleted. Card backs are kept.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
+      const ok = await confirmModal({ title: "Delete card images?", text: "Images in game/front/ and game/double_sided/ will be permanently deleted. Card backs stay.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
       if (!ok) return;
       const job = await doRun("clean_up", null);
       if (job) watchJobDone(job.id, () => afterFormChange(kind));   // the preview re-queries, so the stale-images warning clears
@@ -61,7 +61,7 @@ PAGES.fetch = (root) => {
     runningLabel: `Fetching ${S.manifest[kind].game} card art`,
     onOk: (done, body) => {
       body.append(el("div", { class: "js-msg ok" },
-        ico("check"), el("span", {}, "Card art is ready — the images are in place for the PDF.")));
+        ico("check"), el("span", {}, "Card art is ready. Images are in place for the PDF.")));
       body.append(el("div", { class: "js-actions" },
         el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF")));
     },
@@ -90,7 +90,7 @@ export function patchFetchForm(kind) {
     if (canImport) {
       const browse = el("button", {
         class: "btn btn-ghost btn-sm", type: "button",
-        title: "Pick any file on disk — it's copied into game/decklist/ and appears in the list",
+        title: "Choose a file on disk. It is copied to game/decklist/ and added to the list.",
         onclick: async () => {
           browse.disabled = true;
           try {
@@ -110,11 +110,11 @@ export function patchFetchForm(kind) {
             autoFormat(); // .xml decklist → this game's XML-based format (e.g. MPCFill XML)
             afterFormChange(kind, args);
             browse.disabled = false;
-            toast("ok", `Imported “${result.name}” into the decklist folder`);
+            toast("ok", `Imported “${result.name}” into the decklist folder.`);
             return;
           } catch (e) {
             browse.disabled = false;
-            toast("warn", `The file picker failed to open (${e.message || "unknown error"}) — paste the decklist text instead.`);
+            toast("warn", `The file picker could not open (${e.message || "unknown error"}). Paste the decklist text instead.`);
             return;
           }
         },
@@ -127,7 +127,7 @@ export function patchFetchForm(kind) {
       const fl = S.info.scm.decklists || [];
       list.innerHTML = "";
       if (!fl.length) list.append(el("div", { class: "small faint" },
-        "No decklist files in game/decklist/ yet — use “Paste text” to create one" + (canImport ? ", or pick an existing file with Browse…" : "")));
+        "No decklist files are in game/decklist/ yet. Use “Paste text” to create one" + (canImport ? ", or browse for an existing file" : "")));
       for (const f of fl) {
         list.append(el("div", {
           class: `fp-item ${args.deck_file === f.name ? "active" : ""}`,

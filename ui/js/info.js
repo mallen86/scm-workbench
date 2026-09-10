@@ -31,11 +31,11 @@ export function showBootFailure(e) {
       /unavailable|closed|stopped/i.test(raw) ? "is unavailable" :
       /invoke|native|failed/i.test(raw) ? "failed to answer a native request" :
       "failed to answer";
-    message = `SCM Workbench's bundled worker ${reason}. This is an app startup problem, not a network connection.`;
+    message = `SCM Workbench's bundled worker ${reason}. This is an app startup problem, not a network problem.`;
   } else {
     const msg = /fetch|network|failed/i.test(raw) ? "no network response from the API" : raw;
     message = `Can't reach the Workbench API at ${location.origin} (${msg}). Is the server still running? ` +
-      "If you opened this tab from a Windows browser (WSL2), use the \u201CWindows host\u201D URL the server printed in its console.";
+      "If this tab is open in a Windows browser (WSL2), use the \u201CWindows host\u201D URL printed by the server.";
   }
   const bar = el("div", { class: "banner err" },
     el("span", { class: "b-ico" }, ico("alert")),

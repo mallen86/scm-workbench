@@ -3,7 +3,7 @@
 
 import { PAGES, S, el, pageHead } from "../core.js";import { go } from "../nav.js";import { matrixCard } from "./dashboard.js";PAGES.sizes = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Sizes & layouts", "Every card size the repos know about — core + extras — with a scaled silhouette of each card, plus the full paper × card layout matrix."));
+  wrap.append(pageHead("Sizes & layouts", "Every card size known to the repos, including extras, with scaled silhouettes and the full paper by card layout matrix."));
   wrap.append(el("div", { class: "section-label" }, "Card sizes"));
   wrap.append(sizeExplorer());
   wrap.append(el("div", { class: "section-label" }, "Paper sizes"));
@@ -68,7 +68,7 @@ export function paperStrip() {
 export function specialtyRow() {
   const row = el("div", { class: "frow" });
   const items = S.info.scm.specialty;
-  if (!items.length) return el("div", { class: "empty" }, "No specialty layouts defined.");
+  if (!items.length) return el("div", { class: "empty" }, "No specialty layouts are defined.");
   for (const s of items) {
     row.append(el("div", { class: "field w-full" },
       el("label", {}, s.name),

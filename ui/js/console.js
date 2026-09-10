@@ -75,7 +75,7 @@ export async function refreshJobs(forceRender = false) {
     const slot = $("#recent-jobs");
     if (slot) {
       slot.innerHTML = "";
-      if (!S.jobs.length) slot.append(el("div", { class: "empty" }, ico("clock"), "No jobs yet — run something and it shows up here."));
+      if (!S.jobs.length) slot.append(el("div", { class: "empty" }, ico("clock"), "No jobs yet. Run something to see it here."));
       else for (const j of S.jobs.slice(0, 6)) slot.append(jobRow(j));
     }
   }
@@ -171,18 +171,18 @@ export async function attachStream(id, resume) {
   try {
     initial = await loadConsoleLog(id);
   } catch (error) {
-    if (serial === _streamSerial) appendLogLine(`(log unavailable — ${error.message || "job output could not be loaded"})`, "dim");
+    if (serial === _streamSerial) appendLogLine(`(log unavailable: ${error.message || "job output could not be loaded"})`, "dim");
     updateFooter();
     return;
   }
   if (serial !== _streamSerial) return;
   for (const line of initial.lines) appendLogLine(line);
-  if (initial.gap) appendLogLine("⚠ earlier output is unavailable (the log was truncated)", "warn");
+  if (initial.gap) appendLogLine("⚠ earlier output is unavailable because the log was truncated", "warn");
   if (initial.lineTruncated) appendLogLine("⚠ one or more output lines were clipped to the log line limit", "warn");
   if (initial.omitted) appendLogLine(
     initial.probeFailed
-      ? "⚠ the display cap was reached; further output is available in the job log (availability could not be checked)"
-      : `⚠ display capped at ${CONSOLE_LOG_CAP.toLocaleString()} lines; further output is available in the job log`,
+      ? "⚠ display cap reached. More output is available in the job log, but availability could not be checked"
+      : `⚠ display capped at ${CONSOLE_LOG_CAP.toLocaleString()} lines. More output is available in the job log`,
     "warn",
   );
   log.scrollTop = log.scrollHeight;
@@ -200,7 +200,7 @@ export async function attachStream(id, resume) {
     return;
   }
 
-  appendLogLine("▸ running — started " + new Date((job.ts || Date.now() / 1000) * 1000).toLocaleTimeString() + " (output streams in below as it happens)", "dim");
+  appendLogLine("▸ running. Started " + new Date((job.ts || Date.now() / 1000) * 1000).toLocaleTimeString() + ". Output streams below as it arrives", "dim");
   const subscription = jobs.subscribe(id, {
     after: initial.nextSeq,
     onLine: line => {
@@ -210,7 +210,7 @@ export async function attachStream(id, resume) {
       if (logEl) logEl.scrollTop = logEl.scrollHeight;
     },
     onGap: () => {
-      if (serial === _streamSerial) appendLogLine("⚠ earlier output is unavailable (the log was truncated)", "warn");
+      if (serial === _streamSerial) appendLogLine("⚠ earlier output is unavailable because the log was truncated", "warn");
     },
     onError: error => {
       if (serial === _streamSerial) appendLogLine(`⚠ output stream: ${error.message || error}`, "warn");
@@ -268,11 +268,11 @@ export function updateFooter() {
       const managed = row && row.mode === "managed";
       const left = (job.outputs || []).filter(Boolean).length;
       if (job.status === "ok" && managed && left)
-        return el("button", { class: "btn btn-ghost btn-sm", title: "Copy the output to a folder of your choice (system save dialog).",
+        return el("button", { class: "btn btn-ghost btn-sm", title: "Copy the output to a folder of your choice using the system save dialog.",
           onclick: () => moveJobToMyFiles(job) }, ico("folder"), left > 1 ? `Move to my files… (${left})` : "Move to my files…");
       if (managed)
         return el("button", { class: "btn btn-ghost btn-sm", disabled: "",
-          title: "The output stays in the app's private working area; when the run is done you can move it out." },
+          title: "The output stays in the app's private working area. Move it out when the run finishes." },
           ico("folder"), "In the app area");
       return el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
         try {
@@ -346,7 +346,7 @@ export function setRevealButtons() {
     btn.disabled = false;
   } else if (managed) {
     btn.append("In the app area");
-    btn.title = "This run's files stay in the app's private working area; once the run is done, “Move to my files…” brings them out.";
+    btn.title = "This run's files stay in the app's private working area. When it finishes, “Move to my files…” brings them out.";
     btn.disabled = true;
   } else {
     btn.append("Reveal");

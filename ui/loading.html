@@ -27,7 +27,7 @@
 <body>
 <div class="box">
   <img class="mark" src="/logo.svg" alt="">
-  <div class="d">Starting the SCM Workbench…</div>
+  <div class="d">Starting SCM Workbench</div>
 </div>
 <script>
   // The shell keeps this embedded page visible until the worker answers,
@@ -40,12 +40,11 @@
       if (waited >= 120) {
         clearInterval(timer);
         document.querySelector(".d").textContent =
-          "This window is waiting for the app's bundled worker, and it " +
-          "never arrived. Quit SCM Workbench completely and open it again; on a " +
-          "fresh update that is usually all it takes. If it still will not " +
-          "load, see \u201CFirst run on Mac\u201D in the README — a " +
-          "re-sign can wedge the window on current macOS, and a reboot " +
-          "clears it.";
+          "This window is waiting for the app's bundled worker, but it has not " +
+          "started. Quit SCM Workbench completely and open it again. After a " +
+          "fresh update, that usually fixes it. If it still will not load, see " +
+          "\u201CFirst run on Mac\u201D in the README. Signing the app again can stop " +
+          "the window from loading on current macOS. A reboot clears it.";
       }
     }, 500);
   })();

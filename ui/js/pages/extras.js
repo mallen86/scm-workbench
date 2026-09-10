@@ -6,22 +6,22 @@ import { $, PAGES, S, el, ico, pageHead } from "../core.js";import { doRun, form
 
 PAGES.extras = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Extras: MTG & Sorcery", "scm-extras adds tailored card sizes — Magic: The Gathering (2.5 mm radius) and Sorcery: Contested Realm (4.5 mm radius) — with their own cutting templates. The Workbench wires SCM_EXTRA_LAYOUTS for you, so you can use these sizes from the Create PDF page without any manual env setup."));
+  wrap.append(pageHead("Extras: MTG & Sorcery", "scm-extras adds card sizes for Magic: The Gathering (2.5 mm radius) and Sorcery: Contested Realm (4.5 mm radius), with cutting templates. Workbench sets SCM_EXTRA_LAYOUTS automatically, so these sizes are available on Create PDF without manual environment setup."));
   if (!S.info.extras.found) {
     wrap.append(el("div", { class: "banner warn" }, ico("alert"), el("span", { class: "grow" },
-      "scm-extras is not connected. In Settings, point it at your scm-extras folder — or clone it next to this project: ",
+      "scm-extras is not connected. Point Settings to your scm-extras folder, or clone it next to this project: ",
       el("code", { class: "mono" }, "git clone https://github.com/Alan-Cha/scm-extras"),
     )));
     return wrap;
   }
   wrap.append(el("div", { class: "banner info" }, ico("info"), el("span", { class: "grow" },
-    "Tip: on the Create PDF page, pick ", el("b", {}, "standard_mtg"), " or ", el("b", {}, "standard_sorcery"), " as the card size — the extra layout file is merged automatically, and you cut with the matching ", el("b", {}, ".studio3"), " from this page.")));
+    "On Create PDF, choose ", el("b", {}, "standard_mtg"), " or ", el("b", {}, "standard_sorcery"), " as the card size. The extra layout is merged automatically. Use the matching ", el("b", {}, ".studio3"), " on this page.")));
 
   // sizes
   const sc = el("div", { class: "card" });
   sc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("card")),
-    el("div", { class: "grow" }, el("h2", {}, "Extra card sizes"), el("p", {}, "Defined in scm-extras/assets/layouts_extra.json and merged into every SCM script."))));
+    el("div", { class: "grow" }, el("h2", {}, "Extra card sizes"), el("p", {}, "Defined in scm-extras/assets/layouts_extra.json and merged into SCM scripts."))));
   const grid = el("div", { class: "sizegrid" });
   for (const c of S.info.extras.card_sizes) {
     const w = mm(c.width), h = mm(c.height);

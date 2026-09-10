@@ -990,7 +990,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("deck_name", "Save pasted decklist as", "text", placeholder="my_deck.txt", default=""),
                     _opt("deck_text", "Decklist text", "textarea", default=""),
                     _opt("deck_url", "URL", "text", placeholder="https://archidekt.io/deck/…", default="",
-                         help="For URL-based formats (MTG “url”, any *_url) the decklist is the URL itself."),
+                         help="For URL formats such as MTG url and any *_url format, enter the decklist URL itself."),
                 ],
             },
             {
@@ -1033,17 +1033,17 @@ def build_manifest(info: dict) -> dict:
             ["card_size", "paper_size"],
             ["borderless", "load_offset", "only_fronts", "mpcfill_crop"],
         ],
-        "description": "Lays out card images into a print-ready PDF with registration marks that match the cutting templates.",
+        "description": "Lays out card images in a PDF that is ready to print, with registration marks for the cutting templates.",
         "groups": [
             {
                 "title": "Sources & output",
                 "options": [
                     _opt("front_dir", "Front images folder", "path", default="game/front", width="half",
-                         help="Directory containing the card front images."),
+                         help="Folder containing card front images."),
                     _opt("back_dir", "Card back folder", "path", default="game/back", width="half",
-                         help="Directory with one or more card back images."),
+                         help="Folder containing one or more card back images."),
                     _opt("double_sided_dir", "Double-sided folder", "path", default="game/double_sided", width="half",
-                         help="Cards that have different front and back art."),
+                         help="Folder containing cards with different front and back art."),
                     _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="full"),
                     _opt("output_images", "Output images instead of a PDF", "toggle", default=False, width="third"),
                     _opt("only_fronts", "Front pages only", "toggle", default=False, width="third", simple=True),
@@ -1057,12 +1057,12 @@ def build_manifest(info: dict) -> dict:
                     _opt("registration", "Registration marks", "segment",
                          choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third"),
                     _opt("specialty", "Specialty layout", "select", choices=specialty_choices, default="", width="third",
-                         help="Overrides card size, paper size, and registration."),
+                         help="Overrides the card size, paper size, and registration settings."),
                     _opt("registration_orientation", "Registration orientation", "select",
                          choices=[["", "Auto (follow layout)"], ["portrait", "Portrait"], ["landscape", "Landscape"]],
                          default="", width="third"),
                     _opt("borderless", "Borderless (tighter inset)", "toggle", default=False, width="third", simple=True,
-                         help="Fits more cards per page by using a smaller inset."),
+                         help="Fits more cards on each page by using a smaller inset."),
                 ],
             },
             {
@@ -1071,7 +1071,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("ppi", "Resolution (PPI)", "range", default=1200, min=150, max=1200, step=10, width="third"),
                     _opt("quality", "Compression quality", "range", default=100, min=0, max=100, step=1, width="third"),
                     _opt("load_offset", "Apply saved offset", "toggle", default=False, width="third", simple=True,
-                         help="Applies the saved X / Y / angle printer offset — the matching per-paper-size row when one is saved, else the global value."),
+                         help="Applies the saved X, Y, and angle offset. Uses the matching paper specific row, or the global value when no row exists."),
                 ],
             },
             {
@@ -1080,12 +1080,12 @@ def build_manifest(info: dict) -> dict:
                 "options": [
                     _opt("fit", "Fit front images", "segment",
                          choices=[["stretch", "Stretch"], ["crop", "Center crop"]], default="stretch", width="third",
-                         help="Stretch allows distortion; crop preserves aspect ratio."),
+                         help="Stretch can distort images. Crop preserves their aspect ratio."),
                     _opt("fit_backs", "Fit back images", "segment",
                          choices=[["", "Auto (like fronts)"], ["stretch", "Stretch"], ["crop", "Center crop"]],
                          default="", width="third"),
                     _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
-                         help="Applies a 3mm crop to the front images to fix MPCFill's padding — the art it fetches ships with its own print-bleed margin. A value typed in “Crop edges (fronts)” wins over this toggle."),
+                         help="Applies a 3mm crop to front images to remove MPCFill padding. A value in “Crop edges (fronts)” overrides this toggle."),
                     _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third"),
                     _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third"),
                     _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="3mm", width="third"),
@@ -1101,7 +1101,7 @@ def build_manifest(info: dict) -> dict:
                 "collapsible": True,
                 "options": [
                     _opt("skip", "Skip card indexes", "chips", int=True, placeholder="0, 4", width="half",
-                         help="0-based indexes of cards to skip (works around a bad registration)."),
+                         help="Card indexes to skip, starting from zero. This can work around bad registration."),
                     _opt("label", "Custom page label", "text", width="half"),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half"),
                 ],
@@ -1112,7 +1112,7 @@ def build_manifest(info: dict) -> dict:
     # --------------------------------------------------------------- Offset
     kinds["offset_pdf"] = {
         "title": "Offset PDF", "page": "offset", "needs": ["scm"], "cwd": "scm",
-        "description": "Shifts a printed PDF by an X/Y offset and rotation angle, then re-assembles it. Used to correct printer misalignment.",
+        "description": "Shifts and reassembles a printed PDF using an X/Y offset and rotation angle to correct printer misalignment.",
         "groups": [
             {
                 "title": "Source PDF",
@@ -1122,7 +1122,7 @@ def build_manifest(info: dict) -> dict:
                                + [["game/output/game.pdf", "game/output/game.pdf (default)"]],
                          default="game/output/game.pdf", width="half"),
                     _opt("output_pdf_path", "Output PDF (blank = auto)", "path", width="half",
-                         help="Defaults to <input>_offset.pdf next to the input file."),
+                         help="Defaults to <input>_offset.pdf beside the input file."),
                 ],
             },
             {
@@ -1133,7 +1133,7 @@ def build_manifest(info: dict) -> dict:
                              [p["name"], f"{p['name']} — {p.get('width') or '?'} × {p.get('height') or '?'}"]
                              for p in scm["paper_sizes"]],
                          default="", width="third",
-                         help="Which per-size row to work with: it prefills the fields below and is what “Save” records into. Blank = the single global offset."),
+                         help="Select a paper specific row to prefill and save. Leave blank to use the global offset."),
                     _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter"),
                     _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter"),
                     _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter"),
@@ -1148,14 +1148,14 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------ Calibration
     kinds["calibration"] = {
         "title": "Calibration sheets", "page": "offset", "needs": ["scm"], "cwd": "scm",
-        "description": "Generates a two-page alignment sheet for every paper size. Print double-sided (long-edge flip), compare the dot grids, and measure misalignment.",
+        "description": "Generates a two page alignment sheet for each paper size. Print on both sides with a long edge flip, compare the dot grids, and measure the offset.",
         "groups": [],
     }
 
     # ------------------------------------------------------------- Templates
     kinds["dxf_single"] = {
         "title": "Generate a cutting template (DXF)", "page": "templates", "needs": ["scm"], "cwd": "scm",
-        "description": "Creates one DXF cutting template for a card-size × paper-size combination.",
+        "description": "Creates one DXF cutting template for a card and paper size combination.",
         "groups": [
             {
                 "title": "Card size",
@@ -1168,7 +1168,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("card_height", "Custom height", "text", placeholder="88mm · 3.5in", width="quarter"),
                     _opt("card_radius", "Custom corner radius", "text", placeholder="3mm", width="quarter"),
                     _opt("card_name", "Card label (for filename)", "text", width="quarter",
-                         help="Optional; only used for the output file name."),
+                         help="Optional. Used only for the output filename."),
                 ],
             },
             {
@@ -1181,7 +1181,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("paper_width", "Custom width (shorter side)", "text", placeholder="8.5in · 210mm", width="quarter"),
                     _opt("paper_height", "Custom height (longer side)", "text", placeholder="11in · 297mm", width="quarter"),
                     _opt("paper_name", "Paper label (for filename)", "text", width="quarter",
-                         help="Optional; only used for the output file name."),
+                         help="Optional. Used only for the output filename."),
                 ],
             },
             {
@@ -1192,7 +1192,7 @@ def build_manifest(info: dict) -> dict:
                          choices=[["optimize", "Optimize"], ["landscape", "Landscape"], ["portrait", "Portrait"]],
                          default="optimize", width="third"),
                     _opt("output_path", "Output file (blank = auto)", "path", width="full",
-                         help="Defaults to cutting_templates/dxf/<paper>-<card>-v1.dxf (…/borderless/dxf/ for borderless)."),
+                         help="Defaults to cutting_templates/dxf/<paper>-<card>-v1.dxf, or the borderless/dxf folder for borderless output."),
                     _opt("save", "Save new size / layout to layouts.json", "toggle", default=True, width="half"),
                 ],
             },
@@ -1201,7 +1201,7 @@ def build_manifest(info: dict) -> dict:
 
     kinds["dxf_batch"] = {
         "title": "Batch generate DXF templates", "page": "templates", "needs": ["scm"], "cwd": "scm",
-        "description": "Generates DXF templates for the standard paper × card size matrix in the repo.",
+        "description": "Generates DXF templates for the repo's standard paper and card size matrix.",
         "groups": [
             {
                 "title": "Mode",
@@ -1216,20 +1216,20 @@ def build_manifest(info: dict) -> dict:
 
     kinds["dxf_list"] = {
         "title": "List available sizes", "page": "utilities", "needs": ["scm"], "cwd": "scm",
-        "description": "Prints every card and paper size known to the repo (including extras).",
+        "description": "Prints every card and paper size known to the repo, including extras.",
         "groups": [],
     }
 
     kinds["clean_up"] = {
         "title": "Clear card image folders", "page": "utilities", "needs": ["scm"], "cwd": "scm",
-        "description": "Deletes every image in game/front/ and game/double_sided/ so you can start a new game fresh. The folder README placeholders are kept, and the card back folder is left untouched.",
+        "description": "Deletes images in game/front/ and game/double_sided/ to start a new game. README placeholders stay, and game/back/ is untouched.",
         "groups": [],
     }
 
     # ------------------------------------------------------------- Repo copies
     kinds["repo_update"] = {
         "title": "Update a managed repo", "page": "settings", "needs": [], "cwd": "wb",
-        "description": "Moves a Workbench-managed copy of a sister repo to the chosen ref. Forward moves fetch only the changed files; rollbacks and large jumps take a full snapshot. Your images, decklists, and local edits are preserved.",
+        "description": "Moves a repo copy managed by Workbench to the chosen ref. Forward moves fetch only changed files. Rollbacks and large jumps use a full snapshot. Images, decklists, and local edits are preserved.",
         "groups": [
             {
                 "title": "Target",
@@ -1238,14 +1238,14 @@ def build_manifest(info: dict) -> dict:
                          choices=[["scm", "silhouette-card-maker"], ["extras", "scm-extras"]],
                          default="scm", width="half"),
                     _opt("force_full", "Force full snapshot", "toggle", default=False, width="half",
-                         help="Skip the changed-files diff and swap the whole tree (use if a diff misbehaves)."),
+                         help="Skip the changed files comparison and replace the whole tree if it fails."),
                 ],
             },
         ],
     }
     kinds["repo_init"] = {
         "title": "Download a managed repo copy", "page": "settings", "needs": [], "cwd": "wb",
-        "description": "Fetches a complete copy of a sister repo into the Workbench's own data area, so the app never needs a system Python or a hand-rolled clone.",
+        "description": "Fetches a complete repo copy into Workbench data so the app does not need a system Python or manual clone.",
         "groups": [
             {
                 "title": "Target",
@@ -1261,7 +1261,7 @@ def build_manifest(info: dict) -> dict:
     # ---------------------------------------------------------------- Extras
     kinds["extras_generate"] = {
         "title": "Generate extras DXF templates", "page": "extras", "needs": ["extras"], "cwd": "extras",
-        "description": "Generates the DXF cutting templates for the extra card sizes (MTG, Sorcery) into scm-extras/cutting_templates/. Finds Silhouette Card Maker automatically as a sister folder and wires SCM_EXTRA_LAYOUTS for you.",
+        "description": "Generates DXF templates for extra card sizes (MTG and Sorcery) in scm-extras/cutting_templates/. Finds Silhouette Card Maker as a sibling folder and sets SCM_EXTRA_LAYOUTS.",
         "groups": [
             {
                 "title": "Mode",
@@ -1274,7 +1274,7 @@ def build_manifest(info: dict) -> dict:
 
     kinds["extras_tables"] = {
         "title": "Extras README tables", "page": "extras", "needs": ["extras"], "cwd": "extras",
-        "description": "Renders the markdown size tables for the extra card sizes (paste into the README when they change).",
+        "description": "Renders markdown size tables for the extra card sizes.",
         "groups": [],
     }
 
@@ -1287,7 +1287,7 @@ def build_manifest(info: dict) -> dict:
             # distinguishable even though the button/heading title is generic
             "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
-            "description": f"Downloads card images for {meta['title']} from a decklist into the game/ folders.",
+            "description": f"Downloads {meta['title']} card images from a decklist into the game folders.",
             # Simple mode lays the form out as one flat row per group — the
             # standard 3-per-row rhythm the PDF page uses (create_pdf's
             # `simple_rows` does it in the manifest because the PDF groups are

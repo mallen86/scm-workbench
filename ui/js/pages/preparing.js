@@ -58,10 +58,10 @@ PAGES.preparing = () => {
   wrap.append(el("h1", {}, allReady ? "Your workspace is ready" :
     active ? "Setting up SCM Workbench" : "Setup needs your attention"));
   wrap.append(el("p", { class: "first-boot-lead" }, allReady
-    ? "Both managed repositories are installed. You can start fetching card art and building PDFs."
+    ? "Both managed repos are installed. You can fetch card art and build PDFs."
     : active
-      ? "We’re downloading the tools and game definitions the Workbench needs. You can stay here and watch, or explore the app while setup continues in the background."
-      : "The initial download stopped before every repository was ready. You can continue into the app and retry from Settings → Managed repo copies."));
+      ? "We are downloading the tools and game definitions Workbench needs. Watch here or explore while setup continues in the background."
+      : "The initial download stopped before all repos were ready. Continue to the app and retry from Settings > Managed repo copies."));
 
   wrap.append(el("div", { class: "card first-boot-progress" },
     el("div", { class: "card-head" },
@@ -78,12 +78,12 @@ PAGES.preparing = () => {
     retry.onclick = () => retrySetup(retry);
     actions.append(retry,
       el("button", { class: "btn", type: "button", onclick: leaveSetup }, "Continue to the app", ico("arrow")),
-      el("span", { class: "small faint" }, "Only repositories that are not ready will be downloaded again."));
+      el("span", { class: "small faint" }, "Only repos that are not ready will be downloaded again."));
   } else {
     actions.append(el("button", { class: "btn primary", type: "button", onclick: leaveSetup },
       allReady ? "Start using the Workbench" : "Explore while setup continues", ico("arrow")));
     if (active) actions.append(el("span", { class: "small faint" },
-      "Pages unlock automatically as each repository becomes ready."));
+      "Pages unlock as each repo becomes ready."));
   }
   wrap.append(actions);
 

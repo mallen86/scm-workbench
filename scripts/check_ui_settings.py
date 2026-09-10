@@ -74,9 +74,9 @@ def main() -> int:
             return fail(f"settings caller is missing {marker}")
     if "You may need to restart the server after changing the Python interpreter." in settings:
         return fail("settings still claims repository path changes require a restart")
-    if "Reconnected — the new paths are in use." not in settings:
+    if "Reconnected. The new paths are in use." not in settings:
         return fail("repository path save does not confirm immediate application")
-    if "The Python interpreter is in use for new jobs; port changes apply on next server start." not in settings:
+    if "The selected Python interpreter will run new jobs. Port changes apply next time the server starts." not in settings:
         return fail("Python settings do not distinguish immediate job use from the startup-only port")
     if 'el("label", {}, "Theme")' in settings or "setTheme(" in settings:
         return fail("Advanced Settings still duplicates the sidebar theme control")

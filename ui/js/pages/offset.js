@@ -5,7 +5,7 @@ import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js"
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Offset & calibration", "Printer misalignment is the #1 cause of cards that don't line up. The correction depends on the paper you feed, so you can store one offset per paper size — Create PDF picks the matching row automatically. Generate a calibration sheet, measure the drift, and save the values below."));
+  wrap.append(pageHead("Offset & calibration", "Printer misalignment is a common cause of cards not lining up. Corrections depend on paper size, so save one offset per size. Create PDF picks the matching row. Generate a calibration sheet, measure the drift, and save the values below."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
   prefillOffsetForm();
 
@@ -14,7 +14,7 @@ PAGES.offset = (root) => {
   const sc = el("div", { class: "card" });
   sc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("target")),
-    el("div", { class: "grow" }, el("h2", {}, "Saved printer offset (global)"), el("p", {}, so ? "The single shared value in data/offset_data.json — what SCM applies when no per-size row matches. Per-paper-size rows live below; saving one of them also updates this file." : "Nothing saved yet. Measure with a calibration sheet, then store the values here or in a per-size row below."))));
+    el("div", { class: "grow" }, el("h2", {}, "Saved printer offset (global)"), el("p", {}, so ? "The shared value in data/offset_data.json. SCM uses it when no paper specific row matches. Paper specific rows are below. Saving one also updates this file." : "No offset is saved yet. Measure with a calibration sheet, then save the values here or in a paper specific row."))));
   const xI = el("input", { class: "input mono", type: "number", value: so ? so.x : 0 });
   const yI = el("input", { class: "input mono", type: "number", value: so ? so.y : 0 });
   const aI = el("input", { class: "input mono", type: "number", step: 0.1, value: so ? so.angle : 0 });
@@ -26,7 +26,7 @@ PAGES.offset = (root) => {
       el("button", { class: "btn primary", onclick: async () => {
         try {
           await setOffset({ x: xI.value, y: yI.value, angle: aI.value });
-          toast("ok", "Global offset saved — create_pdf can now apply it.");
+          toast("ok", "Global offset saved. create_pdf can now apply it.");
           await refreshInfo();
           go("offset");
         } catch (error) {
@@ -47,7 +47,7 @@ PAGES.offset = (root) => {
   const cal = el("div", { class: "card" });
   cal.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("zap")),
-    el("div", { class: "grow" }, el("h2", {}, "Calibration sheets"), el("p", {}, "One two-page PDF per paper size. Print double-sided (long-edge flip) and compare the front/back dot grids.")),
+    el("div", { class: "grow" }, el("h2", {}, "Calibration sheets"), el("p", {}, "One two page PDF per paper size. Print on both sides with a long edge flip, then compare the front and back dot grids.")),
     el("button", { class: "btn", onclick: () => doRun("calibration", null) }, ico("refresh"), "Regenerate all"),
   ));
   const grid = el("div", { class: "filegrid" });
@@ -55,11 +55,11 @@ PAGES.offset = (root) => {
     // Same mechanism as the cutting-template buttons: the server opens the
     // file in its default app (the webview can't window.open or render PDFs).
     grid.append(el("button", { class: "fileitem",
-      title: `Open ${c.name} in its default app (e.g. Preview)`,
+      title: `Open ${c.name} in the default app, such as Preview`,
       onclick: async () => {
         try {
           const r = await openFile(c.path);
-          if (r.ok) toast("ok", `Opening ${c.name} in its default app…`);
+          if (r.ok) toast("ok", `Opening ${c.name} in the default app`);
           else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
         } catch (error) {
           toast("warn", error?.message || `Couldn't open ${c.name}.`);
@@ -68,7 +68,7 @@ PAGES.offset = (root) => {
       el("span", { class: "fi-ico" }, ico("file")),
       el("span", { class: "fi-main" },
         el("span", { class: "fi-name" }, c.name),
-        el("span", { class: "fi-sub" }, `${fmtBytes(c.size)} · click to open`),
+        el("span", { class: "fi-sub" }, `${fmtBytes(c.size)} | click to open`),
       )));
   }
   if (!S.info.scm.calibration.length) grid.append(el("div", { class: "empty" }, "No calibration PDFs found."));
@@ -89,7 +89,7 @@ export function offsetsBySizeCard() {
   c.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("ruler")),
     el("div", { class: "grow" }, el("h2", {}, "Offsets by paper size"),
-      el("p", {}, "Printer drift depends on the paper you feed, so different sizes often need different corrections. Store one row per size — “Create PDF” with “Apply saved offset” picks the matching row automatically, and saving a row also stages it into SCM's shared offset file."))));
+      el("p", {}, "Printer drift depends on paper size, so sizes may need different corrections. Save one row per size. Create PDF with Apply saved offset picks the matching row. Saving a row also stages it in SCM's shared offset file."))));
   const sel = el("select", { class: "input" });
   if (!sizes.length) sel.append(el("option", { value: "" }, "no paper sizes known"));
   for (const p of sizes) sel.append(el("option", { value: p.name }, `${p.name} — ${p.width || "?"} × ${p.height || "?"}`));
@@ -108,7 +108,7 @@ export function offsetsBySizeCard() {
           const size = sel.value;
           try {
             await setOffset({ size, x: xI.value, y: yI.value, angle: aI.value });
-            toast("ok", `Saved for “${size}” — staged into SCM's shared file and applied automatically to that paper.`);
+            toast("ok", `Saved for “${size}”. Staged in SCM's shared file and applied automatically to that paper.`);
             await refreshInfo();
             go("offset");
           } catch (error) {
@@ -120,7 +120,7 @@ export function offsetsBySizeCard() {
   ));
   const rows = el("div", { class: "pso-rows" });
   const list = Object.entries(pso);
-  if (!list.length) rows.append(el("div", { class: "empty" }, ico("target"), "No per-size rows yet — measure the drift on a calibration sheet and save the first row above."));
+  if (!list.length) rows.append(el("div", { class: "empty" }, ico("target"), "No paper specific rows yet. Measure the drift on a calibration sheet and save the first row above."));
   for (const [size, o] of list) {
     const p = sizes.find(s => s.name === size);
     rows.append(el("div", { class: "pso-row" },

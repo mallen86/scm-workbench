@@ -61,8 +61,8 @@ def main() -> int:
     if 'setBtn("Checking…", null, true);' not in source:
         return fail("checking state does not disable the update button")
     for marker in (
-        'uStatus.replaceChildren("You\'re on the latest version — ", el("b", {}, latest)',
-        'uStatus.replaceChildren(\n            "A newer version is out — ", el("b", {}, latest)',
+        'uStatus.replaceChildren("You are on the latest version. ", el("b", {}, latest)',
+        'uStatus.replaceChildren(\n            "A newer version is available: ", el("b", {}, latest)',
     ):
         if marker not in source:
             return fail(f"remote release metadata is not rendered as text nodes: {marker}")

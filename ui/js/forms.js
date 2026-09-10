@@ -102,7 +102,7 @@ export function updatePreview(kind) {
           if (attempt === 0) showPreviewPending(box, "Waiting for the server to answer…");
           setTimeout(() => run(attempt + 1), 2000);
         } else if (box.isConnected) {
-          showPreviewPending(box, `Couldn't build the preview (${(err && err.message) || "error"}) — it refreshes as soon as you change a field.`);
+          showPreviewPending(box, `Couldn't build the preview (${(err && err.message) || "error"}). It will refresh when you change a field.`);
         }
       });
   };
@@ -129,7 +129,7 @@ export function renderPreview(box, d) {
   box.append(head);
   const pRow = repoRowForKind(kind);
   if (!d.cmd) {
-    box.append(el("pre", { class: "dim" }, "— incomplete —"));
+    box.append(el("pre", { class: "dim" }, "Incomplete"));
   } else {
     box.append(el("pre", {}, displayCmd(d.cmd, kind)));
     // a managed copy lives inside the app — no point printing where
@@ -296,7 +296,7 @@ export function renderOption(o, args, kind) {
   if (o.type === "path" && (o.key === "output_path" || o.key === "output_pdf_path")) {
     const row = repoRowForKind(kind);
     if (row && row.mode === "managed") wrap.append(el("span", { class: "help" },
-      "Kept in the app's working area — after the run, use the console's “Move to my files…” to bring the result out to your own files."));
+      "Kept in the app's working area. When the run finishes, use the console's “Move to my files…” to save it elsewhere."));
   }
   if (o.help) wrap.append(el("span", { class: "help" }, o.help));
   return wrap;
@@ -472,7 +472,7 @@ export function formCard(kind, opts = {}) {
     const runBtn = el("button", { class: "btn primary", id: `run-${kind}` }, ico("play"), spec.title);
     runBtn.dataset.label = spec.title; // restored by doRun() when the button is re-enabled
     runBtn.onclick = () => doRun(kind, runBtn);
-    const note = el("span", { class: "rb-note" }, "Runs in the background — watch the job console below.");
+    const note = el("span", { class: "rb-note" }, "Runs in the background. Watch the job console below.");
     card.append(el("div", { class: "runbar" }, note, runBtn));
     const missing = (S.manifest[kind] ? S.manifest[kind].needs || [] : []).filter(k => !repoReady(k));
     if (missing.length) {
@@ -481,7 +481,7 @@ export function formCard(kind, opts = {}) {
       runBtn.innerHTML = "";
       runBtn.append(ico("refresh"), "Waiting for " + missing.join(" + ") + "…");
       card.append(el("div", { class: "prep-note" },
-        "This page needs “" + missing.join("”, “") + "” — the button unlocks as soon as the preparation above finishes."));
+        "This page needs “" + missing.join("”, “") + "”. The button unlocks when preparation finishes."));
     }
   }
   return card;
@@ -516,13 +516,13 @@ export async function doRun(kind, btn, opts = {}) {
     for (const need of S.manifest[kind].needs || []) {
       if (need === "scm" && !S.info.scm.found) {
         return toast("err", (S.info.server.is_packaged && !repoReady("scm"))
-          ? "silhouette-card-maker is still being prepared — the button unlocks when it's done."
-          : "SCM repo not found — open Settings and point it at your silhouette-card-maker folder.");
+          ? "silhouette-card-maker is still being prepared. The button unlocks when it is done."
+          : "SCM repo not found. Open Settings and choose your silhouette-card-maker folder.");
       }
       if (need === "extras" && !S.info.extras.found) {
         return toast("err", (S.info.server.is_packaged && !repoReady("extras"))
-          ? "scm-extras is still being prepared — the button unlocks when it's done."
-          : "scm-extras repo not found — open Settings and point it at your scm-extras folder.");
+          ? "scm-extras is still being prepared. The button unlocks when it is done."
+          : "scm-extras repo not found. Open Settings and choose your scm-extras folder.");
       }
     }
   }
@@ -547,7 +547,7 @@ export async function doRun(kind, btn, opts = {}) {
     } else {
       const warnings = j.job?.warnings || j.warnings || [];
       for (const w of warnings) toast("warn", w, 5200);
-      toast("ok", `${j.job.title} — job started`);
+      toast("ok", `${j.job.title}. Job started.`);
       // register the job locally right away: the console tab (advanced mode)
       // and the page's status strip (simple mode) must not wait for the next
       // background list refresh to learn something is running.

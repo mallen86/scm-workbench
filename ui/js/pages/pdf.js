@@ -7,7 +7,7 @@ import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "..
 
 PAGES.pdf = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Create PDF", "Lays out the images in your game/ folders into a print-ready PDF with registration marks. Every option from create_pdf.py is available below — the command preview shows exactly what will run."));
+  wrap.append(pageHead("Create PDF", "Lays out images from game/ folders in a PDF that is ready to print, with registration marks. The options below match create_pdf.py, and the preview shows the command that will run."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
   // Simple mode: the form is one flat section — no group headers, no
   // collapsible wrappers, and no card title of its own (the page head
@@ -24,8 +24,8 @@ PAGES.pdf = (root) => {
     if (uiMode() === "advanced" && (row || g)) {
       const o = row || g;
       const txt = row
-        ? `Per-size offset for “${paper}” is saved: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b> — applied automatically whenever “Apply saved offset” is on.`
-        : `Saved printer offset is available: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” above when ready.`;
+        ? `A paper specific offset for “${paper}” is saved: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. It is applied when “Apply saved offset” is on.`
+        : `Saved printer offset: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” to use it.`;
       wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
         el("span", { class: "grow", html: txt }),
         // the Offset & calibration page is hidden in simple mode — no link to it
@@ -56,7 +56,7 @@ PAGES.pdf = (root) => {
         return actions;
       };
       if (out) {
-        ensureActions().append(el("button", { class: "btn primary", title: "Opens in your default PDF app",
+        ensureActions().append(el("button", { class: "btn primary", title: "Open in your default PDF app",
           onclick: async (e) => {
             const b = e.currentTarget;
             b.disabled = true;
@@ -65,7 +65,7 @@ PAGES.pdf = (root) => {
             // look like a failure even while “open” was doing its job.
             try {
               const r = await openFile(out);
-              if (r?.ok) toast("ok", "Opening the PDF — big files can take a moment to appear in the viewer.", 6000);
+              if (r?.ok) toast("ok", "Opening the PDF. Large files may take a moment to appear.", 6000);
               else toast("warn", r?.errors?.[0] || "Couldn't open the PDF.");
             } catch (err) {
               toast("warn", err?.message || "Couldn't open the PDF.");
@@ -83,13 +83,13 @@ PAGES.pdf = (root) => {
           .then(t => {
             if (!body.isConnected) return;
             if (t?.ok) {
-              ensureActions().append(el("button", { class: "btn", title: `Opens ${t.name} (from ${t.repo}) in its default app`,
+              ensureActions().append(el("button", { class: "btn", title: `Open ${t.name} from ${t.repo} in its default app`,
                 onclick: async (e) => {
                   const b = e.currentTarget;
                   b.disabled = true;
                   try {
                     const r = await openFile(t.path);
-                    if (r?.ok) toast("ok", `Opening ${t.name} — it should appear in its cutting app shortly.`);
+                    if (r?.ok) toast("ok", `Opening ${t.name}. It should appear in your cutting app shortly.`);
                     else toast("warn", r?.errors?.[0] || "Couldn't open the cutting template.");
                   } catch (err) {
                     toast("warn", err?.message || "Couldn't open the cutting template.");
@@ -98,7 +98,7 @@ PAGES.pdf = (root) => {
                   }
                 } }, ico("scissors"), "Open cutting template"));
             } else {
-              body.append(el("div", { class: "js-hint" }, t?.errors?.[0] || "No matching cutting template found."));
+              body.append(el("div", { class: "js-hint" }, t?.errors?.[0] || "No matching cutting template was found."));
             }
           })
           .catch(err => {
@@ -136,7 +136,7 @@ export function patchPdfForm(kind) {
         // Never offer a destructive action when the bounded listing may have
         // omitted images. Leave the switch on so its current state remains
         // honest, and explain why the warning cannot be cleared here.
-        toast("warn", `Couldn’t safely check “${dir}”: the image list was truncated. “Front pages only” stays on, but remove the images manually or uncheck it before running.`, 7000);
+        toast("warn", `Could not safely check “${dir}”. The image list was truncated. “Front pages only” remains on. Remove images manually or uncheck it before running.`, 7000);
         return;
       }
       const items = listing.items;
@@ -145,8 +145,8 @@ export function patchPdfForm(kind) {
       const n = items.length;
       const ok = await confirmModal({
         title: "Images in the double-sided folder",
-        text: `“${dir}” contains ${n} image${n === 1 ? "" : "s"}. While any are there, “Front pages only” (--only_fronts) can’t work — create_pdf.py refuses to run.`,
-        paras: [`Remove them from the folder now? This can’t be undone.`],
+        text: `“${dir}” contains ${n} image${n === 1 ? "" : "s"}. While images remain, “Front pages only” (--only_fronts) cannot work. create_pdf.py will refuse to run.`,
+        paras: [`Remove them from this folder now? This cannot be undone.`],
         list: items.map(i => i.name),
         okLabel: "Yes, remove them",
         danger: true,
@@ -154,7 +154,7 @@ export function patchPdfForm(kind) {
         iconCls: "warn",
       });
       if (!ok) {
-        toast("warn", `“Front pages only” stays on, but the job will fail while “${dir}” still has images — remove them, or uncheck the option.`, 7000);
+        toast("warn", `“Front pages only” remains on, but the job will fail while “${dir}” contains images. Remove them or uncheck the option.`, 7000);
         return;
       }
       let j = {};
@@ -168,7 +168,7 @@ export function patchPdfForm(kind) {
         toast("err", "Could not remove the images.", 7000);
         return;
       }
-      toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}” — “Front pages only” will work now.`, 6000);
+      toast("ok", `Removed ${j.deleted} image${j.deleted === 1 ? "" : "s"} from “${dir}”. “Front pages only” will work now.`, 6000);
       afterFormChange(kind, S.forms[kind]);   // refresh the preview so the warning clears
     } catch (err) {
       toast("warn", err?.message || `Couldn’t check “${dir}”.`, 7000);
@@ -205,12 +205,12 @@ export function patchOffsetToggle(kind) {
         afterFormChange(kind, a);   // the preview follows the switch
       }
       input.disabled = true;
-      note.textContent = `No offset is saved for “${paper}” yet — record one on the Offset & calibration page and this switch enables itself.`;
+      note.textContent = `No offset is saved for “${paper}” yet. Record one on the Offset & calibration page to enable this switch.`;
     } else {
       input.disabled = false;
       note.textContent = row
-        ? `Applies the “${paper}” row (x ${row.x}, y ${row.y}, angle ${row.angle}°) recorded on the Offset & calibration page.`
-        : `No per-size row for “${paper}” — the saved global offset (x ${g.x}, y ${g.y}, angle ${g.angle}°) will be applied.`;
+        ? `Applies the “${paper}” row (x ${row.x}, y ${row.y}, angle ${row.angle}°) from the Offset & calibration page.`
+        : `No paper specific row exists for “${paper}”. The saved global offset (x ${g.x}, y ${g.y}, angle ${g.angle}°) will be applied.`;
     }
   };
   refresh();

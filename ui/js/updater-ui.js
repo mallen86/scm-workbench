@@ -8,11 +8,11 @@
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
 import { $, S, el } from "./core.js";import { jobs } from "./jobs.js";const UPDATE_STAGES = {
-  fetch: "fetching the release…",
+  fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
   install: "swapping it into place",
-  relaunch: "reopening the new version…",
+  relaunch: "reopening the new version",
 };
 let _updStrip = null;
 let _updTimer = null;
@@ -24,7 +24,7 @@ function updStrip() {
   const foot = $(".sidebar-foot");
   if (!foot) return null;
   _updStrip = el("div", { class: "repoprog", id: "updateprog", "aria-live": "polite" },
-    el("div", { class: "rp-head" }, "Updating SCM Workbench…"),
+    el("div", { class: "rp-head" }, "Updating SCM Workbench"),
     el("div", { class: "rp-row" },
       el("div", { class: "rp-label" }),
       el("div", { class: "rp-meta mono" }),
@@ -46,7 +46,7 @@ function updateStrip(job) {
   const [label, meta, bar] = row.children;
   const p = (job && job.progress) || {};
   const stage = p.stage || (job && job.status === "running" ? "fetch" : null);
-  label.textContent = (job?.title || "Updating SCM Workbench") + "  —  " + (UPDATE_STAGES[stage] || "working");
+  label.textContent = (job?.title || "Updating SCM Workbench") + "  |  " + (UPDATE_STAGES[stage] || "working");
   let text = "";
   if (stage === "download" && p.total >= 1000) {
     const doneMB = (p.done || 0) / 1e6, totalMB = p.total / 1e6;
@@ -79,7 +79,7 @@ async function finishUpdateStrip(job) {
   strip.classList.toggle("done", job.status === "ok");
   if (job.status === "handoff") {
     head.textContent = "SCM Workbench update ready";
-    meta.textContent = "Download complete. The app will close, install, and reopen automatically.";
+    meta.textContent = "Download complete. The app will close, install, and reopen automatically."
     bar.classList.remove("indet");
     bar.firstElementChild.style.width = "100%";
     const restartAt = Number(job.progress?.restart_at);
@@ -88,8 +88,8 @@ async function finishUpdateStrip(job) {
       const seconds = Number.isFinite(restartAt)
         ? Math.max(0, Math.ceil(restartAt - Date.now() / 1000)) : 0;
       label.textContent = seconds > 0
-        ? `Restarting in ${seconds} second${seconds === 1 ? "" : "s"}…`
-        : "Restarting now…";
+        ? `Restarting in ${seconds} second${seconds === 1 ? "" : "s"}`
+        : "Restarting now";
     };
     paintCountdown();
     if (Number.isFinite(restartAt)) _updTimer = setInterval(paintCountdown, 250);
@@ -98,14 +98,14 @@ async function finishUpdateStrip(job) {
   bar.classList.remove("indet");
   bar.firstElementChild.style.width = "100%";
   if (job.status === "ok") {
-    head.textContent = "SCM Workbench update complete";
-    label.textContent = "Update finished";
-    meta.textContent = "The new version is ready.";
+    head.textContent = "SCM Workbench update complete"
+    label.textContent = "Update finished"
+    meta.textContent = "The new version is ready."
     return;
   }
-  head.textContent = failed ? "SCM Workbench update failed" : "SCM Workbench update stopped";
+  head.textContent = failed ? "SCM Workbench update failed" : "SCM Workbench update stopped"
   label.textContent = job.status === "killed" ? "Update stopped" : "Update failed";
-  let detail = job.status === "killed" ? "The update was stopped." : "The update did not finish.";
+  let detail = job.status === "killed" ? "The update was stopped." : "The update did not finish."
   try {
     const result = await jobs.log(job.id);
     const lines = (result.lines || []).map(line => String(line).trim()).filter(Boolean);

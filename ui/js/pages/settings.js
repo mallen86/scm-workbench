@@ -128,7 +128,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
         el("span", { class: `rc-chip ${chip[0]}` }, el("span", { class: `dot ${chip[0]}` }), chip[1])
       )
     );
-    if (row.path && row.mode === "managed") head.append(el("div", { class: "rc-path" }, "kept privately inside the app's data folder"));
+    if (row.path && row.mode === "managed") head.append(el("div", { class: "rc-path" }, "kept in the app's data folder"));
     else if (row.path) head.append(el("div", { class: "rc-path mono" }, row.path));
     box.append(head);
     const seg = el("div", { class: "seg" });
@@ -148,7 +148,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
         if (r.ok && !(r.refs.releases || []).length) {
           segBtns["latest-release"].disabled = true;
           segBtns["latest-release"].classList.add("off");
-          segBtns["latest-release"].title = "No releases are published for this repo yet";
+          segBtns["latest-release"].title = "This repo has no published releases yet";
         }
       }).catch(() => { });
       const showPicker = mode === "pinned" || selectingPinned;
@@ -176,9 +176,9 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
     const dep = row.deployed;
     const lc = row.last_check && row.last_check.checked ? row.last_check.checked : null;
     let statusText, statusCls;
-    if (!dep) { statusText = "No managed copy yet — download one to start tracking updates."; statusCls = "warn"; }
-    else if (lc && lc.ok && lc.up_to_date) { statusText = `At ${dep.ref} (${dep.sha.slice(0, 7)}) — up to date.`; statusCls = "ok"; }
-    else if (lc && lc.ok && lc.target) { statusText = `New version available: ${lc.target.ref} (${lc.target.sha.slice(0, 7)}) — deployed: ${dep.ref} (${dep.sha.slice(0, 7)}).`; statusCls = "warn"; }
+    if (!dep) { statusText = "No managed copy yet. Download one to track updates."; statusCls = "warn"; }
+    else if (lc && lc.ok && lc.up_to_date) { statusText = `At ${dep.ref} (${dep.sha.slice(0, 7)}). Up to date.`; statusCls = "ok"; }
+    else if (lc && lc.ok && lc.target) { statusText = `New version: ${lc.target.ref} (${lc.target.sha.slice(0, 7)}). Deployed: ${dep.ref} (${dep.sha.slice(0, 7)}).`; statusCls = "warn"; }
     else { statusText = `Deployed at ${dep.ref} (${dep.sha.slice(0, 7)})` + (dep.date ? `, ${String(dep.date).slice(0, 10)}` : ""); statusCls = "ok"; }
     box.append(el("div", { class: `note ${statusCls}`, style: "margin-top:10px" }, statusText));
     // actions
@@ -202,7 +202,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       upBtn.onclick = async () => {
         const job = await doRun("repo_update", null, { args: { repo: row.key, force_full: false }, confirm: {
         title: `Update ${row.name}`,
-        text: `Moves the managed copy to “${mode === "main" ? "the latest main" : mode === "latest-release" ? "the latest release" : src}”. Forward moves fetch only the changed files; rollbacks and big jumps take a full snapshot. Your images, decklists and local edits are preserved — if upstream also changed a file you edited, your version is kept and flagged.`,
+        text: `Moves the managed copy to “${mode === "main" ? "the latest main" : mode === "latest-release" ? "the latest release" : src}”. Forward moves fetch changed files only. Rollbacks and large jumps use a full snapshot. Images, decklists, and local edits are preserved. If upstream changed an edited file too, your version is kept and flagged.`,
         okLabel: "Update", icon: "refresh" } });
         if (!job) return;
         watchJobDone(job.id, async () => {
@@ -225,8 +225,8 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
         const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
         title: `Download a managed copy of ${row.name}`,
         text: simple
-          ? "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched); it will follow the latest main."
-          : "Keeps a second, Workbench-managed copy in the data folder (your own clone stays untouched). Pick the source above first if you want it to track something other than the latest main.",
+          ? "Keeps a second repo copy managed by Workbench in the data folder. Your clone stays untouched, and the copy follows the latest main."
+          : "Keeps a second repo copy managed by Workbench in the data folder. Your clone stays untouched. Choose a source above to track something other than the latest main.",
         okLabel: "Download", icon: "download" } });
         if (!job) { repoInitPending = false; S.repoInitPending = false; dlBtn.disabled = false; return; }
         watchJobDone(job.id, async () => {
@@ -236,7 +236,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
           if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
         });
       };
-      acts.append(dlBtn, el("span", { class: "small faint" }, "Your own clone stays as it is — the managed copy is the one the Workbench updates for you."));
+      acts.append(dlBtn, el("span", { class: "small faint" }, "Your clone stays unchanged. Workbench updates the managed copy."));
     } else {
       const initRunning = (S.jobs || []).some(j => j.kind === "repo_init" && j.status === "running");
       const dlBtn = el("button", { class: "btn sm primary", disabled: initRunning,
@@ -249,7 +249,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
         repoInitPending = true; S.repoInitPending = true; dlBtn.disabled = true;
         const job = await doRun("repo_init", null, { args: { repo: row.key }, confirm: {
         title: `Download ${row.name}`,
-        text: `Fetches a complete copy into the Workbench's data folder. The first download can be large — silhouette-card-maker is a few hundred MB (it includes the upstream docs site and test material).`,
+        text: `Fetches a complete copy into the Workbench data folder. The first download may be large because silhouette-card-maker includes documentation and test files.`,
         okLabel: "Download", icon: "download" } });
         if (!job) { repoInitPending = false; S.repoInitPending = false; dlBtn.disabled = false; return; }
         watchJobDone(job.id, async () => {
@@ -259,7 +259,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
           if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
         });
       };
-      acts.append(dlBtn, el("span", { class: "small faint" }, "After that, updates are one click and incremental."));
+      acts.append(dlBtn, el("span", { class: "small faint" }, "Afterward, updates are one click and incremental."));
     }
     box.append(acts);
   };
@@ -275,8 +275,8 @@ PAGES.settings = (root) => {
   const wrap = el("div", {});
   const simple = uiMode() === "simple";
   wrap.append(pageHead("Settings", simple
-    ? "Everything here is stored in this project's data folder, out of the way of your repos."
-    : "Everything here is stored in this project's data/settings.json. Repo paths can also be left blank — the Workbench auto-detects sister folders named silhouette-card-maker and scm-extras."));
+    ? "Everything here is stored in this project's data folder, away from your repos."
+    : "Everything here is stored in this project's data/settings.json. Leave repo paths blank to find sibling folders named silhouette-card-maker and scm-extras automatically."));
 
   const s = S.info.settings;
 
@@ -289,7 +289,7 @@ PAGES.settings = (root) => {
   const dc = el("div", { class: "card" });
   dc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("gear")),
-    el("div", { class: "grow" }, el("h2", {}, "Create PDF defaults"), el("p", {}, "Pre-selected values for the Create PDF page (still overridable there)." ))));
+    el("div", { class: "grow" }, el("h2", {}, "Create PDF defaults"), el("p", {}, "Values preselected on Create PDF. You can change them there." ))));
   const d = s.defaults || {};
   const csSel = el("select", { class: "input" }, ...S.info.scm.card_sizes.map(c => el("option", { value: c.name, selected: (d.card_size || "standard") === c.name ? "selected" : null }, c.name)));
   const psSel = el("select", { class: "input" }, ...S.info.scm.paper_sizes.map(p => el("option", { value: p.name, selected: (d.paper_size || "letter") === p.name ? "selected" : null }, p.name)));
@@ -334,7 +334,7 @@ PAGES.settings = (root) => {
   const rc = el("div", { class: "card" });
   rc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("folder")),
-    el("div", { class: "grow" }, el("h2", {}, "Repos"), el("p", {}, "Where the scripts live. Blank = auto-detect next to this project."))));
+    el("div", { class: "grow" }, el("h2", {}, "Repos"), el("p", {}, "Repo paths. Leave blank to find them next to this project automatically."))));
   const scmI = el("input", { class: "input mono", value: s.scm_dir || "", placeholder: "auto: ../silhouette-card-maker" });
   const exI = el("input", { class: "input mono", value: s.extras_dir || "", placeholder: "auto: ../scm-extras" });
   rc.append(el("div", { class: "frow" },
@@ -345,7 +345,7 @@ PAGES.settings = (root) => {
     el("button", { class: "btn primary", onclick: async () => {
       const r = await setSettings({ scm_dir: scmI.value.trim(), extras_dir: exI.value.trim() });
       await refreshInfo();
-      toast(S.info.scm.found ? "ok" : "warn", S.info.scm.found ? "Reconnected — the new paths are in use." : "Saved, but the SCM repo still isn't found at that path.");
+      toast(S.info.scm.found ? "ok" : "warn", S.info.scm.found ? "Reconnected. The new paths are in use." : "Saved, but the SCM repo is still not found at that path.");
       go("settings");
     } }, ico("check"), "Save repo paths"),
   ));
@@ -356,8 +356,8 @@ PAGES.settings = (root) => {
   mc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("refresh")),
     el("div", { class: "grow" }, el("h2", {}, "Managed repo copies"), el("p", {}, simple
-      ? "The Workbench keeps its own copy of each repo in its data folder — check for newer versions and install them from here. Your images, decklists and local edits always survive an update."
-      : "The Workbench can keep its own copy of each repo in its data folder — fetch the newest version on demand and pick exactly what to track (main, the latest release, or a pinned tag). Your images, decklists and local edits always survive an update."))));
+      ? "Workbench keeps its own repo copies in the data folder. Check for updates and install them here. Images, decklists, and local edits survive updates."
+      : "Workbench can keep its own repo copies in the data folder. Fetch the newest version on demand and choose what to track: main, the latest release, or a pinned tag. Images, decklists, and local edits survive updates."))));
   for (const row of (S.info.repos || [])) {
     const wrapRow = el("div", {});            // each row replaces itself inside its own wrapper
     mc.append(wrapRow);
@@ -372,8 +372,8 @@ PAGES.settings = (root) => {
     el("div", { class: "card-ico" }, ico("terminal")),
     el("div", { class: "grow" }, el("h2", {}, "Python & server"),
       el("p", {}, packaged
-        ? "This app runs on its own private Python (kept in the app's data folder). Job dependencies are installed into it automatically — your system Python is never touched."
-        : "Scripts run with the interpreter chosen here. Default: the one that started the Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
+        ? "This app uses a private Python runtime in its data folder. Job dependencies install there automatically. Your system Python is not changed."
+        : "Scripts use the selected interpreter. By default, this is the interpreter that started Workbench. Install the base repo's requirements.txt into it: pip install -r requirements.txt"))));
   const pyI = el("input", { class: "input mono", value: s.python || (packaged && S.info.server.python ? `python ${S.info.server.python}  (private runtime)` : ""), placeholder: S.info.server.python_path + "  (default)", title: S.info.server.python_path || "", readonly: packaged || null });
   const portI = el("input", { class: "input mono", type: "number", value: s.port || 8037, min: 1024, max: 65535 });
   const portW = el("span", { class: "numwrap" }, portI, numSteppers(portI, 1));
@@ -391,7 +391,7 @@ PAGES.settings = (root) => {
       el("button", { class: "btn primary", onclick: async () => {
         await setSettings({ python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
         await refreshInfo();
-        toast("ok", "Saved. The Python interpreter is in use for new jobs; port changes apply on next server start.");
+        toast("ok", "Saved. The selected Python interpreter will run new jobs. Port changes apply next time the server starts.");
         go("settings");
       } }, ico("check"), "Save python & server"),
     ));
@@ -405,8 +405,8 @@ PAGES.settings = (root) => {
     el("div", { class: "card-ico" }, ico("arrow")),
     el("div", { class: "grow" }, el("h2", {}, "App updates"),
       el("p", {}, packaged
-        ? "Checks the newest release of this app on GitHub (at start-up, and once a day while it's open). Installing a new version swaps the app folder only — your data folder is never touched."
-        : "Running from a source checkout — there's nothing to self-update here; pull the Workbench repo itself instead."))));
+        ? "Checks GitHub for the newest app release at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
+        : "Running from a source checkout. Pull the Workbench repo to update it."))));
   if (packaged) {
     const uRow = el("div", { class: "frow", style: "align-items:center; gap:14px" });
     const uBtn = el("button", { class: "btn primary" });
@@ -461,11 +461,11 @@ PAGES.settings = (root) => {
       switch (st.status) {
         case "never":
           setBtn("Check for updates", doCheck);
-          uStatus.textContent = "Not checked yet — the first automatic check runs at start-up, and once a day while the app is open.";
+          uStatus.textContent = "Not checked yet. The first automatic check runs at startup and once daily while the app is open.";
           break;
         case "auth-required":
           setBtn("Check for updates", doCheck);
-          uStatus.textContent = "The release repo is still private, so this check can't see its releases. Once it's made public, this works with no setup at all — press the button again any time to check.";
+          uStatus.textContent = "The release repo is private, so this check cannot see releases. Once it is public, no setup is needed. Press again to check.";
           break;
         case "error":
           setBtn("Check again", doCheck);
@@ -474,8 +474,8 @@ PAGES.settings = (root) => {
         case "up-to-date": {
           const latest = vv(st.latest || r.current);
           setBtn("Check for updates", doCheck);
-          uStatus.replaceChildren("You're on the latest version — ", el("b", {}, latest),
-            " is the newest release. Press to check GitHub again now.");
+          uStatus.replaceChildren("You are on the latest version. ", el("b", {}, latest),
+            " is the newest release. Press to check GitHub again.");
           break;
         }
         case "update-available": {
@@ -485,8 +485,8 @@ PAGES.settings = (root) => {
           const released = st.published ? ` (released ${new Date(st.published).toLocaleDateString()})` : "";
           const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
           uStatus.replaceChildren(
-            "A newer version is out — ", el("b", {}, latest), released,
-            ". The install replaces the app folder and reopens it; your decklists, images and settings stay put.",
+            "A newer version is available: ", el("b", {}, latest), released,
+            ". The install replaces the app folder and reopens it. Your decklists, images, and settings stay put.",
             whatsNew ? " " : "", whatsNew,
           );
           if (whatsNew) {
@@ -516,15 +516,15 @@ PAGES.settings = (root) => {
         // check. Always bypass the persisted freshness cache.
         r = await checkUpdates(true);
       } catch (e) {
-        uStatus.textContent = "The check didn't get through — try again in a moment.";
+        uStatus.textContent = "The check did not get through. Try again in a moment.";
       } finally {
         busy = false;
         checkPending = false;
       }
       await render();
-      if (r?.state?.status === "up-to-date") toast("ok", `No update — ${vv(r.state.latest)} is the newest.`);
-      else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)} — press the button above to install it.`);
-      else if (r?.state?.status === "auth-required") toast("warn", "The release repo is still private — this check will work once it's made public.");
+      if (r?.state?.status === "up-to-date") toast("ok", `No update. ${vv(r.state.latest)} is the newest.`);
+      else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)}. Press the button above to install it.`);
+      else if (r?.state?.status === "auth-required") toast("warn", "The release repo is private. This check will work once it is public.");
     }
 
     const startUpdate = async () => {
@@ -532,7 +532,7 @@ PAGES.settings = (root) => {
       try { r = await startUpdateRequest(); }
       catch (error) { toast("err", error?.message || "The update could not start."); return; }
       if (!r.ok) { toast("warn", r.errors?.[0] || "The update could not start."); return; }
-      uStatus.textContent = "Working — the progress is in the strip at the bottom left. The app closes itself and reopens as the new version when it's done.";
+      uStatus.textContent = "Working. Progress appears in the strip at bottom left. The app closes and reopens as the new version when it is done.";
       const job = r.job || {};
       // The console (advanced mode) keeps its live transcript view; the strip
       // follows either way, so simple mode — where the console can't be
@@ -557,7 +557,7 @@ PAGES.settings = (root) => {
     S.timers.appUpdates = setInterval(render, 5000);   // stay honest while the card is up
   } else {
     uc.append(el("div", { class: "small", style: "margin-top:10px" },
-      `Version v${S.info.server.version}. In a packaged app this card would check GitHub for itself and offer to install the newest release in place.`));
+      `Version v${S.info.server.version}. Running from source. Self updates are available only in packaged builds.`));
   }
   wrap.append(uc);
 

@@ -6,7 +6,7 @@ import { $, S, el, toast } from "./core.js";import { refreshInfo } from "./info.
 
 /* ---------------- repo prep state (first clone + updates) ------------------ */
 export const STAGE_NAMES = {
-  download: "downloading the newest snapshot",
+  download: "downloading the latest snapshot",
   extract: "unpacking the files",
   fingerprint: "fingerprinting the files",
   update: "updating the changed files",
@@ -132,7 +132,7 @@ function globalStrip() {
   const foot = $(".sidebar-foot");
   if (!foot) return null; // no chrome to host it (never, in practice)
   s = el("div", { class: "repoprog", id: "repoprog-global" },
-    el("div", { class: "rp-head" }, "Preparing your managed copies …"));
+    el("div", { class: "rp-head" }, "Preparing your managed copies"));
   // Directly above the footer's divider: the divider (and the toggles under
   // it) never moves — the nav above is the flexible, scrolling part.
   foot.before(s);
@@ -175,7 +175,7 @@ export function updatePrepRows() {
       ? Math.min(100, Math.round(100 * (p.done || 0) / p.total)) : 0);
     const stage = ready ? "ready" : waiting ? "waiting to start" :
       (STAGE_NAMES[p.stage] || p.stage || "setup did not finish");
-    row.children[0].textContent = r.name + "  —  " + stage;
+    row.children[0].textContent = r.name + "  |  " + stage;
     row.children[1].textContent = ready ? "Downloaded and ready" : prepMeta(r);
     const bar = row.children[2], fill = bar.firstElementChild;
     // Unknown-length active downloads have progress but no total. They need
@@ -216,8 +216,8 @@ export function startPrepWatcher() {
           const repos = S.info.repos || [];
           const allReady = repos.length > 0 && repos.every(r => r.deployed);
           toast(allReady ? "ok" : "warn", allReady
-            ? "Your repos are ready — every page is live."
-            : "Setup did not finish — retry the missing repositories.");
+            ? "Your repos are ready. Every page is live."
+            : "Setup did not finish. Retry the missing repositories.");
         }
         go(S.page || "dashboard", null, { push: false, anim: false });
       } else {

@@ -6,19 +6,19 @@ import { $, PAGES, confirmModal, el, ico, pageHead } from "../core.js";import { 
 
 PAGES.utilities = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Utilities", "Small tools that don't fit a single workflow step: cleaning the art folders, unit conversion, and a quick dump of every known size."));
+  wrap.append(pageHead("Utilities", "Tools for cleaning art folders, converting units, and listing known sizes."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
 
   // clean up
   const cc = el("div", { class: "card" });
   cc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("trash")),
-    el("div", { class: "grow" }, el("h2", {}, "Start a new game"), el("p", {}, "Deletes every image in game/front/ and game/double_sided/ (card backs in game/back/ are kept). There is no undo — the files are gone.")),
+    el("div", { class: "grow" }, el("h2", {}, "Start a new game"), el("p", {}, "Deletes images in game/front/ and game/double_sided/. Card backs in game/back/ stay. This cannot be undone.")),
   ));
   cc.append(el("div", { class: "runbar" },
-    el("span", { class: "rb-note" }, "This runs the repo's clean_up.py after you confirm."),
+    el("span", { class: "rb-note" }, "This runs clean_up.py from the repo after you confirm."),
     el("button", { class: "btn danger", onclick: async () => {
-      const ok = await confirmModal({ title: "Delete card images?", text: "Every image in game/front/ and game/double_sided/ will be permanently deleted. Card backs are kept.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
+      const ok = await confirmModal({ title: "Delete card images?", text: "Images in game/front/ and game/double_sided/ will be permanently deleted. Card backs stay.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
       if (ok) doRun("clean_up", null);
     } }, ico("trash"), "Clear front & double-sided")));
   wrap.append(cc);
@@ -30,7 +30,7 @@ PAGES.utilities = (root) => {
   const lc = el("div", { class: "card" });
   lc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("ruler")),
-    el("div", { class: "grow" }, el("h2", {}, "List every known size"), el("p", {}, "Runs generate_dxf.py list — prints all card and paper sizes (including extras) to the job console.")),
+    el("div", { class: "grow" }, el("h2", {}, "List every known size"), el("p", {}, "Runs generate_dxf.py list and prints all card and paper sizes, including extras, in the job console.")),
     el("button", { class: "btn", onclick: () => doRun("dxf_list", null) }, ico("terminal"), "Run"),
   ));
   wrap.append(lc);
@@ -42,7 +42,7 @@ export function converterCard() {
   const card = el("div", { class: "card" });
   card.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("ruler")),
-    el("div", { class: "grow" }, el("h2", {}, "Size converter"), el("p", {}, "The same math the scripts use (size_convert.py): mm, inches, points, and pixels at any PPI."))));
+    el("div", { class: "grow" }, el("h2", {}, "Size converter"), el("p", {}, "Uses the same math as size_convert.py for mm, inches, points, and pixels at any PPI."))));
   const ppi = 300;
   const ppiI = el("input", { class: "input mono", type: "number", value: 300, min: 72, max: 1200 });
   const vI = el("input", { class: "input mono", type: "number", step: "any", value: 63 });

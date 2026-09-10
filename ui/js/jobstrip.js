@@ -128,15 +128,15 @@ export function jobStrip(kind, opts = {}) {
         strip.className = "jobstrip done";
         label.textContent = "Done";
         if (opts.onOk) opts.onOk(done, body);
-        else body.append(el("div", { class: "js-msg ok" }, ico("check"), el("span", {}, "Job finished successfully.")));
+        else body.append(el("div", { class: "js-msg ok" }, ico("check"), el("span", {}, "Job finished.")));
       } else {
         strip.className = "jobstrip failed";
         label.textContent = done.status === "killed" ? "Stopped" : "Failed";
         body.append(el("div", { class: "js-msg err" },
-          ico("x"), el("span", {}, done.status === "killed" ? "You stopped this job." : "The job didn't finish — the output below usually says why.")));
+          ico("x"), el("span", {}, done.status === "killed" ? "You stopped the job." : "The job did not finish. See the output below for details.")));
         const t = await tail(done.id);
         if (t && strip.isConnected) body.append(el("div", { class: "js-tail" }, t));
-        body.append(el("div", { class: "js-hint" }, "Fix the form above and run it again."));
+        body.append(el("div", { class: "js-hint" }, "Fix the form and run it again."));
       }
     } finally {
       painting = false;

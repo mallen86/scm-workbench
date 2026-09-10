@@ -113,7 +113,7 @@ export function setTheme(theme) {
     .then(() => { confirmedTheme = theme; }, error => {
       if (selection !== themeSelection) return;
       applyTheme(s, confirmedTheme || previous);
-      toast("err", error?.message || "Couldn't save the theme — reverted.");
+      toast("err", error?.message || "Couldn't save the theme. The previous theme was restored.");
     });
   // The rejection handler above consumes write failures so the next queued
   // selection still runs and no click creates an unhandled promise.
@@ -160,7 +160,7 @@ export async function setUiMode(mode) {
   try {
     await setSettings({ ui_mode: mode });
   } catch {
-    toast("err", "Couldn't save the interface setting — still in " + cur + " mode.");
+    toast("err", "Couldn't save the interface setting. Still in " + cur + " mode.");
     return;
   }
   S.info.settings.ui_mode = mode;
@@ -168,10 +168,10 @@ export async function setUiMode(mode) {
   const page = S.page || "dashboard";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
-    toast("ok", "Simple — just the essentials: fetch the art, make the PDF, and calibrate your printer.");
+    toast("ok", "Simple: just the essentials. Fetch art, make the PDF, and calibrate your printer.");
   } else {
     if (page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
-    toast("ok", mode === "simple" ? "Simple — the navigation keeps just the essentials." : "Advanced — every page and control is back.");
+    toast("ok", mode === "simple" ? "Simple: navigation shows only the essentials." : "Advanced: every page and control is available.");
   }
   // keepForms: a mode switch is a layout change, not a content change — the
   // values sitting in the visible form must survive, and if anything else did

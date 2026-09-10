@@ -5,7 +5,7 @@ import { $, $$, PAGES, S, el, ico, pageHead, toast } from "../core.js";import { 
 
 PAGES.templates = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Cutting templates", "DXF cutting templates for the repo's standard sizes, plus the prebuilt .studio3 files that Silhouette Studio opens. For MTG / Sorcery extras see the Extras page."));
+  wrap.append(pageHead("Cutting templates", "DXF templates for standard repo sizes, plus prebuilt .studio3 files for Silhouette Studio. See Extras for MTG and Sorcery sizes."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
   wrap.append(formCard("dxf_single", { icon: "scissors" }));
   wrap.__patch = () => patchDxfForm("dxf_single");  // must run once the card is in the document
@@ -52,7 +52,7 @@ export function templatesGallery(which) {
   ];
   card.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("folder")),
-    el("div", { class: "grow" }, el("h2", {}, which === "scm" ? "Repo cutting templates" : "Extras cutting templates"), el("p", {}, "DXF = source files for Silhouette Studio · .studio3 = pre-configured cutting jobs (paper size, registration marks)")),
+    el("div", { class: "grow" }, el("h2", {}, which === "scm" ? "Repo cutting templates" : "Extras cutting templates"), el("p", {}, "DXF files are source files for Silhouette Studio. .studio3 files are preconfigured cutting jobs with paper size and registration marks.")),
   ));
   if (!base) card.append(el("div", { class: "empty" }, ico("folder"), "Repo not connected."));
   for (const [title, items, ext, dir] of sections) {
@@ -61,11 +61,11 @@ export function templatesGallery(which) {
     const g = el("div", { class: "filegrid" });
     for (const n of items) {
       g.append(el("button", { class: "fileitem",
-        title: `Open ${n} in its default app (e.g. Silhouette Studio)`,
+        title: `Open ${n} in the default app, such as Silhouette Studio`,
         onclick: async () => {
           try {
             const r = await openFile(base + dir + n);
-            if (r.ok) toast("ok", `Opening ${n} in its default app…`);
+            if (r.ok) toast("ok", `Opening ${n} in the default app`);
             else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${n}.`);
           } catch (error) {
             toast("warn", error?.message || `Couldn't open ${n}.`);
