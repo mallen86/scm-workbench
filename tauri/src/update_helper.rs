@@ -638,26 +638,33 @@ pub(crate) fn materialize_helper(
     result.map(|_| destination)
 }
 
-pub(crate) fn spawn_helper(
+/// The working directory every helper-launched process must run with.
+///
+/// The helper renames the application folder aside and then renames the
+/// candidate into its place, after spawning the replacement shell. Windows
+/// refuses to rename a directory that is any live process's current directory,
+/// so a process which inherits the app folder as its CWD makes publication
+/// impossible — deterministically, not intermittently. The shell is launched by
+/// Explorer with the app folder as its CWD, the helper is the shell's child,
+/// and the replacement shell is the helper's child: without this every one of
+/// them would sit inside the tree being renamed. Publishing into the data area
+/// is the one directory the transaction never renames.
+fn publication_working_directory(data: &Path) -> PathBuf {
+    data.to_path_buf()
+}
+
+/// Build the helper command. Split out from `spawn_helper` so the working
+/// directory (the Windows rename lock above) is directly assertable.
+fn helper_command(
     helper: &Path,
-    data: &Path,
     token: &str,
     mode: Mode,
     recovery_wait_pid: Option<u32>,
-) -> io::Result<Child> {
-    if !valid_token(token) || (mode == Mode::Handoff && recovery_wait_pid.is_some()) {
-        return Err(invalid("invalid helper launch arguments"));
-    }
-    if mode == Mode::Recover && recovery_wait_pid.unwrap_or(0) == 0 {
-        return Err(invalid("recovery helper requires a wait PID"));
-    }
-    let helper_meta = fs::symlink_metadata(helper)?;
-    if !helper_meta.file_type().is_file() || helper_meta.len() > HELPER_MAX_BYTES {
-        return Err(invalid("helper executable is not a bounded regular file"));
-    }
-    let data = validate_data_dir(data)?;
+    data: &Path,
+) -> Command {
     let mut command = Command::new(helper);
     command
+        .current_dir(publication_working_directory(data))
         .arg("--update-helper")
         .arg("--data-dir")
         .arg(data.as_os_str())
@@ -685,7 +692,28 @@ pub(crate) fn spawn_helper(
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
     }
-    command.spawn()
+    command
+}
+
+pub(crate) fn spawn_helper(
+    helper: &Path,
+    data: &Path,
+    token: &str,
+    mode: Mode,
+    recovery_wait_pid: Option<u32>,
+) -> io::Result<Child> {
+    if !valid_token(token) || (mode == Mode::Handoff && recovery_wait_pid.is_some()) {
+        return Err(invalid("invalid helper launch arguments"));
+    }
+    if mode == Mode::Recover && recovery_wait_pid.unwrap_or(0) == 0 {
+        return Err(invalid("recovery helper requires a wait PID"));
+    }
+    let helper_meta = fs::symlink_metadata(helper)?;
+    if !helper_meta.file_type().is_file() || helper_meta.len() > HELPER_MAX_BYTES {
+        return Err(invalid("helper executable is not a bounded regular file"));
+    }
+    let data = validate_data_dir(data)?;
+    helper_command(helper, token, mode, recovery_wait_pid, &data).spawn()
 }
 
 pub(crate) fn remove_launch_request(data: &Path) -> io::Result<()> {
@@ -1291,19 +1319,7 @@ fn launch_and_wait(data: &Path, journal: &mut Journal, layout: &Layout) -> io::R
     journal.phase = Phase::Launching;
     journal_write(data, journal)?;
     let nonce = launch_nonce()?;
-    let mut command = Command::new(&executable);
-    command
-        .env("SCM_WORKBENCH_UPDATE_TOKEN", &journal.token)
-        .env("SCM_WORKBENCH_UPDATE_NONCE", &nonce);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
-    }
+    let mut command = launched_shell_command(&executable, data, &journal.token, &nonce);
     let mut child = command.spawn()?;
     let pid = child.id();
     let identity = wait_for_identity(&mut child, &executable, Duration::from_secs(5))?;
@@ -1314,6 +1330,27 @@ fn launch_and_wait(data: &Path, journal: &mut Journal, layout: &Layout) -> io::R
     let result = await_health(data, journal, layout, &nonce, Some(&mut child));
     drop(child);
     result
+}
+
+/// Build the replacement shell's command. Split out from `launch_and_wait` so
+/// its working directory is directly assertable: the replacement must not
+/// inherit the helper's CWD if that were ever inside the tree, and it must not
+/// run inside the tree itself (see `publication_working_directory`).
+fn launched_shell_command(executable: &Path, data: &Path, token: &str, nonce: &str) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .current_dir(publication_working_directory(data))
+        .env("SCM_WORKBENCH_UPDATE_TOKEN", token)
+        .env("SCM_WORKBENCH_UPDATE_NONCE", nonce)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn wait_for_identity(
@@ -1579,6 +1616,10 @@ pub(crate) struct RelaunchInvocation {
     pub executable: PathBuf,
     pub data: PathBuf,
     pub removed_env: Vec<&'static str>,
+    /// The working directory the relaunch would run with. Windows refuses to
+    /// rename a directory that is a live process's CWD, so this must stay out
+    /// of the application tree (see `publication_working_directory`).
+    pub working_directory: PathBuf,
 }
 
 #[cfg(test)]
@@ -1605,6 +1646,7 @@ fn spawn_old_target(executable: &Path, data: &Path) -> io::Result<()> {
             executable: executable.to_path_buf(),
             data: data.to_path_buf(),
             removed_env: vec!["SCM_WORKBENCH_UPDATE_TOKEN", "SCM_WORKBENCH_UPDATE_NONCE"],
+            working_directory: publication_working_directory(data),
         });
     Ok(())
 }
@@ -1613,6 +1655,7 @@ fn spawn_old_target(executable: &Path, data: &Path) -> io::Result<()> {
 fn spawn_old_target(executable: &Path, data: &Path) -> io::Result<()> {
     let mut command = Command::new(executable);
     command
+        .current_dir(publication_working_directory(data))
         .env_remove("SCM_WORKBENCH_UPDATE_TOKEN")
         .env_remove("SCM_WORKBENCH_UPDATE_NONCE")
         .env("SCM_WORKBENCH_DATA", data)
@@ -2533,6 +2576,58 @@ mod tests {
             Path::new(&journal.target),
             &fixture.target
         ));
+    }
+
+    #[test]
+    fn every_spawned_process_runs_outside_the_application_tree() {
+        // The Windows publication failure this guards: the shell is launched by
+        // Explorer with the application folder as its working directory, and
+        // the helper, the replacement shell, and the rollback relaunch are all
+        // spawned as descendants. Windows refuses to rename a directory that is
+        // any live process's current directory, so a descendant which kept that
+        // inherited CWD would make `target -> backup` fail deterministically -
+        // every retry, forever, leaving the journal at `identified`.
+        let fixture = Fixture::new();
+        let data = fs::canonicalize(&fixture.data).unwrap();
+        let target = fs::canonicalize(
+            fs::create_dir_all(&fixture.target)
+                .map(|_| &fixture.target)
+                .unwrap(),
+        )
+        .unwrap();
+        let token = token();
+
+        // The helper itself is the process that performs the rename.
+        let helper = helper_command(&data.join("helper"), &token, Mode::Handoff, None, &data);
+        let helper_cwd = helper
+            .get_current_dir()
+            .expect("the helper must not inherit an inherited working directory");
+        assert_eq!(helper_cwd, data.as_path());
+        assert!(
+            !helper_cwd.starts_with(&target),
+            "the helper would hold the rename lock on the target it must rename"
+        );
+
+        // The replacement shell inherits the helper's CWD when it starts.
+        let shell = launched_shell_command(&target.join("SCM Workbench.exe"), &data, &token, "b");
+        let shell_cwd = shell
+            .get_current_dir()
+            .expect("the replacement shell must set its working directory");
+        assert!(
+            !shell_cwd.starts_with(&target),
+            "the replacement shell would run inside the tree being published"
+        );
+
+        // The rollback relaunch must not re-lock the tree it just restored.
+        let _ = spawn_old_target(&target.join("SCM Workbench.exe"), &data);
+        let relaunch = take_relaunch_invocations()
+            .into_iter()
+            .find(|invocation| invocation.data == data)
+            .expect("the rollback relaunch was recorded");
+        assert!(
+            !relaunch.working_directory.starts_with(&target),
+            "the relaunched application would hold the rename lock on its own tree"
+        );
     }
 
     #[test]
