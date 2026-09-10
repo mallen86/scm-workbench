@@ -18,7 +18,7 @@
 - [x] The initial repo sync can fail with "repository metadata changed during deployment, retry" in the tauri log. Ensure this doesn't happen unless there's a real issue with the github repo.
 - [x] Even if the initial repo sync fails there's a toast that says everything is ready to use.
 - [x] The app is showing an update to the same version. The What's New link sometimes doesn't show anything when it think there's an update but there isn't. The What's New link does work if there is a real update.
-- [ ] In the advanced settings next to the save repo paths button is text that says "You may need to restart the server after changing the Python interpreter". This is an outdated reference to the old serving method. Also ensure you don't need to restart the app for those changes to take effect immediately.
+- [x] In the advanced settings next to the save repo paths button is text that says "You may need to restart the server after changing the Python interpreter". This is an outdated reference to the old serving method. Also ensure you don't need to restart the app for those changes to take effect immediately.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

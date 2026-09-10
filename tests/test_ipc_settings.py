@@ -125,6 +125,27 @@ class SettingsIpcTests(unittest.TestCase):
         self.assertFalse(server._INFO_SNAP)
         self.assertFalse(server._REPOS_MTIME)
 
+    def test_repo_paths_and_python_apply_to_the_next_command_without_restart(self):
+        scm = self.data / "new-scm"
+        extras = self.data / "new-extras"
+        python = self.data / "new-python"
+        scm.mkdir()
+        extras.mkdir()
+        python.write_bytes(b"python")
+
+        response = self.native({
+            "scm_dir": str(scm), "extras_dir": str(extras), "python": str(python),
+        })
+
+        self.assertTrue(response["result"]["ok"])
+        settings = server.load_settings()
+        self.assertEqual(server.effective_dirs(settings), (scm, extras))
+        argv, cwd, _env, _title, _warnings, errors = server.build_command(
+            "repo_update", {"repo": "scm"}, settings, {})
+        self.assertFalse(errors)
+        self.assertEqual(argv[0], str(python))
+        self.assertEqual(cwd, server.WB_ROOT)
+
     def test_concurrent_disjoint_updates_are_not_lost(self):
         results = []
         barrier = threading.Barrier(2)

@@ -345,10 +345,9 @@ PAGES.settings = (root) => {
     el("button", { class: "btn primary", onclick: async () => {
       const r = await setSettings({ scm_dir: scmI.value.trim(), extras_dir: exI.value.trim() });
       await refreshInfo();
-      toast(S.info.scm.found ? "ok" : "warn", S.info.scm.found ? "Reconnected — settings reloaded." : "Saved, but the SCM repo still isn't found at that path.");
+      toast(S.info.scm.found ? "ok" : "warn", S.info.scm.found ? "Reconnected — the new paths are in use." : "Saved, but the SCM repo still isn't found at that path.");
       go("settings");
     } }, ico("check"), "Save repo paths"),
-    el("span", { class: "small faint" }, "You may need to restart the server after changing the Python interpreter."),
   ));
   if (!simple) wrap.append(rc);
 
@@ -395,8 +394,9 @@ PAGES.settings = (root) => {
     pc.append(el("div", { class: "field", style: "margin-top:10px" }, lab, sw));
     pc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px" },
       el("button", { class: "btn primary", onclick: async () => {
-        const r = await setSettings({ python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
-        toast("ok", "Saved. Port changes apply on next server start.");
+        await setSettings({ python: pyI.value.trim(), port: parseInt(portI.value), auto_open_browser: autoI.checked });
+        await refreshInfo();
+        toast("ok", "Saved. The Python interpreter is in use for new jobs; port changes apply on next server start.");
         go("settings");
       } }, ico("check"), "Save python & server"),
     ));
