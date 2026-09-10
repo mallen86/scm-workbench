@@ -1180,8 +1180,8 @@ def build_manifest(info: dict) -> dict:
                          default="letter", width="half"),
                     _opt("paper_width", "Custom width (shorter side)", "text", placeholder="8.5in · 210mm", width="quarter"),
                     _opt("paper_height", "Custom height (longer side)", "text", placeholder="11in · 297mm", width="quarter"),
-                    _opt("paper_name", "Paper label (for filename)", "text", width="quarter",
-                         help="Optional. Used only for the output filename."),
+                    _opt("paper_name", "Paper label", "text", width="quarter",
+                         help="Optional. Used for the output filename and saved paper size."),
                 ],
             },
             {
@@ -4463,6 +4463,23 @@ def app_packages_dir() -> Optional[Path]:
     return None
 
 
+def _dxf_custom_label(value: Any, field: str, errors: List[str]) -> Optional[str]:
+    """Return a custom DXF size label that is safe to use as a filename."""
+    label = str(value or "").strip()
+    if not label:
+        return None
+    try:
+        too_long = len(label.encode("utf-8")) > 128
+    except UnicodeEncodeError:
+        too_long = True
+    forbidden = any(ord(char) < 0x20 or ord(char) == 0x7f or char in '<>:"/\\|?*'
+                    for char in label)
+    if too_long or forbidden or label in (".", "..") or label.endswith((" ", ".")):
+        errors.append(f"{field} must be a safe filename label of at most 128 UTF-8 bytes.")
+        return None
+    return label
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -4688,6 +4705,10 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             else:
                 paper = f"{a['paper_width']}x{a['paper_height']}"
                 argv += ["--paper_width", str(a["paper_width"]), "--paper_height", str(a["paper_height"])]
+                paper_name = _dxf_custom_label(a.get("paper_name"), "Paper label", errors)
+                if paper_name:
+                    paper = paper_name
+                    argv += ["--paper_name", paper_name]
         variant = str(a.get("variant") or "default")
         argv += ["--variant", variant]
         argv += ["--orientation", str(a.get("orientation") or "optimize")]

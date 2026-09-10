@@ -295,6 +295,24 @@ class HttpContractTests(unittest.TestCase):
             self.assertIn("groups", spec, kind)
             self.assertIn("cwd", spec, kind)
 
+    def test_custom_paper_label_names_the_dxf_and_saved_size(self):
+        preview = server.build_preview("dxf_single", {
+            "card_mode": "named", "card_size": "standard",
+            "paper_mode": "custom", "paper_width": "8.5in",
+            "paper_height": "14in", "paper_name": "legal", "save": True,
+        })
+        self.assertFalse(preview["errors"])
+        self.assertIn("--paper_name legal", preview["cmd"])
+        self.assertTrue(preview["cmd"].endswith(
+            "cutting_templates/dxf/legal-standard-v1.dxf --save"))
+
+        unsafe = server.build_preview("dxf_single", {
+            "card_mode": "named", "card_size": "standard",
+            "paper_mode": "custom", "paper_width": "8.5in",
+            "paper_height": "14in", "paper_name": "../legal", "save": True,
+        })
+        self.assertTrue(any("safe filename label" in error for error in unsafe["errors"]))
+
     def test_fetch_manifest_keeps_picker_below_source_and_preferences_collapsed(self):
         status, manifest = self.request("GET", "/api/manifest")
         self.assertEqual(status, 200)
