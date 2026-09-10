@@ -2729,6 +2729,56 @@ mod tests {
         }
     }
 
+    /// Build a real, long-running executable to stand in for the fixture's
+    /// application binary.
+    ///
+    /// The fixture cannot simply copy a platform binary such as `/bin/sleep`
+    /// into place: macOS attaches launch constraints to platform binaries, so
+    /// executing a copy is refused by AMFI. The kill is asynchronous, which
+    /// made this test pass for the wrong reason (`try_wait` saw the AMFI kill
+    /// instead of the termination under test) and made every `cargo test` run
+    /// raise a Gatekeeper dialog. The fixture cannot link to a platform binary
+    /// either, because a validated application tree must contain neither an
+    /// absolute link nor one that escapes its root. Compiling a tiny local
+    /// program keeps the fixture a regular executable file inside the bundle,
+    /// exactly like the shipped application, without tripping the platform's
+    /// binary protections.
+    #[cfg(unix)]
+    fn build_live_executable(output: &Path, source: &Path) {
+        fs::write(
+            source,
+            b"#include <unistd.h>\nint main(void) { sleep(10); return 0; }\n",
+        )
+        .unwrap();
+        let mut attempt = None;
+        for compiler in ["cc", "gcc", "clang"] {
+            match Command::new(compiler)
+                .arg("-o")
+                .arg(output)
+                .arg(source)
+                .output()
+            {
+                Ok(result) if result.status.success() => {
+                    let _ = fs::remove_file(source);
+                    make_executable(output);
+                    return;
+                }
+                Ok(result) => {
+                    attempt = Some(format!(
+                        "{compiler} exited with {}: {}",
+                        result.status,
+                        String::from_utf8_lossy(&result.stderr).trim()
+                    ));
+                }
+                Err(error) => attempt = Some(format!("{compiler}: {error}")),
+            }
+        }
+        panic!(
+            "the fixture executable could not be compiled: {}",
+            attempt.unwrap_or_else(|| "no C compiler was found".to_owned())
+        );
+    }
+
     fn make_application(path: &Path, marker: &str) {
         #[cfg(target_os = "macos")]
         {
@@ -3421,16 +3471,7 @@ mod tests {
         make_application(&fixture.target, "new");
         make_application(&fixture.backup, "old");
         let executable = executable_for_target(&fixture.target);
-        let source = if Path::new("/bin/sleep").exists() {
-            Path::new("/bin/sleep")
-        } else {
-            Path::new("/usr/bin/sleep")
-        };
-        fs::copy(source, &executable).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).unwrap();
+        build_live_executable(&executable, &fixture.data.join("fixture-sleeper.c"));
         let child = Command::new(&executable).arg("10").spawn().unwrap();
         let mut child = ChildGuard(child);
         let identity = process_identity(child.0.id()).unwrap();
