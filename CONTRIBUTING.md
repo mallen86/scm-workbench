@@ -162,8 +162,32 @@ an OV certificate as part of this work.
 **The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG and the portable Windows x64 ZIP to the GitHub release.
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1        # CI builds both platform packages and publishes the release
+# 1. the tag is the version; push it and CI builds both packages
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
+
+# 2. create the release with its notes; CI attaches the DMG and ZIP
+gh release create v0.1.1 --title "v0.1.1" --notes-file notes.md --verify-tag
 ```
 
+The tag message and the release title are both the bare version, `v0.1.1`. Nothing is prefixed to them.
+
 For a local build, run `python scripts/inject_version.py v0.1.1` before building; with no tag in sight it keeps the version the repository declares.
+
+### Release notes
+
+Write the notes for the people who run the app, and keep them to what those people can see. The shape is one heading, one bullet per change, and the compare link:
+
+```markdown
+## What changed
+
+- **Short bold lead-in.** What changed from the user's side, in plain language.
+- **Another change.** Same shape: one bullet, one line, readable on its own.
+
+**Full Changelog**: https://github.com/OWNER/REPO/compare/v0.1.0...v0.1.1
+```
+
+* **User-visible changes only.** Leave out test counts, verification runs, root-cause mechanics, internal file and symbol names, and packaging or tooling detail. That belongs in the pull request or the commit message. A user reading the release wants to know what is different for them, not how it was fixed.
+* **One bullet per change, one line each.** Do not hard wrap a bullet at a fixed width; it is a single line however long it runs.
+* **Say when an upgrade needs a manual install.** When the fix lives in the installer that performs an update, the version doing the updating cannot apply it, so the user has to install that one release by hand. Nothing else will tell them.
+* **No en or em dashes.** Use a comma, a colon, or a full stop instead.
