@@ -328,11 +328,10 @@ console.log("ok: job history page routing, manifest filtering, and settings rest
     print(result.stdout.strip())
 
     # --- Node contract for the sidebar order -------------------------------
-    # Job history has to read as "between workflow and system" in simple mode
-    # and "between cutting and reference" in advanced mode. One document order
-    # does both only because the separator answer is per section: this runs the
-    # real applySimpleNav against the real markup and checks the resulting
-    # visible order in both modes.
+    # Job history is its own section, so its header has to stay visible in
+    # both modes. The separator answer is per section: this runs the real
+    # applySimpleNav against the real markup and checks the resulting visible
+    # order and headers in both modes.
     nav_script = r'''
 import fs from "node:fs";
 const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`;
@@ -360,11 +359,14 @@ if (!nodes.length) fail("the nav markup could not be read");
 for (const n of nodes.filter(n => n.kind === "sep"))
   if (!n.section) fail(`the "${n.label}" separator has no data-section`);
 for (const n of nodes.filter(n => n.kind === "item"))
-  if (!n.section && n.page !== "history")
+  if (!n.section)
     fail(`the "${n.label || n.page}" nav item has no data-section`);
 const historyNode = nodes.find(n => n.page === "history");
 if (!historyNode) fail("the nav markup has no job history item");
-if (historyNode.section) fail("job history must not belong to a section, or that section's header would open for it in simple mode");
+if (historyNode.section !== "history")
+  fail(`job history must own a section of its own, not ${JSON.stringify(historyNode.section)}`);
+if (!nodes.some(n => n.kind === "sep" && n.section === "history"))
+  fail("the job history section has no header");
 
 const asElement = n => ({
   dataset: { section: n.section, page: n.page },
@@ -410,7 +412,7 @@ const read = simple => {
 };
 
 const simple = read(true);
-if (JSON.stringify(simple.separatorSections) !== JSON.stringify(["workflow", "system"]))
+if (JSON.stringify(simple.separatorSections) !== JSON.stringify(["workflow", "history", "system"]))
   fail(`simple mode shows the wrong section headers: ${JSON.stringify(simple.separatorSections)}`);
 const simpleOrder = ["fetch", "pdf", "offset", "history", "docs", "settings"];
 if (JSON.stringify(simple.visibleItems) !== JSON.stringify(simpleOrder))
@@ -421,13 +423,22 @@ if (simple.visibleItems.indexOf("history") >= simple.visibleItems.indexOf("docs"
   fail("simple mode does not put job history before the system items");
 
 const advanced = read(false);
-if (JSON.stringify(advanced.separatorSections) !== JSON.stringify(["workflow", "cutting", "reference", "system"]))
+if (JSON.stringify(advanced.separatorSections) !== JSON.stringify(["workflow", "cutting", "history", "reference", "system"]))
   fail(`advanced mode hides a section header: ${JSON.stringify(advanced.separatorSections)}`);
 const advancedOrder = ["fetch", "pdf", "offset", "templates", "extras", "history", "sizes", "utilities", "docs", "settings"];
 if (JSON.stringify(advanced.visibleItems) !== JSON.stringify(advancedOrder))
   fail(`advanced mode order is ${JSON.stringify(advanced.visibleItems)}, expected ${JSON.stringify(advancedOrder)}`);
 
-console.log("ok: the sidebar keeps job history between workflow/system in simple mode and cutting/reference in advanced");
+// A section header with nothing under it would read as a broken section, in
+// either mode.
+for (const [mode, result] of [["simple", simple], ["advanced", advanced]]) {
+  for (const section of result.separatorSections) {
+    if (!nodes.some(n => n.kind === "item" && n.section === section && !(mode === "simple" && n.simpleHide)))
+      fail(`${mode} mode shows the "${section}" header with no visible item under it`);
+  }
+}
+
+console.log("ok: job history keeps its own section header in simple and advanced mode");
 '''.strip()
     nav_result = subprocess.run(
         [node, "--input-type=module", "-", str(index_path), str(nav_path)],

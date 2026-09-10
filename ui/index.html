@@ -28,10 +28,11 @@
         <div class="nav-sep" data-section="cutting">Cutting</div>
         <a class="nav-item" data-page="templates" data-section="cutting" data-simple-hide><span class="nav-ico" data-ico="scissors"></span>Cutting templates</a>
         <a class="nav-item" data-page="extras" data-section="cutting" data-simple-hide><span class="nav-ico" data-ico="sparkle"></span>Extras: MTG &amp; Sorcery</a>
-        <!-- Job history sits between the cutting and reference sections, which
-             also puts it between workflow and system in simple mode: the two
-             hidden sections collapse around it there. -->
-        <a class="nav-item" data-page="history"><span class="nav-ico" data-ico="clock"></span>Job history</a>
+        <!-- Job history is its own section in both modes: it is not part of
+             the cutting or reference work, and a section of its own keeps the
+             header visible wherever the sections around it collapse. -->
+        <div class="nav-sep" data-section="history">History</div>
+        <a class="nav-item" data-page="history" data-section="history"><span class="nav-ico" data-ico="clock"></span>Job history</a>
         <div class="nav-sep" data-section="reference">Reference</div>
         <a class="nav-item" data-page="sizes" data-section="reference" data-simple-hide><span class="nav-ico" data-ico="ruler"></span>Sizes &amp; layouts</a>
         <a class="nav-item" data-page="utilities" data-section="reference" data-simple-hide><span class="nav-ico" data-ico="wrench"></span>Utilities</a>
