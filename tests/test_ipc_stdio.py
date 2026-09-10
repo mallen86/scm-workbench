@@ -13,15 +13,17 @@ class ExternalProcessStdioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "file.txt"
             path.write_text("fixture", encoding="utf-8")
+            opened = server.subprocess.CompletedProcess([], 0)
             with mock.patch.object(server.os, "name", "posix"), \
                  mock.patch.object(server.sys, "platform", "darwin"), \
+                 mock.patch.object(server.subprocess, "run", return_value=opened) as run, \
                  mock.patch.object(server.subprocess, "Popen") as popen:
                 self.assertIsNone(server.reveal_path(path))
                 self.assertIsNone(server.open_path(path))
                 self.assertIsNone(server.open_url("https://example.test"))
 
-            self.assertEqual(popen.call_count, 3)
-            for call in popen.call_args_list:
+            self.assertEqual(popen.call_count, 2)
+            for call in [*popen.call_args_list, run.call_args]:
                 self.assertIs(call.kwargs["stdout"], server.subprocess.DEVNULL)
                 self.assertIs(call.kwargs["stderr"], server.subprocess.DEVNULL)
                 self.assertTrue(call.kwargs["start_new_session"])
