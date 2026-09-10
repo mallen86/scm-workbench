@@ -28,7 +28,7 @@ protocol covers the three bootstrap reads, bounded settings and offset
 mutations, preview, packaged-Tauri job control/log operations, the read-only
 `template.resolve`/`file.list` metadata slice, bounded repository metadata
 operations, app update/release-note operations, the bounded OS-action methods
-below, and secure image deletion.
+below, secure image deletion, and restricted DXF template deletion.
 Image deletion is public `fs.delete_images` RPC with exact `{path}` params; its
 only browser fallback is explicit POST `/api/fs`. Decklist import is a
 separate native command (`wb_decklist_import`), not a public `wb_rpc` method:
@@ -64,9 +64,9 @@ with `{}` parameters and an exact
 `{"ready":true,"process_group":true}` result; the worker emits that result
 only after POSIX process-group containment is established (Windows relies on
 the retained kill-on-close job object). It is not exposed through public
-`wb_rpc`. The exact public `wb_rpc` allowlist contains twenty-seven methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`wb_rpc`. The exact public `wb_rpc` allowlist contains twenty-eight methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
-`jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `file.list`,
+`jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `template.delete`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
 `updates.poll`, `updates.start`, and the virtual Rust facade
@@ -91,6 +91,7 @@ parameter contracts below.
 | `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
 | `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
+| `POST /api/templates/delete` | `template.delete` (packaged Tauri) | `server.delete_template()`; only regular DXF files directly inside repo cutting template folders are accepted |
 | `GET /api/file?...images_only=1` (standalone-browser directory metadata) | `file.list` (packaged Tauri) | `server.list_files()`; IPC-mode HTTP rejects every `/api/file` request before file work |
 | `POST /api/fs` (`delete_images`) | virtual `fs.delete_images` facade (packaged Tauri) | private bounded start/poll around SCM-only stable-handle deletion |
 | `GET /api/file?...open=1` (standalone-browser file-action compatibility) | `file.open` (packaged Tauri) | `server.file_open_action()`; IPC-mode HTTP rejects every `/api/file` request |
@@ -427,6 +428,15 @@ resolves outside those roots is rejected, and no launcher is called. Tauri
 only forwards these exact method names through the existing `wb_rpc` command;
 there is no new capability, command, framing rule, or lifecycle behavior.
 
+`template.delete` takes exactly `{"path":"<string>"}` with the same 4096 byte
+and control character bounds as `file.open`. Python accepts only an absolute
+path to a regular `.dxf` file directly inside `cutting_templates/dxf` or
+`cutting_templates/borderless/dxf` in the effective SCM or extras repo. It
+rejects links, nested paths, other file types, missing files, and paths outside
+those folders. Deletion uses the repository layer's descriptor or stable handle
+unlink so a path cannot be swapped after validation. The packaged HTTP route is
+rejected before path work.
+
 Native actions do not silently fail over to HTTP. A packaged WebView invokes
 the native method and surfaces a native error; a normal browser, which has no
 callable Tauri capability, uses the existing HTTP compatibility route instead.
@@ -643,7 +653,7 @@ bind directly to the initiating SCM checkout snapshot. POSIX candidates move
 through an unpredictable atomic no-replace quarantine name and are revalidated
 there before unlink; Windows deletes the revalidated object by stable handle.
 
-The current migration ledger is (27 native methods; image deletion is the
+The current migration ledger is (28 native methods; template deletion is the
 latest entry):
 
 | Surface | Current transport | Status |
@@ -653,6 +663,7 @@ latest entry):
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
 | Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| `template.delete` cutting template deletion | Tauri JSON-lines in packaged windows; POST `/api/templates/delete` in standalone browsers | Restricted to regular `.dxf` files directly inside effective repo `cutting_templates/dxf` folders; secure unlink rejects links and path escapes; packaged HTTP rejects before path work |
 | `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; standalone browser HTTP compatibility remains; packaged `/api/file` is rejected |
 | `file.open`, `file.reveal`, and `url.open` OS actions | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; standalone browser HTTP compatibility remains; packaged `/api/file` is rejected; strict roots/URL policy above |
 | Raw binary file reads | Standalone browser HTTP compatibility only | **Unavailable in packaged mode because there is no caller**; any future access must be a purpose-specific native grant, not a generic read capability |

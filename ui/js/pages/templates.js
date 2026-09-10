@@ -1,7 +1,7 @@
 /* pages/templates — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* ============================== templates page ============================= */
+import { $, $$, PAGES, S, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { deleteTemplate } from "../template-transport.js";import { formCard } from "../forms.js";import { connectCardNeeded, repoSetupCard } from "./dashboard.js";/* ============================== templates page ============================= */
 
 PAGES.templates = (root) => {
   const wrap = el("div", {});
@@ -57,14 +57,17 @@ export function templatesGallery(which) {
   if (!base) card.append(el("div", { class: "empty" }, ico("folder"), "Repo not connected."));
   for (const [title, items, ext, dir] of sections) {
     if (!items?.length || !base) continue;
-    card.append(el("div", { class: "section-label" }, title));
+    const sectionLabel = el("div", { class: "section-label" }, title);
+    card.append(sectionLabel);
     const g = el("div", { class: "filegrid" });
     for (const n of items) {
-      g.append(el("button", { class: "fileitem",
+      const path = base + dir + n;
+      const tile = el("div", { class: "fileitem-wrap" });
+      tile.append(el("button", { class: "fileitem",
         title: `Open ${n} in the default app, such as Silhouette Studio`,
         onclick: async () => {
           try {
-            const r = await openFile(base + dir + n);
+            const r = await openFile(path);
             if (r.ok) toast("ok", `Opening ${n} in the default app`);
             else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${n}.`);
           } catch (error) {
@@ -74,6 +77,31 @@ export function templatesGallery(which) {
         el("span", { class: "fi-ico" }, ico(ext === "dxf" ? "scissors" : "card")),
         el("span", { class: "fi-name" }, n),
       ));
+      if (ext === "dxf") {
+        tile.append(el("button", {
+          class: "fileitem-delete", type: "button",
+          title: `Delete ${n}`, "aria-label": `Delete ${n}`,
+          onclick: async () => {
+            const confirmed = await confirmModal({
+              title: "Delete cutting template?",
+              text: `Permanently delete “${n}”? This cannot be undone.`,
+              okLabel: "Delete", danger: true, icon: "trash", iconCls: "warn",
+            });
+            if (!confirmed) return;
+            try {
+              await deleteTemplate(path);
+              const index = items.indexOf(n);
+              if (index >= 0) items.splice(index, 1);
+              tile.remove();
+              if (!items.length) { sectionLabel.remove(); g.remove(); }
+              toast("ok", `Deleted ${n}.`);
+            } catch (error) {
+              toast("warn", error?.message || `Couldn't delete ${n}.`);
+            }
+          },
+        }, "×"));
+      }
+      g.append(tile);
     }
     card.append(g);
   }

@@ -6912,6 +6912,54 @@ def resolve_template(paper: str, card: str, borderless: bool,
         f"(looked for {paper}-{card}{'-borderless' if borderless else ''}-v*.studio3)"]}
 
 
+def delete_template(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, int]:
+    """Delete one DXF from an effective repo's cutting template directory."""
+    try:
+        value = _validate_action_value(raw, "path", ACTION_PATH_MAX_BYTES)
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise _ActionFailure("template path must be absolute", 400)
+        candidate = Path(os.path.abspath(candidate))
+        try:
+            candidate = candidate.parent.resolve(strict=True) / candidate.name
+        except OSError as error:
+            raise _ActionFailure("cutting template folder does not exist", 404) from error
+        roots = [root.resolve() for root in effective_dirs(
+            settings if settings is not None else load_settings()) if root]
+        chosen = None
+        relative = None
+        for root in roots:
+            try:
+                rel = candidate.relative_to(root)
+            except ValueError:
+                continue
+            parts = rel.parts
+            allowed = (len(parts) == 3 and parts[:2] == ("cutting_templates", "dxf")) or (
+                len(parts) == 4 and parts[:3] == ("cutting_templates", "borderless", "dxf")
+            )
+            if allowed:
+                chosen, relative = root, rel.as_posix()
+                break
+        if chosen is None or relative is None:
+            raise _ActionFailure("only repo DXF cutting templates can be deleted", 403)
+        if candidate.suffix.lower() != ".dxf":
+            raise _ActionFailure("only DXF cutting templates can be deleted", 400)
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError as error:
+            raise _ActionFailure("cutting template does not exist", 404) from error
+        if _is_reparse_or_symlink(info) or not stat.S_ISREG(info.st_mode):
+            raise _ActionFailure("cutting template must be a regular file, not a link", 400)
+        try:
+            repo_sync._secure_unlink_relative(chosen, relative)
+        except (OSError, repo_sync.RepoError) as error:
+            raise _ActionFailure("could not safely delete the cutting template", 400) from error
+        invalidate_manifest_cache()
+        return {"ok": True, "errors": [], "name": candidate.name}, 200
+    except _ActionFailure as error:
+        return {"ok": False, "errors": [_bounded_action_error(error.message)]}, error.status
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"SCMWorkbench/{SERVER_VERSION}"
     protocol_version = "HTTP/1.1"
@@ -7077,6 +7125,18 @@ class Handler(BaseHTTPRequestHandler):
                         "update start requires exactly an empty object"]}, 400)
                 result = update_start_result()
                 return self._json(result, 200 if result.get("ok") else 400)
+            if path == "/api/templates/delete":
+                # Packaged windows must use the native mutation. Reject HTTP
+                # before resolving the path so a native failure cannot retry.
+                if _IPC_MODE:
+                    return self._json({"ok": False, "errors": [
+                        "native template deletion is required in packaged mode"]}, 403)
+                body = self._body(strict=True)
+                if not isinstance(body, dict) or set(body) != {"path"}:
+                    return self._json({"ok": False, "errors": [
+                        "template deletion requires exactly path"]}, 400)
+                result, status = delete_template(body["path"], load_settings())
+                return self._json(result, status)
             if path == "/api/settings":
                 # HTTP keeps its historical direct-patch body shape, while the
                 # native method wraps the same patch as {changes: ...}.  Invalid

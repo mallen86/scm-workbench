@@ -1021,6 +1021,18 @@ body.mode-simple .console { display: none; }
    enough that the longest real filenames (paper-card-variant-vN.ext) wrap
    to at most two lines instead of ellipsizing. */
 .filegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 9px; }
+.fileitem-wrap { position: relative; min-width: 0; }
+.fileitem-wrap > .fileitem { width: 100%; height: 100%; padding-right: 36px; }
+.fileitem-delete {
+  position: absolute; top: 5px; right: 5px; z-index: 1;
+  width: 25px; height: 25px; padding: 0;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--faint);
+  cursor: pointer; font-size: 18px; line-height: 1;
+}
+.fileitem-delete:hover, .fileitem-delete:focus-visible {
+  background: var(--err-soft); color: var(--err);
+}
 .fileitem {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--border-soft);

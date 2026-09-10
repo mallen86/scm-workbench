@@ -37,7 +37,7 @@ PRIVATE_METHODS = frozenset((
     "fs.delete_images_start", "fs.delete_images_poll",
 ))
 ALLOWED_METHODS = frozenset((
-    "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "file.list",
+    "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "template.delete", "file.list",
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
@@ -208,6 +208,20 @@ def dispatch(request: dict) -> dict:
             if not isinstance(params["borderless"], bool):
                 return _bad_params(request_id, "template.resolve borderless must be boolean")
             result = server.resolve_template(paper, card, params["borderless"])
+        elif method == "template.delete":
+            if set(params) != {"path"}:
+                return _bad_params(request_id, "template.delete requires exactly path")
+            path = params["path"]
+            if not isinstance(path, str) or not path:
+                return _bad_params(request_id, "template.delete path must be a non-empty string")
+            try:
+                if len(path.encode("utf-8")) > server.ACTION_PATH_MAX_BYTES:
+                    return _bad_params(request_id, "template.delete path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "template.delete path must be valid UTF-8")
+            if server.has_forbidden_action_controls(path):
+                return _bad_params(request_id, "template.delete path contains control characters")
+            result, _status = server.delete_template(path)
         elif method == "file.list":
             if set(params) != {"path", "images_only"}:
                 return _bad_params(request_id, "file.list requires exactly path and images_only")

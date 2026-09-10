@@ -379,10 +379,10 @@ fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
         | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll"
-        | "fs.delete_images" | "preview" | "template.resolve" | "file.list" | "file.open"
-        | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set" | "repos.check"
-        | "repos.poll" | "updates.get" | "updates.check" | "updates.notes" | "updates.poll"
-        | "updates.start" => Ok(()),
+        | "fs.delete_images" | "preview" | "template.resolve" | "template.delete" | "file.list"
+        | "file.open" | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set"
+        | "repos.check" | "repos.poll" | "updates.get" | "updates.check" | "updates.notes"
+        | "updates.poll" | "updates.start" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -630,6 +630,7 @@ mod tests {
             "fs.delete_images",
             "preview",
             "template.resolve",
+            "template.delete",
             "file.list",
             "file.open",
             "file.reveal",
@@ -655,6 +656,7 @@ mod tests {
             "jobs.poll.push",
             "preview.extra",
             "template.resolve.extra",
+            "template.delete.extra",
             "file.list.extra",
             "file.list.open",
             "fs.delete_images.extra",
