@@ -1204,6 +1204,54 @@ fn path_is_safe_link(path: &Path, root: &Path) -> io::Result<bool> {
     Ok(fs::canonicalize(path)?.starts_with(fs::canonicalize(root)?))
 }
 
+/// Bound on how many times a rename that failed with a transient Windows
+/// sharing error is retried, and the pause between attempts.
+const RENAME_ATTEMPTS: u32 = 10;
+const RENAME_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+/// A rename can fail transiently on Windows even when nothing in the
+/// transaction holds a handle: an antivirus scanner, indexer, or Explorer's
+/// thumbnail provider may still have the tree open for a moment. Without a
+/// retry that momentary hold is indistinguishable from a permanent failure,
+/// and the transaction is left unable to progress. Only the sharing-family
+/// errors are retried; a real permissions or path failure still fails fast.
+#[cfg(windows)]
+fn is_transient_rename_error(error: &io::Error) -> bool {
+    // ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32), ERROR_LOCK_VIOLATION (33).
+    matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33))
+}
+
+/// Unix allows renaming a directory that is a process's working directory, so
+/// it has no equivalent transient lock and never retries.
+#[cfg(not(windows))]
+fn is_transient_rename_error(_error: &io::Error) -> bool {
+    false
+}
+
+/// Retry an atomic rename while the failure looks transient. The bound, the
+/// delay, and the classification are injected so all three are directly
+/// testable without a Windows host.
+fn retry_rename(
+    attempts: u32,
+    delay: Duration,
+    mut attempt: impl FnMut() -> io::Result<()>,
+    is_transient: fn(&io::Error) -> bool,
+) -> io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if tries >= attempts || !is_transient(&error) {
+                    return Err(error);
+                }
+                tries += 1;
+                thread::sleep(delay);
+            }
+        }
+    }
+}
+
 fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     if from.parent() != to.parent() {
         return Err(invalid("rename is not a sibling rename"));
@@ -1211,7 +1259,12 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     if fs::symlink_metadata(to).is_ok() {
         return Err(invalid("rename destination already exists"));
     }
-    platform_rename_noreplace(from, to)?;
+    retry_rename(
+        RENAME_ATTEMPTS,
+        RENAME_RETRY_DELAY,
+        || platform_rename_noreplace(from, to),
+        is_transient_rename_error,
+    )?;
     sync_dir(from.parent().unwrap())
 }
 
@@ -2576,6 +2629,115 @@ mod tests {
             Path::new(&journal.target),
             &fixture.target
         ));
+    }
+
+    #[test]
+    fn transient_rename_failures_are_retried_a_bounded_number_of_times() {
+        // A momentary antivirus/indexer hold must not turn into an update that
+        // can never finish, and a permanent failure must not be retried into a
+        // long stall. Both bounds are asserted here with the platform
+        // classification and sleep replaced by test doubles.
+        let transient = |error: &io::Error| error.kind() == io::ErrorKind::WouldBlock;
+        let blocked = || Err(io::Error::new(io::ErrorKind::WouldBlock, "held"));
+        let no_delay = Duration::ZERO;
+
+        // Succeeds once the hold clears.
+        let mut calls = 0;
+        retry_rename(
+            5,
+            no_delay,
+            || {
+                calls += 1;
+                if calls < 4 {
+                    Err(io::Error::new(io::ErrorKind::WouldBlock, "held"))
+                } else {
+                    Ok(())
+                }
+            },
+            transient,
+        )
+        .unwrap();
+        assert_eq!(
+            calls, 4,
+            "the rename should have been retried until it succeeded"
+        );
+
+        // A hold that never clears is bounded, not unbounded.
+        let mut calls = 0;
+        let error = retry_rename(
+            5,
+            no_delay,
+            || {
+                calls += 1;
+                blocked()
+            },
+            transient,
+        )
+        .unwrap_err();
+        assert_eq!(calls, 5, "retries must stop at the configured bound");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "the last error is reported"
+        );
+
+        // A real failure is not retried at all.
+        let mut calls = 0;
+        let error = retry_rename(
+            5,
+            no_delay,
+            || {
+                calls += 1;
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            },
+            transient,
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1, "a non-transient failure must fail fast");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        // One attempt means no retry loop at all.
+        let mut calls = 0;
+        assert!(retry_rename(
+            1,
+            no_delay,
+            || {
+                calls += 1;
+                blocked()
+            },
+            transient
+        )
+        .is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn only_sharing_family_errors_are_transient_on_windows() {
+        // The classification itself: the Windows retry list, and the reason
+        // Unix never retries (it permits renaming a directory that is a
+        // process's working directory, so this lock does not exist there).
+        #[cfg(windows)]
+        {
+            for code in [5, 32, 33] {
+                assert!(is_transient_rename_error(&io::Error::from_raw_os_error(
+                    code
+                )));
+            }
+            for code in [2, 3, 18, 87, 183] {
+                assert!(!is_transient_rename_error(&io::Error::from_raw_os_error(
+                    code
+                )));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            for code in [5, 32, 33, 2, 18] {
+                assert!(
+                    !is_transient_rename_error(&io::Error::from_raw_os_error(code)),
+                    "unix has no transient rename lock and must not retry"
+                );
+            }
+        }
     }
 
     #[test]
