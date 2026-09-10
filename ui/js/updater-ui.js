@@ -78,10 +78,21 @@ async function finishUpdateStrip(job) {
   strip.classList.toggle("failed", failed);
   strip.classList.toggle("done", job.status === "ok");
   if (job.status === "handoff") {
-    head.textContent = "Installing SCM Workbench…";
-    label.textContent = "Restarting into the new version";
-    meta.textContent = "The app will close and reopen when installation is ready.";
-    bar.classList.add("indet");
+    head.textContent = "SCM Workbench update ready";
+    meta.textContent = "Download complete. The app will close, install, and reopen automatically.";
+    bar.classList.remove("indet");
+    bar.firstElementChild.style.width = "100%";
+    const restartAt = Number(job.progress?.restart_at);
+    const paintCountdown = () => {
+      if (_updStrip !== strip || !strip.isConnected) return;
+      const seconds = Number.isFinite(restartAt)
+        ? Math.max(0, Math.ceil(restartAt - Date.now() / 1000)) : 0;
+      label.textContent = seconds > 0
+        ? `Restarting in ${seconds} second${seconds === 1 ? "" : "s"}…`
+        : "Restarting now…";
+    };
+    paintCountdown();
+    if (Number.isFinite(restartAt)) _updTimer = setInterval(paintCountdown, 250);
     return;
   }
   bar.classList.remove("indet");

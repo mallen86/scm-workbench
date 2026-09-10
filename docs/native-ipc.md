@@ -562,7 +562,10 @@ ephemeral-nonce health record, writes a bounded result record, and restores only
 authorized backup after interrupted phases. Update-start remains an HTTP state-changing
 operation, but its trusted Python producer now hands the candidate to this helper
 through the durable journal/request boundary; the old in-process swap/relaunch path is
-not used. It supports the signed macOS `.app` shape (including safe internal runtime
+not used. After the helper durably acknowledges ownership, the shell retains the window
+for an eight-second restart countdown before exiting; this bounded presentation delay
+remains inside the helper's 30-second handoff deadline and does not move transaction
+control into JavaScript. It supports the signed macOS `.app` shape (including safe internal runtime
 symlinks) and the flat Windows bundle shape without weakening the worker's kill-on-close
 job object. Result reconciliation finalizes the persisted handoff job on the next
 shell/worker startup. The native update methods do not alter this helper lifecycle.

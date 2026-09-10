@@ -44,7 +44,8 @@ def main():
     if "checkUpdates(!fresh)" in page:
         return fail("manual update checks still reuse the scheduled-check cache")
     for marker in ("async function finishUpdateStrip(job)", "await jobs.log(job.id)",
-                   "await finishUpdateStrip(j)", 'head.textContent = failed ? "SCM Workbench update failed"'):
+                   "await finishUpdateStrip(j)", 'head.textContent = failed ? "SCM Workbench update failed"',
+                   'job.progress?.restart_at', 'Restarting in ${seconds}'):
         if marker not in updater_ui:
             return fail(f"update progress strip is missing {marker}")
     app = (UI / "app.js").read_text(encoding="utf-8")
@@ -171,13 +172,26 @@ const elementText = node => node.textContent + node.children.map(elementText).jo
 if (!failedStrip?.isConnected || !elementText(failedStrip).includes("update failed") ||
     !elementText(failedStrip).includes("archive contained an unsafe path") || !intervalCleared)
   fail("terminal update failure did not remain visible with its log detail");
-listedJob = { id: "update-2", kind: "update", title: "Update to v3", status: "running", progress: { stage: "download", done: 2, total: 10 } };
+const countdownStart = Date.now();
+listedJob = { id: "update-2", kind: "update", title: "Update to v3", status: "handoff", progress: { stage: "handoff", restart_at: countdownStart / 1000 + 4 } };
 updaterUi.startUpdateStrip("update-2");
 await new Promise(resolve => realTimeout(resolve, 0));
-if (failedStrip.isConnected || !globalThis.__insertedUpdateStrip?.isConnected)
-  fail("a new update did not replace the retained terminal strip");
+await new Promise(resolve => realTimeout(resolve, 0));
+const countdownStrip = globalThis.__insertedUpdateStrip;
+if (failedStrip.isConnected || !countdownStrip?.isConnected || !elementText(countdownStrip).includes("Restarting in 4 seconds"))
+  fail("the durable handoff did not replace progress with a visible restart countdown");
+Date.now = () => countdownStart + 5000;
+globalThis.__updateTick();
+if (!elementText(countdownStrip).includes("Restarting now"))
+  fail("the restart countdown did not advance to its terminal message");
+Date.now = realNow;
+listedJob = { id: "update-3", kind: "update", title: "Update to v4", status: "running", progress: { stage: "download", done: 2, total: 10 } };
+updaterUi.startUpdateStrip("update-3");
+await new Promise(resolve => realTimeout(resolve, 0));
+if (countdownStrip.isConnected || !globalThis.__insertedUpdateStrip?.isConnected)
+  fail("a new update did not replace the retained countdown strip");
 globalThis.setInterval = realInterval; globalThis.clearInterval = realClearInterval;
-console.log("ok: update transport, forced manual checks, and persistent Simple-mode failure status pass");
+console.log("ok: update transport, forced checks, persistent failures, and restart countdown pass");
 '''.strip()
     result = subprocess.run([node, "--input-type=module", "-", str(FACADE), str(UPDATER_UI)], input=script,
                             text=True, capture_output=True)

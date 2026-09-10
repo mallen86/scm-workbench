@@ -108,6 +108,10 @@ class HandoffRecordTests(unittest.TestCase):
                         "asset": asset, "bundle": str(bundle), "work": data / "update",
                     }, log)
                 self.assertEqual(job["status"], "handoff")
+                self.assertEqual(job["progress"]["stage"], "handoff")
+                restart_delay = job["progress"]["restart_at"] - time.time()
+                self.assertGreater(restart_delay, 0)
+                self.assertLessEqual(restart_delay, updater.UPDATE_RESTART_GRACE_SECONDS)
                 self.assertEqual(prepare.call_args.args[0], asset)
                 self.assertEqual(prepare.call_args.args[3], "v2.0.0")
                 self.assertTrue(server._UPDATE_QUIESCING)
