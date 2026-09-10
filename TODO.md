@@ -21,7 +21,7 @@
 - [x] In the advanced settings next to the save repo paths button is text that says "You may need to restart the server after changing the Python interpreter". This is an outdated reference to the old serving method. Also ensure you don't need to restart the app for those changes to take effect immediately.
 - [x] Generating a custom cutting template with a custom dimensioned paper doesn't use the name of the paper label anywhere. The paper label should be used in the filename and when choosing elsewhere in the app. Ex: generating a legal size paper, 8.5in x 14in, and setting the name to legal ends up with the paper name showing as "8.5inx14in - 14in x 8.5in"
 - [x] Trying to open a custom dxf on macos says "opening in its default app..." but then nothing happens. I have no default app set but the standard OS style "choose app" should show up. The expected behavior should work on mac and windows.
-- [ ] The restart countdown was almost instant, like it was falling back to the test countdown and not the 8 seconds set by the const. Fix the countdown but change the const to 3 seconds, 8 is too long.
+- [x] The restart countdown was almost instant, like it was falling back to the test countdown and not the 8 seconds set by the const. Fix the countdown but change the const to 3 seconds, 8 is too long.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

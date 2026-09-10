@@ -109,6 +109,7 @@ class HandoffRecordTests(unittest.TestCase):
                     }, log)
                 self.assertEqual(job["status"], "handoff")
                 self.assertEqual(job["progress"]["stage"], "handoff")
+                self.assertEqual(updater.UPDATE_RESTART_GRACE_SECONDS, 3)
                 restart_delay = job["progress"]["restart_at"] - time.time()
                 self.assertGreater(restart_delay, 0)
                 self.assertLessEqual(restart_delay, updater.UPDATE_RESTART_GRACE_SECONDS)

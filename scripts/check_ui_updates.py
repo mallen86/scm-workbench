@@ -45,7 +45,8 @@ def main():
         return fail("manual update checks still reuse the scheduled-check cache")
     for marker in ("async function finishUpdateStrip(job)", "await jobs.log(job.id)",
                    "await finishUpdateStrip(j)", 'head.textContent = failed ? "SCM Workbench update failed"',
-                   'job.progress?.restart_at', 'Restarting in ${seconds}'):
+                   'job.progress?.restart_at', 'Restarting in ${seconds}',
+                   'setInterval(tick, 250)'):
         if marker not in updater_ui:
             return fail(f"update progress strip is missing {marker}")
     app = (UI / "app.js").read_text(encoding="utf-8")

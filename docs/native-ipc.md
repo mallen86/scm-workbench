@@ -568,7 +568,7 @@ authorized backup after interrupted phases. Update-start remains an HTTP state-c
 operation, but its trusted Python producer now hands the candidate to this helper
 through the durable journal/request boundary; the old in-process swap/relaunch path is
 not used. After the helper durably acknowledges ownership, the shell retains the window
-for an eight-second restart countdown before exiting; this bounded presentation delay
+for a three second restart countdown before exiting; this bounded presentation delay
 remains inside the helper's 30-second handoff deadline and does not move transaction
 control into JavaScript. It supports the signed macOS `.app` shape (including safe internal runtime
 symlinks) and the flat Windows bundle shape without weakening the worker's kill-on-close

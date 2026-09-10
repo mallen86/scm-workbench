@@ -75,7 +75,7 @@ DMG_TREE_MAX_BYTES = 4 * 1024 * 1024 * 1024
 DMG_TREE_MAX_PATH_BYTES = 4096
 DMG_TREE_MAX_COMPONENT_BYTES = 255
 DMG_PLIST_MAX_FILE_BYTES = 256 * 1024
-UPDATE_RESTART_GRACE_SECONDS = 8
+UPDATE_RESTART_GRACE_SECONDS = 3
 
 # These remain environment-overridable for test fixtures and forks.  They are
 # validated at request time: configuration must not turn the API path into a
@@ -1934,9 +1934,9 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         # 5) Persist the handoff fence and request while holding the same lock
         # ordinary jobs use for admission.  From this point the old process
         # never swaps, relaunches, stops ancestors, or reports success.
-        # The native shell keeps the old app open for a bounded eight-second
+        # The native shell keeps the old app open for a bounded three second
         # grace period after helper ownership is acknowledged. Publish the
-        # matching wall-clock deadline before the durable handoff so Simple
+        # matching wall clock deadline before the durable handoff so Simple
         # mode can render a countdown rather than disappearing abruptly.
         job["progress"] = {"stage": "handoff", "done": 0, "total": 0,
                            "restart_at": time.time() + UPDATE_RESTART_GRACE_SECONDS}

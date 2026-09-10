@@ -130,5 +130,6 @@ export function startUpdateStrip(jobId) {
     }
   };
   tick();
-  _updTimer = setInterval(tick, 2500);
+  // Poll quickly enough to show nearly all of the three second restart notice.
+  _updTimer = setInterval(tick, 250);
 }

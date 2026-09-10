@@ -36,13 +36,10 @@ use ipc::WorkerRpc;
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const UPDATE_RESTART_GRACE_SECONDS: u64 = 8;
+const UPDATE_RESTART_GRACE_SECONDS: u64 = 3;
 
-fn wait_for_update_restart_notice() {
-    #[cfg(not(test))]
-    thread::sleep(Duration::from_secs(UPDATE_RESTART_GRACE_SECONDS));
-    #[cfg(test)]
-    thread::sleep(Duration::from_millis(10));
+fn wait_for_update_restart_notice(duration: Duration) {
+    thread::sleep(duration);
 }
 
 /// Stop the whole worker tree, not just the direct child.
@@ -646,7 +643,9 @@ fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
                         // a short, bounded UI countdown before normal Tauri
                         // shutdown; even its six-second worker cleanup remains
                         // comfortably inside the helper's 30-second deadline.
-                        wait_for_update_restart_notice();
+                        wait_for_update_restart_notice(Duration::from_secs(
+                            UPDATE_RESTART_GRACE_SECONDS,
+                        ));
                         app.exit(0);
                         return;
                     }
@@ -1230,9 +1229,9 @@ mod restart_notice_tests {
     #[test]
     fn update_restart_notice_wait_is_bounded_and_nonzero() {
         let started = Instant::now();
-        wait_for_update_restart_notice();
+        wait_for_update_restart_notice(Duration::from_millis(10));
         let elapsed = started.elapsed();
-        assert_eq!(UPDATE_RESTART_GRACE_SECONDS, 8);
+        assert_eq!(UPDATE_RESTART_GRACE_SECONDS, 3);
         assert!(elapsed >= Duration::from_millis(10));
         assert!(elapsed < Duration::from_secs(1));
     }
