@@ -413,8 +413,13 @@ apply (7 MiB Python response ceiling and 8 MiB Tauri reader ceiling), but an
 OS-action result is much smaller than either bound.
 
 Python remains the owner of validation, canonicalization, allowed-root policy,
-and OS launching. The allowed roots are the Workbench data directory, the UI
-asset directory, and the effective configured SCM and extras repositories.
+and OS launching. A file opens with its associated application when one exists.
+If macOS or Windows reports that no application is associated, Workbench opens
+the platform application chooser instead. Paths stay single process arguments,
+and the macOS chooser script receives the path through its argument list rather
+than interpolating it into script source. The allowed roots are the Workbench
+data directory, the UI asset directory, and the effective configured SCM and
+extras repositories.
 Relative paths retain the existing first-existing-root precedence; absolute
 and relative paths are resolved canonically (including symlinks) before the
 candidate is checked with the canonical `_inside` root test. A path that

@@ -6746,24 +6746,60 @@ def reveal_path(path: Path) -> Optional[str]:
         return str(e)
 
 
-def open_path(path: Path) -> Optional[str]:
-    """Open a file in the platform's default application (double-click semantics).
+_MAC_OPEN_WITH_SCRIPT = """
+on run argv
+    set targetPath to item 1 of argv
+    set chosenApp to choose application with prompt "Choose an app to open this file"
+    do shell script "/usr/bin/open -a " & quoted form of POSIX path of chosenApp & " " & quoted form of targetPath
+end run
+"""
 
-    Unlike reveal_path this launches the file itself — e.g. a .studio3 cutting
-    template opens in Silhouette Studio if it is installed. Returns an error
-    string or None."""
+
+def _open_with_chooser(path: Path) -> Optional[str]:
+    """Show the platform application chooser after a missing file association."""
+    try:
+        if os.name == "nt":
+            subprocess.Popen(
+                ["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(path)],
+                **_external_proc_kwargs(),
+            )
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["/usr/bin/osascript", "-e", _MAC_OPEN_WITH_SCRIPT, str(path)],
+                **_external_proc_kwargs(),
+            )
+        else:
+            return "no application is associated with this file"
+        return None
+    except Exception as error:
+        return str(error)
+
+
+def open_path(path: Path) -> Optional[str]:
+    """Open a file with its associated app, or show the platform app chooser."""
     if not path.exists():
         return "path does not exist"
     try:
         if os.name == "nt":
-            os.startfile(path)  # type: ignore[attr-defined]
+            try:
+                os.startfile(path)  # type: ignore[attr-defined]
+            except OSError as error:
+                if getattr(error, "winerror", None) != 1155:
+                    raise
+                return _open_with_chooser(path)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)], **_external_proc_kwargs())
+            opened = subprocess.run(
+                ["/usr/bin/open", str(path)], shell=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, **_proc_kwargs(),
+            )
+            if opened.returncode != 0:
+                return _open_with_chooser(path)
         else:
             subprocess.Popen(["xdg-open", str(path)], **_external_proc_kwargs())
         return None
-    except Exception as e:
-        return str(e)
+    except Exception as error:
+        return str(error)
 
 
 def open_url(url: str) -> Optional[str]:

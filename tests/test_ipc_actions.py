@@ -123,6 +123,46 @@ class NativeActionTests(unittest.TestCase):
         self.assertIs(popen.call_args.kwargs["stdout"], server.subprocess.DEVNULL)
         self.assertIs(popen.call_args.kwargs["stderr"], server.subprocess.DEVNULL)
 
+    def test_macos_open_uses_application_chooser_without_an_association(self):
+        failed = server.subprocess.CompletedProcess([], 1)
+        with mock.patch.object(server.os, "name", "posix"), \
+                mock.patch.object(server.sys, "platform", "darwin"), \
+                mock.patch.object(server.subprocess, "run", return_value=failed) as run, \
+                mock.patch.object(server.subprocess, "Popen") as popen:
+            error = server.open_path(self.file)
+        self.assertIsNone(error)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/open", str(self.file)])
+        chooser = popen.call_args.args[0]
+        self.assertEqual(chooser[0:2], ["/usr/bin/osascript", "-e"])
+        self.assertEqual(chooser[-1], str(self.file))
+        self.assertIn("choose application", chooser[2])
+        self.assertFalse(popen.call_args.kwargs["shell"])
+
+    def test_macos_open_skips_chooser_when_default_app_opens_file(self):
+        opened = server.subprocess.CompletedProcess([], 0)
+        with mock.patch.object(server.os, "name", "posix"), \
+                mock.patch.object(server.sys, "platform", "darwin"), \
+                mock.patch.object(server.subprocess, "run", return_value=opened), \
+                mock.patch.object(server.subprocess, "Popen") as popen:
+            error = server.open_path(self.file)
+        self.assertIsNone(error)
+        popen.assert_not_called()
+
+    def test_windows_open_uses_system_chooser_without_an_association(self):
+        no_association = OSError("no association")
+        no_association.winerror = 1155
+        with mock.patch.object(server.os, "name", "nt"), \
+                mock.patch.object(server.os, "startfile", create=True,
+                                  side_effect=no_association), \
+                mock.patch.object(server.subprocess, "Popen") as popen:
+            error = server.open_path(self.file)
+        self.assertIsNone(error)
+        self.assertEqual(popen.call_args.args[0], [
+            "rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(self.file),
+        ])
+        self.assertFalse(popen.call_args.kwargs["shell"])
+
     def _http_request(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
