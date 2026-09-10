@@ -181,7 +181,7 @@ if (!appRejected || appRejected.message !== "invalid port") fail("application se
 // while visuals remain immediate. Use a fresh module/state for each scenario.
 const consoleUrl = dataUrl("export const toggleConsole = () => {}; export const refreshJobs = () => {}; ");
 const infoUrl = dataUrl("export const refreshInfo = () => Promise.resolve(); ");
-const formsUrl = dataUrl("export const defaultArgs = () => ({}); ");
+const formsUrl = dataUrl("export const defaultArgs = () => ({}); export const restoreArgs = () => ({}); ");
 const settingsTransportUrl = dataUrl(`
   export function setSettings(changes) {
     return new Promise((resolve, reject) => globalThis.themeWrites.push({ changes, resolve, reject }));

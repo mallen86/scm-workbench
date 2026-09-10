@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -60,11 +60,16 @@ export async function refreshJobs(forceRender = false) {
   const next = (await jobs.list()).jobs;
   // Redraw only when the job set actually changed (new job, status flip) —
   // the 4 s poll must not repaint an unchanged list (no blink). An explicit
-  // forceRender (used when the dashboard is (re)entered) repaints once even
-  // though nothing changed — a freshly rendered page needs its list filled.
+  // forceRender (used when the dashboard or history page is (re)entered)
+  // repaints once even though nothing changed — a freshly rendered page needs
+  // its list filled.
   const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
   const changed = sig !== _lastJobsSig;
   S.jobs = next;
+  // The server's recorded args back the Job history page for jobs this UI
+  // session did not start (a reload mid-run, an earlier session). An in-session
+  // doRun snapshot stays authoritative when one exists.
+  for (const j of next || []) if (j.id && j.args && !S.jobArgs[j.id]) S.jobArgs[j.id] = j.args;
   if (changed) {
     _lastJobsSig = sig;
     updateBadge();
@@ -79,6 +84,8 @@ export async function refreshJobs(forceRender = false) {
       else for (const j of S.jobs.slice(0, 6)) slot.append(jobRow(j));
     }
   }
+  // the dedicated history page owns the full list in both modes
+  if (S.page === "history" && (changed || forceRender)) renderJobHistory($("#job-history"));
 }
 
 

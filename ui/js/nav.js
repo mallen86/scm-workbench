@@ -1,11 +1,11 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
+import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
-    dashboard: "Dashboard", preparing: "Getting ready", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
+    dashboard: "Dashboard", preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
@@ -43,9 +43,10 @@ export function go(page, prefill, { push = true, anim = true } = {}) {
     const path = page === "dashboard" ? "/" : "/" + page;
     if (location.pathname !== path) history.pushState({ page }, "", path);
   }
-  // the dashboard's job list is rebuilt by the page render — fill it now so
-  // arriving there always shows the current jobs (the poll only repaints on change)
-  if (page === "dashboard") refreshJobs(true);
+  // the dashboard's and the job history page's lists are rebuilt by their
+  // render — fill them now so arriving there always shows the current jobs
+  // (the poll only repaints on change)
+  if (page === "dashboard" || page === "history") refreshJobs(true);
 }
 
 window.addEventListener("popstate", () => {
@@ -71,11 +72,16 @@ export function bootPage() {
 
 
 export function applyPrefill(page, prefill) {
-  if (page === "pdf" && prefill && prefill.card_size) {
+  if (!prefill) return;
+  // Job history: a job's own args are filtered through the manifest and land
+  // in that kind's form slot, so the page opens on exactly what the job ran.
+  if (prefill.kind && S.manifest?.[prefill.kind]?.page === page) {
+    S.forms[prefill.kind] = restoreArgs(prefill.kind, prefill.args || {});
+  } else if (page === "pdf" && prefill.card_size) {
     S.forms.create_pdf = defaultArgs("create_pdf");
     S.forms.create_pdf.card_size = prefill.card_size;
   }
-  if (page === "fetch" && prefill && prefill.plugin) S.plugin = prefill.plugin;
+  if (page === "fetch" && prefill.plugin) S.plugin = prefill.plugin;
 }
 
 
@@ -125,7 +131,7 @@ export function setTheme(theme) {
    paths. Real paths stay in job.cmd for the engine. */
 
 
-export const SIMPLE_PAGES = ["fetch", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
+export const SIMPLE_PAGES = ["history", "fetch", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
 
 
 export function uiMode() {

@@ -73,7 +73,7 @@ for html_name in ("loading.html", "index.html"):
             fail(f"{html_name} references missing embedded asset {asset}")
 
 nav = (ROOT / "ui/js/nav.js").read_text(encoding="utf-8")
-for route in ("dashboard", "fetch", "pdf", "offset", "templates", "extras", "sizes", "utilities", "settings"):
+for route in ("dashboard", "history", "fetch", "pdf", "offset", "templates", "extras", "sizes", "utilities", "settings"):
     if route not in nav:
         fail(f"SPA route {route} is not present in the embedded UI")
 

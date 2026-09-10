@@ -3517,6 +3517,11 @@ def list_jobs() -> dict:
                "status": j["status"], "exit_code": j.get("exit_code"), "cmd": j["cmd"]}
         if j.get("progress"):
             row["progress"] = j["progress"]
+        # The job history page rebuilds a job's settings from the exact args it
+        # ran with. Persisted rows already carry them; live rows must expose the
+        # same field or a job still running (or one reloaded mid-run) would have
+        # nothing to restore. Args come from the validated start request.
+        row["args"] = j.get("args") or {}
         row.update(warnings=j.get("warnings", []), outputs=job_outputs(j),
                    save_grants=_grants_for_job(j))
         running.append(row)

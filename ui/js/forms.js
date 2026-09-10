@@ -63,6 +63,36 @@ export function formArgs(kind) {
 }
 
 
+/* Rebuild a form slot from a job's recorded args (the Job history page
+   restores "that page, with these settings"). Only keys the manifest still
+   defines survive, each coerced to its option's type, so a job recorded by an
+   older manifest cannot inject unknown keys or a value the renderer cannot
+   bind. Every other field keeps the manifest default. */
+export function restoreArgs(kind, raw) {
+  const spec = S.manifest?.[kind];
+  const out = defaultArgs(kind);
+  if (!spec || !raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const g of spec.groups || []) {
+    for (const o of g.options || []) {
+      if (!Object.prototype.hasOwnProperty.call(raw, o.key)) continue;
+      const v = raw[o.key];
+      if (o.type === "chips" || o.type === "choice_chips") {
+        if (Array.isArray(v)) out[o.key] = v.filter(x => typeof x === "string");
+      } else if (o.type === "toggle") {
+        if (typeof v === "boolean") out[o.key] = v;
+      } else if (o.type === "number" || o.type === "range") {
+        // the number renderer stores its live value as a string; accept both
+        if (typeof v === "number" && Number.isFinite(v)) out[o.key] = v;
+        else if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) out[o.key] = v;
+      } else if (typeof v === "string") {
+        out[o.key] = v;
+      }
+    }
+  }
+  return out;
+}
+
+
 export function afterFormChange(kind, args) {
   // The S.forms slot can be wiped out from under a live form at any time
   // (refreshInfo on mode switches / repo updates / boot retries). The form

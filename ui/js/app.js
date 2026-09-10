@@ -12,9 +12,10 @@
      console.js   jobs list, the live console pane, footer actions
      prep.js      repo clone/update progress rows + watcher
      info.js      refreshInfo() and the boot-failure banner
-     pages/*.js   one module per page (dashboard, fetch, pdf, offset, ...)
+     pages/*.js   one module per page (dashboard, history, fetch, pdf, ...)
    ========================================================================== */
 import { refreshInfo, showBootFailure } from "./info.js";import { bindNav, bootPage, go } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { firstBootPageNeeded, startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import { getTauriInvoke } from "./transport.js";import { getUpdates } from "./updates-transport.js";import "./pages/dashboard.js";
+import "./pages/history.js";
 import "./pages/preparing.js";
 import "./pages/fetch.js";
 import "./pages/pdf.js";

@@ -45,6 +45,18 @@ class NativeJobsTests(unittest.TestCase):
         self.assertEqual(polled[0]["next_seq"], 2)
         self.assertEqual((polled[1]["status"], polled[1]["complete"]), ("missing", True))
 
+    def test_job_history_args_are_exposed_for_live_and_persisted_rows(self):
+        # The Job history page rebuilds a job's settings from the args it ran
+        # with, so every list_jobs row must carry them: live rows (a UI reload
+        # mid-run) and persisted rows (an earlier session) alike. A row with no
+        # recorded args still exposes an object, never undefined.
+        server.JOBS["a"]["args"] = {"card_size": "poker", "borderless": True}
+        live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
+        self.assertEqual(live["args"], {"card_size": "poker", "borderless": True})
+        server.JOBS["a"].pop("args")
+        live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
+        self.assertEqual(live["args"], {})
+
     def test_server_error_is_internal_not_bad_request(self):
         with mock.patch.object(server, "list_jobs", side_effect=ValueError("server bug")), \
                 mock.patch.object(ipc.traceback, "print_exc") as trace:

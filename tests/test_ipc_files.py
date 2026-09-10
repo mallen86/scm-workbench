@@ -196,11 +196,14 @@ class ArtifactExportTests(unittest.TestCase):
         server.JOBS_FILE.write_text(json.dumps(persisted), encoding="utf-8")
         old_row = next(row for row in server.list_jobs()["jobs"] if row["id"] == old["id"])
         self.assertIsNone(old_row["save_grants"])
+        # persisted rows keep the args the Job history page restores from
+        self.assertEqual(old_row["args"], {"output_path": "game/output/result.pdf"})
 
     def test_grants_are_opaque_ttl_bounded_and_memoized(self):
         job, path, snap, grant = self.grant()
         exposed = server.list_jobs()["jobs"][0]
-        self.assertEqual(set(exposed), {"id", "ts", "kind", "title", "status", "exit_code", "cmd", "warnings", "outputs", "save_grants"})
+        self.assertEqual(set(exposed), {"id", "ts", "kind", "title", "status", "exit_code", "cmd", "warnings", "outputs", "save_grants", "args"})
+        self.assertEqual(exposed["args"], {"output_path": "game/output/result.pdf"})
         self.assertEqual(exposed["save_grants"], [grant])
         self.assertNotIn(str(path), grant)
         self.assertEqual(server._grants_for_job(job), [grant])
@@ -642,7 +645,9 @@ class ArtifactExportTests(unittest.TestCase):
         self.assertEqual(rows["job"]["save_grants"], [grant])
         self.assertEqual(rows["unrelated"]["outputs"], [])
         self.assertIsNone(rows["unrelated"]["save_grants"])
-        self.assertEqual(set(rows["job"]), {"id", "ts", "kind", "title", "status", "exit_code", "cmd", "warnings", "outputs", "save_grants"})
+        self.assertEqual(rows["unrelated"]["args"], {})
+        self.assertEqual(set(rows["job"]), {"id", "ts", "kind", "title", "status", "exit_code", "cmd", "warnings", "outputs", "save_grants", "args"})
+        self.assertEqual(rows["job"]["args"], {"output_path": "game/output/result.pdf"})
 
     def test_grant_invalidates_on_job_status_or_source_change(self):
         job, source, _, grant = self.grant()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static and Node contract for the offset mutation transport facade."""
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -51,7 +52,8 @@ def main() -> int:
     ):
         if marker not in page:
             return fail(f"simple offset page contract is missing {marker}")
-    if 'SIMPLE_PAGES = ["fetch", "pdf", "offset", "settings"]' not in nav:
+    simple_pages = re.search(r'export const SIMPLE_PAGES = \[([^\]]*)\]', nav)
+    if not simple_pages or '"offset"' not in simple_pages.group(1):
         return fail("simple navigation does not allow the offset page")
     offset_link = '<a class="nav-item" data-page="offset"><span class="nav-ico" data-ico="target"></span>Offset &amp; calibration</a>'
     if offset_link not in index:

@@ -764,6 +764,22 @@ select.input option { background: var(--surface); color: var(--text); }
 .jobrow .jr-cmd { font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .jobrow .jr-meta { text-align: right; flex: 0 0 auto; }
 .jobrow .jr-meta .t { font-size: 11px; color: var(--faint); }
+
+/* Job history rows: the same grammar as the dashboard list, plus the action
+   column (open the log, and the arrow that marks a row as restorable). */
+.jobrow .jr-act { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.jobrow .jr-go { width: 18px; height: 18px; display: inline-flex; color: var(--faint); transition: color 0.12s, transform 0.12s; }
+.jobrow .jr-go svg { width: 100%; height: 100%; }
+.jobrow.restorable:hover .jr-go { color: var(--accent); transform: translateX(2px); }
+.jobrow:not(.restorable) { cursor: default; }
+.jobrow:not(.restorable):hover { border-color: var(--border-soft); background: var(--surface-2); }
+/* the job console does not exist in simple mode: hide its button there (the
+   action itself is refused in openConsole too) */
+body.mode-simple .jobrow .jr-act button { display: none; }
+@media (max-width: 720px) {
+  .jobrow .jr-cmd { display: none; }
+  .jobrow .jr-act .btn-label { display: none; }
+}
 .statusdot { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; }
 .statusdot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
 .statusdot.running::before { background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: pulse 1.1s ease infinite; }
