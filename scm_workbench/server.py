@@ -1732,8 +1732,7 @@ def run_update_check() -> dict:
         except updater.UpdateError as e:
             st.update(status="error", reason=str(e), checked_at=time.time())
         else:
-            if rel.get("tag") and (updater.is_newer(rel["tag"], SERVER_VERSION) or
-                                    rel["tag"].lstrip("v") == SERVER_VERSION):
+            if rel.get("tag") and updater.is_newer(rel["tag"], SERVER_VERSION):
                 try:
                     asset = updater.pick_asset(rel)
                 except updater.UpdateError as e:

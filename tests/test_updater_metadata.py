@@ -632,6 +632,25 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(list(Path(self.temp.name).glob(".update-state.json.*.tmp")), [])
 
+    def test_equal_release_is_up_to_date_not_an_installable_update(self):
+        asset_name = current_asset_name()
+        release = {
+            "tag": "v1.0.0", "name": "same", "body": "", "published": "",
+            "url": "https://github.com/owner/workbench/releases/tag/v1.0.0",
+            "assets": [{
+                "id": 1, "tag": "v1.0.0", "name": asset_name,
+                "url": "https://github.com/owner/workbench/releases/download/v1.0.0/" + asset_name,
+                "size": 1, "digest": None,
+            }],
+        }
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "pick_asset") as pick:
+            state = server.run_update_check()
+        self.assertEqual(state["status"], "up-to-date")
+        self.assertEqual(state["latest"], "v1.0.0")
+        self.assertIsNone(state["asset"])
+        pick.assert_not_called()
+
     def test_explicit_force_bypasses_a_fresh_cached_update_check(self):
         fresh = self.valid_state(checked_at=time.time())
         server.save_update_state(fresh)
