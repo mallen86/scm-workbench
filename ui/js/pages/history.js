@@ -5,13 +5,12 @@
    the jobs poll can repaint it in place; go() asks refreshJobs(true) for a
    fresh paint on arrival.
 
-   The two cards a first run needs (connect the repos, the one-time welcome)
-   live here because the dashboard that used to own them is gone; both hide
-   themselves as soon as they no longer apply. */
+   The repo connect card a first run needs lives here because the dashboard
+   that used to own it is gone; it hides itself as soon as the repo is found.
+   The one-time welcome card belongs to the setup screen (see onboarding.js). */
 
-import { PAGES, S, el, pageHead } from "../core.js";
+import { PAGES, el, pageHead } from "../core.js";
 import { renderJobHistory } from "../job-history.js";
-import { onboardCard } from "../onboarding.js";
 import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";
 
 
@@ -22,7 +21,6 @@ PAGES.history = () => {
   wrap.append(pageHead("Job history",
     "Every job this app has run, newest first. Click a job to open its page with the settings it ran with. Live output stays in the console."));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
-  else if (!S.info.settings.onboarded) wrap.append(onboardCard());
   const slot = el("div", { id: "job-history" });
   wrap.append(slot);
   renderJobHistory(slot);   // first paint from the jobs already in hand

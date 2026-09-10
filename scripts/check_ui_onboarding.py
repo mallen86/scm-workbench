@@ -87,6 +87,30 @@ def main() -> int:
     if "/api/" in page or "wb_rpc" in page or "fetch(" in page:
         return fail("first-boot page bypasses the shared info/native transport path")
 
+    # The one-time welcome card belongs to this screen: it is appended once the
+    # repos are ready and is the sole exit when it is shown (its own button
+    # leaves the setup view, so the actions row would repeat that exit).
+    onboarding = (JS / "onboarding.js").read_text(encoding="utf-8")
+    for marker in ('export function onboardCard(onDone)',
+                   'if (typeof onDone === "function") onDone();',
+                   "else bootPage();",
+                   'setSettings({ onboarded: true })'):
+        if marker not in onboarding:
+            return fail(f"the welcome card is missing its dismissal path: {marker}")
+    for marker in ('import { onboardCard } from "../onboarding.js";',
+                   'if (allReady && !S.info?.settings?.onboarded) wrap.append(onboardCard(leaveSetup));',
+                   'else wrap.append(actions);'):
+        if marker not in page:
+            return fail(f"the setup screen does not own the welcome card: {marker}")
+    # A returning user must never see it again, and no other page may render it.
+    if 'S.info.settings.onboarded' not in onboarding:
+        return fail("the welcome card does not read the dismissed flag")
+    for other in sorted(JS.rglob("*.js")):
+        if other in (JS / "onboarding.js", JS / "pages" / "preparing.js"):
+            continue
+        if "onboardCard" in other.read_text(encoding="utf-8"):
+            return fail(f"{other.relative_to(ROOT)} renders the one-time welcome card")
+
     print("ok: simple PDF visibility and transient packaged first-boot setup contracts pass")
     return 0
 

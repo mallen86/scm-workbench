@@ -4,6 +4,7 @@ import { PAGES, S, el, ico, toast } from "../core.js";
 import { bootPage, go } from "../nav.js";
 import { doRun } from "../forms.js";
 import { refreshInfo } from "../info.js";
+import { onboardCard } from "../onboarding.js";
 import { startPrepWatcher, updatePrepRows } from "../prep.js";
 
 function leaveSetup() {
@@ -85,7 +86,11 @@ PAGES.preparing = () => {
     if (active) actions.append(el("span", { class: "small faint" },
       "Pages unlock as each repo becomes ready."));
   }
-  wrap.append(actions);
+  // The one-time welcome card belongs to this screen and nowhere else: it is
+  // appended only once every repo is actually ready, and its own button leaves
+  // the setup view, so the actions row would only repeat that same exit.
+  if (allReady && !S.info?.settings?.onboarded) wrap.append(onboardCard(leaveSetup));
+  else wrap.append(actions);
 
   // go() invokes this only after the detached page has entered the document,
   // allowing prep.js to find #repoprog and attach its live row handles here.

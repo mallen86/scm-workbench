@@ -96,12 +96,15 @@ def main() -> int:
         for export in exports:
             if export not in source:
                 return fail(f"{path.relative_to(ROOT)} is missing {export}")
-    for marker in ('import { onboardCard } from "../onboarding.js";',
-                   'import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";',
-                   'if (connectCardNeeded()) wrap.append(repoSetupCard());',
-                   'else if (!S.info.settings.onboarded) wrap.append(onboardCard());'):
+    for marker in ('import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";',
+                   'if (connectCardNeeded()) wrap.append(repoSetupCard());'):
         if marker not in page:
-            return fail(f"the landing page does not carry the first-run cards: {marker}")
+            return fail(f"the landing page does not carry the first-run repo card: {marker}")
+    # The welcome card belongs to the first-run setup screen, so the landing
+    # page must not render it (it used to, which is how it leaked into a normal
+    # page for a returning user).
+    if "onboardCard" in page:
+        return fail("the landing page renders the one-time welcome card again")
     # matrixCard used to live in the dashboard module; sizes is its only caller
     sizes = (JS / "pages" / "sizes.js").read_text(encoding="utf-8")
     if 'export function matrixCard(' not in sizes:

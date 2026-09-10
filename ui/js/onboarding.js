@@ -1,13 +1,14 @@
-/* onboarding: the one-time welcome card. It is shown on the landing page
-   until the user dismisses it, and the flag lives in the settings file so it
-   never comes back. */
+/* onboarding: the one-time welcome card. It belongs to the first-run setup
+   screen and appears there once the managed repos are ready, so the staged
+   workflow it describes is the next thing the user sees after setup. The
+   dismissed flag lives in the settings file, so it never comes back. */
 
 import { S, el } from "./core.js";
-import { go } from "./nav.js";
+import { bootPage } from "./nav.js";
 import { setSettings } from "./settings-transport.js";
 
 
-export function onboardCard() {
+export function onboardCard(onDone) {
   const steps = [
     ["1", "Calibrate & offset", "Print a calibration sheet, measure the drift, and save the X/Y/angle correction. Create PDF applies it when enabled."],
     ["2", "Fetch card art", "Choose a game and decklist. Card art goes to game/front."],
@@ -27,7 +28,10 @@ export function onboardCard() {
       el("button", { class: "btn primary", onclick: async () => {
         await setSettings({ onboarded: true });
         S.info.settings.onboarded = true;
-        go(S.page || "history", null, { push: false });
+        // The card only exists on the setup screen, so dismissing it means
+        // leaving that screen; the caller may pick a different landing page.
+        if (typeof onDone === "function") onDone();
+        else bootPage();
       } }, "Got it. Show me around"),
     ),
   );
