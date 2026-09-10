@@ -1,7 +1,7 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
+import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
@@ -92,7 +92,14 @@ export function applyPrefill(page, prefill) {
 
 
 export function bindNav() {
-  $$("#nav .nav-item").forEach(a => a.onclick = () => go(a.dataset.page));
+  // Every nav item is a route except the documentation link, which is a real
+  // outbound URL: it goes through the same openUrl action as every other
+  // "open in the browser" affordance (native bridge in the app window, the
+  // compatibility route in a browser).
+  $$("#nav .nav-item").forEach(a => {
+    if (a.dataset.docs) a.onclick = () => openUrl(a.dataset.docs, "the silhouette-card-maker docs");
+    else a.onclick = () => go(a.dataset.page);
+  });
   $$(".mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
   $("#btn-console").onclick = toggleConsole;
   $$("#theme-switch .ts-btn").forEach(b => b.onclick = () => setTheme(b.dataset.theme));

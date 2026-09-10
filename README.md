@@ -34,7 +34,7 @@ On first launch a window opens immediately, and the setup work (fetching the new
 | **Sizes & layouts** | every card and paper size as scaled silhouettes, and the cards-per-page matrix |
 | **Utilities** | clear the card-image folders, a size converter, a list of all sizes |
 
-Everything runs as a tracked job: a live log, a stop button, a persistent history, and — before you run — a **command preview** of the exact command that will run. The preview doubles as a sanity check: the Create PDF button stays disabled, with a reason, while the front-images folder is empty.
+Everything runs as a tracked job: a live log, a stop button, a persistent history, and — before you run — a **command preview** of the exact command that will run. The preview doubles as a sanity check: the Create PDF button stays disabled, with a reason, while the front-images folder is empty. The sidebar also carries a **Documentation** link (marked with the opens-in-your-browser arrow) to the silhouette-card-maker docs site, in both interface modes.
 
 **Simple or Advanced** (the switch at the bottom of the sidebar, on every page). Advanced is the full set of options above. Simple is the essentials only: the navigation keeps Job history, Fetch card art, Create PDF, Offset & calibration and Settings, and the Create PDF form shrinks to the choices you actually use, with everything else at its defaults. The “Apply saved offset” switch is enabled only when an offset is saved for that paper size.
 

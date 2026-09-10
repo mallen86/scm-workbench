@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static and Node contract for the native OS-action facade."""
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -85,6 +86,31 @@ def main() -> int:
             return fail(f"{path.relative_to(ROOT)} did not migrate its action call site")
     if "split(/[\\\\/]/)" not in console:
         return fail("console basename does not handle both slash separators")
+    # The documentation link is the one nav item that leaves the app: it must
+    # carry the docs URL, the external mark, and go through openUrl (so the
+    # packaged window uses the native url.open bridge rather than a WebView
+    # navigation). It stays available in both interface modes.
+    index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+    nav = (UI / "nav.js").read_text(encoding="utf-8")
+    css = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
+    docs_item = re.search(r'<a class="nav-item nav-external"[^>]*data-docs="([^"]+)"[^>]*>', index)
+    if not docs_item:
+        return fail("the sidebar has no documentation item")
+    if docs_item.group(1) != "https://alan-cha.github.io/silhouette-card-maker/":
+        return fail("the documentation item does not point at the silhouette-card-maker docs")
+    if 'data-ico="external"' not in index[docs_item.start():index.index("</a>", docs_item.start())]:
+        return fail("the documentation item is missing the opens-in-new-tab icon")
+    if 'data-simple-hide' in docs_item.group(0):
+        return fail("the documentation item is hidden in simple mode")
+    for marker in ('import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";',
+                   'if (a.dataset.docs) a.onclick = () => openUrl(a.dataset.docs,'):
+        if marker not in nav:
+            return fail(f"nav.js does not open the docs link through openUrl: {marker}")
+    if 'export async function openUrl(' not in (UI / "core.js").read_text(encoding="utf-8"):
+        return fail("core.js no longer exports the openUrl action")
+    for marker in (".nav-item .nav-ext {", ".nav-item .nav-ext svg {"):
+        if marker not in css:
+            return fail(f"theme.css is missing the docs item mark style: {marker}")
     all_ui = "\n".join(p.read_text(encoding="utf-8") for p in UI.rglob("*.js"))
     if "nativePick" in all_ui or "plugin:dialog|save" in all_ui or "pick_save" in all_ui:
         return fail("legacy direct picker/save bridge remains")

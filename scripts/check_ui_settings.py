@@ -200,6 +200,7 @@ async function freshTheme(initial) {
     export const $ = () => ({ textContent: "", innerHTML: "", firstElementChild: null });
     export const $$ = () => [];
     export const iconize = () => {};
+    export const openUrl = () => Promise.resolve({ ok: true });
     export const toast = (...args) => globalThis.themeToasts.push(args);
   `);
   const navCode = navSource

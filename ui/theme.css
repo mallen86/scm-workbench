@@ -150,6 +150,11 @@ body.mode-simple .nav-item[data-simple-hide] { display: none; }
 }
 .nav-ico { width: 18px; height: 18px; display: inline-flex; flex: 0 0 18px; }
 .nav-ico svg { width: 100%; height: 100%; }
+/* an outbound nav item (documentation): the same shape as the route items,
+   with the "opens in your browser" mark pushed to the right edge */
+.nav-item .nav-ext { margin-left: auto; width: 14px; height: 14px; flex: 0 0 14px; opacity: 0.55; }
+.nav-item .nav-ext svg { width: 100%; height: 100%; }
+.nav-item:hover .nav-ext, .nav-item.nav-external:hover .nav-ext { opacity: 0.9; }
 
 .sidebar-foot {
   display: flex; align-items: center; gap: 8px;
