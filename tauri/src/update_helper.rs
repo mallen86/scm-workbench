@@ -98,7 +98,17 @@ pub fn run_cli(args: &[String]) -> Result<(), ()> {
         Some(Ok(value)) => value,
         _ => return Err(()),
     };
-    run(invocation).map_err(|_| ())
+    // The reason a helper failed was previously discarded here (`map_err(|_|
+    // ())`), which is why a stranded update left no explanation anywhere. It is
+    // recorded before the exit code is decided.
+    let data = invocation.data_dir.clone();
+    match run(invocation) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            update_log(&data, &format!("helper failed: {error}"));
+            Err(())
+        }
+    }
 }
 
 pub fn run(invocation: Invocation) -> io::Result<()> {
@@ -109,12 +119,25 @@ pub fn run(invocation: Invocation) -> io::Result<()> {
         return Err(invalid("journal token does not match command token"));
     }
     let layout = validate_layout(&journal)?;
+    update_log(
+        &data,
+        &format!(
+            "helper start mode={} phase={} target={}",
+            match invocation.mode {
+                Mode::Handoff => "handoff",
+                Mode::Recover => "recover",
+            },
+            journal.phase.name(),
+            layout.target.display()
+        ),
+    );
     match invocation.mode {
         Mode::Handoff => handoff(&data, &mut journal, &layout)?,
         Mode::Recover => {
             recover_with_wait(&data, &mut journal, &layout, invocation.recovery_wait_pid)?
         }
     }
+    update_log(&data, "helper finished");
     Ok(())
 }
 
@@ -162,6 +185,25 @@ pub enum Phase {
     Failed,
 }
 
+impl Phase {
+    /// The stable spelling used in diagnostics, matching the journal's own
+    /// serde kebab-case names so a log line can be compared to the file.
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Prepared => "prepared",
+            Phase::Identified => "identified",
+            Phase::BackupRenamed => "backup-renamed",
+            Phase::CandidatePublished => "candidate-published",
+            Phase::Launching => "launching",
+            Phase::Launched => "launched",
+            Phase::Healthy => "healthy",
+            Phase::Completed => "completed",
+            Phase::Rollback => "rollback",
+            Phase::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Layout {
     target: PathBuf,
@@ -197,6 +239,53 @@ fn invalid(message: &str) -> io::Error {
 
 fn bounded_text(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+/// Best-effort, bounded diagnostics for the helper and the processes it
+/// launches.
+///
+/// The helper runs detached with its stdio closed, so without this a failure is
+/// completely invisible: the app refuses to start, the journal keeps its last
+/// phase, and nothing on disk says why. That was the single hardest part of
+/// diagnosing a stranded update, so every consequential step and every failure
+/// reason is recorded here.
+///
+/// Logging must never change the transaction's outcome, so failures are
+/// deliberately swallowed. The file is capped and rewritten from scratch when
+/// it reaches the cap, so a repeating failure cannot grow it without bound.
+const UPDATE_LOG: &str = "update-helper.log";
+const UPDATE_LOG_LIMIT: u64 = 256 * 1024;
+const UPDATE_LOG_LINE_LIMIT: usize = 512;
+
+fn update_log(data: &Path, message: &str) {
+    let _ = append_update_log(data, message);
+}
+
+fn append_update_log(data: &Path, message: &str) -> io::Result<()> {
+    let text: String = message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(UPDATE_LOG_LINE_LIMIT)
+        .collect();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let line = format!("{now_ms} {text}\n");
+    let path = data.join(UPDATE_LOG);
+    // Never write through a link, and never append to something that is not a
+    // regular file. The path is inside the validated data directory.
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(invalid("update log is not a regular file"));
+        }
+        if meta.len() >= UPDATE_LOG_LIMIT {
+            fs::remove_file(&path)?;
+        }
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    file.write_all(line.as_bytes())?;
+    file.sync_all()
 }
 
 pub(crate) fn valid_token(token: &str) -> bool {
@@ -974,7 +1063,9 @@ fn publish_candidate(data: &Path, journal: &mut Journal, layout: &Layout) -> io:
     }
     rename_noreplace(&layout.candidate, &layout.target)?;
     journal.phase = Phase::CandidatePublished;
-    journal_write(data, journal)
+    journal_write(data, journal)?;
+    update_log(data, "candidate published");
+    Ok(())
 }
 
 fn continue_transaction(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<()> {
@@ -1380,6 +1471,7 @@ fn launch_and_wait(data: &Path, journal: &mut Journal, layout: &Layout) -> io::R
     journal.new_identity = Some(identity);
     journal.phase = Phase::Launched;
     journal_write(data, journal)?;
+    update_log(data, &format!("replacement shell launched pid={pid}"));
     let result = await_health(data, journal, layout, &nonce, Some(&mut child));
     drop(child);
     result
@@ -1547,6 +1639,10 @@ fn complete(data: &Path, journal: &mut Journal, layout: &Layout) -> io::Result<(
     atomic_write(&data.join(RESULT), &bytes)?;
     let _ = fs::remove_file(data.join(HEALTH));
     fs::remove_file(data.join(JOURNAL))?;
+    update_log(
+        data,
+        &format!("update completed to {}", journal.expected_version),
+    );
     sync_dir(data)
 }
 
@@ -1742,6 +1838,7 @@ fn finish_failure(
     journal.phase = Phase::Failed;
     journal_write(data, journal)?;
     write_failure(data, journal, message)?;
+    update_log(data, &format!("update failed: {message}"));
     let executable = executable_for_target(&layout.target);
     let launchable = target_is_launchable(&executable);
     // Remove the durable marker before starting the old shell, so the
@@ -2629,6 +2726,112 @@ mod tests {
             Path::new(&journal.target),
             &fixture.target
         ));
+    }
+
+    #[test]
+    fn a_helper_failure_reason_lands_in_the_update_log() {
+        // End to end through the real entry point: this is the assertion that
+        // would have made the stranded Windows update self-explaining.
+        let fixture = Fixture::new();
+        let mut journal = fixture.journal(Phase::Identified);
+        journal.token = token();
+        fixture.write_journal(&journal);
+        // A token that does not match the journal fails inside run() before any
+        // filesystem work, so the reason is deterministic and portable.
+        let args: Vec<String> = vec![
+            "app".into(),
+            "--update-helper".into(),
+            "--data-dir".into(),
+            fixture.data.to_string_lossy().into_owned(),
+            "--token".into(),
+            "b".repeat(64),
+            "--mode".into(),
+            "recover".into(),
+            "--wait-pid".into(),
+            std::process::id().to_string(),
+        ];
+        assert!(
+            run_cli(&args).is_err(),
+            "the mismatched token must fail the helper"
+        );
+        let text = fs::read_to_string(fixture.data.join(UPDATE_LOG))
+            .expect("the helper failure must leave a log");
+        assert!(
+            text.contains("journal token does not match command token"),
+            "the failure reason was not recorded: {text}"
+        );
+    }
+
+    #[test]
+    fn the_update_log_is_bounded_and_records_failure_reasons() {
+        // The absence of this file is why a stranded update had no explanation.
+        // The reason must be recorded, and the file must not be able to grow
+        // without bound when the same failure repeats.
+        let fixture = Fixture::new();
+        let path = fixture.data.join(UPDATE_LOG);
+
+        update_log(
+            &fixture.data,
+            "helper start mode=handoff phase=identified target=C:\\app",
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("helper start"),
+            "the start line was not recorded: {text}"
+        );
+        assert!(text.contains("identified"), "the phase was not recorded");
+
+        update_log(
+            &fixture.data,
+            "helper failed: old process did not exit before handoff deadline",
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("helper failed: old process did not exit before handoff deadline"),
+            "the failure reason was not recorded: {text}"
+        );
+
+        // Control characters cannot forge extra lines.
+        update_log(&fixture.data, "one\ntwo\rthree");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("one two three"),
+            "control characters were not neutralized"
+        );
+
+        // An over-long message is truncated, not written whole.
+        let long = "x".repeat(10_000);
+        update_log(&fixture.data, &long);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(&long),
+            "an over-long line was written in full"
+        );
+        assert!(
+            text.lines().count() <= 4,
+            "each call must write exactly one line"
+        );
+
+        // Reaching the cap rewrites the file instead of growing forever.
+        fs::write(&path, vec![b'y'; UPDATE_LOG_LIMIT as usize]).unwrap();
+        update_log(&fixture.data, "after the cap");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("after the cap"));
+        assert!(
+            (text.len() as u64) < UPDATE_LOG_LIMIT,
+            "the log did not shrink after reaching its cap"
+        );
+
+        // A symlinked or non-regular log is refused, never written through.
+        #[cfg(unix)]
+        {
+            let victim = fixture.data.join("victim.txt");
+            fs::write(&victim, b"untouched").unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&victim, &path).unwrap();
+            update_log(&fixture.data, "must not be written");
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+        }
     }
 
     #[test]

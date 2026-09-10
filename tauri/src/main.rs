@@ -425,6 +425,13 @@ fn main() {
             if let Some(decision) = recovery {
                 match decision {
                     Ok(journal) => {
+                        // The phase and target are the two facts needed to
+                        // interpret a stuck update; without them a silent
+                        // recovery failure is unattributable.
+                        record(&data.join("server-tauri.log"), &format!(
+                            "[shell] dispatching update recovery: phase={:?} target={}",
+                            journal.phase, journal.target
+                        ));
                         let result = update_helper::materialize_helper(&exe, &data, &journal.token)
                             .and_then(|helper| update_helper::spawn_helper(
                                 &helper, &data, &journal.token,
@@ -434,6 +441,10 @@ fn main() {
                             record(&data.join("server-tauri.log"), &format!("[shell] update recovery could not start: {error}"));
                             app.handle().exit(1);
                         } else {
+                            // Success here means the helper was started, not that
+                            // the transaction advanced: it runs detached and
+                            // reports through server-tauri.log and update-helper.log.
+                            record(&data.join("server-tauri.log"), "[shell] update recovery helper dispatched; see update-helper.log for the outcome");
                             app.handle().exit(0);
                         }
                     }
