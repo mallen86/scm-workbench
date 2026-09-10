@@ -119,6 +119,13 @@ pub fn run(invocation: Invocation) -> io::Result<()> {
         return Err(invalid("journal token does not match command token"));
     }
     let layout = validate_layout(&journal)?;
+    // Count this recovery attempt before doing any work. A transaction that
+    // fails partway through would otherwise be retried forever, because every
+    // launch replays the same steps and reaches the same failure.
+    if invocation.mode == Mode::Recover {
+        journal.attempts = journal.attempts.saturating_add(1);
+        journal_write(&data, &journal)?;
+    }
     update_log(
         &data,
         &format!(
@@ -168,6 +175,11 @@ pub struct Journal {
     pub new_pid: Option<u32>,
     #[serde(default)]
     pub new_identity: Option<ProcessIdentity>,
+    /// How many times a recovery helper has tried to advance this transaction.
+    /// The shell uses this to stop replaying a transaction that cannot make
+    /// progress, so a stuck journal can never keep the app from starting.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1742,6 +1754,89 @@ fn write_failure(data: &Path, journal: &Journal, message: &str) -> io::Result<()
     atomic_write(&data.join(RESULT), &bytes)
 }
 
+/// How many recovery attempts a pending transaction may consume before the
+/// shell stops replaying it.
+const RECOVERY_ATTEMPT_LIMIT: u32 = 3;
+
+/// Settle a transaction that has exhausted its recovery attempts.
+///
+/// The installed application matters more than completing the update, so a
+/// transaction that cannot advance must not keep the app from starting. That is
+/// only safe when the installed application is actually present and launchable:
+/// starting a half-published tree would be worse than a stuck journal, so a
+/// genuinely broken install still goes through rollback instead.
+///
+/// Returns whether the transaction was settled. The caller then starts the
+/// installed application normally. Anything that makes settling unsafe — a
+/// missing or unlaunchable install, or a journal whose layout cannot be read —
+/// returns `false` rather than an error, so a broken install keeps its
+/// transaction for rollback instead of failing the launch outright.
+pub(crate) fn abandon_exhausted_recovery(data: &Path, journal: &Journal) -> io::Result<bool> {
+    if journal.attempts < RECOVERY_ATTEMPT_LIMIT {
+        return Ok(false);
+    }
+    // Settle only the transaction that is actually still on disk, and only the
+    // exact one this shell read: a second call, or a journal replaced by a
+    // different transaction, has nothing to settle here.
+    if !is_pending_transaction(data, journal) {
+        return Ok(false);
+    }
+    let Ok(layout) = validate_layout(journal) else {
+        return Ok(false);
+    };
+    if !target_is_launchable(&executable_for_target(&layout.target)) {
+        return Ok(false);
+    }
+    if validate_application_layout(&layout.target).is_err() {
+        return Ok(false);
+    }
+    write_failure(
+        data,
+        journal,
+        "the update could not be completed; the previous version was kept",
+    )?;
+    let journal_path = data.join(JOURNAL);
+    match fs::symlink_metadata(&journal_path) {
+        Ok(meta) if meta.file_type().is_file() => {
+            fs::remove_file(&journal_path)?;
+            sync_dir(data)?;
+        }
+        Ok(_) => return Err(invalid("update journal is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let _ = fs::remove_file(data.join(HEALTH));
+    // The candidate is abandoned, not published. Its removal is best effort:
+    // disk clutter must never be a reason to fail startup.
+    if layout.candidate.exists() {
+        let _ = remove_authorized_tree(&layout.candidate, &layout.parent, &journal.candidate_name);
+    }
+    update_log(
+        data,
+        &format!(
+            "recovery attempts exhausted after {} attempt(s); kept the installed application",
+            journal.attempts
+        ),
+    );
+    Ok(true)
+}
+
+/// Whether the given journal is the exact transaction still recorded on disk.
+/// Reads the file directly rather than through `pending_journal` so it does not
+/// inherit that function's layout validation: a transaction whose install is
+/// unreadable is still the pending one, it just is not safe to settle.
+fn is_pending_transaction(data: &Path, journal: &Journal) -> bool {
+    let path = data.join(JOURNAL);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => return false,
+    }
+    matches!(
+        read_journal(&path),
+        Ok(current) if current.token == journal.token && current.attempts == journal.attempts
+    )
+}
+
 fn target_is_launchable(target: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(target) else {
         return false;
@@ -2584,6 +2679,7 @@ mod tests {
                 old_worker_identity: None,
                 new_pid: None,
                 new_identity: None,
+                attempts: 0,
             }
         }
 
@@ -2617,6 +2713,22 @@ mod tests {
         "scm-workbench"
     }
 
+    /// The real install's entry point is executable; without the bit,
+    /// `target_is_launchable` would reject the fixture on Unix and the
+    /// "keep the installed application" paths could never be exercised.
+    #[allow(dead_code)]
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
+
     fn make_application(path: &Path, marker: &str) {
         #[cfg(target_os = "macos")]
         {
@@ -2630,6 +2742,7 @@ mod tests {
             // itself remains a regular file, matching validate_application_layout.
             symlink("launcher", path.join("Contents/runtime/link")).unwrap();
             fs::write(path.join("Contents/MacOS/SCM Workbench"), b"executable").unwrap();
+            make_executable(&path.join("Contents/MacOS/SCM Workbench"));
         }
         #[cfg(windows)]
         {
@@ -2637,6 +2750,7 @@ mod tests {
             fs::create_dir_all(path.join("runtime")).unwrap();
             fs::write(path.join("app/scm_workbench"), marker).unwrap();
             fs::write(path.join("SCM Workbench.exe"), b"executable").unwrap();
+            make_executable(&path.join("SCM Workbench.exe"));
         }
         #[cfg(all(not(target_os = "macos"), not(windows)))]
         {
@@ -2758,6 +2872,129 @@ mod tests {
             .expect("the helper failure must leave a log");
         assert!(
             text.contains("journal token does not match command token"),
+            "the failure reason was not recorded: {text}"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_recovery_starts_the_installed_application() {
+        // The Windows failure this guards: every launch replayed a recovery that
+        // could never advance, so the app never opened. Once the attempts are
+        // spent, a launchable install is kept and the journal is settled.
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "installed");
+        let mut journal = fixture.journal(Phase::Identified);
+        journal.attempts = RECOVERY_ATTEMPT_LIMIT;
+        fixture.write_journal(&journal);
+
+        assert!(
+            abandon_exhausted_recovery(&fixture.data, &journal).unwrap(),
+            "an exhausted recovery over a launchable install must settle"
+        );
+        // The transaction is durably recorded as failed, the journal no longer
+        // blocks startup, and the installed application is untouched.
+        assert_failure_result(&fixture);
+        assert!(!fixture.data.join(JOURNAL).exists());
+        assert!(
+            fixture.target.is_dir(),
+            "the installed application must survive"
+        );
+        assert_eq!(
+            fs::read_to_string(marker(&fixture.target)).unwrap(),
+            "installed"
+        );
+        // It is idempotent: a second pass has nothing left to do.
+        assert!(!abandon_exhausted_recovery(&fixture.data, &journal).unwrap());
+    }
+
+    #[test]
+    fn an_exhausted_recovery_still_retries_when_the_install_is_not_launchable() {
+        // The one case where settling would be wrong: the target is not a
+        // runnable application, so starting it is not an option and rollback
+        // must remain available.
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "installed");
+        fs::remove_file(marker(&fixture.target)).unwrap();
+        let mut journal = fixture.journal(Phase::Identified);
+        journal.attempts = RECOVERY_ATTEMPT_LIMIT;
+        fixture.write_journal(&journal);
+
+        assert!(
+            !abandon_exhausted_recovery(&fixture.data, &journal).unwrap(),
+            "a broken install must keep its transaction for rollback"
+        );
+        assert!(
+            fixture.data.join(JOURNAL).exists(),
+            "the journal must remain"
+        );
+        assert!(
+            !fixture.data.join(RESULT).exists(),
+            "no failure result may be invented"
+        );
+    }
+
+    #[test]
+    fn attempts_below_the_limit_are_retried_not_settled() {
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "installed");
+        let mut journal = fixture.journal(Phase::Identified);
+        for attempts in 0..RECOVERY_ATTEMPT_LIMIT {
+            journal.attempts = attempts;
+            fixture.write_journal(&journal);
+            assert!(
+                !abandon_exhausted_recovery(&fixture.data, &journal).unwrap(),
+                "attempt {attempts} is below the limit and must still be recovered"
+            );
+        }
+        assert!(fixture.data.join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn the_attempt_counter_survives_a_journal_without_it() {
+        // Journals written before this field existed must still load, or an
+        // in-flight update from an older build would fail closed.
+        let fixture = Fixture::new();
+        let journal = fixture.journal(Phase::Identified);
+        let mut value: serde_json::Value = serde_json::to_value(&journal).unwrap();
+        value.as_object_mut().unwrap().remove("attempts");
+        let text = serde_json::to_vec(&value).unwrap();
+        fs::create_dir_all(&fixture.data).unwrap();
+        fs::write(fixture.data.join(JOURNAL), text).unwrap();
+        let loaded = read_journal(&fixture.data.join(JOURNAL)).unwrap();
+        assert_eq!(loaded.attempts, 0);
+    }
+
+    #[test]
+    fn a_recovery_attempt_is_counted_before_it_runs() {
+        // The counter has to move even when the attempt then fails, or the
+        // shell would never see the attempts accumulate.
+        let fixture = Fixture::new();
+        make_application(&fixture.target, "installed");
+        let journal = fixture.journal(Phase::Identified);
+        fixture.write_journal(&journal);
+        // A correct token, so the run gets past the token check and fails
+        // later: this process is not the fixture's application executable.
+        let args: Vec<String> = vec![
+            "app".into(),
+            "--update-helper".into(),
+            "--data-dir".into(),
+            fixture.data.to_string_lossy().into_owned(),
+            "--token".into(),
+            journal.token.clone(),
+            "--mode".into(),
+            "recover".into(),
+            "--wait-pid".into(),
+            std::process::id().to_string(),
+        ];
+        assert!(
+            run_cli(&args).is_err(),
+            "the recovery must fail for this PID"
+        );
+        let reloaded = read_journal(&fixture.data.join(JOURNAL)).unwrap();
+        assert_eq!(reloaded.attempts, 1, "the failed attempt was not counted");
+        let text = fs::read_to_string(fixture.data.join(UPDATE_LOG)).unwrap();
+        assert!(
+            text.contains("recovery shell does not match the target executable"),
             "the failure reason was not recorded: {text}"
         );
     }

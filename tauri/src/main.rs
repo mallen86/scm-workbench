@@ -400,7 +400,36 @@ fn main() {
             // nonce pair written by launch_and_wait may bypass recovery.
             let token = std::env::var("SCM_WORKBENCH_UPDATE_TOKEN").ok();
             let nonce = std::env::var("SCM_WORKBENCH_UPDATE_NONCE").ok();
-            let pending = update_helper::pending_journal(&data);
+            let mut pending = update_helper::pending_journal(&data);
+            // A plain startup (no update identity) can be facing a transaction
+            // that has already exhausted its recovery attempts. Settle it and
+            // start the installed application instead of replaying a recovery
+            // that cannot progress: the user's app matters more than finishing
+            // the update, and this is what stops a stuck journal from being a
+            // permanent failure to launch.
+            if token.is_none() && nonce.is_none() {
+                if let Ok(Some(journal)) = &pending {
+                    if startup_recovery_phase(journal.phase)
+                        && update_helper::journal_matches_current_target(journal, &exe)
+                    {
+                        match update_helper::abandon_exhausted_recovery(&data, journal) {
+                            Ok(true) => {
+                                record(&data.join("server-tauri.log"), "[shell] the pending update could not be completed; starting the installed application");
+                                // Re-read: the journal is gone, so the decision
+                                // below must not dispatch recovery for it.
+                                pending = update_helper::pending_journal(&data);
+                            }
+                            Ok(false) => {}
+                            // A settlement failure leaves the journal in place,
+                            // so the recovery decision below simply proceeds.
+                            // It is never a reason to refuse to start.
+                            Err(error) => {
+                                record(&data.join("server-tauri.log"), &format!("[shell] could not settle the pending update: {error}"))
+                            }
+                        }
+                    }
+                }
+            }
             let recovery = match (&token, &nonce, pending) {
                 (None, None, Ok(None)) => None,
                 (Some(token), Some(nonce), Ok(Some(journal)))
