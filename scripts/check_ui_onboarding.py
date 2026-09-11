@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static contracts for simple PDF rendering and packaged first-boot setup."""
+import html
 from pathlib import Path
 import re
 import sys
@@ -193,6 +194,47 @@ def main() -> int:
         return fail("the progress card is not rendered in the welcome card's place")
     if page.find("wrap.append(progressCard);", welcome_at) < page.find("} else {", welcome_at):
         return fail("the progress card is still rendered alongside the welcome card")
+    # The welcome card is the first thing a new user reads, so its wording is
+    # part of the contract: the offset stage is named the way the sidebar names
+    # it, it says that stage is optional (Create PDF's "Apply saved offset"
+    # toggle ships off), and the fetch stage describes the outcome rather than
+    # an internal folder.
+    steps = re.findall(r'\["(\d)", "([^"]*)", "([^"]*)"\]', onboarding)
+    if len(steps) != 4:
+        return fail(f"the welcome card does not list four stages: {steps}")
+    index = UI / "index.html"
+    offset_label = re.search(r'data-page="offset"[^>]*>.*?</span>([^<]*)<', index.read_text(encoding="utf-8"))
+    if not offset_label:
+        return fail("the sidebar's offset label could not be read")
+    sidebar_offset = html.unescape(offset_label.group(1)).strip()
+    if steps[0][1] != sidebar_offset:
+        return fail(f"the welcome card calls stage one {steps[0][1]!r}, but the sidebar says "
+                    f"{sidebar_offset!r}")
+    if "Optional" not in steps[0][2]:
+        return fail("the welcome card does not say the offset stage is optional")
+    if "game/front" in steps[1][2]:
+        return fail("the welcome card still names an internal folder for fetched art")
+    if steps[1][2] != "Choose a game and decklist and let SCM handle fetching the images.":
+        return fail(f"the fetch stage wording changed unexpectedly: {steps[1][2]!r}")
+    for _n, title, desc in steps:
+        if any(dash in title or dash in desc for dash in ("\u2014", "\u2013")):
+            return fail(f"a welcome stage uses an en or em dash: {title!r}")
+
+    # On the welcome screen the app chrome stands back, and the class that does
+    # it is cleared by the next navigation so no page has to clean up after it.
+    if 'document.body.classList.add("setup-welcome");' not in page:
+        return fail("the welcome screen does not ask the top bar to stand back")
+    nav = (JS / "nav.js").read_text(encoding="utf-8")
+    if 'document.body.classList.remove("setup-welcome");' not in nav:
+        return fail("navigating away does not restore the top bar")
+    if nav.find('document.body.classList.remove("setup-welcome");') > nav.find("S.page = page;"):
+        return fail("the top bar is restored after the page is recorded, so a render could re-add it late")
+    if "body.setup-welcome .topbar { display: none; }" not in css:
+        return fail("the welcome screen's top bar is not actually hidden")
+    # Hiding the chrome must not strand anyone: the card's own controls leave it.
+    if "first-boot-close" not in page or 'class: "btn primary"' not in onboarding:
+        return fail("the welcome screen hides the top bar without an in-card exit")
+
     # A returning user must never see it again, and no other page may render it.
     if 'S.info.settings.onboarded' not in onboarding:
         return fail("the welcome card does not read the dismissed flag")

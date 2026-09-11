@@ -9,6 +9,11 @@ export function setNav(page) {
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
+  // The welcome card asks for the app chrome to stand back so the screen it
+  // belongs to is the whole view. This runs on every navigation and before the
+  // page renders, so leaving that screen restores the top bar without the page
+  // having to remember to. See pages/preparing.js.
+  document.body.classList.remove("setup-welcome");
   S.page = page;
 }
 

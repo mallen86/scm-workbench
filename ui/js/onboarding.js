@@ -10,8 +10,12 @@ import { setSettings } from "./settings-transport.js";
 
 export function onboardCard(onDone) {
   const steps = [
-    ["1", "Calibrate & offset", "Print a calibration sheet, measure the drift, and save the X/Y/angle correction. Create PDF applies it when enabled."],
-    ["2", "Fetch card art", "Choose a game and decklist. Card art goes to game/front."],
+    // Step 1 carries the sidebar's name for the page so the welcome text and
+    // the navigation agree. It is the one optional stage: Create PDF applies
+    // the saved offset only when its own "Apply saved offset" toggle is on,
+    // and that toggle ships off.
+    ["1", "Offset & calibration", "Optional. Print a calibration sheet, measure the drift, and save the X/Y/angle correction. Create PDF applies it when enabled."],
+    ["2", "Fetch card art", "Choose a game and decklist and let SCM handle fetching the images."],
     ["3", "Create the PDF", "Lay out cards on your paper with registration marks. Print both sides when needed."],
     ["4", "Cut with a template", "Open the matching .studio3 template in Silhouette Studio and cut your cards."],
   ];

@@ -1174,6 +1174,11 @@ body.mode-simple .console { display: none; }
   border: 1px solid transparent; border-radius: 9px; cursor: pointer;
 }
 .first-boot-close:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+/* The one-time welcome card is the whole message on that screen, so the app
+   chrome stands back: no page title for a page the user has not opened, and no
+   console button on a screen whose only action is to leave it. The close control
+   in the card replaces the top bar's, so this never traps anyone. */
+body.setup-welcome .topbar { display: none; }
 .first-boot-close .ic { width: 18px; height: 18px; }
 .first-boot-mark {
   width: 62px; height: 62px; margin: 0 auto 18px;
