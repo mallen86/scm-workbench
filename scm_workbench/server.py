@@ -1560,6 +1560,27 @@ def _default_update_state() -> dict:
             "published": None}
 
 
+def current_update_state(raw: dict) -> dict:
+    """The stored state, corrected against the version actually running.
+
+    A check records "a newer release is waiting" about the version that was
+    running when it looked. An update never rewrites that snapshot: the app
+    relaunches carrying the very state that asked for the install, so straight
+    after a successful update the record still promises exactly the version
+    that is now installed. Readers cannot take that at face value, or the
+    Settings card and the sidebar notice both offer the release the user
+    already has.
+
+    Only the status changes, so the result keeps the exact field set the
+    stored-state validator requires.
+    """
+    if raw.get("status") == "update-available" and not updater.is_newer(raw.get("latest"), SERVER_VERSION):
+        state = copy.deepcopy(raw)
+        state["status"] = "up-to-date"
+        return state
+    return raw
+
+
 def _valid_update_state(st: Any) -> bool:
     if not isinstance(st, dict):
         return False
@@ -3022,7 +3043,7 @@ def updates_view() -> dict:
         checking = any(op.get("kind") == "check" and
                        op.get("status") in ("running", "queued")
                        for op in _UPDATE_OPS.values())
-    state = copy.deepcopy(load_update_state())
+    state = copy.deepcopy(current_update_state(load_update_state()))
     state["checking"] = checking
     return {"current": SERVER_VERSION, "repo": updater.UPDATE_REPO,
             "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
@@ -3040,7 +3061,7 @@ def _update_check_result(force: bool) -> dict:
             except Exception:
                 age = None
             if age is not None and age < UPDATE_CHECK_INTERVAL:
-                cached = copy.deepcopy(st)
+                cached = copy.deepcopy(current_update_state(st))
                 cached["cached"] = True
                 return {"ok": True, "state": cached}
     return {"ok": True, "state": run_update_check()}

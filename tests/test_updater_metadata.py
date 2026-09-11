@@ -586,6 +586,14 @@ class UpdateStateTests(unittest.TestCase):
         self.repo.stop()
         self.temp.cleanup()
 
+    @staticmethod
+    def installable_asset(tag):
+        """A minimal asset the state validator accepts (real owner/repo/name)."""
+        name = current_asset_name()
+        owner, repo = updater._repo_parts()
+        return {"id": 1, "tag": tag, "name": name, "size": 1, "digest": None,
+                "url": f"https://github.com/{owner}/{repo}/releases/download/{tag}/{name}"}
+
     def valid_state(self, **changes):
         state = server._default_update_state()
         state.update(status="up-to-date", latest="v2.0.0", checked_at=10.0)
@@ -650,6 +658,56 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(state["latest"], "v1.0.0")
         self.assertIsNone(state["asset"])
         pick.assert_not_called()
+
+    def test_a_state_promising_the_running_version_is_not_an_update(self):
+        """A successful update leaves behind the state that asked for it.
+
+        The app relaunches carrying the "update-available" snapshot written by
+        the check, and nothing rewrites it at that moment. Reporting it raw
+        made the Settings card and the sidebar notice offer the version the
+        user had just installed.
+        """
+        installed = "v" + server.SERVER_VERSION.lstrip("v")
+        stale = self.valid_state(status="update-available", latest=installed,
+                                 current="0.0.1", checked_at=time.time(),
+                                 asset=self.installable_asset(installed))
+        server.save_update_state(stale)
+
+        # The stored bytes are untouched: this is a read-time correction.
+        before = server.UPDATE_STATE_FILE.read_bytes()
+        view = server.updates_view()
+        self.assertEqual(view["state"]["status"], "up-to-date")
+        self.assertEqual(server.UPDATE_STATE_FILE.read_bytes(), before)
+        # The correction keeps the exact field set the stored-state validator
+        # requires (the view adds its own "checking" marker on top).
+        corrected = server.current_update_state(stale)
+        self.assertTrue(server._valid_update_state(corrected))
+        self.assertEqual(corrected["latest"], installed)
+        self.assertIsNone(corrected["reason"])
+        self.assertEqual(set(corrected) - set(stale), set())
+
+        # The cached check path reads the same state, so it agrees.
+        cached = server._update_check_result(False)
+        self.assertEqual(cached["state"]["status"], "up-to-date")
+        self.assertTrue(cached["state"]["cached"])
+
+    def test_a_state_promising_a_newer_version_stays_installable(self):
+        newer = self.valid_state(status="update-available", latest="v99.0.0",
+                                 checked_at=time.time(),
+                                 asset=self.installable_asset("v99.0.0"))
+        server.save_update_state(newer)
+        view = server.updates_view()
+        self.assertEqual(view["state"]["status"], "update-available")
+        self.assertEqual(view["state"]["latest"], "v99.0.0")
+        self.assertIsInstance(view["state"]["asset"], dict)
+
+    def test_an_unreadable_promise_is_not_treated_as_an_update(self):
+        # A tag that cannot be compared cannot be shown as newer than what is
+        # running, so it must not raise the notice either.
+        for latest in (None, "not-a-version"):
+            state = self.valid_state(status="update-available", latest=latest,
+                                     checked_at=time.time())
+            self.assertEqual(server.current_update_state(state)["status"], "up-to-date")
 
     def test_explicit_force_bypasses_a_fresh_cached_update_check(self):
         fresh = self.valid_state(checked_at=time.time())
