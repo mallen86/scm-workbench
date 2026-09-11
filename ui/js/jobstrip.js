@@ -8,7 +8,7 @@
    "go create the PDF", create pdf → "open the PDF"). Advanced mode never
    sees the strip — the console drawer is that page's status there instead. */
 
-import { $, S, el, ico, toast } from "./core.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
+import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, RENAME_HOLD_MS } from "./fetch-progress.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
 export function jobStrip(kind, opts = {}) {
   const strip = el("div", { class: "jobstrip", hidden: true });
   const label = el("div", { class: "js-label" }, "");
@@ -32,15 +32,28 @@ export function jobStrip(kind, opts = {}) {
   // progress from it. Any line containing "n/m" (the fetch plugins print
   // "Fetched 42/101 images" per batch) moves the bar to the real fraction.
   // If no such line ever arrives the bar keeps its indeterminate slide.
+  //
+  // A prefetching fetch plugin (MTG over an MPCFill XML) runs two stages: it
+  // prefetches unique images, prints "Prefetch complete.", then walks the deck
+  // slot by slot. Those are separate progressions, so each gets its own 0-100%
+  // pass and the label says which stage is running. Only the prefetch announces
+  // a total, and a deck can have more slots than unique images, so past that
+  // total the count keeps moving while the bar holds at full.
   let subscription = null, esJobId = null, lastX = 0, lastY = 0;
   let imageDone = 0, imageTotal = 0;
-  const closeEs = () => { if (subscription) { try { subscription.close(); } catch {} subscription = null; } };
+  let fetchProgress = createFetchProgress();
+  let renameTimer = null;
+  const closeEs = () => {
+    if (renameTimer) { clearTimeout(renameTimer); renameTimer = null; }
+    if (subscription) { try { subscription.close(); } catch {} subscription = null; }
+  };
 
   const attachProgress = (job) => {
     if (subscription && esJobId === job.id) return;
     closeEs();
     esJobId = job.id;
     lastX = 0; lastY = 0; imageDone = 0; imageTotal = 0;
+    fetchProgress = createFetchProgress();
     const showProgress = (x, y) => {
       if (y <= 0 || x > y || (y === lastY && x < lastX)) return;
       lastX = x; lastY = y;
@@ -49,6 +62,15 @@ export function jobStrip(kind, opts = {}) {
       bar.style.setProperty("--pct", pct + "%");
       strip.classList.add("prog");
       label.textContent = `${opts.runningLabel || "Working"}  ·  ${x}/${y} (${pct}%)`;
+    };
+    // The two-stage view is only named once a prefetch stage is known: the
+    // other plugins fetch in a single pass and "stage 1 of 2" would be a lie.
+    const showFetchStage = () => {
+      const view = fetchProgress.view();
+      if (!view || !strip.isConnected) return;
+      bar.style.setProperty("--pct", view.pct + "%");
+      strip.classList.add("prog");
+      label.textContent = `${opts.runningLabel || "Working"}  ·  stage ${view.stage} of 2  ·  ${view.text}`;
     };
     if (opts.progressTotal) {
       Promise.resolve(opts.progressTotal(job)).then(total => {
@@ -60,6 +82,22 @@ export function jobStrip(kind, opts = {}) {
     subscription = jobs.subscribe(job.id, {
       after: 0,
       onLine: d => {
+        const step = fetchProgress.line(d.s);
+        if (step) {
+          // Stage 1 reaches full first, then stage 2 restarts at 0. Slots that
+          // arrive during the hold are counted and drawn when it flips.
+          if (step.beginRename && !renameTimer) {
+            renameTimer = setTimeout(() => {
+              renameTimer = null;
+              fetchProgress.beginRename();
+              showFetchStage();
+            }, RENAME_HOLD_MS);
+          }
+          showFetchStage();
+          return;
+        }
+        // A prefetch run's own lines are the only progress it reports.
+        if (fetchProgress.active) return;
         const fraction = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
         if (fraction) return showProgress(+fraction[1], +fraction[2]);
         const image = /^\s*Image\s+(\d+)\s*:/i.exec(d.s);

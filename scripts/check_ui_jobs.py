@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Execute the frontend jobs facade's native and browser transport contract."""
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -33,7 +34,8 @@ def main() -> int:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
             return 1
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
-                   "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)"):
+                   "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
+                   "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active"):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
@@ -203,6 +205,68 @@ console.log("ok: native/browser jobs facade contract passed");
     if node.returncode:
         print("FAIL: Node jobs contract failed: " + (node.stderr or node.stdout).strip())
         return 1
+    # The two-stage fetch model is pure, so its stage machine is checked
+    # directly against the plugin's real output sequence.
+    stage_model = subprocess.run(
+        [shutil.which("node") or "node", "--input-type=module", "-", str(UI / "fetch-progress.js")],        input=r'''import fs from "node:fs";
+const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
+const source = fs.readFileSync(process.argv[2], "utf8");
+const mod = await import(dataUrl(source));
+const fail = message => { throw new Error(message); };
+
+// A run that never prefetches must not be described as a two-stage run.
+let p = mod.createFetchProgress();
+if (p.active) fail("a fresh run already claims a prefetch stage");
+if (p.line("  Fetched 42/101 images") !== null) fail("a plain fetch line was treated as a prefetch stage");
+if (p.line("Slot 7: Nami") !== null) fail("a slot line without a prefetch total invented a stage");
+if (p.active) fail("a plain fetch line switched the run into two-stage mode");
+if (p.view() !== null) fail("the two-stage view rendered without a prefetch total");
+
+// The real MTG/MPCFill sequence: 88 prefetched images, then 100 deck slots.
+p = mod.createFetchProgress();
+const step = line => { const r = p.line(line); return r || {}; };
+let r = step("  Prefetching 88 images with 8 workers...");
+if (!p.active || r.stage !== 1) fail("the prefetch announcement did not start stage 1");
+let v = p.view();
+if (v.stage !== 1 || v.done !== 0 || v.total !== 88 || v.pct !== 0) fail("stage 1 did not start empty: " + JSON.stringify(v));
+for (const n of [10, 44, 88]) step(`  Fetched ${n}/88 images`);
+v = p.view();
+if (v.stage !== 1 || v.done !== 88 || v.pct !== 100) fail("stage 1 did not reach 100%: " + JSON.stringify(v));
+
+// "Prefetch complete." fills stage 1 and asks the caller to hold before stage 2.
+r = step("Prefetch complete.");
+if (!r.beginRename) fail("the prefetch completion did not ask for a stage-2 hold");
+if (p.view().pct !== 100) fail("stage 1 did not read full at completion");
+if (mod.RENAME_HOLD_MS <= 0) fail("a zero hold would make stage 1's 100% invisible");
+p.beginRename();
+v = p.view();
+if (v.stage !== 2 || v.done !== 0 || v.pct !== 0) fail("stage 2 did not restart at 0%: " + JSON.stringify(v));
+
+for (const n of [1, 44, 88]) {
+  step(`Slot ${n}: Card ${n}`);
+  const seen = p.view();
+  if (seen.stage !== 2) fail("a slot line left stage 2");
+  if (seen.pct !== Math.round(n / 88 * 100)) fail(`slot ${n} gave ${seen.pct}%`);
+}
+if (p.view().pct !== 100) fail("stage 2 did not reach 100%");
+// A deck can carry more slots than unique images: past the announced total the
+// count keeps moving but no ratio may be claimed.
+step("Slot 95: Card 95");
+v = p.view();
+if (v.done !== 95 || v.pct !== 100 || v.text !== "95 slots renamed") fail("past the total: " + JSON.stringify(v));
+if (/\//.test(v.text)) fail("past the total still printed a ratio: " + v.text);
+// Counters never run backwards, whatever order the plugin prints them in.
+step("Slot 44: Card 44");
+if (p.view().done !== 95) fail("a lower slot number moved the counter backwards");
+console.log("ok: the two-stage fetch progress model passed");
+''',
+        text=True,
+        capture_output=True,
+    )
+    if stage_model.returncode:
+        print("FAIL: Node fetch-stage contract failed: " + (stage_model.stderr or stage_model.stdout).strip())
+        return 1
+    print(stage_model.stdout.strip())
     print(node.stdout.strip())
     return 0
 
