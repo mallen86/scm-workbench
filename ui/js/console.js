@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -75,6 +75,13 @@ export async function refreshJobs(forceRender = false) {
     renderConsoleTabs();
   }
   setRevealButtons();
+  // A repository operation can begin while this page is already up: an update
+  // pressed in Settings, a download from the first-boot screen, a retry from
+  // the sidebar notice. The sidebar box is driven by the prep watcher, and the
+  // job list is where such a start is observed, so start watching from here.
+  // Without this the box only appeared if some later info refresh or
+  // navigation happened to start the watcher for it.
+  if (prepActive() && !_prepTimer) startPrepWatcher();
   // the job history page owns the full list in both modes
   if (S.page === "history" && (changed || forceRender)) renderJobHistory($("#job-history"));
 }

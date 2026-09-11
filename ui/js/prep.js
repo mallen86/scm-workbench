@@ -349,5 +349,8 @@ export function startPrepWatcher() {
       }
     } catch (e) { /* server briefly busy — the next tick retries */ }
   };
-  if (prepActive()) tick();
+  // Paint from the state already in hand before the first refresh round-trip,
+  // so a start that arrives with progress (the usual case) shows the box at
+  // once instead of after one fetch.
+  if (prepActive()) { updatePrepRows(); tick(); }
 }

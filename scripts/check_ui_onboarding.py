@@ -85,6 +85,28 @@ def main() -> int:
     row_at = prep.find("ensurePrepRows(rows, container);", render_at)
     if render_at < 0 or row_at < 0 or row_at < render_at:
         return fail("the failure notice no longer precedes the progress rows")
+    # The sidebar box is driven by the prep watcher. A repository operation can
+    # begin while a page is already up (an update pressed in Settings, a retry
+    # from the notice), so the job-list refresh is where that start is observed;
+    # without it the box only appeared after some later info refresh or a
+    # navigation happened to start the watcher.
+    console_js = (JS / "console.js").read_text(encoding="utf-8")
+    for marker in ("_prepTimer, prepActive, startPrepWatcher",
+                   "if (prepActive() && !_prepTimer) startPrepWatcher();"):
+        if marker not in console_js:
+            return fail(f"a repository operation starting on an open page is not watched: {marker}")
+    refresh_at = console_js.find("export async function refreshJobs")
+    start_at = console_js.find("if (prepActive() && !_prepTimer) startPrepWatcher();", refresh_at)
+    if refresh_at < 0 or start_at < 0:
+        return fail("the prep watcher is not started from the job-list refresh")
+    if start_at < 0 or (lambda nxt: nxt >= 0 and start_at > nxt)(
+            console_js.find("\nexport ", start_at)):
+        return fail("the prep watcher start left refreshJobs")
+    # Starting from a bare job list every 4 s must not stack a second watcher,
+    # and the first paint must not wait for a refresh round-trip.
+    if "if (prepActive()) { updatePrepRows(); tick(); }" not in prep:
+        return fail("the prep watcher does not paint from the state already in hand")
+
     # Retrying from the notice must reuse the real runner (forms.js imports
     # prep.js, so the import has to stay dynamic) and offer a way to dismiss.
     if 'class: "rp-actions"' not in prep or '"aria-label": "Dismiss this message"' not in prep:
