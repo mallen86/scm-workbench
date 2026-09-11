@@ -18,6 +18,10 @@ def fail(message):
     return 1
 
 
+def s_count(haystack, needle):
+    return haystack.count(needle)
+
+
 def main():
     if not FACADE.is_file():
         return fail("updates transport facade is missing")
@@ -49,12 +53,38 @@ def main():
                    'setInterval(tick, 250)'):
         if marker not in updater_ui:
             return fail(f"update progress strip is missing {marker}")
+    # The standing "an update is ready" notice: the scheduled check runs in the
+    # background, so without this a release could sit unnoticed until Settings
+    # was opened. It shows the action and a way to close it, in the shared box.
+    for marker in ("export async function refreshUpdateNotice()",
+                   'class: "repoprog sidebar-note", id: "updatenotice"',
+                   'class: "rp-head rp-head-row"',
+                   '"aria-label": "Dismiss the update notice"',
+                   "S.updateNoticeDismissed = tag;",
+                   "!tag || S.updateNoticeDismissed === tag",
+                   "startUpdateStrip(result.job?.id);",
+                   "if (_updStrip && _updStrip.isConnected) return;"):
+        if marker not in updater_ui:
+            return fail(f"the sidebar update notice is missing {marker}")
+    # Only a genuinely newer release may raise the notice.
+    if 'state.status === "update-available" ? String(state.latest || "") : ""' not in updater_ui:
+        return fail("the update notice does not gate on an available release")
+    css = (UI.parent / "theme.css").read_text(encoding="utf-8")
+    if ".sidebar-note .rp-head-row" not in css:
+        return fail("the update notice close control is unstyled")
+    core_state = (UI / "core.js").read_text(encoding="utf-8")
+    if "updateNoticeDismissed: null" not in core_state or "repoFailureDismissed: null" not in core_state:
+        return fail("the sidebar notices have no session dismissal state")
+    if s_count(page, "refreshUpdateNotice();") < 1:
+        return fail("a manual check does not refresh the sidebar notice")
     app = (UI / "app.js").read_text(encoding="utf-8")
     for marker in ('import { getTauriInvoke } from "./transport.js";',
-                   'import { getUpdates } from "./updates-transport.js";',
-                   "if (getTauriInvoke()) Promise.resolve().then(() => getUpdates()).catch(() => {});"):
+                   'import { refreshUpdateNotice } from "./updater-ui.js";',
+                   "if (getTauriInvoke()) Promise.resolve().then(() => refreshUpdateNotice()).catch(() => {});"):
         if marker not in app:
             return fail(f"packaged startup update read is missing {marker}")
+    if "getUpdates" in app:
+        return fail("startup still reads the update state twice")
     for path in UI.rglob("*.js"):
         text = path.read_text(encoding="utf-8")
         if path != FACADE and any(route in text for route in ("/api/updates", "/api/release-notes")):
@@ -155,11 +185,14 @@ globalThis.__updateJobs = {
   list: async () => ({ jobs: [listedJob] }),
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
-const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); }`);
+const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
+// The sidebar notice reads the update state; keep it inert for the strip test.
+const updaterUpdates = dataUrl(`export const getUpdates = async () => ({ state: {} }); export const startUpdate = async () => ({ ok: true, job: { id: "update-1" } });`);
 const loadedUpdaterSource = updaterSource
   .replace('from "./core.js"', `from "${updaterCore}"`)
-  .replace('from "./jobs.js"', `from "${updaterJobs}"`);
+  .replace('from "./jobs.js"', `from "${updaterJobs}"`)
+  .replace('from "./updates-transport.js"', `from "${updaterUpdates}"`);
 const realInterval = globalThis.setInterval, realClearInterval = globalThis.clearInterval;
 let intervalCleared = false;
 globalThis.setInterval = fn => { globalThis.__updateTick = fn; return 41; };

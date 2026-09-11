@@ -111,6 +111,8 @@ export const S = {
   jobSub: null,
   timers: {},
   firstBootDismissed: false,
+  repoFailureDismissed: null,   // repo job id whose failure notice was closed
+  updateNoticeDismissed: null,  // release tag whose update notice was closed
 };
 
 

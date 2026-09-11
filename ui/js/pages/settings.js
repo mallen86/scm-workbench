@@ -91,7 +91,7 @@ function showWhatsNew(tag, releaseUrl) {
     }
   })();
 }
-import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
+import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { refreshUpdateNotice, startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   let repoInitPending = false;
@@ -522,6 +522,8 @@ PAGES.settings = (root) => {
         checkPending = false;
       }
       await render();
+      // Keep the sidebar notice in step with what this card now shows.
+      refreshUpdateNotice();
       if (r?.state?.status === "up-to-date") toast("ok", `No update. ${vv(r.state.latest)} is the newest.`);
       else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)}. Press the button above to install it.`);
       else if (r?.state?.status === "auth-required") toast("warn", "The release repo is private. This check will work once it is public.");

@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el } from "./core.js";import { jobs } from "./jobs.js";const UPDATE_STAGES = {
+import { $, S, el, ico } from "./core.js";import { jobs } from "./jobs.js";import { getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -132,4 +132,79 @@ export function startUpdateStrip(jobId) {
   tick();
   // Poll quickly enough to show nearly all of the three second restart notice.
   _updTimer = setInterval(tick, 250);
+}
+
+
+/* ---- the standing "an update is ready" notice ---------------------------
+   The scheduled check runs in the background, so a newer release could sit
+   unnoticed until someone opened Settings. The sidebar now says so, in the
+   same seat and the same box as the repo and update strips, with the one
+   action that matters and a way to close it. Closing is per session: the
+   release is still waiting, so the next launch mentions it again. */
+
+let _noticeTag = null;
+
+function removeUpdateNotice() {
+  _noticeTag = null;
+  const node = $("#updatenotice");
+  if (node) node.remove();
+}
+
+const displayTag = tag => "v" + String(tag || "").replace(/^v/, "");
+
+function renderUpdateNotice(tag, state) {
+  if (_noticeTag === tag && $("#updatenotice")) return;
+  removeUpdateNotice();
+  const foot = $(".sidebar-foot");
+  if (!foot) return;
+  const released = state.published ? new Date(state.published) : null;
+  const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, "Update available"));
+  const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss until the app restarts",
+    "aria-label": "Dismiss the update notice" }, ico("x"));
+  close.onclick = () => { S.updateNoticeDismissed = tag; removeUpdateNotice(); };
+  head.append(close);
+  const meta = el("div", { class: "rp-meta" }, released && !Number.isNaN(released.getTime())
+    ? `Released ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
+    : "The app closes and reopens as the new version.");
+  const row = el("div", { class: "rp-row" },
+    el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to install.`), meta);
+  const actions = el("div", { class: "rp-actions" });
+  const install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), "Update now");
+  install.onclick = async () => {
+    install.disabled = true;
+    let result;
+    try {
+      result = await startUpdateRequest();
+    } catch (error) {
+      install.disabled = false;
+      meta.textContent = error?.message || "The update could not start.";
+      return;
+    }
+    if (!result?.ok) {
+      install.disabled = false;
+      meta.textContent = result?.errors?.[0] || "The update could not start.";
+      return;
+    }
+    // The progress strip replaces the notice: it is the same seat, and the
+    // notice would only restate what the strip already shows.
+    removeUpdateNotice();
+    startUpdateStrip(result.job?.id);
+  };
+  actions.append(install);
+  const notice = el("div", { class: "repoprog sidebar-note", id: "updatenotice" }, head, row, actions);
+  foot.before(notice);
+  _noticeTag = tag;
+}
+
+/** Show or clear the sidebar's update notice from the current update state. */
+export async function refreshUpdateNotice() {
+  // While an install is in flight the progress strip owns that seat.
+  if (_updStrip && _updStrip.isConnected) return;
+  let state = {};
+  try {
+    state = (await getUpdates())?.state || {};
+  } catch { return; }   // an unreachable check simply leaves the notice alone
+  const tag = state.status === "update-available" ? String(state.latest || "") : "";
+  if (!tag || S.updateNoticeDismissed === tag) { removeUpdateNotice(); return; }
+  renderUpdateNotice(tag, state);
 }
