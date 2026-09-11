@@ -23,7 +23,7 @@ function updStrip() {
   if (_updStrip && _updStrip.isConnected) return _updStrip;
   const foot = $(".sidebar-foot");
   if (!foot) return null;
-  _updStrip = el("div", { class: "repoprog", id: "updateprog", "aria-live": "polite" },
+  _updStrip = el("div", { class: "repoprog sidebar-note", id: "updateprog", "aria-live": "polite" },
     el("div", { class: "rp-head" }, "Updating SCM Workbench"),
     el("div", { class: "rp-row" },
       el("div", { class: "rp-label" }),

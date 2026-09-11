@@ -1228,14 +1228,18 @@ body.mode-simple .console { display: none; }
    own scrollbar), so the divider, the toggles and the rest of the chrome
    never move when the strip comes and goes. The first-boot page hosts its
    own #repoprog card, which retargets the same rows while it is up. */
-#repoprog-global {
+/* Every notification that seats itself above the sidebar footer's divider
+   (repo preparation, app update, a release notice) uses this one box, so the
+   bottom left always reads as a stack of the same thing. Declared after
+   .repoprog so it wins the equal-specificity gap and padding. */
+.sidebar-note {
   margin-bottom: 10px;
   display: grid; gap: 6px;
   background: var(--surface-2); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 9px 10px;
 }
-#repoprog-global .rp-head { font-size: 11.5px; color: var(--faint); }
-#repoprog-global .rp-label { font-size: 12.5px; }
+.sidebar-note .rp-head { font-size: 11.5px; color: var(--faint); }
+.sidebar-note .rp-label { font-size: 12.5px; }
 #updateprog.failed .rp-head, #updateprog.failed .rp-label { color: var(--err); }
 #updateprog.failed .rp-fill { background: var(--err); }
 #updateprog.done .rp-head, #updateprog.done .rp-label { color: var(--ok); }

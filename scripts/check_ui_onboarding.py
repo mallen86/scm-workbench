@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static contracts for simple PDF rendering and packaged first-boot setup."""
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -115,6 +116,35 @@ def main() -> int:
         return fail("first-boot page presentation or close control is unstyled")
     if "/api/" in page or "wb_rpc" in page or "fetch(" in page:
         return fail("first-boot page bypasses the shared info/native transport path")
+
+    # Everything that seats itself above the sidebar footer's divider shares
+    # one box. The app-update strip used to sit flush against the sidebar with
+    # no background, border or padding while the repo strip beside it was a
+    # box, so the same seat looked like two different things.
+    updater_ui = (JS / "updater-ui.js").read_text(encoding="utf-8")
+    for name, source in (("prep.js", prep), ("updater-ui.js", updater_ui)):
+        if 'class: "repoprog sidebar-note"' not in source:
+            return fail(f"{name} does not use the shared sidebar notification box")
+    if ".sidebar-note {" not in css:
+        return fail("the shared sidebar notification box is unstyled")
+    if "background: var(--surface-2); border: 1px solid var(--border-soft);" not in css:
+        return fail("the shared sidebar notification box has no background or border")
+    # Inner typography belongs to the shared class, or the two boxes' headings
+    # render in different colours.
+    for marker in (".sidebar-note .rp-head", ".sidebar-note .rp-label"):
+        if marker not in css:
+            return fail(f"the shared sidebar box does not own {marker}")
+    if "#repoprog-global .rp-head" in css or "#repoprog-global .rp-label" in css:
+        return fail("a sidebar box still styles its heading outside the shared class")
+    if css.find(".sidebar-note {") < css.find(".repoprog {"):
+        return fail("the shared box is declared before .repoprog, so its padding would lose")
+    # The failed/done overrides must still beat the shared class.
+    if not re.search(r"#updateprog\.failed \.rp-head", css):
+        return fail("the update strip lost its failed-state colour")
+    for path in sorted(JS.rglob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        if "foot.before(" in source and "sidebar-note" not in source:
+            return fail(f"{path.relative_to(ROOT)} seats a sidebar notification outside the shared box")
 
     # The one-time welcome card belongs to this screen: it is appended once the
     # repos are ready and is the sole exit when it is shown (its own button

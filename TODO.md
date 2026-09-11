@@ -25,7 +25,7 @@
 - [x] "Welcome to the Workbench" made its way into the job history page. Move it to the initial repo sync screen such that it appears after the repo sync is done. It shouldn't appear anywhere else.
 - [x] Move job history in the sidebar to between the workflow and system sections in simple mode and between cutting and reference in advanced mode.
 - [x] I can't change the version of a managed repo. The console shows "error: managed repository tree is too large". In simple mode there's no indication that it failed at all. Both modes should still show the box in the bottom left of the sidebar showing the progress.
-- [ ] The progress box in the bottom left when initially syncing a repo doesn't seem to actually be in a box at all like it is normally. All notifications in the bottom left of the sidebar should always be within its own box.
+- [x] The progress box in the bottom left when initially syncing a repo doesn't seem to actually be in a box at all like it is normally. All notifications in the bottom left of the sidebar should always be within its own box.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

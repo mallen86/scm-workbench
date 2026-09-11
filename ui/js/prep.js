@@ -131,7 +131,7 @@ function globalStrip() {
   if (s) return s;
   const foot = $(".sidebar-foot");
   if (!foot) return null; // no chrome to host it (never, in practice)
-  s = el("div", { class: "repoprog", id: "repoprog-global" },
+  s = el("div", { class: "repoprog sidebar-note", id: "repoprog-global" },
     el("div", { class: "rp-head" }, "Preparing your managed copies"));
   // Directly above the footer's divider: the divider (and the toggles under
   // it) never moves — the nav above is the flexible, scrolling part.
