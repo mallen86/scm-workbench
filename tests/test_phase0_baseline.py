@@ -313,6 +313,64 @@ class HttpContractTests(unittest.TestCase):
         })
         self.assertTrue(any("safe filename label" in error for error in unsafe["errors"]))
 
+    def test_a_second_template_for_the_same_size_keeps_the_first(self):
+        """Generating the same size twice must not replace the first template.
+
+        The name used to be fixed at '-v1', so the second run overwrote the
+        first. A taken name now takes the next version, and the preview and the
+        run resolve it identically because they share one command builder.
+        """
+        # The fixture repo is shared with the other contract tests, so anything
+        # this test writes is removed again on the way out.
+        written_dirs = [self.fixture.scm / "cutting_templates" / "dxf",
+                        self.fixture.scm / "cutting_templates" / "borderless" / "dxf"]
+        for directory in written_dirs:
+            self.addCleanup(
+                lambda d=directory: d.rmdir() if d.is_dir() and not any(d.iterdir()) else None)
+        self.addCleanup(lambda: [f.unlink() for d in written_dirs if d.is_dir()
+                                 for f in d.iterdir() if f.suffix == ".dxf"])
+
+        args = {"card_mode": "named", "card_size": "standard",
+                "paper_mode": "custom", "paper_width": "8.5in",
+                "paper_height": "14in", "paper_name": "legal", "save": True}
+        first = server.build_preview("dxf_single", args)
+        self.assertFalse(first["errors"])
+        self.assertIn("cutting_templates/dxf/legal-standard-v1.dxf", first["cmd"])
+
+        # What the first run would have written.
+        written = self.fixture.scm / "cutting_templates" / "dxf" / "legal-standard-v1.dxf"
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_bytes(b"the first template")
+
+        second = server.build_preview("dxf_single", args)
+        self.assertFalse(second["errors"])
+        self.assertIn("cutting_templates/dxf/legal-standard-v2.dxf", second["cmd"])
+        self.assertNotIn("legal-standard-v1.dxf", second["cmd"])
+        self.assertEqual(written.read_bytes(), b"the first template")
+
+        # The run path is the same builder, so it names the same new file.
+        normalized, _errors, _warnings = server.normalize_args(
+            server.get_manifest()["dxf_single"], args)
+        argv, _cwd, _env, _title, _warnings, errs = server.build_command(
+            "dxf_single", normalized, server.load_settings(), server.get_info_cached())
+        self.assertFalse(errs)
+        self.assertEqual(argv[-2], "cutting_templates/dxf/legal-standard-v2.dxf")
+        self.assertTrue(second["cmd"].endswith(
+            "cutting_templates/dxf/legal-standard-v2.dxf --save"))
+
+        # And a borderless template versions in its own folder.
+        borderless = dict(args, variant="borderless")
+        b_first = server.build_preview("dxf_single", borderless)
+        self.assertIn("cutting_templates/borderless/dxf/legal-standard-borderless-v1.dxf", b_first["cmd"])
+        (self.fixture.scm / "cutting_templates" / "borderless" / "dxf").mkdir(parents=True, exist_ok=True)
+        (self.fixture.scm / "cutting_templates" / "borderless" / "dxf"
+         / "legal-standard-borderless-v1.dxf").write_bytes(b"borderless one")
+        b_second = server.build_preview("dxf_single", borderless)
+        self.assertIn("cutting_templates/borderless/dxf/legal-standard-borderless-v2.dxf", b_second["cmd"])
+        # The default folder's counter is its own.
+        self.assertIn("cutting_templates/dxf/legal-standard-v2.dxf",
+                      server.build_preview("dxf_single", args)["cmd"])
+
     def test_fetch_manifest_keeps_picker_below_source_and_preferences_collapsed(self):
         status, manifest = self.request("GET", "/api/manifest")
         self.assertEqual(status, 200)

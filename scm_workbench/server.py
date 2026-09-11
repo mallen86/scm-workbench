@@ -1192,7 +1192,7 @@ def build_manifest(info: dict) -> dict:
                          choices=[["optimize", "Optimize"], ["landscape", "Landscape"], ["portrait", "Portrait"]],
                          default="optimize", width="third"),
                     _opt("output_path", "Output file (blank = auto)", "path", width="full",
-                         help="Defaults to cutting_templates/dxf/<paper>-<card>-v1.dxf, or the borderless/dxf folder for borderless output."),
+                         help="Defaults to cutting_templates/dxf/<paper>-<card>-v1.dxf, or the borderless/dxf folder for borderless output. An existing name is never replaced; the next version is used instead."),
                     _opt("save", "Save new size / layout to layouts.json", "toggle", default=True, width="half"),
                 ],
             },
@@ -4510,6 +4510,55 @@ def _dxf_custom_label(value: Any, field: str, errors: List[str]) -> Optional[str
     return label
 
 
+# A generated template's name carries its version, upstream's own convention:
+# a variant is '<paper>-<card>[-<variant>]-v<N>.dxf'.
+_DXF_VERSION_SUFFIX = re.compile(r"^(?P<base>.*?)-v(?P<version>\d+)$")
+# The search for a free name stays bounded: a folder full of same-named
+# templates is pathological, not something to walk forever.
+_DXF_VERSION_MAX = 5000
+
+
+def _dxf_output_without_overwriting(cwd: Optional[Path], value: str) -> str:
+    """Return a DXF output path that does not already exist.
+
+    The generated name used to be fixed at '-v1', so generating the same size a
+    second time silently replaced the first template. A template is the user's
+    own work, so a taken name moves to the next version instead, which is also
+    the naming upstream already uses.
+
+    A free name is returned untouched, so an untouched folder still produces
+    '-v1'. When the name is taken, the next free version is chosen from the
+    requested one, and an unversioned name counts as version 1: 'custom.dxf'
+    becomes 'custom-v2.dxf' rather than writing over what is there.
+
+    This only reads the directory, so the command preview and the run agree.
+    """
+    raw = str(value)
+    candidate = Path(raw)
+    try:
+        path = candidate if candidate.is_absolute() else Path(cwd or "") / candidate
+        if not os.path.lexists(path):
+            return raw
+        stem, suffix = path.stem, path.suffix
+        match = _DXF_VERSION_SUFFIX.fullmatch(stem)
+        base = match.group("base") if match else stem
+        version = int(match.group("version")) if match else 1
+        directory = path.parent
+        for _ in range(_DXF_VERSION_MAX):
+            version += 1
+            probe = directory / f"{base}-v{version}{suffix}"
+            if not os.path.lexists(probe):
+                # Keep the caller's spelling: relative stays relative, absolute
+                # stays absolute, and only the filename changes.
+                return str(Path(candidate.parent) / probe.name) if not candidate.is_absolute() \
+                    else str(probe)
+    except (OSError, ValueError):
+        # An unreadable directory must not turn into a failed job: fall back to
+        # the name that was asked for.
+        return raw
+    return raw
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -4749,6 +4798,9 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             paper_lbl = paper or "?"
             vtag = "" if variant == "default" else f"-{variant}"
             out = f"cutting_templates/{sub}/{paper_lbl}-{card_lbl}{vtag}-v1.dxf"
+        # A second template for the same size takes the next version rather than
+        # replacing the first one.
+        out = _dxf_output_without_overwriting(cwd, str(out))
         argv += [str(out)]
         if a.get("save"):
             argv += ["--save"]
