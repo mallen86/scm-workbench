@@ -29,6 +29,7 @@
 - [x] With the new update notification if I manually check for an update and then update, when the app opens back up I have a notification that a new version is available showing the same version that's already installed.
 - [x] The repo sync operations seem to be fixed but in simple mode I don't see the box showing the progress in the sidebar unless I go forward then go backward with the version.
 - [x] For the second stage card art fetch, you can get the total number of cards from the count of cards in the supplied decklist/file.
+- [x] After the initial repo sync is done on the intial page the "welcome to the workbench" section is shown as directed but it should replace the repo sync progress status, otherwise it's too low on the page.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

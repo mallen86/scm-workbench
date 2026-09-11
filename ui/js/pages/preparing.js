@@ -45,6 +45,10 @@ PAGES.preparing = () => {
   const active = !!S.info?.server?.active || repos.some(r => r.progress) ||
     (S.jobs || []).some(j => (j.kind === "repo_init" || j.kind === "repo_update") && j.status === "running");
   const allReady = repos.length > 0 && repos.every(r => r.deployed);
+  // The one-time welcome card belongs to this screen and nowhere else: it is
+  // shown only once every repo is actually ready, and its own button leaves the
+  // setup view.
+  const showWelcome = allReady && !S.info?.settings?.onboarded;
   const wrap = el("div", { class: "first-boot-page" });
 
   wrap.append(el("button", {
@@ -64,14 +68,14 @@ PAGES.preparing = () => {
       ? "We are downloading the tools and game definitions Workbench needs. Watch here or explore while setup continues in the background."
       : "The initial download stopped before all repos were ready. Continue to the app and retry from Settings > Managed repo copies."));
 
-  wrap.append(el("div", { class: "card first-boot-progress" },
+  const progressCard = el("div", { class: "card first-boot-progress" },
     el("div", { class: "card-head" },
       el("div", { class: "card-ico" }, ico("refresh")),
       el("div", { class: "grow" },
         el("h2", {}, "Managed repositories"),
         el("p", {}, active ? "Download and verification progress updates automatically." :
           allReady ? "Everything finished successfully." : "One or more downloads did not finish."))),
-    el("div", { class: "repoprog", id: "repoprog", "data-prep-all": "true" })));
+    el("div", { class: "repoprog", id: "repoprog", "data-prep-all": "true" }));
 
   const actions = el("div", { class: "first-boot-actions" });
   if (!allReady && !active) {
@@ -86,14 +90,22 @@ PAGES.preparing = () => {
     if (active) actions.append(el("span", { class: "small faint" },
       "Pages unlock as each repo becomes ready."));
   }
-  // The one-time welcome card belongs to this screen and nowhere else: it is
-  // appended only once every repo is actually ready, and its own button leaves
-  // the setup view, so the actions row would only repeat that same exit.
-  if (allReady && !S.info?.settings?.onboarded) wrap.append(onboardCard(leaveSetup));
-  else wrap.append(actions);
 
-  // go() invokes this only after the detached page has entered the document,
-  // allowing prep.js to find #repoprog and attach its live row handles here.
-  wrap.__patch = updatePrepRows;
+  if (showWelcome) {
+    // The welcome card takes the progress card's place rather than sitting
+    // below it. With every repo ready that card is only a "finished" line, and
+    // stacking it above the welcome pushed the welcome text down the page for
+    // no reason. There is no live #repoprog to keep patching here either, so
+    // the prep rows are not wired up in this branch.
+    wrap.append(onboardCard(leaveSetup));
+  } else {
+    wrap.append(progressCard);
+    // The welcome card's own button is this screen's exit, so the actions row
+    // would only repeat it.
+    wrap.append(actions);
+    // go() invokes this only after the detached page has entered the document,
+    // allowing prep.js to find #repoprog and attach its live row handles here.
+    wrap.__patch = updatePrepRows;
+  }
   return wrap;
 };

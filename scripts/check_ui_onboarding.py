@@ -179,10 +179,20 @@ def main() -> int:
         if marker not in onboarding:
             return fail(f"the welcome card is missing its dismissal path: {marker}")
     for marker in ('import { onboardCard } from "../onboarding.js";',
-                   'if (allReady && !S.info?.settings?.onboarded) wrap.append(onboardCard(leaveSetup));',
-                   'else wrap.append(actions);'):
+                   'const showWelcome = allReady && !S.info?.settings?.onboarded;',
+                   'wrap.append(onboardCard(leaveSetup));'):
         if marker not in page:
             return fail(f"the setup screen does not own the welcome card: {marker}")
+    # The welcome card takes the progress card's place, so the finished status
+    # line does not push it down the page. The two are exclusive branches.
+    if "if (showWelcome) {" not in page or "wrap.append(progressCard);" not in page:
+        return fail("the welcome card and the progress card are not exclusive")
+    welcome_at = page.find("if (showWelcome) {")
+    progress_at = page.find("wrap.append(progressCard);")
+    if welcome_at < 0 or progress_at < 0 or progress_at < welcome_at:
+        return fail("the progress card is not rendered in the welcome card's place")
+    if page.find("wrap.append(progressCard);", welcome_at) < page.find("} else {", welcome_at):
+        return fail("the progress card is still rendered alongside the welcome card")
     # A returning user must never see it again, and no other page may render it.
     if 'S.info.settings.onboarded' not in onboarding:
         return fail("the welcome card does not read the dismissed flag")
