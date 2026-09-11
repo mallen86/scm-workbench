@@ -2178,11 +2178,18 @@ def _sync_deps(key: str, log=print) -> None:
 
 
 # User data lives in these repo subfolders (decklists, fetched card images,
-# generated output, calibration data). A full re-deploy must never lose it:
-# copies are staged before the tree is replaced and put back afterwards.
+# generated output, calibration data, and the cutting templates the Workbench
+# itself generates). A re-deploy must never lose it: copies are staged before
+# the tree is replaced and put back afterwards, and the update paths exempt
+# these from the deletions an upstream change would otherwise apply.
 # Upstream placeholder files (README/EMPTY) are not user data.
+#
+# cutting_templates/dxf and cutting_templates/borderless/dxf are where the
+# Workbench writes a template it generated. They are the user's own files, and
+# nothing upstream replaces them, so they are user data like any other.
 USER_DATA_PATHS = ("data", "game/front", "game/back", "game/double_sided",
-                   "game/decklist", "game/output")
+                   "game/decklist", "game/output",
+                   "cutting_templates/dxf", "cutting_templates/borderless/dxf")
 _PRISTINE_NAMES = {"README.md", "EMPTY.md"}
 
 
@@ -2929,6 +2936,40 @@ def _copy_existing_local_edits(source: Path, dest: Path, old_manifest: dict, log
     return copied
 
 
+def _carry_over_local_files_the_archive_lacks(source: Path, dest: Path, log=print):
+    """Keep every local file the new tree does not already provide.
+
+    An update rebuilds the live tree from a clone of itself, so a file the
+    manifest does not mention survives on its own: nothing ever enumerates it.
+    A re-deploy is different. It builds the new tree from the downloaded
+    archive, so anything the archive does not carry has to be copied across
+    explicitly or it is gone.
+
+    Enumerating the folders that are *expected* to hold user data is not enough
+    for that, because it silently omits whatever nobody thought of: a custom
+    cutting template the Workbench generated, a calibration sheet, a note the
+    user dropped in the repo. This pass is the backstop, and its rule is the
+    one the module promises: a re-deploy replaces upstream's files and never
+    removes anything else.
+
+    The documented user slots are still staged separately, and before this, so
+    that user data keeps winning over a same-named upstream file. Here, a path
+    the archive already provides is left alone.
+    """
+    copied = 0
+    for rel in _validate_tree(source):
+        if os.path.lexists(dest / rel):
+            continue
+        src = safe_path(source, rel)
+        if src.is_symlink() or not src.is_file():
+            raise RepoError("local file is missing or unsafe")
+        _secure_copy_file(src, dest, rel)
+        copied += 1
+    if copied:
+        log(f"[repos] carried {copied} local file(s) the new snapshot does not provide")
+    return copied
+
+
 def _fingerprint_tree(key, target, tree, progress=False):
     files = _validate_tree(tree)
     man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
@@ -3134,6 +3175,10 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
             _copy_authorized_user_data(repo, tx["candidate"], log)
             if old_manifest is not None:
                 _copy_existing_local_edits(repo, tx["candidate"], old_manifest, log)
+            # Last, and unconditionally: whatever the archive did not provide is
+            # the user's, including files no list of "user data folders" would
+            # have predicted. Without this a re-deploy silently discarded them.
+            _carry_over_local_files_the_archive_lacks(repo, tx["candidate"], log)
         man = pristine
         candidate_paths = set(_validate_tree(tx["candidate"]))
         if old_manifest is not None:
@@ -3192,6 +3237,11 @@ def _cmd_update_locked(key, force_full=False, log=print):
                 if cmp["status"] != "ahead" or cmp["too_many"]:
                     mode = "full"
             except RepoError as exc:
+                # compare() raises for a rate limit, a 404, an invalid response,
+                # or a diff past the file cap. Falling back is the whole point
+                # of catching it here, and the diff branch below reads the
+                # comparison that was never made.
+                mode = "full"
                 log(f"[update {key}] diff unavailable ({_brief(exc)}) — switching to full-tarball sync.")
         if mode == "diff":
             staging.mkdir()
