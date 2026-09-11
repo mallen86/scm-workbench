@@ -65,6 +65,17 @@ TAR_MEMBER_CAP = TARBALL_CAP
 # bounds protect the clone/fingerprint phase as well as tar extraction.
 TREE_FILE_CAP = 200_000
 TREE_BYTES_CAP = TARBALL_CAP
+# User data (fetched card images, decklists, generated output, offsets) lives
+# inside the managed tree, so it is walked by the same validation. It must not
+# be counted against the upstream bounds above: those bound *network-sourced*
+# content (clone, fingerprint, extraction), and the upstream repository alone
+# already uses most of the byte budget. Counting the user's own image cache
+# there meant that once the cache filled the remaining headroom every repo
+# update failed with "managed repository tree is too large", permanently and
+# with nothing the user could do. User data gets its own, much larger, still
+# finite budget instead, so the walk stays bounded either way.
+USER_DATA_BYTES_CAP = 32 * 1024 ** 3
+USER_DATA_FILE_CAP = 500_000
 TAR_MEMBER_COUNT_CAP = TREE_FILE_CAP * 2 + 1
 REFS_RESULT_CAP = 512 * 1024
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -1084,7 +1095,14 @@ def load_manifest(key: str) -> dict:
 def _validate_manifest_shape(man: dict) -> dict:
     if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
         raise RepoError("invalid repository manifest shape")
-    if len(man["files"]) > TREE_FILE_CAP:
+    if len(man["files"]) > TREE_FILE_CAP + USER_DATA_FILE_CAP:
+        raise RepoError("repository manifest has too many files")
+    # The manifest records user data alongside upstream paths (a fetch job's
+    # images are fingerprinted like anything else), so its bound is the same
+    # split as the tree walk: upstream under the tree cap, user data under its
+    # own allowance. A manifest that is all user data still cannot exceed them.
+    upstream_entries = sum(1 for path in man["files"] if not _is_user_data_rel(path))
+    if upstream_entries > TREE_FILE_CAP:
         raise RepoError("repository manifest has too many files")
     for path, digest in man["files"].items():
         validate_repo_path(path)
@@ -1753,7 +1771,7 @@ def _validate_tree(tree_dir: Path, require_dir=True):
         return []
     if tree_dir.is_symlink() or not tree_dir.is_dir():
         raise RepoError("managed repository tree is not a directory")
-    files, total = [], 0
+    files, upstream_bytes, upstream_files, user_bytes, user_files = [], 0, 0, 0, 0
     stack = [(tree_dir, "")]
     while stack:
         current, prefix = stack.pop()
@@ -1767,12 +1785,23 @@ def _validate_tree(tree_dir: Path, require_dir=True):
                 if stat.S_ISDIR(info.st_mode):
                     stack.append((Path(entry.path), rel))
                 elif stat.S_ISREG(info.st_mode):
-                    total += info.st_size
-                    if total > TREE_BYTES_CAP:
-                        raise RepoError("managed repository tree is too large")
                     files.append(rel)
-                    if len(files) > TREE_FILE_CAP:
-                        raise RepoError("managed repository tree has too many files")
+                    # Every entry is still walked and name-validated above; only
+                    # the cap it is charged against depends on what it is.
+                    if _is_user_data_rel(rel):
+                        user_bytes += info.st_size
+                        user_files += 1
+                        if user_bytes > USER_DATA_BYTES_CAP:
+                            raise RepoError("managed repository user data is too large")
+                        if user_files > USER_DATA_FILE_CAP:
+                            raise RepoError("managed repository user data has too many files")
+                    else:
+                        upstream_bytes += info.st_size
+                        upstream_files += 1
+                        if upstream_bytes > TREE_BYTES_CAP:
+                            raise RepoError("managed repository tree is too large")
+                        if upstream_files > TREE_FILE_CAP:
+                            raise RepoError("managed repository tree has too many files")
                 else:
                     raise RepoError("refusing a special file in repository tree")
     return sorted(files)
@@ -2155,6 +2184,11 @@ def _sync_deps(key: str, log=print) -> None:
 USER_DATA_PATHS = ("data", "game/front", "game/back", "game/double_sided",
                    "game/decklist", "game/output")
 _PRISTINE_NAMES = {"README.md", "EMPTY.md"}
+
+
+def _is_user_data_rel(rel: str) -> bool:
+    """True when an already-validated relative path is one of the user slots."""
+    return any(rel == base or rel.startswith(base + "/") for base in USER_DATA_PATHS)
 
 
 def stash_user_data(repo: Path, dest: Path, log=print) -> list:
@@ -2906,8 +2940,7 @@ def _fingerprint_tree(key, target, tree, progress=False):
 
 
 def _is_authorized_user_path(path):
-    path = validate_repo_path(path)
-    return any(path == base or path.startswith(base + "/") for base in USER_DATA_PATHS)
+    return _is_user_data_rel(validate_repo_path(path))
 
 
 def _with_local_edits(tree, man):

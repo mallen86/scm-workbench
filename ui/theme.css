@@ -1243,5 +1243,11 @@ body.mode-simple .console { display: none; }
 .rp-fill { height: 100%; border-radius: 3px; background: var(--accent-grad, var(--accent, #ffb454));
           transition: width 2.4s linear; will-change: width; }
 .rp-bar.indet .rp-fill { width: 38%; animation: prep-slide 1.5s ease-in-out infinite; }
+/* A failed repo operation keeps the sidebar box and states the problem, so the
+   notice needs the error colour and its own action row. */
+.rp-fail .rp-label { color: var(--err); }
+.rp-fail .rp-meta { color: var(--muted); }
+.rp-actions { margin-top: 7px; display: flex; gap: 6px; align-items: center; }
+.rp-actions .btn.ghost { padding-left: 8px; padding-right: 8px; }
 .prep-note { margin-top: 8px; font-size: 12px; color: var(--faint, #9aa3b5); }
 .btn.wait { opacity: .8; cursor: progress; }

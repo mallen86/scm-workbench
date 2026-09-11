@@ -1,7 +1,7 @@
 /* prep — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, S, el, toast } from "./core.js";import { refreshInfo } from "./info.js";import { go } from "./nav.js";
+import { $, S, el, ico, toast } from "./core.js";import { refreshInfo } from "./info.js";import { jobs } from "./jobs.js";import { go } from "./nav.js";
 /* ============================ repo preparation ============================ */
 
 /* ---------------- repo prep state (first clone + updates) ------------------ */
@@ -144,6 +144,113 @@ export function removeGlobalStrip() {
   if (s) s.remove();
 }
 
+
+// ---- a failed repo operation stays on screen ------------------------------
+// Progress disappears the moment a repo operation ends, so a failure used to
+// leave the sidebar empty and only a toast that fades. In simple mode the
+// console is hidden, which made a failed update completely silent: no progress
+// box, no error, nothing to act on. The box now stays and says what failed.
+//
+// S.jobs is newest first, so the first repo job seen per repo is the latest
+// word on that repo: a later success clears the notice by itself, and a stale
+// failure from an earlier session cannot outlive a successful retry.
+export function repoFailures() {
+  const seen = new Set();
+  const failures = [];
+  for (const job of (S.jobs || [])) {
+    if (job.kind !== "repo_init" && job.kind !== "repo_update") continue;
+    const key = (job.args || {}).repo || "";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (job.status === "fail" && job.id !== S.repoFailureDismissed) failures.push(job);
+  }
+  return failures.map(job => {
+    const key = (job.args || {}).repo || "";
+    const row = (S.info.repos || []).find(r => r.key === key);
+    return { job, key, name: row ? row.name : (key || "managed repo") };
+  });
+}
+
+
+// The job's own log already carries the reason (repo_sync prints one "error:"
+// line and exits). Read it once per job and keep the most specific line: the
+// console is not available in simple mode, so the box is the only place a
+// person can see why it failed.
+const _failureDetail = new Map();
+
+async function loadFailureDetail(job) {
+  if (_failureDetail.has(job.id)) return _failureDetail.get(job.id);
+  let detail = "The last attempt did not finish.";
+  try {
+    const result = await jobs.log(job.id, { maxLines: 200 });
+    const lines = (result?.lines || []).map(line => String(line).trim()).filter(Boolean);
+    const picked = [...lines].reverse().find(line => /^!\s+/.test(line)) ||
+                   [...lines].reverse().find(line => /^error/i.test(line)) ||
+                   [...lines].reverse().find(line => !/^\$\s/.test(line));
+    if (picked) detail = picked.replace(/^!\s+/, "").slice(0, 180);
+  } catch { /* the notice still names the repo without the reason */ }
+  _failureDetail.set(job.id, detail);
+  return detail;
+}
+
+
+// Retry re-runs the exact operation that failed, through the same runner the
+// Settings row uses (so the confirm text and args match). forms.js imports
+// prep.js, so the import is dynamic to keep that edge one-way.
+async function retryRepoJob(failure, button) {
+  button.disabled = true;
+  try {
+    const { doRun } = await import("./forms.js");
+    await doRun(failure.job.kind, null, { args: { repo: failure.key } });
+  } catch (error) {
+    toast("err", error?.message || "could not start the repository operation");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+
+// Render the failure notice into the shared sidebar box, replacing any stale
+// progress rows so the box never shows a row beside an error.
+function renderRepoFailures(container, failures) {
+  for (const key of Object.keys(S.prows || {})) {
+    if (!S.prows[key].isConnected) continue;
+    S.prows[key].remove();
+  }
+  S.prows = {};
+  const head = container.firstElementChild;
+  if (head) head.textContent = failures.length > 1
+    ? "Some managed repos need attention"
+    : "A managed repo needs attention";
+  for (const failure of failures) {
+    let row = container.querySelector(`[data-repo-failure="${CSS.escape(failure.job.id)}"]`);
+    if (!row) {
+      row = el("div", { class: "rp-row rp-fail", "data-repo-failure": failure.job.id });
+      row.append(
+        el("div", { class: "rp-label" }, failure.name + "  |  " + (failure.job.kind === "repo_init" ? "download failed" : "update failed")),
+        el("div", { class: "rp-meta" }, "Checking the log for the reason"));
+      const actions = el("div", { class: "rp-actions" });
+      const retry = el("button", { type: "button", class: "btn sm" }, ico("refresh"), "Retry");
+      retry.onclick = () => retryRepoJob(failure, retry);
+      const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss this message", "aria-label": "Dismiss this message" }, ico("x"));
+      close.onclick = () => { S.repoFailureDismissed = failure.job.id; updatePrepRows(); };
+      actions.append(retry, close);
+      row.append(actions);
+      container.append(row);
+      loadFailureDetail(failure.job).then(detail => {
+        if (!row.isConnected) return;
+        row.children[1].textContent = detail;
+      });
+    }
+  }
+}
+
+function clearRepoFailures(container) {
+  container.querySelectorAll("[data-repo-failure]").forEach(node => node.remove());
+  const head = container.firstElementChild;
+  if (head) head.textContent = "Preparing your managed copies";
+}
+
 function retargetProws(container) {
   for (const k of Object.keys(S.prows || {})) {
     const r = S.prows[k];
@@ -163,6 +270,16 @@ export function updatePrepRows() {
   const rows = showAll
     ? (S.info.repos || [])
     : (S.info.repos || []).filter(r => r.progress || (S.info.server.active && !r.deployed));
+  // A settled failure owns the sidebar box until the user dismisses it or a
+  // later attempt succeeds. The first-boot page keeps its own rows instead:
+  // it already shows the retry action for a first pass that did not finish.
+  const failures = native ? [] : repoFailures();
+  if (failures.length) {
+    ensurePrepRows([], container);
+    renderRepoFailures(container, failures);
+    return;
+  }
+  if (!native) clearRepoFailures(container);
   ensurePrepRows(rows, container);
   for (const r of rows) {
     const row = S.prows[r.key];
@@ -205,7 +322,14 @@ export function stopPrepWatcher() {
 export function startPrepWatcher() {
   stopPrepWatcher();
   const tick = async () => {
-    if (!prepActive()) { removeGlobalStrip(); _prepTimer = null; return; }
+    if (!prepActive()) {
+      // Progress is over, but a failed operation must not vanish with it: the
+      // last row render is what turns the box into the failure notice.
+      updatePrepRows();
+      if (!repoFailures().length) removeGlobalStrip();
+      _prepTimer = null;
+      return;
+    }
     const before = prepSignature();
     _prepTimer = setTimeout(tick, 750);
     try {

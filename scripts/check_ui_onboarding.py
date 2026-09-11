@@ -61,9 +61,38 @@ def main() -> int:
         "const allReady = repos.length > 0 && repos.every(r => r.deployed);",
         'toast(allReady ? "ok" : "warn"',
         '"Setup did not finish. Retry the missing repositories."',
+        # A failed repo operation used to vanish with its progress row, leaving
+        # simple mode with no console and no other trace of the failure.
+        "export function repoFailures()",
+        'job.kind !== "repo_init" && job.kind !== "repo_update"',
+        "if (seen.has(key)) continue;",
+        'job.status === "fail" && job.id !== S.repoFailureDismissed',
+        "function renderRepoFailures(container, failures)",
+        'S.repoFailureDismissed = failure.job.id;',
+        "await import(\"./forms.js\")",
+        "if (!repoFailures().length) removeGlobalStrip();",
     ):
         if marker not in prep:
             return fail(f"preparation state contract is missing: {marker}")
+    # Progress rows and the failure notice are mutually exclusive, and the
+    # notice is the sidebar's own: the first-boot page keeps its retry rows.
+    if "const container = native || globalStrip();" not in prep:
+        return fail("the prep box is no longer hosted by the shared sidebar strip")
+    if "const failures = native ? [] : repoFailures();" not in prep:
+        return fail("the sidebar prep box does not consult a settled failure")
+    render_at = prep.find("if (failures.length) {")
+    row_at = prep.find("ensurePrepRows(rows, container);", render_at)
+    if render_at < 0 or row_at < 0 or row_at < render_at:
+        return fail("the failure notice no longer precedes the progress rows")
+    # Retrying from the notice must reuse the real runner (forms.js imports
+    # prep.js, so the import has to stay dynamic) and offer a way to dismiss.
+    if 'class: "rp-actions"' not in prep or '"aria-label": "Dismiss this message"' not in prep:
+        return fail("the repo failure notice has no retry and dismiss actions")
+    if "repoReady" not in (JS / "forms.js").read_text(encoding="utf-8"):
+        return fail("forms.js no longer owns the repo runner the retry reuses")
+    for path in sorted(JS.rglob("*.js")):
+        if path != JS / "prep.js" and "repoFailures" in path.read_text(encoding="utf-8"):
+            return fail(f"{path.relative_to(ROOT)} renders the repo failure notice")
     for marker in (
         "PAGES.preparing",
         "S.firstBootDismissed = true",

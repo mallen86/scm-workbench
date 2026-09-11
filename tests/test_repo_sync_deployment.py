@@ -640,6 +640,91 @@ class DeploymentTests(unittest.TestCase):
             with self.assertRaises(repo_sync.RepoError):
                 repo_sync._validate_tree(source)
 
+    def test_user_data_does_not_consume_the_upstream_tree_budget(self):
+        """A filled image cache must not strand repo updates.
+
+        The upstream repository alone uses most of TREE_BYTES_CAP, and fetched
+        card images live inside the same managed tree. Counting them against
+        the upstream budget made every update fail with "managed repository
+        tree is too large" once the cache filled the remaining headroom.
+        """
+        tree = Path(self.temp.name) / "managed"
+        (tree / "game" / "front").mkdir(parents=True)
+        (tree / "upstream.bin").write_bytes(b"u" * 8)
+        (tree / "game" / "front" / "card.png").write_bytes(b"i" * 40)
+
+        # The whole tree is far past the upstream cap; only the user slot is
+        # over its own share, so the walk must charge the cache to its own
+        # budget instead of failing on the upstream one.
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 16):
+            files = repo_sync._validate_tree(tree)
+        self.assertEqual(files, ["game/front/card.png", "upstream.bin"])
+
+        # Every user slot is covered, not just the front images.
+        for slot in repo_sync.USER_DATA_PATHS:
+            self.assertTrue(repo_sync._is_user_data_rel(f"{slot}/x.png"), slot)
+            self.assertTrue(repo_sync._is_user_data_rel(slot), slot)
+            self.assertFalse(repo_sync._is_user_data_rel(f"{slot}2/x.png"), slot)
+            self.assertFalse(repo_sync._is_user_data_rel(f"other/{slot}/x.png"), slot)
+        # An upstream path that merely starts with a user slot's spelling is
+        # still upstream content.
+        self.assertFalse(repo_sync._is_user_data_rel("game/frontline/x.png"))
+        self.assertFalse(repo_sync._is_user_data_rel("database/x.png"))
+
+    def test_upstream_and_user_caps_are_each_still_enforced(self):
+        """Exempting user data from the upstream cap must not remove bounds."""
+        tree = Path(self.temp.name) / "capped"
+        (tree / "game" / "front").mkdir(parents=True)
+        (tree / "upstream.bin").write_bytes(b"u" * 40)
+        (tree / "game" / "front" / "card.png").write_bytes(b"i" * 40)
+
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 8):
+            with self.assertRaisesRegex(repo_sync.RepoError, "tree is too large"):
+                repo_sync._validate_tree(tree)
+        with patch.object(repo_sync, "TREE_FILE_CAP", 0):
+            with self.assertRaisesRegex(repo_sync.RepoError, "tree has too many files"):
+                repo_sync._validate_tree(tree)
+        with patch.object(repo_sync, "USER_DATA_BYTES_CAP", 8):
+            with self.assertRaisesRegex(repo_sync.RepoError, "user data is too large"):
+                repo_sync._validate_tree(tree)
+        with patch.object(repo_sync, "USER_DATA_FILE_CAP", 0):
+            with self.assertRaisesRegex(repo_sync.RepoError, "user data has too many files"):
+                repo_sync._validate_tree(tree)
+
+        # A hostile link or special file is still refused inside a user slot.
+        outside = Path(self.temp.name) / "outside.txt"
+        outside.write_bytes(b"outside")
+        (tree / "game" / "front" / "link.png").symlink_to(outside)
+        with self.assertRaises(repo_sync.RepoError):
+            repo_sync._validate_tree(tree)
+        (tree / "game" / "front" / "link.png").unlink()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(tree / "game" / "front" / "fifo")
+            with self.assertRaises(repo_sync.RepoError):
+                repo_sync._validate_tree(tree)
+            (tree / "game" / "front" / "fifo").unlink()
+
+    def test_manifest_file_cap_charges_user_data_to_its_own_budget(self):
+        manifest = {"files": {}}
+        for index in range(3):
+            manifest["files"][f"game/front/{index}.png"] = "a" * 64
+        manifest["files"]["upstream.py"] = "b" * 64
+
+        # One upstream entry and three user entries: the upstream cap of one is
+        # met, so the user images must not push it over.
+        with patch.object(repo_sync, "TREE_FILE_CAP", 1):
+            repo_sync._validate_manifest_shape(manifest)
+        # A second upstream entry does trip it, so the cap is still enforced.
+        manifest["files"]["upstream2.py"] = "c" * 64
+        with patch.object(repo_sync, "TREE_FILE_CAP", 1):
+            with self.assertRaisesRegex(repo_sync.RepoError, "manifest has too many files"):
+                repo_sync._validate_manifest_shape(manifest)
+        # And the user entries have their own finite bound.
+        with patch.object(repo_sync, "TREE_FILE_CAP", 1), \
+                patch.object(repo_sync, "USER_DATA_FILE_CAP", 2):
+            with self.assertRaisesRegex(repo_sync.RepoError, "manifest has too many files"):
+                repo_sync._validate_manifest_shape(manifest)
+
     def test_streamed_tar_download_cap_closes_response_and_cleans_destination(self):
         class Response:
             headers = {}
