@@ -3360,7 +3360,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3543,6 +3543,10 @@ def list_jobs() -> dict:
         # same field or a job still running (or one reloaded mid-run) would have
         # nothing to restore. Args come from the validated start request.
         row["args"] = j.get("args") or {}
+        # The second fetch stage's denominator, when the job's decklist
+        # declared one (item: stage 2 counts cards, not prefetched images).
+        if j.get("deck_total"):
+            row["deck_total"] = j["deck_total"]
         row.update(warnings=j.get("warnings", []), outputs=job_outputs(j),
                    save_grants=_grants_for_job(j))
         running.append(row)
@@ -5045,6 +5049,47 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
     return args, errors, warns
 
 
+# A fetch job's second stage walks the decklist slot by slot. MPCFill XML
+# states that slot count once, in <details><quantity>N</quantity>, and the
+# plugin sizes its slot list from exactly that number. Reading that one scalar
+# gives the stage an honest denominator; the decklist itself stays the repo
+# plugin's to parse, so this never becomes a second implementation of it.
+DECKLIST_SCAN_BYTES = 2 * 1024 * 1024
+_DECK_QUANTITY_RE = re.compile(r"<quantity>\s*(\d{1,9})\s*</quantity>", re.IGNORECASE)
+
+
+def _decklist_quantity(text: str) -> int:
+    """The slot count a decklist declares, or 0 when it declares none."""
+    match = _DECK_QUANTITY_RE.search(text)
+    return int(match.group(1)) if match else 0
+
+
+def _fetch_decklist_total(args: dict, cwd) -> int:
+    """Best-effort card count for a fetch job's own decklist; 0 when unknown.
+
+    Only the decklist this job was given is read, only the first bounded slice
+    of it, and nothing is written. Anything unexpected yields 0, which simply
+    leaves the progress bar without a second-stage total.
+    """
+    source = str(args.get("deck_source") or "file")
+    if source == "paste":
+        return _decklist_quantity(str(args.get("deck_text") or ""))
+    if source != "file" or not cwd:
+        return 0   # a URL is the plugin's to fetch, not ours
+    name = str(args.get("deck_file") or "").strip()
+    if not name or "/" in name or "\\" in name:
+        return 0   # decklist names never carry a separator
+    try:
+        path = Path(cwd) / "game" / "decklist" / name
+        if not path.is_file() or path.is_symlink():
+            return 0
+        with open(path, "rb") as handle:
+            raw = handle.read(DECKLIST_SCAN_BYTES)
+    except OSError:
+        return 0
+    return _decklist_quantity(raw.decode("utf-8", "replace"))
+
+
 def build_preview(kind: str, raw_args: dict) -> dict:
     """Build the command preview used by both HTTP and native IPC.
 
@@ -5224,6 +5269,13 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "scm_path": str(cwd) if cwd else None,
         "offset_lease": offset_lease,
     }
+    if kind.startswith("fetch:"):
+        # What the second stage will walk, for the progress bar. Absent (0)
+        # whenever the decklist does not declare it, so the bar falls back to
+        # the prefetch count rather than inventing a denominator.
+        deck_total = _fetch_decklist_total(args, cwd)
+        if deck_total:
+            job["deck_total"] = deck_total
     # Record terminal candidates before the child starts. This prevents a
     # successful calibration run from granting an unrelated old PDF merely
     # because it happens to share the expected family.

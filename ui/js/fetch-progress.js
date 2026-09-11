@@ -25,7 +25,8 @@
 export const RENAME_HOLD_MS = 450;
 
 export function createFetchProgress() {
-  let total = 0;      // stage 1's announced total, reused as stage 2's scale
+  let total = 0;      // stage 1's announced total
+  let deckTotal = 0;  // the decklist's slot count, when it declares one
   let prefetched = 0; // stage 1 counter
   let slots = 0;      // stage 2 counter
   let seen = false;   // a prefetch stage exists in this run
@@ -70,6 +71,12 @@ export function createFetchProgress() {
       return null;
     },
 
+    /** The decklist's own slot count, which is what stage 2 walks. Unknown
+        (0) falls back to stage 1's number, the images actually fetched. */
+    setDeckTotal(count) {
+      deckTotal = Number(count) > 0 ? Number(count) : 0;
+    },
+
     /** Switch to stage 2, after the caller has shown stage 1 complete. */
     beginRename() {
       renaming = true;
@@ -79,17 +86,22 @@ export function createFetchProgress() {
     /** The numbers line for the stage in progress, or null before a total. */
     view() {
       if (!seen || total <= 0) return null;
+      // Stage 2 is measured against the decklist's own slot count when it has
+      // one: a card played four times is one image and four slots, so the
+      // prefetch number can be well short of the slots that follow.
+      const whole = renaming && deckTotal > 0 ? deckTotal : total;
       const done = renaming ? slots : prefetched;
-      const pct = percent(done, total);
+      const pct = percent(done, whole);
       return {
         stage: renaming ? 2 : 1,
         done,
-        total,
+        total: whole,
         pct,
-        // Past stage 1's total there is no honest ratio left to show.
-        text: renaming && done > total
+        // A count past the total means the decklist understated itself; the
+        // count still moves, but no ratio may be claimed for it.
+        text: renaming && done > whole
           ? done + " slots renamed"
-          : `${done}/${total} (${pct}%)`,
+          : `${done}/${whole} (${pct}%)`,
       };
     },
   };

@@ -57,6 +57,19 @@ class NativeJobsTests(unittest.TestCase):
         live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
         self.assertEqual(live["args"], {})
 
+    def test_a_fetch_job_exposes_its_decklists_slot_count(self):
+        # The second stage of a prefetching fetch is measured against the
+        # decklist's slot count, so a live row must carry it. A job whose
+        # decklist declared nothing must not invent one.
+        server.JOBS["a"]["kind"] = "fetch:mtg"
+        server.JOBS["a"]["deck_total"] = 100
+        live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
+        self.assertEqual(live["deck_total"], 100)
+        for absent in (0, None):
+            server.JOBS["a"]["deck_total"] = absent
+            live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
+            self.assertNotIn("deck_total", live)
+
     def test_server_error_is_internal_not_bad_request(self):
         with mock.patch.object(server, "list_jobs", side_effect=ValueError("server bug")), \
                 mock.patch.object(ipc.traceback, "print_exc") as trace:

@@ -18,6 +18,7 @@ def main() -> int:
     console = (ROOT / "ui" / "js" / "console.js").read_text(encoding="utf-8")
     jobstrip = (ROOT / "ui" / "js" / "jobstrip.js").read_text(encoding="utf-8")
     pdf = (ROOT / "ui" / "js" / "pages" / "pdf.js").read_text(encoding="utf-8")
+    fetch_page = (ROOT / "ui" / "js" / "pages" / "fetch.js").read_text(encoding="utf-8")
     theme = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
     if "j.job?.warnings" not in forms or "catch (error)" not in forms or "startFailed" not in forms:
         print("FAIL: doRun does not preserve nested warnings and start errors")
@@ -35,7 +36,8 @@ def main() -> int:
             return 1
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
                    "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
-                   "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active"):
+                   "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active",
+                   "if (opts.slotTotal)", "fetchProgress.setDeckTotal"):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
@@ -46,6 +48,14 @@ def main() -> int:
         if marker not in pdf:
             print(f"FAIL: PDF progress or completion actions are missing {marker}")
             return 1
+    # The fetch page is the only place that knows a prefetching fetch's second
+    # stage should be measured against the decklist rather than the images.
+    if "slotTotal: async job => job.deck_total || 0" not in fetch_page:
+        print("FAIL: the fetch page does not give the strip the decklist slot count")
+        return 1
+    if "jobStrip(kind" not in fetch_page:
+        print("FAIL: the fetch page no longer renders a job strip")
+        return 1
     if 'document.body.classList.add("console-open")' not in console or \
             "body:not(.mode-simple).console-open .main" not in theme:
         print("FAIL: advanced console does not reserve page space")
@@ -258,6 +268,37 @@ if (/\//.test(v.text)) fail("past the total still printed a ratio: " + v.text);
 // Counters never run backwards, whatever order the plugin prints them in.
 step("Slot 44: Card 44");
 if (p.view().done !== 95) fail("a lower slot number moved the counter backwards");
+
+// A decklist that declares its own slot count is the honest denominator for
+// stage 2: a card played six times is one image and six slots, so the
+// prefetch total (88) is short of the slots that follow (100).
+p = mod.createFetchProgress();
+step("  Prefetching 88 images with 8 workers...");
+step("  Fetched 88/88 images");
+step("Prefetch complete.");
+p.beginRename();
+p.setDeckTotal(100);
+v = p.view();
+if (v.total !== 100 || v.done !== 0 || v.pct !== 0) fail("the decklist total did not become stage 2's scale: " + JSON.stringify(v));
+for (const n of [25, 50, 99]) {
+  step(`Slot ${n}: Card ${n}`);
+  const seen = p.view();
+  // Exactly the fraction of the decklist walked, not of the prefetch.
+  if (seen.pct !== Math.round(n / 100 * 100)) fail(`slot ${n} of a 100 card decklist gave ${seen.pct}%`);
+}
+step("Slot 100: Last Card");
+if (p.view().pct !== 100) fail("a complete 100 card decklist did not reach 100%");
+// A count past the declared total still reports no ratio.
+step("Slot 104: Beyond");
+v = p.view();
+if (v.done !== 104 || v.pct !== 100 || v.text !== "104 slots renamed") fail("beyond the decklist total: " + JSON.stringify(v));
+// An unknown total leaves stage 1's number in place.
+p = mod.createFetchProgress();
+step("  Prefetching 12 images with 8 workers...");
+step("Prefetch complete.");
+p.beginRename();
+p.setDeckTotal(0);
+if (p.view().total !== 12) fail("an unknown decklist total did not fall back to the prefetch count");
 console.log("ok: the two-stage fetch progress model passed");
 ''',
         text=True,

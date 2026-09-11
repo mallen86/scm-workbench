@@ -79,6 +79,15 @@ export function jobStrip(kind, opts = {}) {
         if (imageDone && imageTotal) showProgress(imageDone, imageTotal);
       }).catch(() => {}); // an unknown total deliberately leaves the cycling bar
     }
+    // The second stage of a prefetching fetch walks the decklist, so its
+    // denominator is the decklist's own slot count, not the images fetched.
+    if (opts.slotTotal) {
+      Promise.resolve(opts.slotTotal(job)).then(count => {
+        if (esJobId !== job.id) return;
+        fetchProgress.setDeckTotal(Number(count) || 0);
+        showFetchStage();
+      }).catch(() => {});
+    }
     subscription = jobs.subscribe(job.id, {
       after: 0,
       onLine: d => {

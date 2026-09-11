@@ -59,6 +59,10 @@ PAGES.fetch = (root) => {
   wrap.append(jobStrip(kind, {
     icon: "download",
     runningLabel: `Fetching ${S.manifest[kind].game} card art`,
+    // A prefetching fetch runs a second stage over the decklist's slots. The
+    // server records how many the decklist declares; without it the bar falls
+    // back to the number of images prefetched.
+    slotTotal: async job => job.deck_total || 0,
     onOk: (done, body) => {
       body.append(el("div", { class: "js-msg ok" },
         ico("check"), el("span", {}, "Card art is ready. Images are in place for the PDF.")));

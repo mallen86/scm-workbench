@@ -28,7 +28,7 @@
 - [x] The progress box in the bottom left when initially syncing a repo doesn't seem to actually be in a box at all like it is normally. All notifications in the bottom left of the sidebar should always be within its own box.
 - [x] With the new update notification if I manually check for an update and then update, when the app opens back up I have a notification that a new version is available showing the same version that's already installed.
 - [x] The repo sync operations seem to be fixed but in simple mode I don't see the box showing the progress in the sidebar unless I go forward then go backward with the version.
-- [ ] For the second stage card art fetch, you can get the total number of cards from the count of cards in the supplied decklist/file.
+- [x] For the second stage card art fetch, you can get the total number of cards from the count of cards in the supplied decklist/file.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
