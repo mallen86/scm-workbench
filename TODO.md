@@ -56,4 +56,4 @@
     Error fetching 1AIX8y0rttAqqbbXSLtCp7fY-bXQsxjLj: 404 Client Error: Not Found for url: https://script.googleusercontent.com/macros/echo?user_content_key=AUkAhnS5jXdaCK65r4wXAiljQA5NF6rCZbhWAwGP5nCC_vQ6CQd_EAfNAtaXJWQPFQajNVBEDMYxhcAFqdeQxJEYTaDkHC3EpLJW7Bs410_OPNJgs7xZa14Ono9rlzbvo0bFhSnHC8N7WuUQ_ez7OvRgM4gLltI0-wyIlYKm3e2ShPB7O_beiGG0qC3mTSS1waJo8aajQYX__fkPVXfHNTWGdpSN_6vqS58KRaCQ7wbNz8BAyLhhW0qmoxUKpO3rGt4nlaY_OUYytt7pujnzAfxgun22qO5sdw_jwjL-uYjfvhW7rGlQRP1bTajnH30xin5WMczDfb5h&lib=M07GOxqQgW-vs9J-r8eL5W6-NPiLuMcbZ
     Warning: No image data for slot 1 (Treasure Vault)
     ```
-- [ ] You can cancel a job in advanced mode using the console but there's no way to cancel a job in simple mode. Add a button to cancel the job all the way on the right in the same row as the label and progress bar.
+- [x] You can cancel a job in advanced mode using the console but there's no way to cancel a job in simple mode. Add a button to cancel the job all the way on the right in the same row as the label and progress bar.

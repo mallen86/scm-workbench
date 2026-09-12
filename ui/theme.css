@@ -848,11 +848,17 @@ body.mode-simple .console { display: none; }
   background: var(--surface-2);
   padding: 12px 14px;
   display: grid; gap: 9px;
+  position: relative;
 }
 /* the hidden attribute loses to any display rule, so the strip would sit
    visibly (bar sliding) on a fresh page with no job at all - pin it down */
 .jobstrip[hidden] { display: none; }
 .jobstrip .js-top { display: flex; align-items: center; gap: 9px; }
+.jobstrip.running .js-top { padding-right: 78px; }
+/* Kept out of the grid so adding Cancel cannot make the label row taller or
+   push the progress bar down. */
+.jobstrip .js-cancel { position: absolute; top: 8px; right: 10px; padding: 4px 9px; }
+.jobstrip .js-cancel[hidden] { display: none; }
 .jobstrip .js-ico { display: inline-flex; color: var(--accent); }
 .jobstrip .js-label { font-size: 13px; font-weight: 600; color: var(--text); }
 .jobstrip .js-progress-row { display: flex; align-items: center; gap: 7px; min-width: 0; }

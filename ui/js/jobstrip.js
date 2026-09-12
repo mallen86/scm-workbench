@@ -29,10 +29,13 @@ export function jobStrip(kind, opts = {}) {
   const warningIcons = el("div", { class: "js-progress-warnings", hidden: true });
   const progressRow = el("div", { class: "js-progress-row" }, warningIcons, bar);
   const body = el("div", { class: "js-body" });
+  const cancel = el("button", { type: "button", class: "btn sm ghost js-cancel", hidden: true,
+    title: "Cancel this job", "aria-label": "Cancel this job" }, ico("stop"), "Cancel");
   strip.append(
     el("div", { class: "js-top" }, el("span", { class: "js-ico" }, ico(opts.icon || "play")), label),
     progressRow,
     body,
+    cancel,
   );
 
   // A timestamp remains the fallback for callers outside doRun(). Jobs
@@ -58,6 +61,26 @@ export function jobStrip(kind, opts = {}) {
   let imageDone = 0, imageTotal = 0;
   let fetchProgress = createFetchProgress();
   let renameTimer = null;
+  let stoppingId = null;
+  cancel.onclick = async () => {
+    const id = cancel.dataset.jobId;
+    if (!id || cancel.disabled) return;
+    stoppingId = id;
+    cancel.disabled = true;
+    try {
+      const result = await jobs.kill(id);
+      if (result?.ok) toast("warn", "Stopping…");
+      else {
+        stoppingId = null;
+        cancel.disabled = false;
+        toast("warn", "The job has already finished.");
+      }
+    } catch (error) {
+      stoppingId = null;
+      cancel.disabled = false;
+      toast("err", error?.message || "Could not stop the job.");
+    }
+  };
   const closeEs = () => {
     if (renameTimer) { clearTimeout(renameTimer); renameTimer = null; }
     if (subscription) { try { subscription.close(); } catch {} subscription = null; }
@@ -181,7 +204,7 @@ export function jobStrip(kind, opts = {}) {
     if (painting) return;
     painting = true;
     try {
-      if (uiMode() !== "simple") { strip.hidden = true; closeEs(); return; }
+      if (uiMode() !== "simple") { strip.hidden = true; cancel.hidden = true; closeEs(); return; }
       if (!strip.isConnected) return;          // page gone — the timer cleans up below
       const jobs = (S.jobs || []).filter(j => j.kind === kind);
       const run = jobs.find(j => j.status === "running");
@@ -189,6 +212,9 @@ export function jobStrip(kind, opts = {}) {
         strip.dataset.painted = "";               // a new run may re-render onOk later
         attachProgress(run);
         showImageWarnings(run);
+        cancel.dataset.jobId = run.id;
+        cancel.hidden = false;
+        cancel.disabled = stoppingId === run.id;
         strip.hidden = false;
         strip.className = strip.classList.contains("prog") ? "jobstrip running prog" : "jobstrip running";
         if (!strip.classList.contains("prog"))
@@ -198,6 +224,10 @@ export function jobStrip(kind, opts = {}) {
         return;
       }
       closeEs();
+      cancel.hidden = true;
+      cancel.disabled = false;
+      cancel.dataset.jobId = "";
+      stoppingId = null;
       const remembered = S.startedJobIds?.[kind];
       const cutoff = Math.max(t0, S.jobCompletionCutoffs?.[kind] || 0);
       const done = (remembered && jobs.find(j => j.id === remembered)) || jobs.find(j => j.ts >= cutoff);

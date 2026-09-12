@@ -73,13 +73,25 @@ def main() -> int:
                    "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
                    "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active",
                    "if (opts.slotTotal)", "fetchProgress.setDeckTotal", "fetchProgress.warningView()",
-                   'ico("warncircle")', 'ico("alert")', "job?.image_warnings"):
+                   'ico("warncircle")', 'ico("alert")', "job?.image_warnings",
+                   'title: text, "aria-label": text'):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
     if jobstrip.count("jobs.list().then(result") < 2:
         print("FAIL: rebuilt job strips do not immediately refresh canonical completion state")
         return 1
+    # Simple mode cancels the exact running strip job through the shared facade.
+    # The control is outside the grid so it cannot increase the label row's
+    # height or push the progress bar down.
+    for marker in ('class: "btn sm ghost js-cancel"', 'title: "Cancel this job"',
+                   "const result = await jobs.kill(id);", "cancel.dataset.jobId = run.id;",
+                   "cancel.hidden = false;", "cancel.disabled = stoppingId === run.id;",
+                   ".jobstrip .js-cancel { position: absolute; top: 8px; right: 10px;"):
+        source = theme if marker.startswith(".jobstrip") else jobstrip
+        if marker not in source:
+            print(f"FAIL: simple-mode job cancellation is missing {marker}")
+            return 1
     for marker in ("progressTotal: async job", "S.jobArgs?.[done.id]", "resolveTemplate(f.paper_size, f.card_size, !!f.borderless)"):
         if marker not in pdf:
             print(f"FAIL: PDF progress or completion actions are missing {marker}")
