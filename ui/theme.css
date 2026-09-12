@@ -1257,6 +1257,10 @@ body.setup-welcome .topbar { display: none; }
 #updateprog.failed .rp-fill { background: var(--err); }
 #updateprog.done .rp-head, #updateprog.done .rp-label { color: var(--ok); }
 #updateprog.done .rp-fill { background: var(--ok); }
+.job-notice.running .rp-head { color: var(--accent); }
+.job-notice.ok .rp-head, .job-notice.ok .rp-label { color: var(--ok); }
+.job-notice.fail .rp-head, .job-notice.fail .rp-label { color: var(--err); }
+.job-notice.killed .rp-head, .job-notice.killed .rp-label { color: var(--warn); }
 .rp-fill { height: 100%; border-radius: 3px; background: var(--accent-grad, var(--accent, #ffb454));
           transition: width 2.4s linear; will-change: width; }
 .rp-bar.indet .rp-fill { width: 38%; animation: prep-slide 1.5s ease-in-out infinite; }

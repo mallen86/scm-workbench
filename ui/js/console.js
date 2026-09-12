@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { openFile, revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { openFile, revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -65,6 +65,10 @@ export async function refreshJobs(forceRender = false) {
   const sig = (next || []).map(j => j.id + ":" + j.status).join(",");
   const changed = sig !== _lastJobsSig;
   S.jobs = next;
+  // Ordinary jobs share a bounded sidebar lifecycle across pages. Reconcile on
+  // every authoritative list response, even when the status signature has not
+  // changed, so expiry and dismissal never depend on a page render.
+  syncJobNotices(next);
   // The server's recorded args back the Job history page for jobs this UI
   // session did not start (a reload mid-run, an earlier session). An in-session
   // doRun snapshot stays authoritative when one exists.

@@ -17,6 +17,9 @@ def main() -> int:
     forms = (ROOT / "ui" / "js" / "forms.js").read_text(encoding="utf-8")
     console = (ROOT / "ui" / "js" / "console.js").read_text(encoding="utf-8")
     jobstrip = (ROOT / "ui" / "js" / "jobstrip.js").read_text(encoding="utf-8")
+    notices = (ROOT / "ui" / "js" / "job-notices.js").read_text(encoding="utf-8")
+    notice_state_path = ROOT / "ui" / "js" / "job-notice-state.js"
+    notice_state = notice_state_path.read_text(encoding="utf-8")
     pdf = (ROOT / "ui" / "js" / "pages" / "pdf.js").read_text(encoding="utf-8")
     fetch_page = (ROOT / "ui" / "js" / "pages" / "fetch.js").read_text(encoding="utf-8")
     theme = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
@@ -48,6 +51,23 @@ def main() -> int:
     for marker in ("S.startedJobIds[kind]", "S.jobArgs[j0.id]"):
         if marker not in forms:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
+            return 1
+    for marker in ('import { syncJobNotices } from "./job-notices.js";',
+                   "syncJobNotices(next);"):
+        if marker not in console:
+            print(f"FAIL: canonical job refresh does not drive sidebar notices: {marker}")
+            return 1
+    for marker in ('data-job-notice', 'class: "rp-head rp-head-row"',
+                   '"aria-label": "Dismiss this job message"',
+                   'setTimeout(() => syncJobNotices(S.jobs)',
+                   'class: `repoprog sidebar-note job-notice ${record.status}`'):
+        if marker not in notices:
+            print(f"FAIL: sidebar job notices are missing {marker}")
+            return 1
+    for marker in ("JOB_NOTICE_HOLD_MS = 5000", "JOB_NOTICE_MAX = 4",
+                   'new Set(["repo_init", "repo_update", "update"])'):
+        if marker not in notice_state:
+            print(f"FAIL: sidebar job notice lifecycle is missing {marker}")
             return 1
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
                    "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
@@ -331,7 +351,50 @@ console.log("ok: the two-stage fetch progress model passed");
     if stage_model.returncode:
         print("FAIL: Node fetch-stage contract failed: " + (stage_model.stderr or stage_model.stdout).strip())
         return 1
+    notice_model = subprocess.run(
+        ["node", "--input-type=module", "-", str(notice_state_path)],
+        input=r'''import fs from "node:fs";
+const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
+const mod = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
+const fail = message => { throw new Error(message); };
+const job = (id, status, ts = 1, kind = "create_pdf") => ({ id, status, ts, kind, title: `Job ${id}` });
+let state = mod.createJobNoticeState();
+let view = state.sync([job("old", "ok")], 1000);
+if (view.length) fail("historical terminal jobs created notices");
+view = state.sync([job("a", "running")], 1000);
+if (view.length !== 1 || view[0].status !== "running" || view[0].expiresAt) fail("running job did not create a notice");
+view = state.sync([job("a", "ok")], 2000);
+if (view[0]?.status !== "ok" || view[0].expiresAt !== 2000 + mod.JOB_NOTICE_HOLD_MS) fail("running notice did not transition to a five-second terminal notice");
+view = state.sync([job("a", "ok")], 6999);
+if (view.length !== 1) fail("terminal notice disappeared before five seconds");
+view = state.sync([job("a", "ok")], 7000);
+if (view.length) fail("terminal notice did not expire at five seconds");
+state = mod.createJobNoticeState();
+state.sync([job("b", "running")], 1000);
+state.dismiss("b");
+if (state.sync([job("b", "running")], 1100).length) fail("dismissed running notice came back");
+if (state.sync([job("b", "ok")], 1200).length) fail("dismissed job created a terminal notice");
+state = mod.createJobNoticeState();
+view = state.sync(Array.from({ length: 8 }, (_, i) => job(String(i), "running", i)), 1000);
+if (view.length !== mod.JOB_NOTICE_MAX || view[0].job.id !== "7") fail("notice list is not bounded to the newest jobs");
+view = state.sync([job("repo", "running", 10, "repo_update"), job("app", "running", 11, "update")], 1000);
+if (view.some(record => record.job.id === "repo" || record.job.id === "app")) fail("specialized sidebar jobs were duplicated");
+state = mod.createJobNoticeState();
+state.sync([job("same", "running")], 1000);
+view = state.sync([job("same", "ok")], 2000);
+const expiry = view[0].expiresAt;
+view = state.sync([job("same", "ok")], 3000);
+if (view[0].expiresAt !== expiry) fail("terminal refresh reset the five-second timer");
+console.log("ok: sidebar job notice lifecycle passed");
+''',
+        text=True,
+        capture_output=True,
+    )
+    if notice_model.returncode:
+        print("FAIL: Node job-notice contract failed: " + (notice_model.stderr or notice_model.stdout).strip())
+        return 1
     print(stage_model.stdout.strip())
+    print(notice_model.stdout.strip())
     print(node.stdout.strip())
     return 0
 
