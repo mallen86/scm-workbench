@@ -32,6 +32,7 @@
 - [x] After the initial repo sync is done on the intial page the "welcome to the workbench" section is shown as directed but it should replace the repo sync progress status, otherwise it's too low on the page.
 - [x] In advanced mode there's no way to open the pdf directly when it's done being created. The only option is to open the console and click "Move to my files..." but that button doesn't work. When you click the button you get a message saying the "this artifact is no longer available". Fix both, add a button to open the PDF and fix the Move to my files... button.
 - [x] When the fetch card art job is done in simple mode, the "Go to Create PDF" button is underneath the done message on the left inside of all the way on the right like the other buttons on the page, move it to align with the other buttons. The same issue is present on the create pdf page when the pdf is ready, the buttons show up under the text on the left.
+- [ ] When a job is cancelled in simple mode the job status has some odd text at the bottom saying something about fixing the form. I'm not sure what that's about but it's incorrect and should be removed. At the same time remove the text showing the last line of the job log.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
@@ -57,3 +58,5 @@
     Warning: No image data for slot 1 (Treasure Vault)
     ```
 - [x] You can cancel a job in advanced mode using the console but there's no way to cancel a job in simple mode. Add a button to cancel the job all the way on the right in the same row as the label and progress bar.
+- [ ] At the moment there's no way to easily add a back image. The only method right now is to go to settings, open the data folder, and navigate to the back folder and manually put the image in. Let's add an easy way to do this.
+- [ ] Verify all the image fetch methods have real progress percentages if able.
