@@ -30,7 +30,7 @@
 - [x] The repo sync operations seem to be fixed but in simple mode I don't see the box showing the progress in the sidebar unless I go forward then go backward with the version.
 - [x] For the second stage card art fetch, you can get the total number of cards from the count of cards in the supplied decklist/file.
 - [x] After the initial repo sync is done on the intial page the "welcome to the workbench" section is shown as directed but it should replace the repo sync progress status, otherwise it's too low on the page.
-- [ ] In advanced mode there's no way to open the pdf directly when it's done being created. The only option is to open the console and click "Move to my files..." but that button doesn't work. When you click the button you get a message saying the "this artifact is no longer available". Fix both, add a button to open the PDF and fix the Move to my files... button.
+- [x] In advanced mode there's no way to open the pdf directly when it's done being created. The only option is to open the console and click "Move to my files..." but that button doesn't work. When you click the button you get a message saying the "this artifact is no longer available". Fix both, add a button to open the PDF and fix the Move to my files... button.
 - [ ] When the fetch card art job is done in simple mode, the "Go to Create PDF" button is underneath the done message on the left inside of all the way on the right like the other buttons on the page, move it to align with the other buttons. The same issue is present on the create pdf page when the pdf is ready, the buttons show up under the text on the left.
 
 # Features

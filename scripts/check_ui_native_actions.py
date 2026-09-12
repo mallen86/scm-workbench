@@ -76,7 +76,8 @@ def main() -> int:
     for path, marker in (
         (UI / "core.js", 'openExternalUrl(url)'),
         (UI / "native-actions.js", 'saveArtifact(grantId, suggestedName)'),
-        (UI / "console.js", 'from "./native-actions.js";'),
+        (UI / "console.js", 'import { openFile, revealPath, saveArtifact } from "./native-actions.js";'),
+        (UI / "console.js", 'const result = await openFile(output);'),
         (UI / "pages" / "pdf.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "templates.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "offset.js", 'import { openFile } from "../native-actions.js";'),

@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
+import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { openFile, revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -178,6 +178,10 @@ export async function attachStream(id, resume) {
   if (current && status !== "running") {
     current.status = status;
     current.exit_code = initial.exitCode;
+    // The log can observe completion before the last jobs.list response. Pull
+    // the artifact paths and export grants before drawing terminal actions.
+    try { await refreshJobs(); } catch {}
+    if (serial !== _streamSerial) return;
     updateBadge();
     renderConsoleTabs();
     updateFooter();
@@ -213,6 +217,14 @@ export async function attachStream(id, resume) {
       if (done.status === "ok") { appendLogLine("", null); appendLogLine("✓ done", "ok"); }
       else if (done.status === "fail") { appendLogLine("", null); appendLogLine(`✕ exited with code ${done.exit_code ?? "?"}`, "err"); }
       else if (done.status === "killed") { appendLogLine("", null); appendLogLine("✕ stopped", "warn"); }
+      // The terminal stream event intentionally carries only status. The
+      // authoritative list call adds outputs and freshly minted export grants
+      // after the worker has snapshotted the artifacts. Refreshing here makes
+      // both Advanced completion actions usable without waiting for another
+      // poll or reopening the console.
+      refreshJobs().then(() => {
+        if (serial === _streamSerial && S.activeJobId === id) updateFooter();
+      }).catch(() => {});
     },
   });
   if (serial === _streamSerial) S.jobSub = subscription;
@@ -250,6 +262,10 @@ export function updateFooter() {
     el("span", { class: "mono" }, fmtTs(job.ts)),
     el("span", { class: "grow" }),
     (() => { const dc = displayCmd(job.cmd, job.kind); return el("span", { class: "mono", title: dc }, truncate(dc, 90)); })(),
+    job.status === "ok" && job.kind === "create_pdf" && (job.outputs || []).find(Boolean)
+      ? el("button", { class: "btn btn-ghost btn-sm", title: "Open in your default PDF app",
+        onclick: () => openJobPdf(job) }, ico("file"), "Open PDF")
+      : null,
     (() => {
       const row = repoRowForKind(job.kind);
       const managed = row && row.mode === "managed";
@@ -272,6 +288,22 @@ export function updateFooter() {
     })(),
     el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") jobs.kill(job.id).then(() => toast("warn", "Stopping…")).catch(e => toast("err", e.message || "Could not stop job")); } }, ico("stop"), "Stop"),
   );
+}
+
+
+export async function openJobPdf(job) {
+  const output = (job.outputs || []).find(Boolean);
+  if (!output) {
+    toast("warn", "This PDF is no longer available. Run the job again.");
+    return;
+  }
+  try {
+    const result = await openFile(output);
+    if (result?.ok) toast("ok", "Opening the PDF. Large files may take a moment to appear.", 6000);
+    else toast("warn", result?.errors?.[0] || "Couldn't open the PDF.");
+  } catch (error) {
+    toast("warn", error?.message || "Couldn't open the PDF.");
+  }
 }
 
 

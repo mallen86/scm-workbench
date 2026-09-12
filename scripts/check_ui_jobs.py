@@ -30,6 +30,21 @@ def main() -> int:
     if "typeof handlers === \"number\"" in jobs:
         print("FAIL: subscribe retains undocumented positional argument mangling")
         return 1
+    # Terminal stream events carry status only. Advanced-mode PDF actions need
+    # the canonical list row, which is where artifact paths and save grants are
+    # exposed after the backend snapshots the output.
+    for marker in ('export async function openJobPdf(job)',
+                   'job.kind === "create_pdf"', 'onclick: () => openJobPdf(job)',
+                   'const result = await openFile(output);',
+                   'refreshJobs().then(() => {',
+                   'if (serial === _streamSerial && S.activeJobId === id) updateFooter();'):
+        if marker not in console:
+            print(f"FAIL: advanced PDF completion actions are missing {marker}")
+            return 1
+    terminal_branch = console[console.find('onDone: done => {'):console.find('onDone: done => {') + 1800]
+    if 'refreshJobs()' not in terminal_branch:
+        print("FAIL: console completion does not refresh artifact paths and save grants")
+        return 1
     for marker in ("S.startedJobIds[kind]", "S.jobArgs[j0.id]"):
         if marker not in forms:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
