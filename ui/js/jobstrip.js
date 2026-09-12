@@ -8,7 +8,7 @@
    "go create the PDF", create pdf → "open the PDF"). Advanced mode never
    sees the strip — the console drawer is that page's status there instead. */
 
-import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, RENAME_HOLD_MS } from "./fetch-progress.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
+import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, fetchFractionLine, RENAME_HOLD_MS } from "./fetch-progress.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
 export function clearJobCompletion(kind) {
   S.jobCompletionCutoffs = S.jobCompletionCutoffs || {};
   S.jobCompletionCutoffs[kind] = Date.now() / 1000;
@@ -47,9 +47,10 @@ export function jobStrip(kind, opts = {}) {
   // ---- live progress from the job's own stream ---------------------------
   // The console drawer is closed in simple mode, so nothing else consumes the
   // job's SSE stream; the strip opens one on the running job and harvests
-  // progress from it. Any line containing "n/m" (the fetch plugins print
-  // "Fetched 42/101 images" per batch) moves the bar to the real fraction.
-  // If no such line ever arrives the bar keeps its indeterminate slide.
+  // progress from it. The fetch plugins' own "Fetched 42/101 images" line
+  // moves the bar to the real fraction (matched exactly, so a retry notice or
+  // an image URL cannot pass for progress). If no such line ever arrives the
+  // bar keeps its indeterminate slide.
   //
   // A prefetching fetch plugin (MTG over an MPCFill XML) runs two stages: it
   // prefetches unique images, prints "Prefetch complete.", then walks the deck
@@ -166,8 +167,11 @@ export function jobStrip(kind, opts = {}) {
         }
         // A prefetch run's own lines are the only progress it reports.
         if (fetchProgress.active) return;
-        const fraction = /(\d+)\s*\/\s*(\d+)/.exec(d.s);
-        if (fraction) return showProgress(+fraction[1], +fraction[2]);
+        // The one single-stage progress sentence the fetch plugins print,
+        // matched exactly. A bare number/number pair is not progress: retry
+        // notices ("1/3") and image URLs contain one too.
+        const fraction = fetchFractionLine(d.s);
+        if (fraction) return showProgress(fraction[0], fraction[1]);
         const image = /^\s*Image\s+(\d+)\s*:/i.exec(d.s);
         if (!image) return;
         imageDone = Math.max(imageDone, +image[1]);

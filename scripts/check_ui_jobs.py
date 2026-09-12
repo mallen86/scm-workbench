@@ -78,6 +78,7 @@ def main() -> int:
             print(f"FAIL: sidebar job notice lifecycle is missing {marker}")
             return 1
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
+                   "fetchFractionLine(d.s)",
                    "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
                    "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active",
                    "if (opts.slotTotal)", "fetchProgress.setDeckTotal", "fetchProgress.warningView()",
@@ -329,6 +330,21 @@ const source = fs.readFileSync(process.argv[2], "utf8");
 const mod = await import(dataUrl(source));
 const fail = message => { throw new Error(message); };
 
+// The single-stage fallback only accepts the plugins' real progress sentence.
+// A loose number/number match would fire on a Scryfall rate-limit retry notice
+// and on an image URL, fabricating a percentage for a run with no progress.
+const real = mod.fetchFractionLine("  Fetched 42/101 images");
+if (!real || real[0] !== 42 || real[1] !== 101) fail("the real fetch progress line was not recognized: " + JSON.stringify(real));
+for (const line of [
+  "Hit Scryfall rate limit (429), waiting 30 seconds before retry 1/3...",
+  "Fetching image from URL: https://cards.scryfall.io/normal/front/1/2/ab.jpg",
+  "Parsed 100 cards into 61 unique entries",
+  "Error fetching https://example.test/2/3: timed out",
+  "Index: 4, quantity: 2, name: Card",
+]) {
+  if (mod.fetchFractionLine(line) !== null) fail("a non-progress line fabricated a fraction: " + line);
+}
+
 // A run that never prefetches must not be described as a two-stage run.
 let p = mod.createFetchProgress();
 if (p.active) fail("a fresh run already claims a prefetch stage");
@@ -336,6 +352,21 @@ if (p.line("  Fetched 42/101 images") !== null) fail("a plain fetch line was tre
 if (p.line("Slot 7: Nami") !== null) fail("a slot line without a prefetch total invented a stage");
 if (p.active) fail("a plain fetch line switched the run into two-stage mode");
 if (p.view() !== null) fail("the two-stage view rendered without a prefetch total");
+
+// Every non-MTG fetch plugin prints only a per-entry index and no total, and
+// some restart that index per section. Nothing in this model may turn that
+// into a percentage: an invented denominator is exactly what it must not do.
+p = mod.createFetchProgress();
+for (const line of [
+  "Index: 1, quantity: 4, name: Lightning Bolt",
+  "Index: 12, quantity: 1, set: LTR, collector number: 246, name: Anduril",
+  "Index: 1, quantity: 2, name: Mickey Mouse - True Friend",
+  "Skipping: \"// sideboard\"",
+  "Parsed 100 cards into 61 unique entries",
+]) {
+  if (p.line(line) !== null) fail("a non-prefetch fetch line invented progress: " + line);
+}
+if (p.active || p.view() !== null) fail("a plain Index-style fetch claimed a percentage");
 
 // The real MTG/MPCFill sequence: 88 prefetched images, then 100 deck slots.
 p = mod.createFetchProgress();

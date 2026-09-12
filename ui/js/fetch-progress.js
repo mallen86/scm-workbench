@@ -17,12 +17,31 @@
    the bar holds at full, rather than freezing the numbers or inventing a
    denominator the plugin never printed.
 
+   This is the only fetch path that can show a real percentage. Every other
+   game plugin prints one "Index: N, quantity: Q, ..." line per decklist entry
+   and never prints a total, and some restart that index per section (MTG's
+   Scryfall JSON restarts it on each entry). Counting the decklist ourselves
+   would mean re-implementing each format, so those runs keep the honest
+   indeterminate bar instead. A line that is not part of a prefetch run must
+   stay null here; the frontend contract pins that.
+
    Kept free of DOM and imports so the stage machine can be tested directly. */
 
 /** How long stage 1's full bar stays on screen before stage 2 restarts at 0.
     Without a beat here the two lines arrive together and the first 100% is
     never visible. */
 export const RENAME_HOLD_MS = 450;
+
+/** The single-stage progress line a fetch plugin prints when the prefetch
+    announcement was missed (for example, a truncated transcript). It is
+    anchored to that exact sentence on purpose: a loose number/number match
+    also fires on a rate-limit notice ("retry 1/3") or an image URL
+    (".../front/1/2/card.jpg"), which would fabricate a percentage. */
+export function fetchFractionLine(text) {
+  const match = /^\s*Fetched\s+(\d+)\s*\/\s*(\d+)\s+images\b/i.exec(text);
+  return match ? [+match[1], +match[2]] : null;
+}
+
 
 export function createFetchProgress() {
   let total = 0;      // stage 1's announced total
