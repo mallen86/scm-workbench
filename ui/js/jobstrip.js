@@ -192,14 +192,6 @@ export function jobStrip(kind, opts = {}) {
     });
   };
 
-  const tail = async (id) => {
-    try {
-      const d = await jobs.log(id);
-      const lines = (d.lines || []).filter(l => l.trim() && !/^\($/.test(l.trim()));
-      return lines.slice(-2).join("  ·  ");
-    } catch { return ""; }
-  };
-
   let painting = false;
   const paint = async () => {
     if (painting) return;
@@ -250,10 +242,9 @@ export function jobStrip(kind, opts = {}) {
         strip.className = "jobstrip failed";
         label.textContent = done.status === "killed" ? "Stopped" : "Failed";
         body.append(el("div", { class: "js-msg err" },
-          ico("x"), el("span", {}, done.status === "killed" ? "You stopped the job." : "The job did not finish. See the output below for details.")));
-        const t = await tail(done.id);
-        if (t && strip.isConnected) body.append(el("div", { class: "js-tail" }, t));
-        body.append(el("div", { class: "js-hint" }, "Fix the form and run it again."));
+          ico("x"), el("span", {}, done.status === "killed" ? "You stopped the job." : "The job did not finish. See Job history for details.")));
+        if (done.status !== "killed")
+          body.append(el("div", { class: "js-hint" }, "Fix the form and run it again."));
       }
     } finally {
       painting = false;

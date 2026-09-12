@@ -108,6 +108,15 @@ def main() -> int:
         if marker not in source:
             print(f"FAIL: simple-mode job cancellation is missing {marker}")
             return 1
+    failure_branch = jobstrip[jobstrip.find('if (done.status === "ok")'):jobstrip.find('if (done.status === "ok")') + 1300]
+    if ('done.status !== "killed"' not in failure_branch or
+            '"The job did not finish. See Job history for details."' not in failure_branch):
+        print("FAIL: cancelled Simple-mode jobs still show failure-only guidance")
+        return 1
+    for removed in ("jobs.log(id)", 'class: "js-tail"', "See the output below for details."):
+        if removed in jobstrip:
+            print(f"FAIL: Simple-mode status still exposes a last-log-line detail: {removed}")
+            return 1
     for marker in ("progressTotal: async job", "S.jobArgs?.[done.id]", "resolveTemplate(f.paper_size, f.card_size, !!f.borderless)"):
         if marker not in pdf:
             print(f"FAIL: PDF progress or completion actions are missing {marker}")
