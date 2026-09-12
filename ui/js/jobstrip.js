@@ -8,7 +8,7 @@
    "go create the PDF", create pdf → "open the PDF"). Advanced mode never
    sees the strip — the console drawer is that page's status there instead. */
 
-import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, RENAME_HOLD_MS } from "./fetch-progress.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
+import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, RENAME_HOLD_MS } from "./fetch-progress.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
 export function clearJobCompletion(kind) {
   S.jobCompletionCutoffs = S.jobCompletionCutoffs || {};
   S.jobCompletionCutoffs[kind] = Date.now() / 1000;
@@ -183,6 +183,7 @@ export function jobStrip(kind, opts = {}) {
         if (!id) return;
         jobs.list().then(result => {
           S.jobs = result.jobs || S.jobs;
+          syncJobNotices(S.jobs);
           paint();
         }).catch(() => paint());
       },
@@ -281,6 +282,7 @@ export function jobStrip(kind, opts = {}) {
   jobs.list().then(result => {
     if (!strip.isConnected) return;
     S.jobs = result.jobs || S.jobs;
+    syncJobNotices(S.jobs);
     paint();
   }).catch(() => {});
 

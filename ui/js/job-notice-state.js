@@ -41,10 +41,22 @@ export function createJobNoticeState() {
       .filter(job => job?.id && job.status === "running" && !SPECIALIZED_KINDS.has(job.kind))
       .sort((a, b) => (b.ts || 0) - (a.ts || 0));
     for (const job of running) {
-      if (records.size >= JOB_NOTICE_MAX) break;
-      if (!dismissed.has(job.id) && !records.has(job.id)) {
-        records.set(job.id, { job, status: "running", expiresAt: 0 });
+      if (dismissed.has(job.id) || records.has(job.id)) continue;
+      if (records.size >= JOB_NOTICE_MAX) {
+        // Active work always outranks a five-second terminal message. If every
+        // seat is already running, retain only the newest jobs.
+        const terminal = [...records.entries()]
+          .filter(([, record]) => record.status !== "running")
+          .sort(([, a], [, b]) => (a.expiresAt || 0) - (b.expiresAt || 0))[0];
+        if (terminal) records.delete(terminal[0]);
+        else {
+          const oldest = [...records.entries()]
+            .sort(([, a], [, b]) => (a.job.ts || 0) - (b.job.ts || 0))[0];
+          if (!oldest || (oldest[1].job.ts || 0) >= (job.ts || 0)) continue;
+          records.delete(oldest[0]);
+        }
       }
+      records.set(job.id, { job, status: "running", expiresAt: 0 });
     }
 
     return [...records.values()]

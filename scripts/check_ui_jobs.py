@@ -81,6 +81,10 @@ def main() -> int:
     if jobstrip.count("jobs.list().then(result") < 2:
         print("FAIL: rebuilt job strips do not immediately refresh canonical completion state")
         return 1
+    if ('import { syncJobNotices } from "./job-notices.js";' not in jobstrip or
+            jobstrip.count("syncJobNotices(S.jobs);") < 2):
+        print("FAIL: simple job completion can leave its sidebar notice running")
+        return 1
     # Simple mode cancels the exact running strip job through the shared facade.
     # The control is outside the grid so it cannot increase the label row's
     # height or push the progress bar down.
@@ -436,6 +440,15 @@ if (state.sync([job("b", "ok")], 1200).length) fail("dismissed job created a ter
 state = mod.createJobNoticeState();
 view = state.sync(Array.from({ length: 8 }, (_, i) => job(String(i), "running", i)), 1000);
 if (view.length !== mod.JOB_NOTICE_MAX || view[0].job.id !== "7") fail("notice list is not bounded to the newest jobs");
+state = mod.createJobNoticeState();
+state.sync([job("done", "running", 1), job("a", "running", 2), job("b", "running", 3), job("c", "running", 4)], 1000);
+state.sync([job("done", "ok", 1), job("a", "running", 2), job("b", "running", 3), job("c", "running", 4)], 1100);
+view = state.sync([job("done", "ok", 1), job("a", "running", 2), job("b", "running", 3), job("c", "running", 4), job("new", "running", 5)], 1200);
+if (!view.some(record => record.job.id === "new") || view.some(record => record.job.id === "done"))
+  fail("a terminal notice blocked a newly running job");
+view = state.sync([job("a", "running", 2), job("b", "running", 3), job("c", "running", 4), job("new", "running", 5), job("newest", "running", 6)], 1300);
+if (!view.some(record => record.job.id === "newest") || view.some(record => record.job.id === "a"))
+  fail("the oldest running notice blocked newer work");
 view = state.sync([job("repo", "running", 10, "repo_update"), job("app", "running", 11, "update")], 1000);
 if (view.some(record => record.job.id === "repo" || record.job.id === "app")) fail("specialized sidebar jobs were duplicated");
 state = mod.createJobNoticeState();
