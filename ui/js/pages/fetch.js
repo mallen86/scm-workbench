@@ -2,7 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
-import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
+import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { clearJobCompletion, jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
@@ -50,7 +50,13 @@ PAGES.fetch = (root) => {
       const ok = await confirmModal({ title: "Delete card images?", text: "Images in game/front/ and game/double_sided/ will be permanently deleted. Card backs stay.", okLabel: "Yes, clear them", danger: true, icon: "trash", iconCls: "warn" });
       if (!ok) return;
       const job = await doRun("clean_up", null);
-      if (job) watchJobDone(job.id, () => afterFormChange(kind));   // the preview re-queries, so the stale-images warning clears
+      if (job) {
+        // Cleanup has begun, so the prior fetch can no longer promise that its
+        // images are ready. Hide it now and suppress both ways a rebuilt strip
+        // could resurrect it; the cleanup job itself remains in job history.
+        clearJobCompletion(kind);
+        watchJobDone(job.id, () => afterFormChange(kind));   // the preview re-queries, so the stale-images warning clears
+      }
     } }, ico("trash"), "Clear card images")));
   wrap.append(cc);
   // simple mode: the console is hidden, so the page shows its own compact

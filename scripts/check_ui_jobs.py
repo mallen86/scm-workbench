@@ -91,6 +91,26 @@ def main() -> int:
     if "jobStrip(kind" not in fetch_page:
         print("FAIL: the fetch page no longer renders a job strip")
         return 1
+    # Starting image cleanup invalidates the old fetch result immediately. Both
+    # persistence paths are cleared: the remembered ID and the current strip's
+    # timestamp fallback.
+    for marker in ('export function clearJobCompletion(kind)',
+                   'S.jobCompletionCutoffs[kind] = Date.now() / 1000;',
+                   'delete S.startedJobIds[kind];',
+                   'S.jobCompletionCutoffs?.[kind] || 0',
+                   '"data-job-kind": kind'):
+        if marker not in jobstrip:
+            print(f"FAIL: stale fetch completion reset is missing {marker}")
+            return 1
+    if 'clearJobCompletion, jobStrip' not in fetch_page or 'clearJobCompletion(kind);' not in fetch_page:
+        print("FAIL: clearing card images does not remove the stale fetch completion")
+        return 1
+    cleanup_at = fetch_page.find('const job = await doRun("clean_up", null);')
+    clear_at = fetch_page.find('clearJobCompletion(kind);', cleanup_at)
+    watch_at = fetch_page.find('watchJobDone(job.id', cleanup_at)
+    if cleanup_at < 0 or clear_at < cleanup_at or watch_at < clear_at:
+        print("FAIL: fetch completion is not cleared as soon as cleanup starts")
+        return 1
     if 'document.body.classList.add("console-open")' not in console or \
             "body:not(.mode-simple).console-open .main" not in theme:
         print("FAIL: advanced console does not reserve page space")

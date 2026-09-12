@@ -9,8 +9,21 @@
    sees the strip — the console drawer is that page's status there instead. */
 
 import { $, S, el, ico, toast } from "./core.js";import { createFetchProgress, RENAME_HOLD_MS } from "./fetch-progress.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";
+export function clearJobCompletion(kind) {
+  S.jobCompletionCutoffs = S.jobCompletionCutoffs || {};
+  S.jobCompletionCutoffs[kind] = Date.now() / 1000;
+  delete S.startedJobIds[kind];
+  const strip = document.querySelector(`.jobstrip[data-job-kind="${CSS.escape(kind)}"]`);
+  if (strip) {
+    strip.hidden = true;
+    strip.className = "jobstrip";
+    strip.dataset.painted = "";
+  }
+}
+
+
 export function jobStrip(kind, opts = {}) {
-  const strip = el("div", { class: "jobstrip", hidden: true });
+  const strip = el("div", { class: "jobstrip", hidden: true, "data-job-kind": kind });
   const label = el("div", { class: "js-label" }, "");
   const bar = el("div", { class: "js-bar" }, el("i", {}));
   const body = el("div", { class: "js-body" });
@@ -162,7 +175,8 @@ export function jobStrip(kind, opts = {}) {
       }
       closeEs();
       const remembered = S.startedJobIds?.[kind];
-      const done = (remembered && jobs.find(j => j.id === remembered)) || jobs.find(j => j.ts >= t0);
+      const cutoff = Math.max(t0, S.jobCompletionCutoffs?.[kind] || 0);
+      const done = (remembered && jobs.find(j => j.id === remembered)) || jobs.find(j => j.ts >= cutoff);
       if (!done) { strip.hidden = true; strip.className = "jobstrip"; return; }
       // same job already painted? don't tear the body down and re-run onOk
       // every 2 s (it re-appends buttons and would restart any async work).
