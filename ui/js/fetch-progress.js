@@ -31,6 +31,9 @@ export function createFetchProgress() {
   let slots = 0;      // stage 2 counter
   let seen = false;   // a prefetch stage exists in this run
   let renaming = false;
+  let prefetchComplete = false;
+  let stage1NotFound = 0;
+  let missingData = false;
 
   const percent = (done, whole) => whole > 0
     ? Math.min(100, Math.round(done / whole * 100)) : 0;
@@ -43,6 +46,12 @@ export function createFetchProgress() {
     /** Consume one output line. Returns what the caller should do, or null for
         a line that is not part of a prefetch run. */
     line(text) {
+      if (/^\s*Warning:\s*No image data for slot\s+\d+\b/i.test(text)) {
+        missingData = true;
+      }
+      if (!prefetchComplete && /^\s*Error fetching\b.*:\s*404\s+Client Error:\s*Not Found\b/i.test(text)) {
+        stage1NotFound++;
+      }
       const start = /Prefetching\s+(\d+)\s+images/i.exec(text);
       if (start) {
         seen = true;
@@ -52,6 +61,7 @@ export function createFetchProgress() {
       }
       if (/Prefetch complete\.?/i.test(text)) {
         seen = true;
+        prefetchComplete = true;
         prefetched = total || prefetched;
         return { stage: 1, beginRename: true };
       }
@@ -69,6 +79,13 @@ export function createFetchProgress() {
         return { stage: renaming ? 2 : 1, beginRename: false };
       }
       return null;
+    },
+
+    /** Missing-image evidence seen in this run. A pair of prefetch 404s is an
+        orange caution because retries may recover; an explicit no-data warning
+        is the red, definitive indication for that slot. */
+    warningView() {
+      return { multiple404s: stage1NotFound >= 2, missingData };
     },
 
     /** The decklist's own slot count, which is what stage 2 walks. Unknown

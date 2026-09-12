@@ -855,7 +855,14 @@ body.mode-simple .console { display: none; }
 .jobstrip .js-top { display: flex; align-items: center; gap: 9px; }
 .jobstrip .js-ico { display: inline-flex; color: var(--accent); }
 .jobstrip .js-label { font-size: 13px; font-weight: 600; color: var(--text); }
-.jobstrip .js-bar { height: 6px; border-radius: 4px; background: var(--surface-3, var(--border-soft)); overflow: hidden; position: relative; }
+.jobstrip .js-progress-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.jobstrip .js-progress-row[hidden], .jobstrip .js-progress-warnings[hidden] { display: none; }
+.jobstrip .js-progress-warnings { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.jobstrip .fetch-warning { display: inline-flex; }
+.jobstrip .fetch-warning .ic { width: 17px; height: 17px; }
+.jobstrip .fetch-warning.retry { color: var(--warn); }
+.jobstrip .fetch-warning.missing { color: var(--err); }
+.jobstrip .js-bar { flex: 1 1 auto; min-width: 0; height: 6px; border-radius: 4px; background: var(--surface-3, var(--border-soft)); overflow: hidden; position: relative; }
 .jobstrip .js-bar i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: inherit; background: var(--accent); opacity: .85; }
 /* the slide animation only belongs to an actually-running, unmeasured job */
 .jobstrip.running .js-bar i { animation: jsslide 1.1s ease-in-out infinite; width: 38%; }

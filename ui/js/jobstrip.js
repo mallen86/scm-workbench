@@ -26,10 +26,12 @@ export function jobStrip(kind, opts = {}) {
   const strip = el("div", { class: "jobstrip", hidden: true, "data-job-kind": kind });
   const label = el("div", { class: "js-label" }, "");
   const bar = el("div", { class: "js-bar" }, el("i", {}));
+  const warningIcons = el("div", { class: "js-progress-warnings", hidden: true });
+  const progressRow = el("div", { class: "js-progress-row" }, warningIcons, bar);
   const body = el("div", { class: "js-body" });
   strip.append(
     el("div", { class: "js-top" }, el("span", { class: "js-ico" }, ico(opts.icon || "play")), label),
-    bar,
+    progressRow,
     body,
   );
 
@@ -61,12 +63,32 @@ export function jobStrip(kind, opts = {}) {
     if (subscription) { try { subscription.close(); } catch {} subscription = null; }
   };
 
+  const showImageWarnings = (job) => {
+    const live = fetchProgress.warningView();
+    const saved = job?.image_warnings || {};
+    const multiple404s = live.multiple404s || saved.multiple_404s;
+    const missingData = live.missingData || saved.missing_data;
+    warningIcons.innerHTML = "";
+    if (multiple404s) {
+      const text = "Multiple image requests returned 404. Some images may have succeeded on retry.";
+      warningIcons.append(el("span", { class: "fetch-warning retry", title: text, "aria-label": text }, ico("warncircle")));
+    }
+    if (missingData) {
+      const text = "One or more cards have no image data.";
+      warningIcons.append(el("span", { class: "fetch-warning missing", title: text, "aria-label": text }, ico("alert")));
+    }
+    const hasWarnings = multiple404s || missingData;
+    warningIcons.hidden = !hasWarnings;
+    progressRow.hidden = job?.status !== "running" && !hasWarnings;
+  };
+
   const attachProgress = (job) => {
     if (subscription && esJobId === job.id) return;
     closeEs();
     esJobId = job.id;
     lastX = 0; lastY = 0; imageDone = 0; imageTotal = 0;
     fetchProgress = createFetchProgress();
+    showImageWarnings(job);
     const showProgress = (x, y) => {
       if (y <= 0 || x > y || (y === lastY && x < lastX)) return;
       lastX = x; lastY = y;
@@ -105,6 +127,7 @@ export function jobStrip(kind, opts = {}) {
       after: 0,
       onLine: d => {
         const step = fetchProgress.line(d.s);
+        showImageWarnings(job);
         if (step) {
           // Stage 1 reaches full first, then stage 2 restarts at 0. Slots that
           // arrive during the hold are counted and drawn when it flips.
@@ -165,6 +188,7 @@ export function jobStrip(kind, opts = {}) {
       if (run) {
         strip.dataset.painted = "";               // a new run may re-render onOk later
         attachProgress(run);
+        showImageWarnings(run);
         strip.hidden = false;
         strip.className = strip.classList.contains("prog") ? "jobstrip running prog" : "jobstrip running";
         if (!strip.classList.contains("prog"))
@@ -185,6 +209,7 @@ export function jobStrip(kind, opts = {}) {
       strip.dataset.painted = key;
       strip.hidden = false;
       body.innerHTML = "";
+      showImageWarnings(done);
       if (done.status === "ok") {
         strip.className = "jobstrip done";
         label.textContent = "Done";

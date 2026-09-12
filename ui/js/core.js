@@ -58,6 +58,7 @@ export const P = {
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   alert: '<path d="M12 3.5 2.7 19.5h18.6z"/><path d="M12 9.5v4.5M12 17v.1"/>',
+  warncircle: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v6M12 17v.1"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.1"/>',
   play: '<path d="M8 5.2v13.6L19 12z"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',

@@ -72,7 +72,8 @@ def main() -> int:
     for marker in ('/^\\s*Image\\s+(\\d+)\\s*:/i', "opts.progressTotal(job)",
                    "S.startedJobIds?.[kind]", "jobs.list().then(result", "setInterval(tick, 500)",
                    "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active",
-                   "if (opts.slotTotal)", "fetchProgress.setDeckTotal"):
+                   "if (opts.slotTotal)", "fetchProgress.setDeckTotal", "fetchProgress.warningView()",
+                   'ico("warncircle")', 'ico("alert")', "job?.image_warnings"):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
@@ -120,7 +121,10 @@ def main() -> int:
     # message at left and its actions at the far right.
     for marker in (".jobstrip.done .js-top { display: none; }",
                    ".jobstrip.done .js-body { grid-template-columns: minmax(0, 1fr) auto;",
-                   ".jobstrip.done .js-actions { grid-column: 2; grid-row: 1; justify-self: end;"):
+                   ".jobstrip.done .js-actions { grid-column: 2; grid-row: 1; justify-self: end;",
+                   ".jobstrip .js-progress-row { display: flex;",
+                   ".jobstrip .fetch-warning.retry { color: var(--warn); }",
+                   ".jobstrip .fetch-warning.missing { color: var(--err); }"):
         if marker not in theme:
             print(f"FAIL: completed job actions are not on the message row: {marker}")
             return 1
@@ -363,6 +367,29 @@ step("Prefetch complete.");
 p.beginRename();
 p.setDeckTotal(0);
 if (p.view().total !== 12) fail("an unknown decklist total did not fall back to the prefetch count");
+
+// Missing-image evidence is independent of progress. Two stage-1 404s latch
+// the orange caution; the explicit no-data warning latches the red warning.
+const missing = "Warning: No image data for slot 1 (Treasure Vault)";
+const notFound = "Error fetching abc: 404 Client Error: Not Found for url: https://example.test/image";
+p = mod.createFetchProgress();
+p.line("Prefetching 3 images with 2 workers...");
+p.line(notFound);
+if (p.warningView().multiple404s) fail("one 404 triggered the multiple-error caution");
+p.line(notFound);
+if (!p.warningView().multiple404s || p.warningView().missingData) fail("the second 404 did not latch only the orange caution");
+p.line(missing);
+if (!p.warningView().multiple404s || !p.warningView().missingData) fail("the red no-data warning did not coexist with the orange caution");
+p = mod.createFetchProgress();
+p.line("Prefetch complete.");
+p.line(notFound); p.line(notFound);
+if (p.warningView().multiple404s) fail("404s after prefetch completion were called stage-1 failures");
+p.line("Error fetching https://example.test/404: timed out");
+if (p.warningView().multiple404s) fail("a URL containing 404 triggered the caution");
+p.line(missing.toLowerCase());
+if (!p.warningView().missingData) fail("the no-data warning match is case-sensitive");
+if (mod.createFetchProgress().warningView().multiple404s || mod.createFetchProgress().warningView().missingData)
+  fail("a fresh fetch inherited the previous run's warnings");
 console.log("ok: the two-stage fetch progress model passed");
 ''',
         text=True,

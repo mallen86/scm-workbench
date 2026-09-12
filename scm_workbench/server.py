@@ -3309,6 +3309,28 @@ def _job_lines_snapshot(job: dict) -> Tuple[int, List[str]]:
         return _job_lines_locked(job)
 
 
+_FETCH_404_RE = re.compile(r"^\s*Error fetching\b.*:\s*404\s+Client Error:\s*Not Found\b", re.I)
+_FETCH_NO_DATA_RE = re.compile(r"^\s*Warning:\s*No image data for slot\s+\d+\b", re.I)
+
+
+def _record_fetch_image_warning(job: dict, text: str) -> None:
+    """Latch bounded missing-image evidence while a fetch transcript arrives."""
+    if not str(job.get("kind") or "").startswith("fetch:"):
+        return
+    state = job.setdefault("_fetch_image_warning_state", {"prefetch_complete": False, "not_found": 0})
+    if re.search(r"Prefetch complete\.?", text, re.I):
+        state["prefetch_complete"] = True
+    if not state["prefetch_complete"] and _FETCH_404_RE.search(text):
+        state["not_found"] = min(2, int(state.get("not_found") or 0) + 1)
+    warnings = job.setdefault("image_warnings", {})
+    if state["not_found"] >= 2:
+        warnings["multiple_404s"] = True
+    if _FETCH_NO_DATA_RE.search(text):
+        warnings["missing_data"] = True
+    if not warnings:
+        job.pop("image_warnings", None)
+
+
 def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
     """Append a complete line and wake subscribers without ever blocking."""
     text = str(line)
@@ -3316,6 +3338,7 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
         log_f.write(text + "\n")
         log_f.flush()
     with JOBS_LOCK:
+        _record_fetch_image_warning(job, text)
         lines = job.setdefault("log_lines", [])
         first = int(job.get("first_seq", 0) or 0)
         seq = first + len(lines)
@@ -3360,7 +3383,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3547,6 +3570,8 @@ def list_jobs() -> dict:
         # declared one (item: stage 2 counts cards, not prefetched images).
         if j.get("deck_total"):
             row["deck_total"] = j["deck_total"]
+        if j.get("image_warnings"):
+            row["image_warnings"] = dict(j["image_warnings"])
         row.update(warnings=j.get("warnings", []), outputs=job_outputs(j),
                    save_grants=_grants_for_job(j))
         running.append(row)
