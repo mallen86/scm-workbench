@@ -39,15 +39,23 @@ def main() -> int:
     for marker in ('export async function openJobPdf(job)',
                    'job.kind === "create_pdf"', 'onclick: () => openJobPdf(job)',
                    'const result = await openFile(output);',
-                   'refreshJobs().then(() => {',
+                   'TERMINAL_REFRESH_ATTEMPTS = 4', 'TERMINAL_REFRESH_BASE_MS = 250',
+                   'refreshTerminalJob(id, serial).then(() => {',
                    'if (serial === _streamSerial && S.activeJobId === id) updateFooter();'):
         if marker not in console:
             print(f"FAIL: advanced PDF completion actions are missing {marker}")
             return 1
-    terminal_branch = console[console.find('onDone: done => {'):console.find('onDone: done => {') + 1800]
-    if 'refreshJobs()' not in terminal_branch:
+    terminal_branch = console[console.find('onDone: done => {'):console.find('onDone: done => {') + 2000]
+    if 'refreshTerminalJob(id, serial)' not in terminal_branch:
         print("FAIL: console completion does not refresh artifact paths and save grants")
         return 1
+    retry = console[console.find('export async function refreshTerminalJob'):console.find('export async function refreshTerminalJob') + 900]
+    for marker in ('attempt < TERMINAL_REFRESH_ATTEMPTS', 'await refreshJobs();',
+                   'attempt + 1 >= TERMINAL_REFRESH_ATTEMPTS',
+                   'TERMINAL_REFRESH_BASE_MS * (2 ** attempt)'):
+        if marker not in retry:
+            print(f"FAIL: terminal artifact refresh is not bounded and retryable: {marker}")
+            return 1
     for marker in ("S.startedJobIds[kind]", "S.jobArgs[j0.id]"):
         if marker not in forms:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
@@ -84,6 +92,10 @@ def main() -> int:
     if ('import { syncJobNotices } from "./job-notices.js";' not in jobstrip or
             jobstrip.count("syncJobNotices(S.jobs);") < 2):
         print("FAIL: simple job completion can leave its sidebar notice running")
+        return 1
+    simple_done = jobstrip[jobstrip.find('onDone: d => {'):jobstrip.find('onDone: d => {') + 1100]
+    if 'jobs.list().then(result =>' not in simple_done or 'syncJobNotices(S.jobs);' not in simple_done:
+        print("FAIL: the simple terminal callback does not reconcile its sidebar notice")
         return 1
     # Simple mode cancels the exact running strip job through the shared facade.
     # The control is outside the grid so it cannot increase the label row's

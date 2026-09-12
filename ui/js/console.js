@@ -54,6 +54,8 @@ export async function loadConsoleLog(jobId) {
   return { lines, nextSeq: after, firstSeq, status, exitCode, gap, lineTruncated, omitted, probeFailed };
 }
 export let _lastJobsSig;
+const TERMINAL_REFRESH_ATTEMPTS = 4;
+const TERMINAL_REFRESH_BASE_MS = 250;
 
 
 export async function refreshJobs(forceRender = false) {
@@ -88,6 +90,21 @@ export async function refreshJobs(forceRender = false) {
   if (prepActive() && !_prepTimer) startPrepWatcher();
   // the job history page owns the full list in both modes
   if (S.page === "history" && (changed || forceRender)) renderJobHistory($("#job-history"));
+}
+
+
+export async function refreshTerminalJob(id, serial) {
+  for (let attempt = 0; attempt < TERMINAL_REFRESH_ATTEMPTS; attempt++) {
+    if (serial !== _streamSerial) return false;
+    try {
+      await refreshJobs();
+      return true;
+    } catch {
+      if (attempt + 1 >= TERMINAL_REFRESH_ATTEMPTS) return false;
+      await new Promise(resolve => setTimeout(resolve, TERMINAL_REFRESH_BASE_MS * (2 ** attempt)));
+    }
+  }
+  return false;
 }
 
 
@@ -184,7 +201,9 @@ export async function attachStream(id, resume) {
     current.exit_code = initial.exitCode;
     // The log can observe completion before the last jobs.list response. Pull
     // the artifact paths and export grants before drawing terminal actions.
-    try { await refreshJobs(); } catch {}
+    // A brief transport interruption must not strand those actions after the
+    // global poll stops seeing this job as running.
+    await refreshTerminalJob(id, serial);
     if (serial !== _streamSerial) return;
     updateBadge();
     renderConsoleTabs();
@@ -226,9 +245,9 @@ export async function attachStream(id, resume) {
       // after the worker has snapshotted the artifacts. Refreshing here makes
       // both Advanced completion actions usable without waiting for another
       // poll or reopening the console.
-      refreshJobs().then(() => {
+      refreshTerminalJob(id, serial).then(() => {
         if (serial === _streamSerial && S.activeJobId === id) updateFooter();
-      }).catch(() => {});
+      });
     },
   });
   if (serial === _streamSerial) S.jobSub = subscription;
