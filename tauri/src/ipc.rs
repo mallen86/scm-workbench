@@ -211,6 +211,65 @@ impl WorkerRpc {
         )
     }
 
+    /// Private protocol edge owned by the native card-back picker.
+    pub(crate) fn import_selected_back_image(&self, source_path: &str) -> Result<Value, String> {
+        let value = self.call_unchecked(
+            "back_images.import_selected",
+            json!({"source_path": source_path}),
+        )?;
+        if serde_json::to_vec(&value)
+            .map_err(|_| "malformed card-back import response".to_string())?
+            .len()
+            > 512 * 1024
+        {
+            return Err("card-back import response too large".to_string());
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| "malformed card-back import response".to_string())?;
+        let rejected = object.len() == 2
+            && object.get("ok").and_then(Value::as_bool) == Some(false)
+            && object
+                .get("errors")
+                .and_then(Value::as_array)
+                .is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.len() <= 8
+                        && errors.iter().all(|error| {
+                            error
+                                .as_str()
+                                .is_some_and(|message| !message.is_empty() && message.len() <= 256)
+                        })
+                });
+        let accepted = object.len() == 3
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.is_empty() && name.len() <= 255)
+            && object
+                .get("back_images")
+                .and_then(Value::as_array)
+                .is_some_and(|images| {
+                    images.len() <= 1024
+                        && images.iter().all(|image| {
+                            let Some(image) = image.as_object() else {
+                                return false;
+                            };
+                            image.len() == 2
+                                && image
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|name| !name.is_empty() && name.len() <= 255)
+                                && image.get("size").and_then(Value::as_u64).is_some()
+                        })
+                });
+        if !accepted && !rejected {
+            return Err("malformed card-back import response".to_string());
+        }
+        Ok(value)
+    }
+
     /// Private artifact-export edges. These are intentionally typed helpers:
     /// the WebView can call only the public `wb_rpc` command, whose allowlist
     /// rejects all three method names.
@@ -694,6 +753,7 @@ mod tests {
             "repos.poll/",
             "repos.poll ",
             "decklists.import_selected",
+            "back_images.import_selected",
             "files.export_selected",
             "files.export_poll",
             "files.export_cancel",
@@ -705,6 +765,22 @@ mod tests {
         ] {
             assert_eq!(validate_method(method), Err("unknown method".into()));
         }
+    }
+
+    #[test]
+    fn private_back_image_method_is_not_public() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "back_images.import_selected",
+                json!({"source_path": "/tmp/back.png"})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.import_selected_back_image("/tmp/back.png"),
+            Err("worker unavailable".into())
+        );
     }
 
     #[test]

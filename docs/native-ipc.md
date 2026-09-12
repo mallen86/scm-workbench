@@ -30,10 +30,12 @@ mutations, preview, packaged-Tauri job control/log operations, the read-only
 operations, app update/release-note operations, the bounded OS-action methods
 below, secure image deletion, and restricted DXF template deletion.
 Image deletion is public `fs.delete_images` RPC with exact `{path}` params; its
-only browser fallback is explicit POST `/api/fs`. Decklist import is a
-separate native command (`wb_decklist_import`), not a public `wb_rpc` method:
-the command owns the fixed single-file picker and sends one validated private
-`decklists.import_selected` frame to the worker. Standalone-browser surfaces
+only browser fallback is explicit POST `/api/fs`. Decklist import and
+card-back image import are separate native commands (`wb_decklist_import` and
+`wb_back_image_import`), not public `wb_rpc` methods: each command owns a
+parented single-file picker and sends one validated private frame
+(`decklists.import_selected` or `back_images.import_selected`) to the worker.
+Standalone-browser surfaces
 remain on their existing HTTP compatibility paths; the packaged UI uses native
 IPC for its migrated calls.
 
@@ -107,6 +109,7 @@ parameter contracts below.
 | (update operation registry) | `updates.poll` (packaged Tauri) | poll an update operation |
 | `POST /api/updates/start` | `updates.start` (packaged Tauri) | `server.start_update_job()` |
 | `POST /api/decklists/import` | `wb_decklist_import` (packaged Tauri command) | `server.import_decklist()` |
+| `POST /api/back-images/import` | `wb_back_image_import` (packaged Tauri command) | `server.import_back_image()` |
 
 Those HTTP routes remain served as standalone-browser compatibility endpoints;
 all `/api/file` requests are rejected in IPC mode before action, metadata, or
@@ -195,6 +198,12 @@ the SCM repository lock, uses an exclusive sibling temporary file plus an
 atomic no-replace hard link, and never overwrites a collision. Returned entries
 are deterministic and bounded to 8192 scanned entries, 1024 results, and a
 512 KiB encoded result; manifest and info caches are invalidated after success.
+
+### Card-back import
+
+`wb_back_image_import` is a no-argument Tauri command with a parented single-file image picker. It is not a public `wb_rpc` method. The command sends only the selected UTF-8 path to the private worker method `back_images.import_selected`; picker cancellation returns JSON `null`, and a native invocation failure is final rather than an HTTP fallback.
+
+The worker accepts paths up to 4096 UTF-8 bytes and opens the selected final object as a stable regular-file handle. It rejects controls, symlinks/reparse points, non-files, files larger than 8 MiB, and files whose magic bytes are not one of the image formats recognized by Workbench. Import holds the SCM repository lock and the image/job exclusion fence, preserves placeholders and unrelated user files, and publishes one copied image through a bounded temporary-file transaction. POSIX keeps no-follow directory handles throughout the transaction. Windows revalidates destination components and moved files while retaining the platform's existing path-based component-swap limitation. Existing recognized back images are moved into an unpredictable nested quarantine directory and validated again before publication. They are removed only after publication succeeds; cleanup is best effort so a cleanup failure leaves recoverable hidden backups while pre-publication failures restore every original name. The result is bounded and includes the deterministic current `back_images` state. Browser compatibility uses `POST /api/back-images/import` only with an explicit `{path}` body. A create PDF command counts recognized images the way upstream does, resolving links rather than refusing them, and rejects more than one image or a scan that exceeds its bounds. Child jobs receive no stdin, so an upstream prompt outside that guard fails without hanging or consuming native protocol input.
 
 ### Artifact export
 
@@ -704,6 +713,8 @@ From the repository root, the first-slice checks are:
 python -m unittest discover -s tests -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
+python scripts/check_ui_decklists.py
+python scripts/check_ui_back_images.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_repos.py
 python scripts/check_ui_preview.py

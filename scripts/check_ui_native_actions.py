@@ -78,7 +78,7 @@ def main() -> int:
         (UI / "native-actions.js", 'saveArtifact(grantId, suggestedName)'),
         (UI / "console.js", 'import { openFile, revealPath, saveArtifact } from "./native-actions.js";'),
         (UI / "console.js", 'const result = await openFile(output);'),
-        (UI / "pages" / "pdf.js", 'import { openFile } from "../native-actions.js";'),
+        (UI / "pages" / "pdf.js", 'import { openFile, revealPath } from "../native-actions.js";'),
         (UI / "pages" / "templates.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "offset.js", 'import { openFile } from "../native-actions.js";'),
         (UI / "pages" / "settings.js", 'import { revealPath } from "../native-actions.js";'),

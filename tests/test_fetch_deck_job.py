@@ -66,6 +66,7 @@ class StartedFetchDeckTotalTests(unittest.TestCase):
             proc.STDOUT = -2
             proc.DEVNULL = -3
             job, errors = server.start_job("fetch:mtg", args)
+            self.assertEqual(proc.Popen.call_args.kwargs["stdin"], proc.DEVNULL)
         self.assertEqual(errors, [])
         self.assertIsNotNone(job)
         return job

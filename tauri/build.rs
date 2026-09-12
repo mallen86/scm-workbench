@@ -8,6 +8,7 @@ fn main() {
             "wb_rpc",
             "wb_pick_repo_directory",
             "wb_decklist_import",
+            "wb_back_image_import",
             "wb_save_artifact",
         ]),
     ))

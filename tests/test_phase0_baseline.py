@@ -233,7 +233,7 @@ class HttpContractTests(unittest.TestCase):
             "avif": b"\x00\x00\x00\x18ftypavif",
             "qoi": b"qoif",
             "dds": b"DDS <wal",
-            "jp2": b"\x00\x00\x00\x0cJP 11\x0a\x0d\x08",
+            "jp2": b"\x00\x00\x00\x0cjP  \r\n\x87\n\x00\x00\x00\x14ftypjp2 ",
         }
         for name, magic in signatures.items():
             path = Path(self.temp.name) / (name + ".not-an-image-extension")

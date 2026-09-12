@@ -225,6 +225,52 @@ async fn wb_decklist_import(
     worker.import_selected_decklist(source_path)
 }
 
+/// Native card-back import owns the picker. The worker validates the stable
+/// source and performs the replacement transaction inside game/back.
+#[tauri::command]
+async fn wb_back_image_import(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+) -> Result<Value, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose card back image")
+        .add_filter(
+            "Images",
+            &[
+                "png", "jpg", "jpeg", "jfif", "jp2", "jpx", "gif", "webp", "avif", "bmp", "tif",
+                "tiff", "qoi", "dds",
+            ],
+        )
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "card-back image picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "card-back image picker failed".to_string()))?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected image path is unavailable".to_string())?;
+    let source_path = path
+        .to_str()
+        .ok_or_else(|| "selected image path is not valid UTF-8".to_string())?;
+    if source_path.as_bytes().len() > 4096
+        || source_path
+            .chars()
+            .any(|character| character.is_control() || character == '\u{7f}')
+    {
+        return Err("selected image path is invalid".to_string());
+    }
+    state.inner().import_selected_back_image(source_path)
+}
+
 /// Native artifact save. The selected destination is consumed here and is
 /// never returned to JavaScript before the worker has copied it. Rust only
 /// accepts an opaque grant and a bounded basename hint from the WebView.
@@ -342,6 +388,7 @@ fn main() {
             ipc::wb_rpc,
             wb_pick_repo_directory,
             wb_decklist_import,
+            wb_back_image_import,
             wb_save_artifact
         ])
         .manage(worker_slot.clone())

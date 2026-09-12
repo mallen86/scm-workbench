@@ -35,6 +35,7 @@ PRIVATE_METHODS = frozenset((
     "ready",
     "files.export_selected", "files.export_poll", "files.export_cancel",
     "fs.delete_images_start", "fs.delete_images_poll",
+    "back_images.import_selected",
 ))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "template.delete", "file.list",
@@ -180,6 +181,20 @@ def dispatch(request: dict) -> dict:
             try:
                 result = server.import_decklist(params["source_path"])
             except server.DecklistImportError as error:
+                result = {"ok": False, "errors": [error.message]}
+        elif method == "back_images.import_selected":
+            if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
+                return _bad_params(request_id, "back_images.import_selected requires exactly source_path string")
+            try:
+                if len(params["source_path"].encode("utf-8")) > server.BACK_IMAGE_PATH_MAX_BYTES:
+                    return _bad_params(request_id, "card-back source path exceeds 4096 UTF-8 bytes")
+            except UnicodeEncodeError:
+                return _bad_params(request_id, "card-back source path must be valid UTF-8")
+            if server.has_forbidden_action_controls(params["source_path"]):
+                return _bad_params(request_id, "card-back source path contains control characters")
+            try:
+                result = server.import_back_image(params["source_path"])
+            except server.BackImageImportError as error:
                 result = {"ok": False, "errors": [error.message]}
         elif method == "settings.set":
             if set(params) != {"changes"}:
@@ -432,6 +447,13 @@ def dispatch(request: dict) -> dict:
         # useful to the supervising shell and belongs on stderr, not stdout.
         traceback.print_exc(file=sys.stderr)
         return _error(request_id, "internal", "request handler failed")
+    if method == "back_images.import_selected":
+        try:
+            result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > server.BACK_IMAGE_RESULT_MAX_BYTES:
+            return _error(request_id, "result_too_large", "card-back import result exceeds 512 KiB")
     if method == "preview":
         # This is deliberately outside the handler exception block: a genuine
         # build failure remains an ``internal`` error, never a size error.

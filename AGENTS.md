@@ -54,7 +54,7 @@ Do not hard-code a second option schema in the UI.
 
 ### Native and browser transports
 
-Packaged windows must use native RPC; source-browser mode retains HTTP compatibility.
+Packaged windows must use native RPC; source-browser mode retains HTTP compatibility. Create PDF card-back import uses a parented native picker and private worker method in packaged windows; browser compatibility accepts an explicit path only.
 
 - Put transport selection in the relevant facade (`jobs.js`, `*-transport.js`, or a new equivalent), not in page code.
 - Once a callable native bridge is selected, a native failure is final. **Never silently retry it over HTTP.**
@@ -136,6 +136,7 @@ python -m unittest tests.test_update_handoff -v
 python scripts/check_ui_imports.py
 python scripts/check_ui_transport.py
 python scripts/check_ui_decklists.py
+python scripts/check_ui_back_images.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_repos.py
 python scripts/check_ui_onboarding.py

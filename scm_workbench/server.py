@@ -159,6 +159,20 @@ DECKLIST_IO_CHUNK = 64 * 1024
 DECKLIST_PLACEHOLDERS = frozenset(("README.md", "EMPTY.md"))
 DECKLIST_TEMP_PREFIX = ".wb-decklist-import-"
 
+# Card-back import crosses the native picker boundary just like decklists, but
+# it has its own limits and transaction names.  A back folder may contain
+# upstream placeholders and user files, so import never treats the directory
+# as an empty staging area.
+BACK_IMAGE_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+BACK_IMAGE_PATH_MAX_BYTES = 4096
+BACK_IMAGE_NAME_MAX_BYTES = 255
+BACK_IMAGE_SCAN_MAX_SCANNED = 8192
+BACK_IMAGE_SCAN_MAX_CANDIDATES = 1024
+BACK_IMAGE_RESULT_MAX_BYTES = 512 * 1024
+BACK_IMAGE_IO_CHUNK = 64 * 1024
+BACK_IMAGE_TEMP_PREFIX = ".wb-back-import-"
+BACK_IMAGE_QUARANTINE_PREFIX = ".wb-back-old-"
+
 # Artifact export is a deliberately separate trust boundary from the legacy
 # browser compatibility route.  Grants contain no paths in the WebView; they
 # are short-lived handles to immutable records owned by this worker.
@@ -186,6 +200,14 @@ class DecklistImportError(Exception):
     def __init__(self, message: str):
         super().__init__(" ".join(str(message).split())[:256])
         self.message = str(self) or "decklist operation failed"
+
+
+class BackImageImportError(Exception):
+    """Bounded application failure for a card-back import."""
+
+    def __init__(self, message: str):
+        super().__init__(" ".join(str(message).split())[:256])
+        self.message = str(self) or "card-back import failed"
 
 
 def _utf8_size(value: str, label: str, limit: int) -> int:
@@ -685,6 +707,7 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
         "calibration": [],
         "saved_offset": None,
         "decklists": [],
+        "back_images": [],
         "output_pdfs": [],
     }
     if not info["found"]:
@@ -804,6 +827,7 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
                 os.close(scan_fd)
             except OSError:
                 pass
+    info["back_images"] = _scan_back_images(scm)
     outdir = scm / "game" / "output"
     if outdir.is_dir():
         info["output_pdfs"] = [p.name for p in sorted(outdir.glob("*.pdf"))]
@@ -4671,6 +4695,17 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["create_pdf.py"]
         emit("front_dir", "--front_dir_path", default="game/front")
         emit("back_dir", "--back_dir_path", default="game/back")
+        back_dir = str(a.get("back_dir") or "game/back")
+        back_path = Path(back_dir) if Path(back_dir).is_absolute() else cwd / back_dir
+        back_images, back_scan_incomplete = _inspect_back_image_directory(back_path)
+        if back_scan_incomplete:
+            errors.append(
+                f"Card back folder “{back_dir}” could not be safely checked. "
+                "Remove links or excess files before creating the PDF.")
+        elif len(back_images) > 1:
+            errors.append(
+                f"Card back folder “{back_dir}” contains {len(back_images)} recognized images. "
+                "Import one back image or remove the extras before creating the PDF.")
         emit("double_sided_dir", "--double_sided_dir_path", default="game/double_sided")
         argv += ["--output_path", str(a.get("output_path") or "game/output/game.pdf")]
         if a.get("output_images"): argv += ["--output_images"]
@@ -5423,8 +5458,13 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         with JOBS_LOCK:
             if _UPDATE_QUIESCING:
                 raise RuntimeError("the app update is being handed off; try again after it restarts")
+            # Child scripts must never inherit the worker's JSON-lines stdin.
+            # Some upstream paths prompt interactively (for example, multiple
+            # card backs); EOF makes that job fail instead of consuming native
+            # protocol requests or hanging forever.
             proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, env=env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **_proc_kwargs())
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, **_proc_kwargs())
             job["proc"] = proc
             pump_thread = threading.Thread(
                 target=_pump, args=(job, proc, log_f), daemon=True,
@@ -6105,8 +6145,567 @@ def _image_header_is_image(head: bytes) -> bool:
             head[:4] == b"GIF8" or (head[:4] == b"RIFF" and head[8:12] == b"WEBP") or
             head[:4] in (b"II\x2a\x00", b"MM\x00\x2a") or head[:2] == b"BM" or
             (head[4:8] == b"ftyp" and head[8:12] in (b"av01", b"avif", b"heif", b"hevc", b"mif1")) or
-            head[:4] == b"qoif" or head[:8] == b"DDS <wal" or
-            head[:12] == b"\x00\x00\x00\x0cJP\x20\x31\x31\x0a\x0d\x08")
+            head[:4] == b"qoif" or head[:4] == b"DDS " or
+            head[:12] == b"\x00\x00\x00\x0cjP  \r\n\x87\n")
+
+
+def _inspect_back_image_directory(directory: Path) -> Tuple[list, bool]:
+    """Count the images upstream's own scan would see, plus any uncertainty.
+
+    Upstream resolves symlinks before deciding an entry is an image, so this
+    count has to follow them too: treating a linked back image as unusable
+    would refuse a PDF that upstream runs without complaint. The import and
+    deletion transactions are the layers that refuse links, because those are
+    the ones that remove a user's files.
+    """
+    directory = Path(directory)
+    try:
+        directory_stat = os.lstat(directory)
+    except FileNotFoundError:
+        return [], False
+    except OSError:
+        return [], True
+    if _is_reparse_or_symlink(directory_stat) or not stat.S_ISDIR(directory_stat.st_mode):
+        return [], True
+    entries = []
+    scanned = 0
+    incomplete = False
+    try:
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                if scanned >= BACK_IMAGE_SCAN_MAX_SCANNED:
+                    incomplete = True
+                    break
+                scanned += 1
+                try:
+                    observed = entry.stat(follow_symlinks=True)
+                except OSError:
+                    incomplete = True
+                    continue
+                # Only a regular file is ever opened. Upstream resolves links
+                # before deciding an entry is an image, so a linked back image
+                # counts here too, but a FIFO, device, or directory never
+                # reaches the open that could block on it.
+                if not stat.S_ISREG(observed.st_mode):
+                    continue
+                try:
+                    with open(entry.path, "rb") as handle:
+                        head = handle.read(16)
+                    name = entry.name
+                    too_long = len(name.encode("utf-8")) > BACK_IMAGE_NAME_MAX_BYTES
+                except (OSError, UnicodeError):
+                    incomplete = True
+                    continue
+                if not _image_header_is_image(head):
+                    continue
+                if too_long:
+                    incomplete = True
+                    continue
+                entries.append({"name": name, "size": int(observed.st_size)})
+    except OSError:
+        return [], True
+    entries.sort(key=lambda item: item["name"])
+    if len(entries) > BACK_IMAGE_SCAN_MAX_CANDIDATES:
+        incomplete = True
+    return entries[:BACK_IMAGE_SCAN_MAX_CANDIDATES], incomplete
+
+
+def _scan_back_images(scm: Path) -> list:
+    return _inspect_back_image_directory(Path(scm) / "game" / "back")[0]
+
+
+def _back_image_name(name: str) -> str:
+    if not isinstance(name, str) or not name:
+        raise BackImageImportError("selected image has no file name")
+    try:
+        if len(name.encode("utf-8")) > BACK_IMAGE_NAME_MAX_BYTES:
+            raise BackImageImportError("selected image name is too long")
+    except UnicodeEncodeError as exc:
+        raise BackImageImportError("selected image name must be valid UTF-8") from exc
+    if name in (".", "..") or any(ord(c) < 0x20 or ord(c) == 0x7f for c in name):
+        raise BackImageImportError("selected image name contains unsafe characters")
+    if any(c in name for c in ("/", "\\", ":")) or name.endswith((".", " ")):
+        raise BackImageImportError("selected image name is unsafe")
+    stem = name.split(".", 1)[0].upper()
+    if stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"COM[1-9]", stem) or re.fullmatch(r"LPT[1-9]", stem):
+        raise BackImageImportError("selected image name is reserved on Windows")
+    if name.startswith((BACK_IMAGE_TEMP_PREFIX, BACK_IMAGE_QUARANTINE_PREFIX)):
+        raise BackImageImportError("selected image name is reserved")
+    return name
+
+
+def _open_back_image_source(source_path: str):
+    if not isinstance(source_path, str) or not source_path:
+        raise BackImageImportError("source path must be a non-empty string")
+    try:
+        if len(source_path.encode("utf-8")) > BACK_IMAGE_PATH_MAX_BYTES:
+            raise BackImageImportError("source path exceeds 4096 UTF-8 bytes")
+    except UnicodeEncodeError as exc:
+        raise BackImageImportError("source path must be valid UTF-8") from exc
+    if has_forbidden_action_controls(source_path):
+        raise BackImageImportError("source path contains control characters")
+    trimmed = source_path.rstrip("/\\")
+    name = trimmed.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if not name:
+        raise BackImageImportError("source path has no file name")
+    name = _back_image_name(name)
+    if os.name == "nt":
+        try:
+            fd, source_stat = _open_windows_regular_file(Path(source_path))
+        except Exception as exc:
+            raise BackImageImportError("could not open selected image") from exc
+    else:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(source_path, flags)
+            source_stat = os.fstat(fd)
+        except OSError as exc:
+            raise BackImageImportError("could not open selected image") from exc
+    try:
+        if (_is_reparse_or_symlink(source_stat) or not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_size > BACK_IMAGE_SOURCE_MAX_BYTES):
+            raise BackImageImportError("selected image is not a bounded regular file")
+        os.lseek(fd, 0, os.SEEK_SET)
+        if not _image_header_is_image(os.read(fd, 16)):
+            raise BackImageImportError("selected file is not a recognized image")
+        os.lseek(fd, 0, os.SEEK_SET)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd, source_stat, name
+
+
+def _open_posix_back_directory(scm: Path):
+    if os.name == "nt" or not all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+        raise BackImageImportError("secure card-back directories are unavailable")
+    root = Path(os.path.abspath(os.fspath(scm)))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    opened = []
+    try:
+        current = os.open(root, flags)
+        opened.append(current)
+        root_stat = os.fstat(current)
+        if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+            raise BackImageImportError("SCM checkout is not a safe directory")
+        for component in ("game", "back"):
+            try:
+                os.mkdir(component, 0o755, dir_fd=current)
+            except FileExistsError:
+                pass
+            child = os.open(component, flags, dir_fd=current)
+            opened.append(child)
+            current = child
+        final_fd = opened.pop()
+        return root / "game" / "back", final_fd
+    except BackImageImportError:
+        raise
+    except OSError as exc:
+        raise BackImageImportError("card-back destination contains a symlink or non-directory") from exc
+    finally:
+        for fd in opened:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _back_image_identity(value: os.stat_result):
+    return (value.st_dev, value.st_ino, value.st_size,
+            getattr(value, "st_mtime_ns", value.st_mtime),
+            getattr(value, "st_ctime_ns", value.st_ctime))
+
+
+def _back_image_content_identity(value: os.stat_result):
+    """Identity which survives a quarantine rename while detecting edits."""
+    return (value.st_dev, value.st_ino, value.st_size,
+            getattr(value, "st_mtime_ns", value.st_mtime))
+
+
+def _back_image_result(directory: Path, name: str) -> dict:
+    result = {"ok": True, "name": name, "back_images": _scan_back_images(directory.parent.parent)}
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > BACK_IMAGE_RESULT_MAX_BYTES:
+        raise BackImageImportError("card-back result is too large")
+    return result
+
+
+def _import_back_image_posix(source_fd: int, source_stat: os.stat_result, source_name: str,
+                             scm: Path, directory: Path, directory_fd: int,
+                             cancelled=None) -> dict:
+    """Copy one image with a nested quarantine and pre-publication rollback."""
+    candidates = []
+    scanned = 0
+    with os.scandir(directory_fd) as iterator:
+        for entry in iterator:
+            if cancelled and cancelled():
+                raise BackImageImportError("card-back import cancelled")
+            if scanned >= BACK_IMAGE_SCAN_MAX_SCANNED:
+                raise BackImageImportError("card-back directory is too large")
+            scanned += 1
+            st = entry.stat(follow_symlinks=False)
+            if _is_reparse_or_symlink(st):
+                raise BackImageImportError("card-back destination contains a symlink or reparse point")
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            fd = None
+            try:
+                fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW |
+                             getattr(os, "O_CLOEXEC", 0), dir_fd=directory_fd)
+                stable = os.fstat(fd)
+                if (_is_reparse_or_symlink(stable) or not stat.S_ISREG(stable.st_mode)
+                        or _back_image_identity(stable) != _back_image_identity(st)
+                        or not _image_header_is_image(os.read(fd, 16))):
+                    continue
+                candidates.append({"name": entry.name, "identity": _back_image_content_identity(stable)})
+                if len(candidates) > BACK_IMAGE_SCAN_MAX_CANDIDATES:
+                    raise BackImageImportError("too many card-back images")
+            finally:
+                if fd is not None:
+                    os.close(fd)
+    candidates.sort(key=lambda item: item["name"])
+    existing = {entry["name"] for entry in candidates}
+    try:
+        os.stat(source_name, dir_fd=directory_fd, follow_symlinks=False)
+        target_exists = True
+    except FileNotFoundError:
+        target_exists = False
+    except OSError as exc:
+        raise BackImageImportError("could not inspect card-back destination") from exc
+    target_name = source_name
+    if target_exists and source_name not in existing:
+        stem, suffix = os.path.splitext(source_name)
+        for index in range(2, 1002):
+            target_name = f"{stem} ({index}){suffix}"
+            _back_image_name(target_name)
+            try:
+                os.stat(target_name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+        else:
+            raise BackImageImportError("too many card-back name collisions")
+
+    temp_name = None
+    temp_fd = None
+    quarantine_name = None
+    quarantine_fd = None
+    quarantined = []
+    published = False
+    try:
+        for _ in range(16):
+            temp_name = f"{BACK_IMAGE_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
+            try:
+                temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                  os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600,
+                                  dir_fd=directory_fd)
+                break
+            except FileExistsError:
+                continue
+        if temp_fd is None:
+            raise BackImageImportError("could not create card-back temporary file")
+        total = 0
+        while total < source_stat.st_size:
+            if cancelled and cancelled():
+                raise BackImageImportError("card-back import cancelled")
+            chunk = os.read(source_fd, min(BACK_IMAGE_IO_CHUNK, source_stat.st_size - total))
+            if not chunk:
+                raise BackImageImportError("selected image changed while reading")
+            view = memoryview(chunk)
+            while view:
+                count = os.write(temp_fd, view)
+                if count <= 0:
+                    raise BackImageImportError("could not write card-back temporary file")
+                view = view[count:]
+            total += len(chunk)
+        if os.read(source_fd, 1) or _back_image_identity(os.fstat(source_fd)) != _back_image_identity(source_stat):
+            raise BackImageImportError("selected image changed while reading")
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = None
+
+        for _ in range(16):
+            quarantine_name = f"{BACK_IMAGE_QUARANTINE_PREFIX}{secrets.token_hex(16)}"
+            try:
+                os.mkdir(quarantine_name, 0o700, dir_fd=directory_fd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise BackImageImportError("could not create card-back quarantine")
+        quarantine_fd = os.open(quarantine_name, os.O_RDONLY | os.O_DIRECTORY |
+                                os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory_fd)
+        for candidate in candidates:
+            moved_name = candidate["name"]
+            moved_quarantine_name = moved_name
+            _rename_delete_candidate(directory_fd, moved_name, moved_quarantine_name,
+                                     destination_fd=quarantine_fd)
+            quarantined.append((moved_name, moved_quarantine_name, candidate["identity"]))
+            moved_fd = None
+            try:
+                moved_fd = os.open(moved_quarantine_name, os.O_RDONLY | os.O_NOFOLLOW |
+                                   getattr(os, "O_CLOEXEC", 0), dir_fd=quarantine_fd)
+                moved = os.fstat(moved_fd)
+                if (_is_reparse_or_symlink(moved) or not stat.S_ISREG(moved.st_mode)
+                        or _back_image_content_identity(moved) != candidate["identity"]
+                        or not _image_header_is_image(os.read(moved_fd, 16))):
+                    raise BackImageImportError("card-back image changed while quarantining")
+            finally:
+                if moved_fd is not None:
+                    os.close(moved_fd)
+        # Move, rather than hard-link, the complete temporary image into place.
+        # A failed post-publication cleanup must never leave a second recognized
+        # top-level image that makes upstream prompt on stdin.
+        _rename_delete_candidate(directory_fd, temp_name, target_name)
+        temp_name = None
+        published = True
+        # Publication is the transaction's commit point. Cleanup is best effort;
+        # a failed cleanup leaves recoverable backups below the ignored directory.
+        for _original, moved_name, _identity in quarantined:
+            try:
+                os.unlink(moved_name, dir_fd=quarantine_fd)
+            except OSError:
+                pass
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        try:
+            with os.scandir(quarantine_fd) as remaining:
+                empty = next(remaining, None) is None
+            if empty:
+                os.rmdir(quarantine_name, dir_fd=directory_fd)
+                quarantine_name = None
+        except OSError:
+            pass
+        return _back_image_result(directory, target_name)
+    except Exception as exc:
+        if published:
+            # No exception after publication is allowed to turn a usable new
+            # top-level image into a failed rollback.
+            return _back_image_result(directory, target_name)
+        if temp_fd is not None:
+            os.close(temp_fd)
+            temp_fd = None
+        if temp_name:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        for original, moved_name, _identity in reversed(quarantined):
+            try:
+                _rename_delete_candidate(quarantine_fd, moved_name, original,
+                                         destination_fd=directory_fd)
+            except Exception:
+                # The original stays inside the hidden quarantine rather than
+                # being deleted, so the user's image is not lost. Report it so
+                # the leftover backup is at least discoverable.
+                _diag(f"card-back rollback left {moved_name!r} quarantined", error=True)
+        if quarantine_fd is not None:
+            os.close(quarantine_fd)
+            quarantine_fd = None
+        if quarantine_name:
+            try:
+                os.rmdir(quarantine_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        if isinstance(exc, BackImageImportError):
+            raise
+        raise BackImageImportError("card-back import failed") from exc
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if quarantine_fd is not None:
+            os.close(quarantine_fd)
+
+
+def _import_back_image_windows(source_fd: int, source_stat: os.stat_result,
+                               source_name: str, directory: Path, cancelled=None) -> dict:
+    """Windows transaction using stable handles and a nested reparse-checked quarantine."""
+    candidates = []
+    scanned = 0
+    try:
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                if cancelled and cancelled():
+                    raise BackImageImportError("card-back import cancelled")
+                if scanned >= BACK_IMAGE_SCAN_MAX_SCANNED:
+                    raise BackImageImportError("card-back directory is too large")
+                scanned += 1
+                leaf = Path(entry.path)
+                st = os.lstat(leaf)
+                if _is_reparse_or_symlink(st):
+                    raise BackImageImportError("card-back destination contains a symlink or reparse point")
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                try:
+                    fd, stable = _open_windows_regular_file(leaf)
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        if (_back_image_identity(stable) != _back_image_identity(st)
+                                or not _image_header_is_image(os.read(fd, 16))):
+                            continue
+                    finally:
+                        os.close(fd)
+                except ArtifactExportError:
+                    continue
+                candidates.append({"name": entry.name, "identity": _back_image_content_identity(stable)})
+                if len(candidates) > BACK_IMAGE_SCAN_MAX_CANDIDATES:
+                    raise BackImageImportError("too many card-back images")
+    except OSError as exc:
+        raise BackImageImportError("could not scan card-back destination") from exc
+    candidates.sort(key=lambda item: item["name"])
+    existing = {item["name"] for item in candidates}
+    target_name = source_name
+    target_path = directory / target_name
+    if target_path.exists() and source_name not in existing:
+        stem, suffix = os.path.splitext(source_name)
+        for index in range(2, 1002):
+            target_name = f"{stem} ({index}){suffix}"
+            _back_image_name(target_name)
+            candidate_path = directory / target_name
+            if not candidate_path.exists():
+                break
+        else:
+            raise BackImageImportError("too many card-back name collisions")
+    target_path = directory / target_name
+    temp_path = None
+    temp_fd = None
+    quarantine_path = None
+    quarantined = []
+    published = False
+    try:
+        for _ in range(16):
+            candidate = directory / f"{BACK_IMAGE_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
+            try:
+                temp_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                  getattr(os, "O_BINARY", 0), 0o600)
+                temp_path = candidate
+                break
+            except FileExistsError:
+                continue
+        if temp_fd is None:
+            raise BackImageImportError("could not create card-back temporary file")
+        total = 0
+        while total < source_stat.st_size:
+            if cancelled and cancelled():
+                raise BackImageImportError("card-back import cancelled")
+            chunk = os.read(source_fd, min(BACK_IMAGE_IO_CHUNK, source_stat.st_size - total))
+            if not chunk:
+                raise BackImageImportError("selected image changed while reading")
+            view = memoryview(chunk)
+            while view:
+                count = os.write(temp_fd, view)
+                if count <= 0:
+                    raise BackImageImportError("could not write card-back temporary file")
+                view = view[count:]
+            total += len(chunk)
+        if os.read(source_fd, 1) or _back_image_identity(os.fstat(source_fd)) != _back_image_identity(source_stat):
+            raise BackImageImportError("selected image changed while reading")
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = None
+        for _ in range(16):
+            quarantine_path = directory / f"{BACK_IMAGE_QUARANTINE_PREFIX}{secrets.token_hex(16)}"
+            try:
+                os.mkdir(quarantine_path, 0o700)
+                qstat = os.lstat(quarantine_path)
+                if _is_reparse_or_symlink(qstat) or not stat.S_ISDIR(qstat.st_mode):
+                    raise BackImageImportError("card-back quarantine is unsafe")
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise BackImageImportError("could not create card-back quarantine")
+        for candidate in candidates:
+            moved = quarantine_path / candidate["name"]
+            os.rename(directory / candidate["name"], moved)
+            quarantined.append((candidate["name"], moved, candidate["identity"]))
+            moved_fd, moved_stat = _open_windows_regular_file(moved)
+            try:
+                if (_back_image_content_identity(moved_stat) != candidate["identity"]
+                        or not _image_header_is_image(os.read(moved_fd, 16))):
+                    raise BackImageImportError("card-back image changed while quarantining")
+            finally:
+                os.close(moved_fd)
+        # Windows rename is no-replace. Moving the temporary image avoids a
+        # duplicate top-level hard link if cleanup is interrupted.
+        os.rename(temp_path, target_path)
+        temp_path = None
+        published = True
+        for _original, moved, _identity in quarantined:
+            try:
+                os.unlink(moved)
+            except OSError:
+                pass
+        try:
+            if not any(quarantine_path.iterdir()):
+                quarantine_path.rmdir()
+                quarantine_path = None
+        except OSError:
+            pass
+        return _back_image_result(directory, target_name)
+    except Exception as exc:
+        if published:
+            return _back_image_result(directory, target_name)
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        for original, moved, _identity in reversed(quarantined):
+            try:
+                os.rename(moved, directory / original)
+            except OSError:
+                _diag(f"card-back rollback left {moved.name!r} quarantined", error=True)
+        if quarantine_path:
+            try:
+                quarantine_path.rmdir()
+            except OSError:
+                pass
+        if isinstance(exc, BackImageImportError):
+            raise
+        raise BackImageImportError("card-back import failed") from exc
+
+
+def import_back_image(source_path: str, settings: Optional[dict] = None) -> dict:
+    source_fd, source_stat, source_name = _open_back_image_source(source_path)
+    directory_fd = None
+    try:
+        settings = settings if settings is not None else load_settings()
+        scm, _extras = effective_dirs(settings)
+        if not scm:
+            raise BackImageImportError("no copy of silhouette-card-maker is connected yet")
+        scm = Path(scm)
+        with _image_delete_lock():
+            if os.name == "nt":
+                directory = _decklist_components(scm / "game" / "back", create=True)
+                result = _import_back_image_windows(source_fd, source_stat, source_name, directory)
+            else:
+                directory, directory_fd = _open_posix_back_directory(scm)
+                result = _import_back_image_posix(source_fd, source_stat, source_name,
+                                                  scm, directory, directory_fd)
+            invalidate_manifest_cache()
+            return result
+    except BackImageImportError:
+        raise
+    except ImageDeleteError as exc:
+        message = "another image operation is busy" if exc.message == "image deletion is busy" else exc.message
+        raise BackImageImportError(message) from exc
+    except Exception as exc:
+        raise BackImageImportError("card-back import failed") from exc
+    finally:
+        try:
+            os.close(source_fd)
+        except OSError:
+            pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def _image_delete_result_size(directory: Path, names: list) -> int:
@@ -6329,29 +6928,31 @@ def _scan_delete_posix(directory_fd: int, directory: Path, cancelled=None) -> li
     return candidates
 
 
-def _rename_delete_candidate(directory_fd: int, source: str, destination: str) -> None:
-    """Atomically quarantine one POSIX name without replacing another name."""
+def _rename_delete_candidate(directory_fd: int, source: str, destination: str,
+                              destination_fd: Optional[int] = None) -> None:
+    """Atomically move a name without replacing another name."""
     import ctypes
 
     libc = ctypes.CDLL(None, use_errno=True)
     source_raw = os.fsencode(source)
     destination_raw = os.fsencode(destination)
+    destination_fd = directory_fd if destination_fd is None else destination_fd
     if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
         rename = libc.renameatx_np
         rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
                            ctypes.c_char_p, ctypes.c_uint]
         rename.restype = ctypes.c_int
-        result = rename(directory_fd, source_raw, directory_fd,
+        result = rename(directory_fd, source_raw, destination_fd,
                         destination_raw, 0x00000004)  # RENAME_EXCL
     elif hasattr(libc, "renameat2"):
         rename = libc.renameat2
         rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
                            ctypes.c_char_p, ctypes.c_uint]
         rename.restype = ctypes.c_int
-        result = rename(directory_fd, source_raw, directory_fd,
+        result = rename(directory_fd, source_raw, destination_fd,
                         destination_raw, 0x00000001)  # RENAME_NOREPLACE
     else:
-        raise _image_delete_error("secure no-replace deletion is unavailable")
+        raise _image_delete_error("secure no-replace rename is unavailable")
     if result != 0:
         value = ctypes.get_errno()
         raise OSError(value, os.strerror(value), destination)
@@ -7329,6 +7930,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "errors": ["unknown repository"]}, 400)
                 result = repo_refs_result(key)
                 return self._json(result, 200 if result.get("ok") else 400)
+            if path == "/api/back-images/import":
+                # Packaged windows own image selection through the parented
+                # native picker. Browser compatibility accepts an explicit
+                # path only and never exposes a browser picker.
+                if _IPC_MODE:
+                    return self._json({"ok": False, "errors": [
+                        "native picker required for packaged card-back import"]}, 400)
+                body = self._body(strict=True)
+                if not isinstance(body, dict) or set(body) != {"path"}:
+                    return self._json({"ok": False, "errors": [
+                        "card-back import requires exactly path"]}, 400)
+                try:
+                    result = import_back_image(body["path"], load_settings())
+                except BackImageImportError as exc:
+                    return self._json({"ok": False, "errors": [exc.message]}, 400)
+                return self._json(result)
             if path == "/api/decklists/import":
                 # A packaged worker must only accept the path delivered over
                 # the native command. Standalone browser mode keeps this

@@ -1,7 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile, revealPath } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { canImportBackImage, importBackImage } from "../back-image-transport.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
@@ -14,6 +14,7 @@ PAGES.pdf = (root) => {
   // above carries the name). Advanced mode keeps the full grouped layout.
   const simple = uiMode() === "simple";
   wrap.append(formCard("create_pdf", { icon: "pdf", flat: simple, head: !simple }));
+  wrap.append(backImageCard());
   {  // offset banner — per-size row wins over the global value for this form's paper
     const form = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
     const paper = paperForCreatePdf(form);
@@ -111,6 +112,73 @@ PAGES.pdf = (root) => {
   wrap.__patch = () => { patchPdfForm("create_pdf"); patchOffsetToggle("create_pdf"); };
   return wrap;
 };
+
+function backImageCard() {
+  const card = el("div", { class: "card back-image-card" });
+  card.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("image")),
+    el("div", { class: "grow" }, el("h2", {}, "Card back image"),
+      el("p", {}, "Import one image for game/back. Existing recognized back images are replaced; placeholders and other files stay."))));
+  const status = el("p", { class: "small" });
+  const refreshStatus = () => {
+    const images = S.info?.scm?.back_images || [];
+    status.textContent = images.length === 0
+      ? "No recognized card back image is installed."
+      : images.length === 1
+        ? `Current card back: ${images[0].name}`
+        : `There are ${images.length} recognized card back images. Import one to keep exactly one.`;
+    status.className = `small ${images.length > 1 ? "warn" : ""}`;
+  };
+  refreshStatus();
+  const row = el("div", { class: "runbar" });
+  const native = canImportBackImage();
+  let pathInput = null;
+  if (!native) {
+    pathInput = el("input", { class: "input grow", type: "text", placeholder: "Path to an image file", "aria-label": "Image path" });
+    row.append(pathInput);
+  }
+  const browse = el("button", { class: "btn primary", type: "button", title: native ? "Choose a card back image" : "Import the image at the path above", onclick: async () => {
+    browse.disabled = true;
+    try {
+      const existing = S.info?.scm?.back_images || [];
+      if (existing.length) {
+        const replace = await confirmModal({
+          title: "Replace the card back image?",
+          text: `Choosing a new image replaces ${existing.length === 1 ? `“${existing[0].name}”` : `the ${existing.length} recognized images currently in game/back`}. Placeholders and non-image files stay.`,
+          okLabel: "Choose replacement",
+          icon: "image",
+        });
+        if (!replace) return;
+      }
+      const result = await importBackImage(native ? null : pathInput.value.trim());
+      if (result === null) return;
+      if (!result?.ok) {
+        toast("err", result?.errors?.[0] || "Importing the card back failed.");
+        return;
+      }
+      S.info.scm.back_images = result.back_images || [];
+      refreshStatus();
+      afterFormChange("create_pdf", S.forms.create_pdf);
+      toast("ok", `Imported “${result.name}”. Exactly one recognized card back is now installed.`);
+    } catch (error) {
+      toast("warn", error?.message || "The card back image could not be imported.");
+    } finally {
+      browse.disabled = false;
+    }
+  } }, ico("folder"), native ? "Choose image" : "Import image");
+  row.append(browse);
+  const reveal = el("button", { class: "btn btn-ghost", type: "button", title: "Reveal game/back in the file manager", onclick: async () => {
+    try {
+      const result = await revealPath("game/back");
+      if (!result?.ok) toast("warn", result?.errors?.[0] || "Could not reveal the card back folder.");
+    } catch (error) {
+      toast("warn", error?.message || "Could not reveal the card back folder.");
+    }
+  } }, ico("folder"), "Reveal folder");
+  row.append(reveal);
+  card.append(status, row);
+  return card;
+}
 
 /* Create-PDF behavior: guard the “Front pages only” toggle against images left
    in the double-sided folder. create_pdf.py refuses to run with --only_fronts
