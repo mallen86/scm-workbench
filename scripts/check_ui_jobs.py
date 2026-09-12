@@ -75,6 +75,15 @@ def main() -> int:
             "body:not(.mode-simple).console-open .main" not in theme:
         print("FAIL: advanced console does not reserve page space")
         return 1
+    # Both fetch and PDF use this shared completion structure. Successful jobs
+    # hide the redundant Done header, leaving one desktop row with the useful
+    # message at left and its actions at the far right.
+    for marker in (".jobstrip.done .js-top { display: none; }",
+                   ".jobstrip.done .js-body { grid-template-columns: minmax(0, 1fr) auto;",
+                   ".jobstrip.done .js-actions { grid-column: 2; grid-row: 1; justify-self: end;"):
+        if marker not in theme:
+            print(f"FAIL: completed job actions are not on the message row: {marker}")
+            return 1
     for path in sorted(UI.rglob("*.js")):
         if path.name == "jobs.js":
             continue

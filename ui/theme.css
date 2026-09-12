@@ -865,6 +865,14 @@ body.mode-simple .console { display: none; }
 .jobstrip.done .js-bar, .jobstrip.failed .js-bar { display: none; }
 @keyframes jsslide { 0% { transform: translateX(-110%); } 100% { transform: translateX(360%); } }
 .jobstrip .js-body { display: grid; gap: 9px; }
+/* A successful strip needs one row, not a separate "Done" header above its
+   useful message. Fetch and PDF both put that message first and their buttons
+   in one .js-actions container, so the buttons can sit at the far right of the
+   same row. */
+.jobstrip.done .js-top { display: none; }
+.jobstrip.done .js-body { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.jobstrip.done .js-actions { grid-column: 2; grid-row: 1; justify-self: end; justify-content: flex-end; }
+.jobstrip.done .js-hint { grid-column: 1 / -1; }
 .jobstrip .js-msg { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .jobstrip .js-msg.ok { color: var(--ok); }
 .jobstrip .js-msg.err { color: var(--err); }
