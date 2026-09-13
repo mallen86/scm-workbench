@@ -25,7 +25,7 @@ The packaged Tauri window stays inside the bounded embedded `ui/` frontend
 distribution (`index.html` and root-relative assets); it does not navigate to
 worker HTTP. The native
 protocol covers the three bootstrap reads, bounded settings and offset
-mutations, preview, packaged-Tauri job control/log operations, the read-only
+mutations, command and representative PDF previews, packaged-Tauri job control/log operations, the read-only
 `template.resolve`/`file.list` metadata slice, bounded repository metadata
 operations, app update/release-note operations, the bounded OS-action methods
 below, secure image deletion, and restricted DXF template deletion.
@@ -51,8 +51,8 @@ worker flushes after every response. The input frame is limited to 1 MiB and
 the complete response frame is limited to 8 MiB on the Tauri reader (the Python
 worker keeps ordinary responses below 7 MiB). An oversized result becomes a
 bounded error response rather than a truncated JSON frame. `preview` has a
-stricter 512 KiB encoded result budget, and `jobs.poll` has a stricter 6 MiB
-result budget.
+stricter 512 KiB encoded result budget, `pdf_preview.*` has a 1 MiB result
+budget, and `jobs.poll` has a stricter 6 MiB result budget.
 
 A request has this exact shape:
 
@@ -66,9 +66,10 @@ with `{}` parameters and an exact
 `{"ready":true,"process_group":true}` result; the worker emits that result
 only after POSIX process-group containment is established (Windows relies on
 the retained kill-on-close job object). It is not exposed through public
-`wb_rpc`. The exact public `wb_rpc` allowlist contains twenty-eight methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-one methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
-`jobs.kill`, `jobs.poll`, `preview`, `template.resolve`, `template.delete`, `file.list`,
+`jobs.kill`, `jobs.poll`, `preview`, `pdf_preview.start`, `pdf_preview.poll`,
+`pdf_preview.cancel`, `template.resolve`, `template.delete`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
 `updates.poll`, `updates.start`, and the virtual Rust facade
@@ -92,6 +93,7 @@ parameter contracts below.
 | `POST /api/jobs/<id>/kill` | `jobs.kill` | `server.kill_job()` |
 | `GET /api/jobs/<id>/stream` | `jobs.poll` (packaged Tauri) | `server.poll_jobs()` |
 | `GET /api/preview` | `preview` (packaged Tauri) | `server.build_preview()` |
+| `POST /api/pdf-preview` (`start`, `poll`, or `cancel`) | `pdf_preview.start`, `pdf_preview.poll`, `pdf_preview.cancel` (packaged Tauri) | private bounded representative first-front-page renderer; it never creates a job, history row, log, artifact grant, or output in the SCM checkout |
 | `GET /api/template` | `template.resolve` (packaged Tauri) | `server.resolve_template()` |
 | `POST /api/templates/delete` | `template.delete` (packaged Tauri) | `server.delete_template()`; only regular DXF files directly inside repo cutting template folders are accepted |
 | `GET /api/file?...images_only=1` (standalone-browser directory metadata) | `file.list` (packaged Tauri) | `server.list_files()`; IPC-mode HTTP rejects every `/api/file` request before file work |
@@ -132,6 +134,14 @@ state/projection transaction described below:
   object is at most 512 KiB. The result is the same object as `GET
   /api/preview` (`cmd`, `cwd`, `env`, `warnings`, `errors`, and
   `no_front_images`) and its encoded JSON is at most 512 KiB.
+* `pdf_preview.start`: params exactly `{"args":{...}}`, with finite flat
+  Create PDF values and at most 512 KiB of encoded arguments. It returns a
+  32-character lowercase hexadecimal operation id or a bounded application
+  rejection. `pdf_preview.poll` and `pdf_preview.cancel` each accept exactly
+  that `operation_id`. A running poll is small. A terminal success contains
+  one base64 JPEG, its width and height, and bounded sampled/available counts;
+  the complete result is at most 1 MiB. The browser route accepts the same
+  operations as exact POST bodies.
 * `settings.get`: params `{}`. Result is the complete merged settings object.
 * `offset.set`: params exactly `{"size":null,"x":<integer>,"y":<integer>,"angle":<number>}`
   for the global baseline, or the same object with `size` set to a known SCM
@@ -597,14 +607,14 @@ shell/worker startup. The native update methods do not alter this helper lifecyc
 ## Browser fallback and migration boundary
 
 The UI keeps its existing transport seams. In a packaged Tauri window,
-`preview`, `settings.set`, `offset.set`, `offset.delete`, `jobs.list`,
+`preview`, `pdf_preview.start`, `pdf_preview.poll`, `pdf_preview.cancel`, `settings.set`, `offset.set`, `offset.delete`, `jobs.list`,
 `jobs.start`, `jobs.log`, `jobs.kill`, aggregate `jobs.poll`, `template.resolve`,
 `file.list`, `file.open`, `file.reveal`, `url.open`, and the asynchronous
 `repos.refs`, `repos.source.set`, `repos.check`, `repos.poll`, `updates.get`,
 `updates.check`, `updates.notes`, `updates.poll`, and `updates.start` methods,
 as well as the three bootstrap reads, use native IPC when a callable Tauri
 `invoke` capability exists. In a normal browser there is no Tauri capability:
-preview, template resolution, directory metadata, OS actions, repo metadata,
+command/PDF preview, template resolution, directory metadata, OS actions, repo metadata,
 and job list/start/log/kill use the existing HTTP routes and live output uses
 the SSE stream. A native invocation failure is reported to the UI; “browser
 fallback” means running without the Tauri bridge, not silently hiding a failed
@@ -662,15 +672,15 @@ bind directly to the initiating SCM checkout snapshot. POSIX candidates move
 through an unpredictable atomic no-replace quarantine name and are revalidated
 there before unlink; Windows deletes the revalidated object by stable handle.
 
-The current migration ledger is (28 native methods; template deletion is the
-latest entry):
+The current migration ledger is (31 native methods):
 
 | Surface | Current transport | Status |
 | --- | --- | --- |
 | Bootstrap `info`, `manifest`, `settings.get` reads | Tauri → worker JSON-lines | **This first slice** |
 | Static assets and worker-origin compatibility routes | Standalone HTTP only | Available when launched without `--ipc`; packaged assets/routes are embedded |
 | Job list/start/kill, log reads, and packaged-Tauri aggregate polling | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP/SSE fallback remains |
-| Preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| Command preview | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
+| Representative Create PDF preview | Bounded Tauri start/poll/cancel JSON-lines in packaged windows; POST `/api/pdf-preview` in standalone browsers | Uses at most 16 private copied fronts, fixed low-resolution overrides, a 15-second deadline, process-tree cancellation, bounded Pillow decoding/JPEG output, and disposable private output. It invokes unchanged upstream `create_pdf.py` and never publishes normal job or artifact state. |
 | `template.resolve` read-only template metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains |
 | `template.delete` cutting template deletion | Tauri JSON-lines in packaged windows; POST `/api/templates/delete` in standalone browsers | Restricted to regular `.dxf` files directly inside effective repo `cutting_templates/dxf` folders; secure unlink rejects links and path escapes; packaged HTTP rejects before path work |
 | `file.list` read-only directory/image metadata | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; standalone browser HTTP compatibility remains; packaged `/api/file` is rejected |
@@ -718,6 +728,7 @@ python scripts/check_ui_back_images.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_repos.py
 python scripts/check_ui_preview.py
+python scripts/check_ui_pdf_preview.py
 python scripts/check_ui_artifacts.py
 python scripts/check_ui_native_actions.py
 python scripts/check_ui_settings.py

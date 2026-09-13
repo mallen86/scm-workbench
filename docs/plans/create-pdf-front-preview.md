@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only. No implementation has started.
+Implemented in SCM Workbench. The completed design uses private bounded copies, the selected SCM interpreter for isolated Pillow work, asynchronous native and browser operations, cancellation and checkout coordination, and a representative first-front-page panel in both interface modes. Simple mode shows a concise readiness summary instead of the technical command preview; Advanced mode retains the command preview.
 
 ## Decision summary
 
@@ -28,7 +28,7 @@ A local benchmark with the unchanged renderer at 150 PPI took about 1.26 seconds
 
 ## User experience
 
-Add a preview panel to the Create PDF page near the command preview and Run action.
+Add a preview panel to the Create PDF page near the validation or command summary and Run action.
 
 The panel should:
 

@@ -1,20 +1,35 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile, revealPath } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { canImportBackImage, importBackImage } from "../back-image-transport.js";import { backDirectory, backImageState, isDefaultBackDirectory } from "../back-image-state.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile, revealPath } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { canImportBackImage, importBackImage } from "../back-image-transport.js";import { backDirectory, backImageState, isDefaultBackDirectory } from "../back-image-state.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { mountPdfFrontPreview, pdfFrontPreviewPanel, pdfValidationSummaryPanel } from "../pdf-front-preview.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
 PAGES.pdf = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Create PDF", "Lays out images from game/ folders in a PDF that is ready to print, with registration marks. The options below match create_pdf.py, and the preview shows the command that will run."));
-  if (connectCardNeeded()) wrap.append(repoSetupCard());
-  // Simple mode: the form is one flat section — no group headers, no
-  // collapsible wrappers, and no card title of its own (the page head
-  // above carries the name). Advanced mode keeps the full grouped layout.
   const simple = uiMode() === "simple";
-  const pdfForm = formCard("create_pdf", { icon: "pdf", flat: simple, head: !simple });
+  const description = simple
+    ? "Lays out images from game/ folders in a PDF that is ready to print, with registration marks. The first-page preview is a low quality estimate of the current settings."
+    : "Lays out images from game/ folders in a PDF that is ready to print, with registration marks. The options below match create_pdf.py, and the command preview shows exactly what will run.";
+  wrap.append(pageHead("Create PDF", description));
+  if (connectCardNeeded()) wrap.append(repoSetupCard());
+  // Simple mode: the form is one flat section, with no group headers,
+  // collapsible wrappers, or technical command box. Advanced mode keeps the
+  // full grouped layout and command preview.
+  const pdfForm = formCard("create_pdf", {
+    icon: "pdf", flat: simple, head: !simple, preview: simple ? "summary" : true,
+  });
   const backImageControl = installBackImageControl(pdfForm, { simple });
+  const visualPreview = pdfFrontPreviewPanel();
+  const commandPreview = $(".cmdbox", pdfForm);
+  if (commandPreview) commandPreview.before(visualPreview);
+  else pdfForm.append(visualPreview);
+  const validationSummary = simple ? pdfValidationSummaryPanel() : null;
+  if (validationSummary) {
+    $(".runbar", pdfForm)?.before(validationSummary);
+    const runNote = $(".rb-note", pdfForm);
+    if (runNote) runNote.textContent = "Runs in the background. Progress and completion stay on this page.";
+  }
   wrap.append(pdfForm);
   {  // offset banner — per-size row wins over the global value for this form's paper
     const form = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
@@ -114,6 +129,11 @@ PAGES.pdf = (root) => {
     patchPdfForm("create_pdf");
     patchOffsetToggle("create_pdf");
     backImageControl.refresh();
+    const disposeVisualPreview = mountPdfFrontPreview(visualPreview, validationSummary);
+    wrap.__dispose = () => {
+      disposeVisualPreview();
+      backImageControl.dispose();
+    };
   };
   return wrap;
 };
@@ -367,7 +387,7 @@ function installBackImageControl(card, { simple }) {
   disposeBackImageRefresh = dispose;
   backInput?.addEventListener("input", () => refresh(180));
   frontsInput?.addEventListener("change", () => refresh());
-  return { refresh };
+  return { refresh, dispose };
 }
 
 /* Create-PDF behavior: guard the “Front pages only” toggle against images left

@@ -19,6 +19,7 @@ Requires Python 3.10+ (3.12+ recommended to match silhouette-card-maker).
 """
 
 import argparse
+import base64
 import io
 import json
 import math
@@ -1857,7 +1858,9 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
         return (text or exc.__class__.__name__)[:256]
 
     # State validation, admission, log creation, insertion, and thread start
-    # are serialized. Caller values are intentionally ignored.
+    # are serialized. Caller values are intentionally ignored. A real update
+    # also takes precedence over disposable visual preview work.
+    stop_all_pdf_previews(timeout=1.0)
     with JOBS_LOCK:
         # A test/process teardown or recovery may have removed an abandoned
         # record. Do not let that orphaned token permanently deny admission.
@@ -2090,7 +2093,7 @@ def _start_repo_operation(kind: str, args: dict) -> dict:
             "source.set": lambda: repo_source_result(args["repo"], args["source"]),
             "check": lambda: repo_check_result(args["repo"], args["force"]),
         }
-        operation = {"status": "running", "call": calls[kind], "result": None}
+        operation = {"status": "running", "kind": kind, "call": calls[kind], "result": None}
         _REPO_OPS[operation_id] = operation
         _ensure_repo_operation_workers_locked()
         try:
@@ -2171,14 +2174,22 @@ def _invalidate_repo_views() -> None:
 
 def repo_check_result(key: str, force: bool = False) -> dict:
     """Return the complete browser response body for a repository check."""
-    res = run_repo_check(key, force=force)
-    if res.get("ok"):
-        res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
-        _invalidate_repo_views()
-    body = {"ok": bool(res.get("ok")), **(
-        res if res.get("ok") else {"errors": _bounded_errors(res.get("error", "check failed"))}
-    ), "repos": repos_view(load_settings())}
-    return body
+    stop_all_pdf_previews(timeout=1.0)
+    if not _acquire_repo_mutation_lease():
+        return {"ok": False, "errors": [
+            "the SCM checkout is busy; try again when current work finishes"],
+            "repos": repos_view(load_settings())}
+    try:
+        res = run_repo_check(key, force=force)
+        if res.get("ok"):
+            res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
+            _invalidate_repo_views()
+        body = {"ok": bool(res.get("ok")), **(
+            res if res.get("ok") else {"errors": _bounded_errors(res.get("error", "check failed"))}
+        ), "repos": repos_view(load_settings())}
+        return body
+    finally:
+        _release_repo_mutation_lease()
 
 
 def _repo_source_settings_mirror(key: str, source: str) -> None:
@@ -2207,36 +2218,42 @@ def repo_source_result(key: str, source: str) -> dict:
     init/update/check.  Settings are only a mirror and are written after the
     state commit; if that mirror fails, state remains authoritative.
     """
+    stop_all_pdf_previews(timeout=1.0)
+    if not _acquire_repo_mutation_lease():
+        return {"ok": False, "repo": key, "errors": [
+            "the SCM checkout is busy; try again when current work finishes"],
+            "repos": repos_view(load_settings())}
     try:
-        key = repo_sync.validate_repo_key(key)
-        source = repo_sync.validate_source(source)
-        with repo_sync._repo_lock(key):
-            # Keep the settings-backed source stable while resolving it, and
-            # retain the established repo -> settings-source -> state order.
-            with repo_sync._settings_source_lock():
-                target = repo_sync.resolve_target(key, source)
-                repo_sync._record_source_and_check_locked(key, source, target)
-        _invalidate_repo_views()
         try:
-            _repo_source_settings_mirror(key, source)
-        except Exception as exc:
-            # The state/check commit is authoritative and must not be reported
-            # as a failed source change merely because its optional settings
-            # mirror could not be persisted.  Keep the warning bounded; the
-            # browser and native transports receive this exact same body.
+            key = repo_sync.validate_repo_key(key)
+            source = repo_sync.validate_source(source)
+            with repo_sync._repo_lock(key):
+                # Keep the settings-backed source stable while resolving it,
+                # and retain the established lock order.
+                with repo_sync._settings_source_lock():
+                    target = repo_sync.resolve_target(key, source)
+                    repo_sync._record_source_and_check_locked(key, source, target)
+            _invalidate_repo_views()
+            try:
+                _repo_source_settings_mirror(key, source)
+            except Exception as exc:
+                # State is authoritative even if its optional settings mirror
+                # could not be persisted.
+                return {"ok": True, "repo": key, "source": source, "target": target,
+                        "canonical": True,
+                        "warnings": [f"source mirror failed: {_bounded_error(exc)}"],
+                        "repos": repos_view(load_settings())}
+            settings = load_settings()
             return {"ok": True, "repo": key, "source": source, "target": target,
-                    "canonical": True,
-                    "warnings": [f"source mirror failed: {_bounded_error(exc)}"],
+                    "repos": repos_view(settings)}
+        except repo_sync.RepoError as exc:
+            return {"ok": False, "repo": key, "errors": [_bounded_error(exc)],
                     "repos": repos_view(load_settings())}
-        settings = load_settings()
-        return {"ok": True, "repo": key, "source": source, "target": target,
-                "repos": repos_view(settings)}
-    except repo_sync.RepoError as exc:
-        return {"ok": False, "repo": key, "errors": [_bounded_error(exc)],
-                "repos": repos_view(load_settings())}
-    except Exception:
-        return {"ok": False, "repo": key, "errors": ["source update failed"],
-                "repos": repos_view(load_settings())}
+        except Exception:
+            return {"ok": False, "repo": key, "errors": ["source update failed"],
+                    "repos": repos_view(load_settings())}
+    finally:
+        _release_repo_mutation_lease()
 
 
 def repo_refs_result(key: str) -> dict:
@@ -5260,6 +5277,965 @@ def build_preview(kind: str, raw_args: dict) -> dict:
     }
 
 
+# A visual PDF preview is a separate, bounded operation. It runs the unchanged
+# upstream renderer only against private low-resolution inputs and never enters
+# the job/history/artifact system.
+PDF_PREVIEW_ARGS_MAX_BYTES = 512 * 1024
+PDF_PREVIEW_RESULT_MAX_BYTES = 1024 * 1024
+PDF_PREVIEW_PATH_MAX_BYTES = 4096
+PDF_PREVIEW_NAME_MAX_BYTES = 255
+PDF_PREVIEW_SCAN_MAX_SCANNED = 8192
+PDF_PREVIEW_SCAN_MAX_CANDIDATES = 1024
+PDF_PREVIEW_SAMPLE_MAX = 16
+PDF_PREVIEW_SOURCE_MAX_BYTES = 32 * 1024 * 1024
+PDF_PREVIEW_SOURCE_TOTAL_MAX_BYTES = 128 * 1024 * 1024
+PDF_PREVIEW_IO_CHUNK = 64 * 1024
+PDF_PREVIEW_PPI = 75
+PDF_PREVIEW_JPEG_MAX_BYTES = 512 * 1024
+PDF_PREVIEW_PAGE_MAX_BYTES = 64 * 1024 * 1024
+PDF_PREVIEW_RENDER_TIMEOUT = 15.0
+PDF_PREVIEW_OPERATION_TTL = 60.0
+PDF_PREVIEW_RETAINED_MAX = 4
+PDF_PREVIEW_MAX_DEPTH = 8
+PDF_PREVIEW_MAX_PAPER_INCHES = 24.0
+PDF_PREVIEW_MAX_LAYOUT_PIXELS = 25_000_000
+PDF_PREVIEW_MAX_PAGE_MEMORY_BYTES = 128 * 1024 * 1024
+PDF_PREVIEW_ARGV_MAX_BYTES = 24 * 1024
+PDF_PREVIEW_TEMP_PREFIX = "preview-"
+_PDF_PREVIEW_OP_LOCK = threading.RLock()
+_PDF_PREVIEW_START_LOCK = threading.Lock()
+_PDF_PREVIEW_OPS: "OrderedDict[str, dict]" = OrderedDict()
+_PREVIEW_DIMENSION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(mm|in)\s*$", re.I)
+
+
+class PdfPreviewError(Exception):
+    def __init__(self, message: str, *, retryable: bool = False,
+                 unavailable: bool = True, cancelled: bool = False):
+        super().__init__(message)
+        self.message = " ".join(str(message).split())[:256] or "PDF preview failed"
+        self.retryable = bool(retryable)
+        self.unavailable = bool(unavailable)
+        self.cancelled = bool(cancelled)
+
+    def result(self) -> dict:
+        result = {"ok": False, "errors": [self.message]}
+        if self.retryable:
+            result["retryable"] = True
+        if self.unavailable:
+            result["unavailable"] = True
+        if self.cancelled:
+            result["cancelled"] = True
+        return result
+
+
+def _pdf_preview_cancelled(record: dict) -> None:
+    if record["cancel"].is_set():
+        raise PdfPreviewError("Preview cancelled.", unavailable=False, cancelled=True)
+    if time.monotonic() >= record["deadline"]:
+        raise PdfPreviewError("The representative preview took too long to render.",
+                              retryable=True)
+
+
+def _pdf_preview_validate_raw_args(raw_args: Any) -> int:
+    if not isinstance(raw_args, dict):
+        raise PdfPreviewError("Preview arguments must be an object.")
+    if len(raw_args) > 128:
+        raise PdfPreviewError("Preview arguments contain too many fields.")
+    try:
+        encoded = json.dumps(raw_args, ensure_ascii=False, separators=(",", ":"),
+                             allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise PdfPreviewError("Preview arguments must be finite valid JSON values.") from exc
+    if len(encoded) > PDF_PREVIEW_ARGS_MAX_BYTES:
+        raise PdfPreviewError("Preview arguments exceed 512 KiB when encoded.")
+
+    def check_value(value: Any, depth: int = 0) -> None:
+        if depth > 2:
+            raise PdfPreviewError("Preview arguments are too deeply nested.")
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            if abs(value) > 1_000_000_000:
+                raise PdfPreviewError("Preview numeric values are too large.")
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value) or abs(value) > 1_000_000_000:
+                raise PdfPreviewError("Preview numeric values must be finite and bounded.")
+            return
+        if isinstance(value, str):
+            try:
+                if len(value.encode("utf-8")) > 8192:
+                    raise PdfPreviewError("A preview value exceeds 8192 UTF-8 bytes.")
+            except UnicodeEncodeError as exc:
+                raise PdfPreviewError("Preview text must be valid UTF-8.") from exc
+            if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+                raise PdfPreviewError("Preview values must not contain control characters.")
+            return
+        if isinstance(value, list):
+            if len(value) > 256:
+                raise PdfPreviewError("A preview list contains too many values.")
+            for item in value:
+                check_value(item, depth + 1)
+            return
+        raise PdfPreviewError("Preview arguments contain an unsupported value.")
+
+    for key, value in raw_args.items():
+        if not isinstance(key, str):
+            raise PdfPreviewError("Preview field names must be strings.")
+        try:
+            if (len(key.encode("utf-8")) > 128 or
+                    any(ord(char) < 0x20 or ord(char) == 0x7f for char in key)):
+                raise PdfPreviewError("Preview field names must be short and contain no controls.")
+        except UnicodeEncodeError as exc:
+            raise PdfPreviewError("Preview field names must be valid UTF-8.") from exc
+        check_value(value)
+    return len(encoded)
+
+
+def _pdf_preview_validate_manifest_numbers(spec: dict, raw_args: dict) -> None:
+    options = [option for group in spec.get("groups", [])
+               for option in group.get("options", [])]
+    allowed = {option.get("key") for option in options if isinstance(option.get("key"), str)}
+    if set(raw_args) - allowed:
+        raise PdfPreviewError("Preview arguments contain an unknown Create PDF field.")
+    for group in spec.get("groups", []):
+        for option in group.get("options", []):
+            key = option.get("key")
+            value = raw_args.get(key)
+            option_type = option.get("type")
+            if option_type == "path" and isinstance(value, str):
+                try:
+                    if len(value.encode("utf-8")) > PDF_PREVIEW_PATH_MAX_BYTES:
+                        raise PdfPreviewError(f"{option.get('label', key)} exceeds 4096 UTF-8 bytes.")
+                except UnicodeEncodeError as exc:
+                    raise PdfPreviewError(f"{option.get('label', key)} must be valid UTF-8.") from exc
+            if option_type in ("number", "range") and value not in (None, ""):
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise PdfPreviewError(f"{option.get('label', key)} must be a number.") from exc
+                if not math.isfinite(number) or abs(number) > 1_000_000_000:
+                    raise PdfPreviewError(f"{option.get('label', key)} must be finite and bounded.")
+    skips = raw_args.get("skip")
+    if isinstance(skips, list):
+        if len(skips) > 256:
+            raise PdfPreviewError("Skip contains too many positions.")
+        for value in skips:
+            text = str(value)
+            if len(text) > 12 or not re.fullmatch(r"\d+", text) or int(text) > 1_000_000:
+                raise PdfPreviewError("Skip positions must be bounded nonnegative integers.")
+
+
+def _pdf_preview_parse_dimension(value: Any) -> float:
+    if not isinstance(value, str) or len(value) > 64:
+        raise PdfPreviewError("Preview unavailable because the paper dimensions are unknown.")
+    match = _PREVIEW_DIMENSION_RE.fullmatch(value)
+    if not match:
+        raise PdfPreviewError("Preview unavailable because the paper dimensions are not bounded mm or in values.")
+    number = float(match.group(1))
+    if not math.isfinite(number) or number <= 0:
+        raise PdfPreviewError("Preview unavailable because the paper dimensions are invalid.")
+    return number / 25.4 if match.group(2).lower() == "mm" else number
+
+
+def _pdf_preview_validate_paper(info: dict, args: dict, settings: dict) -> None:
+    scm_info = info.get("scm") or {}
+    specialty_name = str(args.get("specialty") or "")
+    if specialty_name:
+        if args.get("borderless"):
+            raise PdfPreviewError("Preview unavailable because borderless mode cannot be combined with a specialty layout.")
+        specialty = next((item for item in scm_info.get("specialty", [])
+                          if item.get("name") == specialty_name), None)
+        paper_name = specialty.get("paper") if specialty else None
+        rows = specialty.get("rows") if specialty else None
+        columns = specialty.get("cols") if specialty else None
+        if (not paper_name or isinstance(rows, bool) or isinstance(columns, bool) or
+                not isinstance(rows, int) or not isinstance(columns, int) or
+                rows < 1 or columns < 1 or rows > 32 or columns > 32 or rows * columns > 256):
+            raise PdfPreviewError("Preview unavailable for this custom paper size.")
+        slot_width = _pdf_preview_parse_dimension(specialty.get("width"))
+        slot_height = _pdf_preview_parse_dimension(specialty.get("height"))
+        if min(slot_width, slot_height) < 0.1 or max(slot_width, slot_height) > 20:
+            raise PdfPreviewError("Preview unavailable because the specialty layout is outside safe bounds.")
+    else:
+        paper_name = str(args.get("paper_size") or
+                         settings.get("defaults", {}).get("paper_size") or "letter")
+    wanted = paper_name.casefold()
+    paper = None
+    for candidate in scm_info.get("paper_sizes", []):
+        names = [candidate.get("name"), *(candidate.get("aliases") or [])]
+        if any(isinstance(name, str) and name.casefold() == wanted for name in names):
+            paper = candidate
+            break
+    if paper is None:
+        raise PdfPreviewError("Preview unavailable because the selected paper size could not be verified.")
+    width = _pdf_preview_parse_dimension(paper.get("width"))
+    height = _pdf_preview_parse_dimension(paper.get("height"))
+    if not specialty_name:
+        card_name = str(args.get("card_size") or
+                        settings.get("defaults", {}).get("card_size") or "standard")
+        wanted_card = card_name.casefold()
+        card = next((candidate for candidate in scm_info.get("card_sizes", [])
+                     if any(isinstance(name, str) and name.casefold() == wanted_card
+                            for name in [candidate.get("name"), *(candidate.get("aliases") or [])])), None)
+        if card is None:
+            raise PdfPreviewError("Preview unavailable because the selected card size could not be verified.")
+        card_width = _pdf_preview_parse_dimension(card.get("width"))
+        card_height = _pdf_preview_parse_dimension(card.get("height"))
+        slots = (math.ceil(width / card_width) + 2) * (math.ceil(height / card_height) + 2)
+        if (min(card_width, card_height) < 0.25 or max(card_width, card_height) > 20 or
+                slots > 256):
+            raise PdfPreviewError("Preview unavailable because the selected card size is outside safe bounds.")
+    layout_pixels = width * height * 300 * 300
+    estimated_page_bytes = (width * height * PDF_PREVIEW_PPI * PDF_PREVIEW_PPI *
+                            4 * PDF_PREVIEW_SAMPLE_MAX)
+    if (max(width, height) > PDF_PREVIEW_MAX_PAPER_INCHES or
+            layout_pixels > PDF_PREVIEW_MAX_LAYOUT_PIXELS or
+            estimated_page_bytes > PDF_PREVIEW_MAX_PAGE_MEMORY_BYTES):
+        raise PdfPreviewError("Preview unavailable because the selected paper size is too large for a safe live preview.")
+
+
+def _pdf_preview_identity(value: os.stat_result) -> tuple:
+    return (int(getattr(value, "st_dev", 0)), int(getattr(value, "st_ino", 0)),
+            int(value.st_size), int(getattr(value, "st_mtime_ns", int(value.st_mtime * 1e9))),
+            int(getattr(value, "st_ctime_ns", int(value.st_ctime * 1e9))))
+
+
+def _pdf_preview_root_identity(value: os.stat_result) -> tuple:
+    return (int(getattr(value, "st_dev", 0)), int(getattr(value, "st_ino", 0)))
+
+
+def _pdf_preview_source(settings: dict, args: dict) -> tuple[Path, tuple, tuple[str, ...]]:
+    scm, _extras = effective_dirs(settings)
+    if not scm:
+        raise PdfPreviewError("Connect silhouette-card-maker to see a preview.")
+    root = Path(os.path.abspath(os.fspath(scm)))
+    try:
+        root_stat = os.lstat(root)
+    except OSError as exc:
+        raise PdfPreviewError("The connected SCM checkout could not be inspected.", retryable=True) from exc
+    if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+        raise PdfPreviewError("Preview unavailable because the SCM checkout is not a safe directory.")
+    raw = str(args.get("front_dir") or "game/front")
+    try:
+        if len(raw.encode("utf-8")) > PDF_PREVIEW_PATH_MAX_BYTES:
+            raise PdfPreviewError("The front image path exceeds 4096 UTF-8 bytes.")
+    except UnicodeEncodeError as exc:
+        raise PdfPreviewError("The front image path must be valid UTF-8.") from exc
+    if not raw or has_forbidden_action_controls(raw):
+        raise PdfPreviewError("The front image path is invalid.")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = Path(os.path.abspath(os.fspath(candidate)))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise PdfPreviewError("Representative previews are limited to front folders inside the connected SCM checkout.") from exc
+    if not relative.parts:
+        raise PdfPreviewError("Choose a front image folder inside the SCM checkout.")
+    for part in relative.parts:
+        try:
+            if (part in ("", ".", "..") or len(part.encode("utf-8")) > PDF_PREVIEW_NAME_MAX_BYTES or
+                    any(ord(char) < 0x20 or ord(char) == 0x7f for char in part)):
+                raise PdfPreviewError("The front image path contains an unsafe component.")
+        except UnicodeEncodeError as exc:
+            raise PdfPreviewError("The front image path must be valid UTF-8.") from exc
+    return root, _pdf_preview_root_identity(root_stat), tuple(relative.parts)
+
+
+def _pdf_preview_open_posix_directory(root: Path, root_identity: tuple,
+                                       parts: tuple[str, ...]) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current = os.open(root, flags)
+    try:
+        if _pdf_preview_root_identity(os.fstat(current)) != root_identity:
+            raise PdfPreviewError("The SCM checkout changed while preparing the preview.", retryable=True)
+        for part in parts:
+            child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        observed = os.fstat(current)
+        if _is_reparse_or_symlink(observed) or not stat.S_ISDIR(observed.st_mode):
+            raise PdfPreviewError("The front image path is not a safe directory.")
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _pdf_preview_check_windows_chain(root: Path, root_identity: tuple,
+                                      parts: tuple[str, ...]) -> Path:
+    try:
+        if _pdf_preview_root_identity(os.lstat(root)) != root_identity:
+            raise PdfPreviewError("The SCM checkout changed while preparing the preview.", retryable=True)
+        current = root
+        for part in parts:
+            current /= part
+            observed = os.lstat(current)
+            if _is_reparse_or_symlink(observed):
+                raise PdfPreviewError("The front image path contains a link or reparse point.")
+        if not stat.S_ISDIR(os.lstat(current).st_mode):
+            raise PdfPreviewError("The front image path is not a directory.")
+        return current
+    except FileNotFoundError as exc:
+        raise PdfPreviewError("Add front images to see a representative preview.", retryable=True) from exc
+    except OSError as exc:
+        raise PdfPreviewError("The front image folder could not be safely inspected.", retryable=True) from exc
+
+
+def _pdf_preview_natural_key(parts: tuple[str, ...]) -> tuple:
+    text = "/".join(parts).casefold()
+    return tuple((1, int(piece)) if piece.isdigit() else (0, piece)
+                 for piece in re.split(r"(\d+)", text))
+
+
+def _pdf_preview_scan_posix(root: Path, root_identity: tuple,
+                            source_parts: tuple[str, ...]) -> list:
+    candidates = []
+    scanned = 0
+    stack = [(source_parts, 0)]
+    while stack:
+        parts, depth = stack.pop()
+        try:
+            directory_fd = _pdf_preview_open_posix_directory(root, root_identity, parts)
+        except PdfPreviewError:
+            raise
+        except FileNotFoundError as exc:
+            raise PdfPreviewError("Add front images to see a representative preview.", retryable=True) from exc
+        except OSError as exc:
+            raise PdfPreviewError("The front image folder could not be safely opened.", retryable=True) from exc
+        try:
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > PDF_PREVIEW_SCAN_MAX_SCANNED:
+                        raise PdfPreviewError("The front image folder is too large to preview safely.")
+                    name = entry.name
+                    try:
+                        if (len(name.encode("utf-8")) > PDF_PREVIEW_NAME_MAX_BYTES or
+                                any(ord(char) < 0x20 or ord(char) == 0x7f for char in name)):
+                            raise PdfPreviewError("The front image folder contains an unsafe file name.")
+                    except UnicodeEncodeError as exc:
+                        raise PdfPreviewError("The front image folder contains a non-UTF-8 file name.") from exc
+                    observed = entry.stat(follow_symlinks=False)
+                    if _is_reparse_or_symlink(observed):
+                        raise PdfPreviewError("The front image folder contains a link or reparse point.")
+                    child_parts = parts + (name,)
+                    if stat.S_ISDIR(observed.st_mode):
+                        if depth >= PDF_PREVIEW_MAX_DEPTH:
+                            raise PdfPreviewError("The front image folder is nested too deeply to preview safely.")
+                        stack.append((child_parts, depth + 1))
+                        continue
+                    if not stat.S_ISREG(observed.st_mode):
+                        raise PdfPreviewError("The front image folder contains an unsafe special file.")
+                    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+                    fd = os.open(name, flags, dir_fd=directory_fd)
+                    try:
+                        stable = os.fstat(fd)
+                        if (_is_reparse_or_symlink(stable) or not stat.S_ISREG(stable.st_mode) or
+                                _pdf_preview_identity(stable) != _pdf_preview_identity(observed)):
+                            raise PdfPreviewError("A front image changed while it was being inspected.", retryable=True)
+                        head = os.read(fd, 16)
+                    finally:
+                        os.close(fd)
+                    if not _image_header_is_image(head):
+                        continue
+                    candidates.append({"parts": child_parts, "identity": _pdf_preview_identity(stable)})
+                    if len(candidates) > PDF_PREVIEW_SCAN_MAX_CANDIDATES:
+                        raise PdfPreviewError("The front image folder contains too many images for a live preview.")
+        except FileNotFoundError as exc:
+            raise PdfPreviewError("Add front images to see a representative preview.", retryable=True) from exc
+        except PdfPreviewError:
+            raise
+        except OSError as exc:
+            raise PdfPreviewError("The front image folder could not be safely inspected.", retryable=True) from exc
+        finally:
+            os.close(directory_fd)
+    candidates.sort(key=lambda item: _pdf_preview_natural_key(item["parts"]))
+    return candidates
+
+
+def _pdf_preview_scan_windows(root: Path, root_identity: tuple,
+                              source_parts: tuple[str, ...]) -> list:
+    candidates = []
+    scanned = 0
+    stack = [(source_parts, 0)]
+    while stack:
+        parts, depth = stack.pop()
+        directory = _pdf_preview_check_windows_chain(root, root_identity, parts)
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > PDF_PREVIEW_SCAN_MAX_SCANNED:
+                        raise PdfPreviewError("The front image folder is too large to preview safely.")
+                    name = entry.name
+                    if (len(name.encode("utf-8")) > PDF_PREVIEW_NAME_MAX_BYTES or
+                            any(ord(char) < 0x20 or ord(char) == 0x7f for char in name)):
+                        raise PdfPreviewError("The front image folder contains an unsafe file name.")
+                    child_parts = parts + (name,)
+                    path = root.joinpath(*child_parts)
+                    observed = os.lstat(path)
+                    if _is_reparse_or_symlink(observed):
+                        raise PdfPreviewError("The front image folder contains a link or reparse point.")
+                    if stat.S_ISDIR(observed.st_mode):
+                        if depth >= PDF_PREVIEW_MAX_DEPTH:
+                            raise PdfPreviewError("The front image folder is nested too deeply to preview safely.")
+                        stack.append((child_parts, depth + 1))
+                        continue
+                    if not stat.S_ISREG(observed.st_mode):
+                        raise PdfPreviewError("The front image folder contains an unsafe special file.")
+                    fd, stable = _open_windows_regular_file(path)
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        if _pdf_preview_identity(stable) != _pdf_preview_identity(observed):
+                            raise PdfPreviewError("A front image changed while it was being inspected.", retryable=True)
+                        head = os.read(fd, 16)
+                    finally:
+                        os.close(fd)
+                    if not _image_header_is_image(head):
+                        continue
+                    candidates.append({"parts": child_parts, "identity": _pdf_preview_identity(stable)})
+                    if len(candidates) > PDF_PREVIEW_SCAN_MAX_CANDIDATES:
+                        raise PdfPreviewError("The front image folder contains too many images for a live preview.")
+        except PdfPreviewError:
+            raise
+        except (OSError, UnicodeError, ArtifactExportError) as exc:
+            raise PdfPreviewError("The front image folder could not be safely inspected.", retryable=True) from exc
+    candidates.sort(key=lambda item: _pdf_preview_natural_key(item["parts"]))
+    return candidates
+
+
+def _pdf_preview_open_source(root: Path, root_identity: tuple,
+                             item: dict) -> tuple[int, os.stat_result]:
+    parts = item["parts"]
+    fd = None
+    try:
+        if os.name == "nt":
+            _pdf_preview_check_windows_chain(root, root_identity, parts[:-1])
+            fd, observed = _open_windows_regular_file(root.joinpath(*parts))
+            os.lseek(fd, 0, os.SEEK_SET)
+        else:
+            directory_fd = _pdf_preview_open_posix_directory(root, root_identity, parts[:-1])
+            try:
+                flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+                fd = os.open(parts[-1], flags, dir_fd=directory_fd)
+            finally:
+                os.close(directory_fd)
+            observed = os.fstat(fd)
+    except PdfPreviewError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except Exception as exc:
+        if fd is not None:
+            os.close(fd)
+        raise PdfPreviewError("A sampled front image could not be safely reopened.", retryable=True) from exc
+    if (_is_reparse_or_symlink(observed) or not stat.S_ISREG(observed.st_mode) or
+            _pdf_preview_identity(observed) != item["identity"]):
+        os.close(fd)
+        raise PdfPreviewError("A front image changed while the preview was being prepared.", retryable=True)
+    return fd, observed
+
+
+def _pdf_preview_copy_sample(record: dict, root: Path, root_identity: tuple,
+                             source_parts: tuple[str, ...], raw_dir: Path) -> tuple[int, int]:
+    candidates = (_pdf_preview_scan_windows(root, root_identity, source_parts)
+                  if os.name == "nt" else
+                  _pdf_preview_scan_posix(root, root_identity, source_parts))
+    if not candidates:
+        raise PdfPreviewError("Add front images to see a representative preview.", retryable=True)
+    selected = candidates[:PDF_PREVIEW_SAMPLE_MAX]
+    total_expected = sum(item["identity"][2] for item in selected)
+    if any(item["identity"][2] < 1 or item["identity"][2] > PDF_PREVIEW_SOURCE_MAX_BYTES
+           for item in selected):
+        raise PdfPreviewError("A sampled front image is too large for a safe live preview.")
+    if total_expected > PDF_PREVIEW_SOURCE_TOTAL_MAX_BYTES:
+        raise PdfPreviewError("The sampled front images are too large for a safe live preview.")
+    for index, item in enumerate(selected, 1):
+        _pdf_preview_cancelled(record)
+        source_fd, expected = _pdf_preview_open_source(root, root_identity, item)
+        destination = raw_dir / f"{index:04d}.img"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        destination_fd = os.open(destination, flags, 0o600)
+        try:
+            copied = 0
+            while copied < expected.st_size:
+                _pdf_preview_cancelled(record)
+                chunk = os.read(source_fd, min(PDF_PREVIEW_IO_CHUNK, expected.st_size - copied))
+                if not chunk:
+                    raise PdfPreviewError("A front image changed while it was being copied.", retryable=True)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_fd, view)
+                    if written <= 0:
+                        raise PdfPreviewError("The private preview copy could not be written.", retryable=True)
+                    view = view[written:]
+                copied += len(chunk)
+            if (os.read(source_fd, 1) or
+                    _pdf_preview_identity(os.fstat(source_fd)) != item["identity"]):
+                raise PdfPreviewError("A front image changed while it was being copied.", retryable=True)
+            os.fsync(destination_fd)
+        finally:
+            os.close(source_fd)
+            os.close(destination_fd)
+    return len(selected), len(candidates)
+
+
+def _pdf_preview_parent() -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    parent = DATA_DIR / "pdf-previews"
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    observed = os.lstat(parent)
+    if _is_reparse_or_symlink(observed) or not stat.S_ISDIR(observed.st_mode):
+        raise PdfPreviewError("The private preview directory is unsafe.", retryable=True)
+    if os.name != "nt":
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(parent, flags)
+        try:
+            stable = os.fstat(fd)
+            if (stable.st_dev, stable.st_ino) != (observed.st_dev, observed.st_ino):
+                raise PdfPreviewError("The private preview directory changed.", retryable=True)
+            if stat.S_IMODE(stable.st_mode) != 0o700:
+                os.fchmod(fd, 0o700)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+                    raise PdfPreviewError("The private preview directory is not private.", retryable=True)
+        finally:
+            os.close(fd)
+    return parent
+
+
+def _pdf_preview_cleanup_stale() -> None:
+    try:
+        parent = _pdf_preview_parent()
+        with _PDF_PREVIEW_OP_LOCK:
+            active_names = {
+                f"{PDF_PREVIEW_TEMP_PREFIX}{operation_id}"
+                for operation_id, operation in _PDF_PREVIEW_OPS.items()
+                if operation.get("status") == "running"
+            }
+        with os.scandir(parent) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 64:
+                    break
+                if (not re.fullmatch(r"preview-[0-9a-f]{32}", entry.name) or
+                        entry.name in active_names):
+                    continue
+                observed = entry.stat(follow_symlinks=False)
+                if _is_reparse_or_symlink(observed) or not stat.S_ISDIR(observed.st_mode):
+                    continue
+                shutil.rmtree(entry.path)
+    except Exception:
+        pass
+
+
+def _pdf_preview_create_tree(operation_id: str) -> tuple[Path, tuple]:
+    parent = _pdf_preview_parent()
+    root = parent / f"{PDF_PREVIEW_TEMP_PREFIX}{operation_id}"
+    os.mkdir(root, 0o700)
+    observed = os.lstat(root)
+    if _is_reparse_or_symlink(observed) or not stat.S_ISDIR(observed.st_mode):
+        raise PdfPreviewError("The private preview directory could not be created.", retryable=True)
+    for name in ("raw", "front", "back", "double_sided", "output"):
+        os.mkdir(root / name, 0o700)
+    return root, _pdf_preview_root_identity(observed)
+
+
+def _pdf_preview_cleanup_tree(root: Optional[Path], identity: Optional[tuple]) -> None:
+    if root is None or identity is None:
+        return
+    try:
+        if not re.fullmatch(r"preview-[0-9a-f]{32}", root.name):
+            return
+        parent = _pdf_preview_parent()
+        if root.parent != parent:
+            return
+        observed = os.lstat(root)
+        if (_is_reparse_or_symlink(observed) or not stat.S_ISDIR(observed.st_mode) or
+                _pdf_preview_root_identity(observed) != identity):
+            _diag("[pdf-preview] private directory identity changed; cleanup skipped", error=True)
+            return
+        shutil.rmtree(root)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        _diag(f"[pdf-preview] cleanup failed: {exc}", error=True)
+
+
+def _pdf_preview_run_child(record: dict, argv: list, cwd: Path, env: dict,
+                           failure_message: str) -> None:
+    try:
+        encoded_argv = sum(len(str(value).encode("utf-8")) + 1 for value in argv)
+    except UnicodeEncodeError as exc:
+        raise PdfPreviewError("Preview command arguments must be valid UTF-8.") from exc
+    if encoded_argv > PDF_PREVIEW_ARGV_MAX_BYTES:
+        raise PdfPreviewError("Preview command arguments are too large to launch safely.")
+    _pdf_preview_cancelled(record)
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            shell=False, **_proc_kwargs(),
+        )
+    except Exception as exc:
+        raise PdfPreviewError(failure_message, retryable=True) from exc
+    proc_lock = record["proc_lock"]
+    with proc_lock:
+        record["proc"] = proc
+    try:
+        while True:
+            with proc_lock:
+                return_code = proc.poll()
+                if return_code is not None:
+                    try:
+                        proc.wait(timeout=0)
+                    except Exception:
+                        pass
+                    if record.get("proc") is proc:
+                        record["proc"] = None
+                    break
+            if record["cancel"].is_set() or time.monotonic() >= record["deadline"]:
+                _terminate_and_reap(proc, proc_lock)
+                with proc_lock:
+                    if record.get("proc") is proc:
+                        record["proc"] = None
+                _pdf_preview_cancelled(record)
+            time.sleep(0.025)
+    finally:
+        with proc_lock:
+            if record.get("proc") is proc and proc.poll() is not None:
+                record["proc"] = None
+    if record["cancel"].is_set():
+        _pdf_preview_cancelled(record)
+    if return_code != 0:
+        raise PdfPreviewError(failure_message)
+
+
+def _pdf_preview_read_private(path: Path, max_bytes: int) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if (_is_reparse_or_symlink(before) or not stat.S_ISREG(before.st_mode) or
+                before.st_size < 1 or before.st_size > max_bytes):
+            raise PdfPreviewError("The renderer produced an unsafe preview file.")
+        payload = os.read(fd, max_bytes + 1)
+        after = os.fstat(fd)
+        if len(payload) != before.st_size or len(payload) > max_bytes or _pdf_preview_identity(after) != _pdf_preview_identity(before):
+            raise PdfPreviewError("The renderer preview changed while it was being read.", retryable=True)
+        return payload, before
+    finally:
+        os.close(fd)
+
+
+def _pdf_preview_read_json(path: Path) -> dict:
+    payload, _observed = _pdf_preview_read_private(path, 4096)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise PdfPreviewError("The preview helper returned invalid metadata.") from exc
+    if not isinstance(value, dict):
+        raise PdfPreviewError("The preview helper returned invalid metadata.")
+    return value
+
+
+def _render_pdf_preview(record: dict) -> dict:
+    root = record["scm_root"]
+    root_identity = record["scm_identity"]
+    args = record["args"]
+    settings = record["settings"]
+    info = record["info"]
+    operation_dir, operation_identity = _pdf_preview_create_tree(record["id"])
+    record["temp_dir"] = operation_dir
+    record["temp_identity"] = operation_identity
+    raw_dir = operation_dir / "raw"
+    front_dir = operation_dir / "front"
+    back_dir = operation_dir / "back"
+    double_sided_dir = operation_dir / "double_sided"
+    output_dir = operation_dir / "output"
+
+    sampled, available = _pdf_preview_copy_sample(
+        record, root, root_identity, record["source_parts"], raw_dir)
+    _pdf_preview_cancelled(record)
+
+    preview_args = dict(args)
+    preview_args.update({
+        "front_dir": str(front_dir),
+        "back_dir": str(back_dir),
+        "double_sided_dir": str(double_sided_dir),
+        "output_path": str(output_dir),
+        "output_images": True,
+        "only_fronts": True,
+        "ppi": PDF_PREVIEW_PPI,
+        "quality": 60,
+        "load_offset": False,
+        "fit_backs": "",
+        "crop_backs": "",
+        "extend_edges_backs": "",
+        "extend_corners_backs": "",
+        "extend_bleed_backs": "",
+    })
+    argv, cwd, env, _title, _warnings, errors = build_command(
+        "create_pdf", preview_args, settings, info, write_deck=False)
+    if errors or cwd is None:
+        raise PdfPreviewError(errors[0] if errors else "The representative preview command is incomplete.")
+    env = dict(env)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if Path(os.path.abspath(os.fspath(cwd))) != root:
+        raise PdfPreviewError("The connected SCM checkout changed while preparing the preview.", retryable=True)
+    try:
+        if _pdf_preview_root_identity(os.lstat(root)) != root_identity:
+            raise PdfPreviewError("The connected SCM checkout changed while preparing the preview.", retryable=True)
+        helper = _HERE / "pdf_preview_helper.py"
+        helper_stat = os.lstat(helper)
+        if _is_reparse_or_symlink(helper_stat) or not stat.S_ISREG(helper_stat.st_mode):
+            raise PdfPreviewError("The PDF preview helper is unavailable.")
+    except OSError as exc:
+        raise PdfPreviewError("The PDF preview helper is unavailable.") from exc
+
+    prepared_meta = operation_dir / "prepared.json"
+    _pdf_preview_run_child(
+        record,
+        [argv[0], str(helper), "prepare", str(raw_dir), str(front_dir), str(prepared_meta)],
+        WB_ROOT, env, "The sampled card fronts could not be prepared for preview.",
+    )
+    prepared = _pdf_preview_read_json(prepared_meta)
+    dimensions = prepared.get("dimensions")
+    valid_dimensions = (isinstance(dimensions, list) and len(dimensions) == sampled and
+                        all(isinstance(pair, list) and len(pair) == 2 and
+                            all(isinstance(value, int) and not isinstance(value, bool) and
+                                1 <= value <= 1600 for value in pair)
+                            for pair in dimensions))
+    if (set(prepared) != {"version", "count", "dimensions"} or
+            isinstance(prepared.get("version"), bool) or prepared.get("version") != 1 or
+            isinstance(prepared.get("count"), bool) or prepared.get("count") != sampled or
+            not valid_dimensions):
+        raise PdfPreviewError("The preview helper returned invalid sample metadata.")
+
+    _pdf_preview_run_child(
+        record, argv, root, env,
+        "The representative front page could not be rendered with these settings.",
+    )
+    page_path = output_dir / "page1.png"
+    try:
+        page_stat = os.lstat(page_path)
+        if (_is_reparse_or_symlink(page_stat) or not stat.S_ISREG(page_stat.st_mode) or
+                page_stat.st_size < 1 or page_stat.st_size > PDF_PREVIEW_PAGE_MAX_BYTES):
+            raise PdfPreviewError("The renderer produced an unsafe first-page image.")
+    except FileNotFoundError as exc:
+        raise PdfPreviewError("The renderer did not produce a first front page.") from exc
+    jpeg_path = operation_dir / "page1.jpg"
+    encoded_meta = operation_dir / "encoded.json"
+    _pdf_preview_run_child(
+        record,
+        [argv[0], str(helper), "encode", str(page_path), str(jpeg_path), str(encoded_meta)],
+        WB_ROOT, env, "The representative front page could not be converted for display.",
+    )
+    metadata = _pdf_preview_read_json(encoded_meta)
+    if (set(metadata) != {"version", "width", "height", "bytes"} or
+            isinstance(metadata.get("version"), bool) or metadata.get("version") != 1 or
+            any(isinstance(metadata.get(key), bool) or not isinstance(metadata.get(key), int)
+                for key in ("width", "height", "bytes")) or
+            not (1 <= metadata["width"] <= 900 and 1 <= metadata["height"] <= 900) or
+            not (1 <= metadata["bytes"] <= PDF_PREVIEW_JPEG_MAX_BYTES)):
+        raise PdfPreviewError("The preview helper returned invalid image metadata.")
+    jpeg, _observed = _pdf_preview_read_private(jpeg_path, PDF_PREVIEW_JPEG_MAX_BYTES)
+    if (metadata["bytes"] != len(jpeg) or not jpeg.startswith(b"\xff\xd8\xff") or
+            not jpeg.endswith(b"\xff\xd9")):
+        raise PdfPreviewError("The preview helper returned an invalid JPEG.")
+    _pdf_preview_cancelled(record)
+    result = {
+        "ok": True,
+        "mime": "image/jpeg",
+        "data": base64.b64encode(jpeg).decode("ascii"),
+        "width": metadata["width"],
+        "height": metadata["height"],
+        "sampled": sampled,
+        "available": available,
+    }
+    if len(json.dumps(result, separators=(",", ":")).encode("utf-8")) > PDF_PREVIEW_RESULT_MAX_BYTES:
+        raise PdfPreviewError("The representative preview result is too large.")
+    return result
+
+
+def _prune_pdf_preview_operations_locked(now: Optional[float] = None) -> None:
+    now = time.time() if now is None else now
+    for operation_id, operation in list(_PDF_PREVIEW_OPS.items()):
+        if operation.get("status") == "done" and now - operation.get("ended", now) >= PDF_PREVIEW_OPERATION_TTL:
+            _PDF_PREVIEW_OPS.pop(operation_id, None)
+    while len(_PDF_PREVIEW_OPS) > PDF_PREVIEW_RETAINED_MAX:
+        terminal = next((key for key, value in _PDF_PREVIEW_OPS.items()
+                         if value.get("status") == "done"), None)
+        if terminal is None:
+            break
+        _PDF_PREVIEW_OPS.pop(terminal, None)
+
+
+def _run_pdf_preview_operation(operation_id: str) -> None:
+    with _PDF_PREVIEW_OP_LOCK:
+        record = _PDF_PREVIEW_OPS.get(operation_id)
+    if record is None:
+        return
+    lease = False
+    result = None
+    try:
+        if not _acquire_image_preview_lease():
+            raise PdfPreviewError("Preview paused while another operation is using the SCM checkout.",
+                                  retryable=True)
+        lease = True
+        result = _render_pdf_preview(record)
+    except PdfPreviewError as exc:
+        result = exc.result()
+    except Exception:
+        result = PdfPreviewError("The representative preview could not be generated.",
+                                 retryable=True).result()
+    finally:
+        if lease:
+            try:
+                _release_image_preview_lease()
+            except RuntimeError:
+                pass
+        _pdf_preview_cleanup_tree(record.get("temp_dir"), record.get("temp_identity"))
+        if record["cancel"].is_set() and result and result.get("ok"):
+            result = PdfPreviewError("Preview cancelled.", unavailable=False,
+                                     cancelled=True).result()
+        with _PDF_PREVIEW_OP_LOCK:
+            current = _PDF_PREVIEW_OPS.get(operation_id)
+            if current is not None:
+                current["status"] = "done"
+                current["result"] = result or PdfPreviewError(
+                    "The representative preview could not be generated.").result()
+                current["ended"] = time.time()
+                current["proc"] = None
+                _prune_pdf_preview_operations_locked()
+
+
+def _cancel_pdf_preview_record(record: dict) -> None:
+    record["cancel"].set()
+    with record["proc_lock"]:
+        proc = record.get("proc")
+    if proc is not None:
+        _terminate_and_reap(proc, record["proc_lock"])
+        with record["proc_lock"]:
+            if record.get("proc") is proc:
+                record["proc"] = None
+
+
+def stop_all_pdf_previews(timeout: float = 1.0) -> None:
+    with _PDF_PREVIEW_OP_LOCK:
+        active = [operation for operation in _PDF_PREVIEW_OPS.values()
+                  if operation.get("status") == "running"]
+    for operation in active:
+        _cancel_pdf_preview_record(operation)
+    deadline = time.monotonic() + max(0.0, timeout)
+    for operation in active:
+        thread = operation.get("thread")
+        if thread is None or thread is threading.current_thread() or not hasattr(thread, "join"):
+            continue
+        try:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
+
+
+def start_pdf_preview(raw_args: dict) -> dict:
+    try:
+        _pdf_preview_validate_raw_args(raw_args)
+        spec = get_manifest().get("create_pdf")
+        if spec is None:
+            raise PdfPreviewError("Create PDF is unavailable.")
+        _pdf_preview_validate_manifest_numbers(spec, raw_args)
+        args, errors, _warnings = normalize_args(spec, raw_args)
+        if errors:
+            raise PdfPreviewError(errors[0])
+        settings = copy.deepcopy(load_settings())
+        info = copy.deepcopy(get_info())
+        _pdf_preview_validate_paper(info, args, settings)
+        scm_root, scm_identity, source_parts = _pdf_preview_source(settings, args)
+    except PdfPreviewError as exc:
+        return exc.result()
+    except Exception:
+        return PdfPreviewError("Preview settings could not be validated.").result()
+
+    with _PDF_PREVIEW_START_LOCK:
+        stop_all_pdf_previews(timeout=1.0)
+        with JOBS_LOCK:
+            if _UPDATE_QUIESCING or any(job.get("status") in ("running", "handoff") for job in JOBS.values()):
+                return PdfPreviewError("Preview paused while a job is using the SCM checkout.",
+                                       retryable=True).result()
+        _pdf_preview_cleanup_stale()
+        with _PDF_PREVIEW_OP_LOCK:
+            _prune_pdf_preview_operations_locked()
+            if any(operation.get("status") == "running" for operation in _PDF_PREVIEW_OPS.values()):
+                return PdfPreviewError("A previous preview is still stopping. Please try again.",
+                                       retryable=True).result()
+            operation_id = secrets.token_hex(16)
+            while operation_id in _PDF_PREVIEW_OPS:
+                operation_id = secrets.token_hex(16)
+            record = {
+                "id": operation_id,
+                "status": "running",
+                "result": None,
+                "started": time.time(),
+                "ended": None,
+                "deadline": time.monotonic() + PDF_PREVIEW_RENDER_TIMEOUT,
+                "cancel": threading.Event(),
+                "proc": None,
+                "proc_lock": threading.Lock(),
+                "temp_dir": None,
+                "temp_identity": None,
+                "settings": settings,
+                "info": info,
+                "args": args,
+                "scm_root": scm_root,
+                "scm_identity": scm_identity,
+                "source_parts": source_parts,
+            }
+            thread = threading.Thread(target=_run_pdf_preview_operation,
+                                      args=(operation_id,), daemon=True,
+                                      name="pdf-preview-operation")
+            record["thread"] = thread
+            _PDF_PREVIEW_OPS[operation_id] = record
+            try:
+                thread.start()
+            except Exception:
+                _PDF_PREVIEW_OPS.pop(operation_id, None)
+                return PdfPreviewError("The representative preview could not be started.",
+                                       retryable=True).result()
+    return {"ok": True, "operation": {"id": operation_id, "status": "running"}}
+
+
+def poll_pdf_preview(operation_id: str) -> dict:
+    with _PDF_PREVIEW_OP_LOCK:
+        _prune_pdf_preview_operations_locked()
+        operation = _PDF_PREVIEW_OPS.get(operation_id)
+        if operation is None:
+            return {"ok": False, "error": {"code": "bad_request", "message": "operation not found"}}
+        if operation.get("status") == "running":
+            return {"ok": True, "status": "running"}
+        return {"ok": True, "status": "done", "result": dict(operation["result"])}
+
+
+def cancel_pdf_preview(operation_id: str) -> dict:
+    with _PDF_PREVIEW_OP_LOCK:
+        _prune_pdf_preview_operations_locked()
+        operation = _PDF_PREVIEW_OPS.get(operation_id)
+        if operation is None:
+            return {"ok": False, "error": {"code": "bad_request", "message": "operation not found"}}
+        active = operation.get("status") == "running"
+    if active:
+        _cancel_pdf_preview_record(operation)
+    return {"ok": True, "cancelled": active}
+
+
 def _offset_sensitive_job(kind: str, args: dict) -> bool:
     return (kind == "offset_pdf") or (kind == "create_pdf" and bool(args.get("load_offset")))
 
@@ -5441,17 +6417,24 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
             OFFSET_LEASE.release()
         return None, _offset_errors([f"could not write job log: {exc}"])
     if not _acquire_image_job_lease():
-        try:
-            log_f.close()
-        except Exception:
-            pass
-        if offset_lease:
-            OFFSET_LEASE.release()
-        try:
-            Path(job["log_file"]).unlink()
-        except OSError:
-            pass
-        return None, ["image deletion is using the SCM checkout; try again when it finishes"]
+        # A real job takes precedence over an automatically generated visual
+        # preview. Stop that disposable work and retry the lease once; an
+        # active deletion or another real job still returns the ordinary busy
+        # result without waiting indefinitely.
+        stop_all_pdf_previews(timeout=1.0)
+        acquired_after_preview = _acquire_image_job_lease()
+        if not acquired_after_preview:
+            try:
+                log_f.close()
+            except Exception:
+                pass
+            if offset_lease:
+                OFFSET_LEASE.release()
+            try:
+                Path(job["log_file"]).unlink()
+            except OSError:
+                pass
+            return None, ["another image operation is using the SCM checkout; try again when it finishes"]
     job["image_lease"] = True
 
     proc = None
@@ -5746,6 +6729,7 @@ def stop_all_jobs(timeout: float = 2.0) -> None:
     The lock is used only to take the work list. Waiting while holding it would
     deadlock a pump trying to publish its terminal status.
     """
+    stop_all_pdf_previews(timeout=min(1.0, max(0.0, timeout)))
     with JOBS_LOCK:
         active = []
         for job in JOBS.values():
@@ -6036,13 +7020,15 @@ IMAGE_DELETE_MAX_NAME_BYTES = 255
 _IMAGE_DELETE_LOCK = threading.Lock()
 _IMAGE_JOB_STATE_LOCK = threading.Lock()
 _IMAGE_JOB_USERS = 0
+_IMAGE_PREVIEW_USERS = 0
+_REPO_MUTATION_USERS = 0
 
 
 def _acquire_image_job_lease() -> bool:
-    """Admit jobs concurrently, but never while image deletion owns the fence."""
+    """Admit jobs concurrently, but never during deletion or a PDF preview."""
     global _IMAGE_JOB_USERS
     with _IMAGE_JOB_STATE_LOCK:
-        if _IMAGE_DELETE_LOCK.locked():
+        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS:
             return False
         _IMAGE_JOB_USERS += 1
         return True
@@ -6054,6 +7040,45 @@ def _release_image_job_lease() -> None:
         if _IMAGE_JOB_USERS <= 0:
             raise RuntimeError("image job lease is not held")
         _IMAGE_JOB_USERS -= 1
+
+
+def _acquire_image_preview_lease() -> bool:
+    """Give one preview exclusive read use of the checkout and its scripts."""
+    global _IMAGE_PREVIEW_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if (_IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or
+                _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS):
+            return False
+        _IMAGE_PREVIEW_USERS = 1
+        return True
+
+
+def _release_image_preview_lease() -> None:
+    global _IMAGE_PREVIEW_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _IMAGE_PREVIEW_USERS != 1:
+            raise RuntimeError("image preview lease is not held")
+        _IMAGE_PREVIEW_USERS = 0
+
+
+def _acquire_repo_mutation_lease() -> bool:
+    global _REPO_MUTATION_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or _IMAGE_PREVIEW_USERS:
+            return False
+        # Repository operations retain their established internal per-repo
+        # locking and may coexist with each other. The count only fences them
+        # from jobs, image mutations, and representative preview reads.
+        _REPO_MUTATION_USERS += 1
+        return True
+
+
+def _release_repo_mutation_lease() -> None:
+    global _REPO_MUTATION_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _REPO_MUTATION_USERS <= 0:
+            raise RuntimeError("repository mutation lease is not held")
+        _REPO_MUTATION_USERS -= 1
 
 
 class ImageDeleteError(Exception):
@@ -6083,17 +7108,21 @@ def _image_delete_lock():
     The lock file is the same SCM repository lock used by repo_sync.  A
     deletion is small and bounded, so waiting here would only turn a user
     action into an unbounded serialized IPC request; contention is reported as
-    a normal application result instead.
+    a normal application result instead. Explicit mutations take precedence
+    over a disposable representative preview.
     """
+    stop_all_pdf_previews(timeout=1.0)
+
     @contextlib.contextmanager
     def locked():
         if not _IMAGE_DELETE_LOCK.acquire(blocking=False):
             raise _image_delete_error("image deletion is busy", 409)
         with _IMAGE_JOB_STATE_LOCK:
-            jobs_active = _IMAGE_JOB_USERS > 0
+            jobs_active = (_IMAGE_JOB_USERS > 0 or _IMAGE_PREVIEW_USERS > 0 or
+                           _REPO_MUTATION_USERS > 0)
         if jobs_active:
             _IMAGE_DELETE_LOCK.release()
-            raise _image_delete_error("a job is using the SCM checkout", 409)
+            raise _image_delete_error("a job or another operation is using the SCM checkout", 409)
         fh = None
         acquired = False
         try:
@@ -7872,6 +8901,34 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/jobs/([\w-]+)/kill", path)
             if m:
                 return self._json({"ok": kill_job(m.group(1))})
+            if path == "/api/pdf-preview":
+                if _IPC_MODE:
+                    return self._json({"error": "not available in native mode"}, 403)
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except (TypeError, ValueError):
+                    self.close_connection = True
+                    return self._json({"error": "invalid content length"}, 400)
+                if content_length <= 0 or content_length > PDF_PREVIEW_ARGS_MAX_BYTES + 4096:
+                    self.close_connection = True
+                    return self._json({"error": "request body exceeds the PDF preview limit"}, 413)
+                body = self._body(strict=True)
+                if not isinstance(body, dict):
+                    return self._json({"error": "invalid JSON body"}, 400)
+                operation = body.get("op")
+                if operation == "start":
+                    if set(body) != {"op", "args"} or not isinstance(body.get("args"), dict):
+                        return self._json({"error": "start requires only an args object"}, 400)
+                    return self._json(start_pdf_preview(body["args"]))
+                if operation in ("poll", "cancel"):
+                    operation_id = body.get("operation_id")
+                    if (set(body) != {"op", "operation_id"} or not isinstance(operation_id, str) or
+                            re.fullmatch(r"[0-9a-f]{32}", operation_id) is None):
+                        return self._json({"error": f"{operation} requires a valid operation_id"}, 400)
+                    result = (poll_pdf_preview(operation_id) if operation == "poll"
+                              else cancel_pdf_preview(operation_id))
+                    return self._json(result)
+                return self._json({"error": "op must be start, poll, or cancel"}, 400)
             if path == "/api/updates/check":
                 body = self._body(strict=True)
                 if not isinstance(body, dict) or set(body) != {"force"} or not isinstance(body["force"], bool):
@@ -8396,6 +9453,9 @@ def main():
     recovery_error = recover_offset_projection()
     if recovery_error:
         _diag(f"[offset] recovery deferred: {recovery_error}", error=True)
+    # Preview trees are disposable and purpose-specific. A previous hard exit
+    # cannot leave one behind once the next worker starts.
+    _pdf_preview_cleanup_stale()
     port = args.port if args.port is not None else int(settings.get("port") or DEFAULT_PORT)
     scm, extras = effective_dirs(settings)
 

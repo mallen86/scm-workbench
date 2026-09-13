@@ -38,6 +38,7 @@ jobs:
           python scripts/check_ui_repos.py
           python scripts/check_ui_onboarding.py
           python scripts/check_ui_preview.py
+          python scripts/check_ui_pdf_preview.py
           python scripts/check_ui_artifacts.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_save.py
@@ -162,6 +163,7 @@ jobs:
           app="$ws/build/macos/SCM Workbench.app"
           export PYTHONDONTWRITEBYTECODE=1
           "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
+          "$app/Contents/runtime/python/install/bin/python3.13" "$ws/scripts/check_pdf_preview_helper.py" "$app/Contents/app/scm_workbench/pdf_preview_helper.py"
           data="$(mktemp -d /private/tmp/scm-workbench-smoke.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
@@ -392,6 +394,7 @@ jobs:
           python scripts/check_ui_repos.py
           python scripts/check_ui_onboarding.py
           python scripts/check_ui_preview.py
+          python scripts/check_ui_pdf_preview.py
           python scripts/check_ui_artifacts.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_save.py
@@ -453,6 +456,9 @@ jobs:
           # must not ship inside the bundle:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
+          $runtimePython = Join-Path $bundle "runtime\python\install\python.exe"
+          & $runtimePython (Join-Path $ws "scripts\check_pdf_preview_helper.py") (Join-Path $bundle "app\scm_workbench\pdf_preview_helper.py")
+          if ($LASTEXITCODE) { throw "packaged PDF preview helper smoke failed" }
       - name: Smoke test - embedded UI and native IPC
         # Private ready plus five public UI IPC markers prove rendering.
         # A packaged worker has no HTTP listener, so port 8038 is checked while

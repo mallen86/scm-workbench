@@ -38,8 +38,12 @@ export function pageFromPath() {
 
 export function go(page, prefill, { push = true, anim = true } = {}) {
   if (prefill) applyPrefill(page, prefill);
-  setNav(page);
   const pageEl = $("#page");
+  const previous = pageEl.firstElementChild;
+  if (typeof previous?.__dispose === "function") {
+    try { previous.__dispose(); } catch (error) { console.warn("page cleanup failed", error); }
+  }
+  setNav(page);
   pageEl.innerHTML = "";
   const content = PAGES[page](pageEl);
   if (content) {

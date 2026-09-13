@@ -125,6 +125,7 @@ python scripts/check_ui_back_images.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_repos.py
 python scripts/check_ui_preview.py
+python scripts/check_ui_pdf_preview.py
 python scripts/check_ui_artifacts.py
 python scripts/check_ui_history.py
 python scripts/check_ui_native_actions.py

@@ -108,6 +108,16 @@ export function afterFormChange(kind, args) {
 export function clearTimer(kind) { if (S.timers[kind]) { clearTimeout(S.timers[kind]); S.timers[kind] = null; } }
 
 
+export const COMMAND_PREVIEW_EVENT = "wb:command-preview";
+
+function publishCommandPreview(kind, args, result) {
+  if (typeof document?.dispatchEvent !== "function" || typeof globalThis.CustomEvent !== "function") return;
+  document.dispatchEvent(new globalThis.CustomEvent(COMMAND_PREVIEW_EVENT, {
+    detail: { kind, args, result },
+  }));
+}
+
+
 export function updatePreview(kind) {
   const box = document.querySelector(`.cmdbox[data-kind="${kind}"]`);
   if (!box) return;
@@ -115,7 +125,10 @@ export function updatePreview(kind) {
   // repaint the box over the newer one (this is how the preview could sit
   // "stale" for seconds while the user kept editing).
   const seq = (S.previewSeq = S.previewSeq || {})[kind] = ((S.previewSeq || {})[kind] || 0) + 1;
-  const isCurrent = () => (S.previewSeq || {})[kind] === seq;
+  const requestArgs = Object.fromEntries(Object.entries(S.forms[kind] || {}).map(
+    ([key, value]) => [key, Array.isArray(value) ? [...value] : value]));
+  const isCurrent = () => (S.previewSeq || {})[kind] === seq && box.isConnected &&
+    document.querySelector(`.cmdbox[data-kind="${kind}"]`) === box;
   // The box must never be able to sit frozen in a stale state: on a failed
   // round-trip (server mid-restart, a dropped connection) we retry briefly and
   // then say so, instead of swallowing the error and keeping whatever the box
@@ -125,14 +138,30 @@ export function updatePreview(kind) {
       .then(d => {
         if (!isCurrent()) return;
         renderPreview(box, d);
+        publishCommandPreview(kind, requestArgs, d);
       })
       .catch(err => {
         if (!isCurrent()) return;
         if (box.isConnected && attempt < 5) {
-          if (attempt === 0) showPreviewPending(box, "Waiting for the server to answer…");
+          if (attempt === 0) {
+            showPreviewPending(box, "Waiting for the server to answer…");
+            (S.previewBlock ||= {})[kind] = true;
+            const runBtn = document.getElementById("run-" + kind);
+            if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = true;
+            publishCommandPreview(kind, requestArgs, {
+              cmd: null, warnings: [], errors: [], no_front_images: false, pending: true,
+            });
+          }
           setTimeout(() => run(attempt + 1), 2000);
         } else if (box.isConnected) {
-          showPreviewPending(box, `Couldn't build the preview (${(err && err.message) || "error"}). It will refresh when you change a field.`);
+          const message = `Couldn't validate these settings (${(err && err.message) || "error"}). Change a field to try again.`;
+          showPreviewPending(box, message);
+          publishCommandPreview(kind, requestArgs, {
+            cmd: null, warnings: [], errors: [message], no_front_images: false,
+          });
+          (S.previewBlock ||= {})[kind] = true;
+          const runBtn = document.getElementById("run-" + kind);
+          if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = true;
         }
       });
   };
@@ -493,7 +522,13 @@ export function formCard(kind, opts = {}) {
   }
 
   if (opts.preview !== false) {
-    const box = el("div", { class: "cmdbox", "data-kind": kind });
+    const validationOnly = opts.preview === "summary";
+    const box = el("div", {
+      class: `cmdbox${validationOnly ? " validation-only" : ""}`,
+      "data-kind": kind,
+      "aria-hidden": validationOnly ? "true" : null,
+      hidden: validationOnly,
+    });
     card.append(box);
     setTimeout(() => updatePreview(kind), 0); // must run once the card is in the document
   }

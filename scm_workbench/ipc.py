@@ -26,6 +26,8 @@ MAX_RESPONSE_SIZE = 7 * 1024 * 1024
 # value cannot monopolize the native request/response channel.
 MAX_PREVIEW_ARGS_SIZE = 512 * 1024
 MAX_PREVIEW_RESULT_SIZE = 512 * 1024
+MAX_PDF_PREVIEW_ARGS_SIZE = 512 * 1024
+MAX_PDF_PREVIEW_RESULT_SIZE = 1024 * 1024
 # Byte-oriented aliases make the unit explicit for callers and tests.
 MAX_PREVIEW_ARGS_BYTES = MAX_PREVIEW_ARGS_SIZE
 MAX_PREVIEW_RESULT_BYTES = MAX_PREVIEW_RESULT_SIZE
@@ -38,7 +40,9 @@ PRIVATE_METHODS = frozenset((
     "back_images.import_selected",
 ))
 ALLOWED_METHODS = frozenset((
-    "info", "manifest", "settings.get", "settings.set", "preview", "template.resolve", "template.delete", "file.list",
+    "info", "manifest", "settings.get", "settings.set", "preview",
+    "pdf_preview.start", "pdf_preview.poll", "pdf_preview.cancel",
+    "template.resolve", "template.delete", "file.list",
     "file.open", "file.reveal", "url.open",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
@@ -316,6 +320,28 @@ def dispatch(request: dict) -> dict:
                 result = server.build_preview(kind, args)
             except server.PreviewError as error:
                 return _error(request_id, error.ipc_code, error.message)
+        elif method == "pdf_preview.start":
+            if set(params) != {"args"} or not isinstance(params.get("args"), dict):
+                return _bad_params(request_id, "pdf_preview.start requires exactly an args object")
+            try:
+                args_size = len(json.dumps(
+                    params["args"], ensure_ascii=False, separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8"))
+            except (TypeError, ValueError, UnicodeError):
+                return _bad_params(request_id, "pdf_preview.start args must be finite valid JSON")
+            if args_size > MAX_PDF_PREVIEW_ARGS_SIZE:
+                return _bad_params(request_id, "pdf_preview.start args exceed 512 KiB when encoded")
+            result = server.start_pdf_preview(params["args"])
+        elif method in ("pdf_preview.poll", "pdf_preview.cancel"):
+            if set(params) != {"operation_id"} or not isinstance(params.get("operation_id"), str):
+                return _bad_params(request_id, f"{method} requires exactly operation_id")
+            operation_id = params["operation_id"]
+            if len(operation_id) != 32 or any(char not in "0123456789abcdef" for char in operation_id):
+                return _bad_params(request_id, "invalid PDF preview operation id")
+            result = (server.poll_pdf_preview(operation_id)
+                      if method == "pdf_preview.poll"
+                      else server.cancel_pdf_preview(operation_id))
         elif method == "offset.set":
             if set(params) != {"size", "x", "y", "angle"}:
                 return _bad_params(request_id, "offset.set requires exactly size, x, y, and angle")
@@ -454,6 +480,15 @@ def dispatch(request: dict) -> dict:
             return _error(request_id, "internal", "request handler failed")
         if result_size > server.BACK_IMAGE_RESULT_MAX_BYTES:
             return _error(request_id, "result_too_large", "card-back import result exceeds 512 KiB")
+    if method in ("pdf_preview.start", "pdf_preview.poll", "pdf_preview.cancel"):
+        try:
+            result_size = len(json.dumps(
+                result, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > MAX_PDF_PREVIEW_RESULT_SIZE:
+            return _error(request_id, "result_too_large", "PDF preview result exceeds 1 MiB")
     if method == "preview":
         # This is deliberately outside the handler exception block: a genuine
         # build failure remains an ``internal`` error, never a size error.

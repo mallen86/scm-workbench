@@ -63,7 +63,7 @@
 - [x] At the moment there's no way to easily add a back image. The only method right now is to go to settings, open the data folder, and navigate to the back folder and manually put the image in. Let's add an easy way to do this.
 - [x] Verify all the image fetch methods have real progress percentages if able.
 - [x] Integrate card-back selection into the Create PDF form instead of showing a separate section. Put it before the run action, keep it compact in Simple mode, and make Advanced mode reflect the selected card back folder.
-- [ ] Add a low-quality representative first-front-page preview to Create PDF.
+- [x] Add a low-quality representative first-front-page preview to Create PDF.
     - Keep the implementation entirely in Workbench and invoke the unchanged upstream `create_pdf.py` against private temporary inputs. Do not import, copy, or reimplement the upstream renderer.
     - Stage no more than 16 bounded front images, force low-resolution front-only image output, display only page 1, and clearly state that the result is not a print proof or complete deck reproduction.
     - Debounce and cancel stale renders, keep native and browser behavior equivalent, never retry native failures over HTTP, and never modify source folders, real PDF output, job history, or artifact grants.

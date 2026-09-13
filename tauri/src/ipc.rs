@@ -438,7 +438,8 @@ fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
         | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll"
-        | "fs.delete_images" | "preview" | "template.resolve" | "template.delete" | "file.list"
+        | "fs.delete_images" | "preview" | "pdf_preview.start" | "pdf_preview.poll"
+        | "pdf_preview.cancel" | "template.resolve" | "template.delete" | "file.list"
         | "file.open" | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set"
         | "repos.check" | "repos.poll" | "updates.get" | "updates.check" | "updates.notes"
         | "updates.poll" | "updates.start" => Ok(()),
@@ -688,6 +689,9 @@ mod tests {
             "jobs.poll",
             "fs.delete_images",
             "preview",
+            "pdf_preview.start",
+            "pdf_preview.poll",
+            "pdf_preview.cancel",
             "template.resolve",
             "template.delete",
             "file.list",
@@ -714,6 +718,10 @@ mod tests {
             "jobs",
             "jobs.poll.push",
             "preview.extra",
+            "pdf_preview",
+            "pdf_preview.start.extra",
+            "pdf_preview.poll/",
+            "pdf_preview.cancel ",
             "template.resolve.extra",
             "template.delete.extra",
             "file.list.extra",
