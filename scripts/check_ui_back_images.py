@@ -30,6 +30,10 @@ def main():
         return fail("card-back selection is not placed before Run and attached to the Advanced folder field")
     if "currentOnlyFronts" not in page or "listFiles(directory, true)" not in page:
         return fail("card-back state does not follow the active PDF options")
+    if ('window.addEventListener("focus", onWindowFocus)' not in page or
+            'document.addEventListener("visibilitychange", onVisibilityChange)' not in page or
+            'S.info.scm.back_images = listing.items || [];' not in page):
+        return fail("card-back state is not refreshed after an external filesystem change")
     if "Choose image" not in page or "Reveal folder" not in page:
         return fail("Create PDF does not expose the card-back actions")
     if 'afterFormChange("create_pdf", S.forms.create_pdf);' not in page:

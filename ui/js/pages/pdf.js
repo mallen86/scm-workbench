@@ -119,7 +119,11 @@ PAGES.pdf = (root) => {
 };
 
 
+let disposeBackImageRefresh = null;
+
+
 function installBackImageControl(card, { simple }) {
+  disposeBackImageRefresh?.();
   const args = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
   const backField = $(".field[data-key=back_dir]", card);
   const backInput = backField && $("input", backField);
@@ -241,16 +245,20 @@ function installBackImageControl(card, { simple }) {
       paint(backImageState({ dir: directory, onlyFronts: true }));
       return;
     }
-    if (isDefaultBackDirectory(directory)) {
+    const defaultDirectory = isDefaultBackDirectory(directory);
+    if (defaultDirectory) {
+      // Paint the last info snapshot immediately, then verify it from disk.
+      // Returning from Finder or Explorer therefore never flashes a loading
+      // state, but a manually removed image still disappears promptly.
       const items = S.info?.scm?.back_images || [];
       paint(backImageState({ dir: directory, items, found: items.length }));
-      return;
+    } else {
+      paint({
+        ...backImageState({ dir: directory, unavailable: true }),
+        status: "Checking selected folder.",
+        tone: "muted",
+      });
     }
-    paint({
-      ...backImageState({ dir: directory, unavailable: true }),
-      status: "Checking selected folder.",
-      tone: "muted",
-    });
     refreshTimer = setTimeout(async () => {
       let view;
       try {
@@ -262,6 +270,9 @@ function installBackImageControl(card, { simple }) {
           exists: listing.exists,
           truncated: listing.truncated,
         });
+        if (defaultDirectory && !listing.truncated && S.info?.scm) {
+          S.info.scm.back_images = listing.items || [];
+        }
       } catch (_error) {
         view = backImageState({ dir: directory, unavailable: true });
       }
@@ -269,6 +280,24 @@ function installBackImageControl(card, { simple }) {
     }, delay);
   };
 
+  const dispose = () => {
+    ++refreshSequence;
+    clearTimeout(refreshTimer);
+    window.removeEventListener("focus", onWindowFocus);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    if (disposeBackImageRefresh === dispose) disposeBackImageRefresh = null;
+  };
+  const refreshIfMounted = () => {
+    if (!control.isConnected) return dispose();
+    refresh();
+  };
+  const onWindowFocus = () => refreshIfMounted();
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "visible") refreshIfMounted();
+  };
+  window.addEventListener("focus", onWindowFocus);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  disposeBackImageRefresh = dispose;
   backInput?.addEventListener("input", () => refresh(180));
   frontsInput?.addEventListener("change", () => refresh());
   return { refresh };
