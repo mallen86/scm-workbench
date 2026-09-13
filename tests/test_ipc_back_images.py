@@ -278,9 +278,10 @@ class BackImageTests(unittest.TestCase):
             httpd.server_close()
             thread.join(timeout=3)
 
-    def build_pdf(self, back_dir):
+    def build_pdf(self, back_dir, *, only_fronts=False):
         args = {"front_dir": "game/front", "back_dir": str(back_dir), "card_size": "standard",
-                "paper_size": "letter", "output_path": "game/output/game.pdf"}
+                "paper_size": "letter", "output_path": "game/output/game.pdf",
+                "only_fronts": only_fronts}
         return server.build_command(
             "create_pdf", args, self.settings, server.get_info(), write_deck=False)[-1]
 
@@ -290,6 +291,7 @@ class BackImageTests(unittest.TestCase):
         (back / "two.jpg").write_bytes(JPEG)
         errors = self.build_pdf("game/back")
         self.assertTrue(any("contains 2" in error for error in errors), errors)
+        self.assertEqual(self.build_pdf("game/back", only_fronts=True), [])
         custom = self.root / "custom-backs"
         custom.mkdir()
         (custom / "one.jp2").write_bytes(JP2)

@@ -1,7 +1,7 @@
 /* pages/pdf — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile, revealPath } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { canImportBackImage, importBackImage } from "../back-image-transport.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
+import { $, $$, PAGES, S, api, confirmModal, el, ico, pageHead, toast } from "../core.js";import { openFile, revealPath } from "../native-actions.js";import { deleteImages } from "../fs-transport.js";import { canImportBackImage, importBackImage } from "../back-image-transport.js";import { backDirectory, backImageState, isDefaultBackDirectory } from "../back-image-state.js";import { afterFormChange, defaultArgs, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { paperForCreatePdf } from "./offset.js";import { jobStrip } from "../jobstrip.js";import { listFiles, resolveTemplate } from "../artifacts.js";
 
 /* ================================ pdf page ================================ */
 
@@ -13,8 +13,9 @@ PAGES.pdf = (root) => {
   // collapsible wrappers, and no card title of its own (the page head
   // above carries the name). Advanced mode keeps the full grouped layout.
   const simple = uiMode() === "simple";
-  wrap.append(formCard("create_pdf", { icon: "pdf", flat: simple, head: !simple }));
-  wrap.append(backImageCard());
+  const pdfForm = formCard("create_pdf", { icon: "pdf", flat: simple, head: !simple });
+  const backImageControl = installBackImageControl(pdfForm, { simple });
+  wrap.append(pdfForm);
   {  // offset banner — per-size row wins over the global value for this form's paper
     const form = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
     const paper = paperForCreatePdf(form);
@@ -108,76 +109,169 @@ PAGES.pdf = (root) => {
       }
     },
   }));
-  // both must run once the card is in the document
-  wrap.__patch = () => { patchPdfForm("create_pdf"); patchOffsetToggle("create_pdf"); };
+  // all three need the page in the document before querying or refreshing it
+  wrap.__patch = () => {
+    patchPdfForm("create_pdf");
+    patchOffsetToggle("create_pdf");
+    backImageControl.refresh();
+  };
   return wrap;
 };
 
-function backImageCard() {
-  const card = el("div", { class: "card back-image-card" });
-  card.append(el("div", { class: "card-head" },
-    el("div", { class: "card-ico" }, ico("image")),
-    el("div", { class: "grow" }, el("h2", {}, "Card back image"),
-      el("p", {}, "Import one image for game/back. Existing recognized back images are replaced; placeholders and other files stay."))));
-  const status = el("p", { class: "small" });
-  const refreshStatus = () => {
-    const images = S.info?.scm?.back_images || [];
-    status.textContent = images.length === 0
-      ? "No recognized card back image is installed."
-      : images.length === 1
-        ? `Current card back: ${images[0].name}`
-        : `There are ${images.length} recognized card back images. Import one to keep exactly one.`;
-    status.className = `small ${images.length > 1 ? "warn" : ""}`;
-  };
-  refreshStatus();
-  const row = el("div", { class: "runbar" });
+
+function installBackImageControl(card, { simple }) {
+  const args = S.forms.create_pdf || (S.forms.create_pdf = defaultArgs("create_pdf"));
+  const backField = $(".field[data-key=back_dir]", card);
+  const backInput = backField && $("input", backField);
+  const frontsField = $(".field[data-key=only_fronts]", card);
+  const frontsInput = frontsField && $("input[type=checkbox]", frontsField);
   const native = canImportBackImage();
-  let pathInput = null;
-  if (!native) {
-    pathInput = el("input", { class: "input grow", type: "text", placeholder: "Path to an image file", "aria-label": "Image path" });
-    row.append(pathInput);
-  }
-  const browse = el("button", { class: "btn primary", type: "button", title: native ? "Choose a card back image" : "Import the image at the path above", onclick: async () => {
-    browse.disabled = true;
-    try {
-      const existing = S.info?.scm?.back_images || [];
-      if (existing.length) {
-        const replace = await confirmModal({
-          title: "Replace the card back image?",
-          text: `Choosing a new image replaces ${existing.length === 1 ? `“${existing[0].name}”` : `the ${existing.length} recognized images currently in game/back`}. Placeholders and non-image files stay.`,
-          okLabel: "Choose replacement",
-          icon: "image",
-        });
-        if (!replace) return;
-      }
-      const result = await importBackImage(native ? null : pathInput.value.trim());
-      if (result === null) return;
-      if (!result?.ok) {
-        toast("err", result?.errors?.[0] || "Importing the card back failed.");
+  const status = el("span", { class: "back-image-status", "aria-live": "polite" });
+  const sourceInput = native ? null : el("input", {
+    class: "input back-image-source",
+    type: "text",
+    placeholder: "Path to image file",
+    "aria-label": "Card back image path",
+  });
+  const browse = el("button", {
+    class: "btn back-image-choose",
+    type: "button",
+    title: native ? "Choose a card back image for game/back" : "Import the image at the path",
+    onclick: async () => {
+      if (!isDefaultBackDirectory(currentDirectory()) || currentOnlyFronts()) {
+        refresh();
         return;
       }
-      S.info.scm.back_images = result.back_images || [];
-      refreshStatus();
-      afterFormChange("create_pdf", S.forms.create_pdf);
-      toast("ok", `Imported “${result.name}”. Exactly one recognized card back is now installed.`);
-    } catch (error) {
-      toast("warn", error?.message || "The card back image could not be imported.");
-    } finally {
-      browse.disabled = false;
+      const explicitPath = sourceInput?.value.trim() || "";
+      if (!native && !explicitPath) {
+        toast("warn", "Enter the path to a card back image first.");
+        sourceInput.focus();
+        return;
+      }
+      browse.disabled = true;
+      try {
+        const existing = S.info?.scm?.back_images || [];
+        if (existing.length) {
+          const replace = await confirmModal({
+            title: "Replace the card back image?",
+            text: `Choosing a new image replaces ${existing.length === 1 ? `“${existing[0].name}”` : `the ${existing.length} recognized images currently in game/back`}. Placeholders and non-image files stay.`,
+            okLabel: "Choose replacement",
+            icon: "image",
+          });
+          if (!replace) return;
+        }
+        const result = await importBackImage(native ? null : explicitPath);
+        if (result === null) return;
+        if (!result?.ok) {
+          toast("err", result?.errors?.[0] || "Importing the card back failed.");
+          return;
+        }
+        if (S.info?.scm) S.info.scm.back_images = result.back_images || [];
+        if (sourceInput) sourceInput.value = "";
+        refresh();
+        afterFormChange("create_pdf", S.forms.create_pdf);
+        toast("ok", `Imported “${result.name}”. Exactly one recognized card back is now installed.`);
+      } catch (error) {
+        toast("warn", error?.message || "The card back image could not be imported.");
+      } finally {
+        browse.disabled = false;
+      }
+    },
+  }, ico("image"), native ? "Choose image" : "Import image");
+  const reveal = el("button", {
+    class: "btn btn-ghost back-image-reveal",
+    type: "button",
+    onclick: async () => {
+      try {
+        const result = await revealPath(currentDirectory());
+        if (!result?.ok) toast("warn", result?.errors?.[0] || "Could not reveal the card back folder.");
+      } catch (error) {
+        toast("warn", error?.message || "Could not reveal the card back folder.");
+      }
+    },
+  }, ico("folder"), simple ? "Reveal folder" : "Reveal");
+  const actions = el("div", { class: "back-image-actions" }, sourceInput, browse, reveal);
+  const control = el("div", { class: `back-image-inline ${simple ? "simple" : "in-field"}` },
+    ...(simple ? [el("span", { class: "back-image-label" }, ico("image"), "Card back")] : []),
+    status,
+    actions,
+  );
+
+  if (simple) {
+    $(".runbar", card)?.before(control);
+  } else if (backField) {
+    const help = $(".help", backField);
+    if (help) help.before(control);
+    else backField.append(control);
+  } else {
+    $(".runbar", card)?.before(control);
+  }
+
+  const currentDirectory = () => backDirectory(backInput?.value ?? args.back_dir);
+  const currentOnlyFronts = () => !!(frontsInput ? frontsInput.checked : args.only_fronts);
+  let refreshSequence = 0;
+  let refreshTimer = null;
+
+  const paint = view => {
+    let text = view.status;
+    if (simple && !view.defaultDirectory && !view.onlyFronts) {
+      text += ` Folder: ${view.directory}`;
     }
-  } }, ico("folder"), native ? "Choose image" : "Import image");
-  row.append(browse);
-  const reveal = el("button", { class: "btn btn-ghost", type: "button", title: "Reveal game/back in the file manager", onclick: async () => {
-    try {
-      const result = await revealPath("game/back");
-      if (!result?.ok) toast("warn", result?.errors?.[0] || "Could not reveal the card back folder.");
-    } catch (error) {
-      toast("warn", error?.message || "Could not reveal the card back folder.");
+    status.textContent = text;
+    status.title = view.defaultDirectory ? "" : view.directory;
+    control.classList.toggle("warn", view.tone === "warn");
+    control.classList.toggle("muted", view.tone === "muted");
+    if (sourceInput) sourceInput.hidden = !view.canImport;
+    browse.hidden = !view.canImport;
+    reveal.hidden = !view.canReveal;
+    actions.hidden = !view.canImport && !view.canReveal;
+    const label = native
+      ? (view.count ? (simple ? "Change image" : "Change") : (simple ? "Choose image" : "Choose"))
+      : (simple ? "Import image" : "Import");
+    browse.replaceChildren(ico("image"), label);
+    reveal.title = `Reveal ${view.directory} in the file manager`;
+  };
+
+  const refresh = (delay = 0) => {
+    const sequence = ++refreshSequence;
+    clearTimeout(refreshTimer);
+    const directory = currentDirectory();
+    const onlyFronts = currentOnlyFronts();
+    if (onlyFronts) {
+      paint(backImageState({ dir: directory, onlyFronts: true }));
+      return;
     }
-  } }, ico("folder"), "Reveal folder");
-  row.append(reveal);
-  card.append(status, row);
-  return card;
+    if (isDefaultBackDirectory(directory)) {
+      const items = S.info?.scm?.back_images || [];
+      paint(backImageState({ dir: directory, items, found: items.length }));
+      return;
+    }
+    paint({
+      ...backImageState({ dir: directory, unavailable: true }),
+      status: "Checking selected folder.",
+      tone: "muted",
+    });
+    refreshTimer = setTimeout(async () => {
+      let view;
+      try {
+        const listing = await listFiles(directory, true);
+        view = backImageState({
+          dir: directory,
+          items: listing.items,
+          found: listing.found,
+          exists: listing.exists,
+          truncated: listing.truncated,
+        });
+      } catch (_error) {
+        view = backImageState({ dir: directory, unavailable: true });
+      }
+      if (sequence === refreshSequence && control.isConnected) paint(view);
+    }, delay);
+  };
+
+  backInput?.addEventListener("input", () => refresh(180));
+  frontsInput?.addEventListener("change", () => refresh());
+  return { refresh };
 }
 
 /* Create-PDF behavior: guard the “Front pages only” toggle against images left

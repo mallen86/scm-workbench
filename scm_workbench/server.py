@@ -1065,7 +1065,7 @@ def build_manifest(info: dict) -> dict:
                     _opt("front_dir", "Front images folder", "path", default="game/front", width="half",
                          help="Folder containing card front images."),
                     _opt("back_dir", "Card back folder", "path", default="game/back", width="half",
-                         help="Folder containing one or more card back images."),
+                         help="Folder containing the optional card back image."),
                     _opt("double_sided_dir", "Double-sided folder", "path", default="game/double_sided", width="half",
                          help="Folder containing cards with different front and back art."),
                     _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="full"),
@@ -4695,17 +4695,21 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["create_pdf.py"]
         emit("front_dir", "--front_dir_path", default="game/front")
         emit("back_dir", "--back_dir_path", default="game/back")
-        back_dir = str(a.get("back_dir") or "game/back")
-        back_path = Path(back_dir) if Path(back_dir).is_absolute() else cwd / back_dir
-        back_images, back_scan_incomplete = _inspect_back_image_directory(back_path)
-        if back_scan_incomplete:
-            errors.append(
-                f"Card back folder “{back_dir}” could not be safely checked. "
-                "Remove links or excess files before creating the PDF.")
-        elif len(back_images) > 1:
-            errors.append(
-                f"Card back folder “{back_dir}” contains {len(back_images)} recognized images. "
-                "Import one back image or remove the extras before creating the PDF.")
+        # Upstream never scans the back folder for a front-only PDF. Match that
+        # behavior so an unused folder cannot block the job or make the inline
+        # card-back control claim that it matters to this run.
+        if not a.get("only_fronts"):
+            back_dir = str(a.get("back_dir") or "game/back")
+            back_path = Path(back_dir) if Path(back_dir).is_absolute() else cwd / back_dir
+            back_images, back_scan_incomplete = _inspect_back_image_directory(back_path)
+            if back_scan_incomplete:
+                errors.append(
+                    f"Card back folder “{back_dir}” could not be safely checked. "
+                    "Remove broken links or excess files before creating the PDF.")
+            elif len(back_images) > 1:
+                errors.append(
+                    f"Card back folder “{back_dir}” contains {len(back_images)} recognized images. "
+                    "Keep one recognized image in that folder or remove the extras before creating the PDF.")
         emit("double_sided_dir", "--double_sided_dir_path", default="game/double_sided")
         argv += ["--output_path", str(a.get("output_path") or "game/output/game.pdf")]
         if a.get("output_images"): argv += ["--output_images"]

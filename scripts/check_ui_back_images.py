@@ -16,14 +16,22 @@ def fail(message):
 def main():
     transport = (UI / "back-image-transport.js").read_text(encoding="utf-8")
     page = (UI / "pages" / "pdf.js").read_text(encoding="utf-8")
+    state_source = (UI / "back-image-state.js").read_text(encoding="utf-8")
     if 'invoke("wb_back_image_import", {})' not in transport:
         return fail("card-back import is not a no-argument native command")
     if 'fetch("/api/back-images/import"' not in transport:
         return fail("browser compatibility route is missing")
     if "native picker required" not in transport:
         return fail("browser import does not require an explicit path")
-    if "backImageCard" not in page or "Choose image" not in page or "Reveal folder" not in page:
-        return fail("Create PDF does not expose the card-back state and actions")
+    if "backImageCard" in page or "installBackImageControl" not in page:
+        return fail("card-back selection is still a separate workflow card")
+    if ('$(".runbar", card)?.before(control)' not in page or
+            '$(".field[data-key=back_dir]", card)' not in page):
+        return fail("card-back selection is not placed before Run and attached to the Advanced folder field")
+    if "currentOnlyFronts" not in page or "listFiles(directory, true)" not in page:
+        return fail("card-back state does not follow the active PDF options")
+    if "Choose image" not in page or "Reveal folder" not in page:
+        return fail("Create PDF does not expose the card-back actions")
     if 'afterFormChange("create_pdf", S.forms.create_pdf);' not in page:
         return fail("a card-back import does not refresh the Create PDF preview")
     if ('title: "Replace the card back image?"' not in page or
@@ -33,8 +41,24 @@ def main():
 import fs from "node:fs";
 const source = fs.readFileSync(process.argv[2], "utf8");
 const transportSource = fs.readFileSync(process.argv[3], "utf8");
+const stateSource = fs.readFileSync(process.argv[4], "utf8");
 const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
 const facade = await import(dataUrl(source.replace('from "./transport.js"', `from "${dataUrl(transportSource)}"`)));
+const state = await import(dataUrl(stateSource));
+if (state.backDirectory("  ") !== "game/back" || !state.isDefaultBackDirectory("./game/back/")) throw new Error("default directory normalization failed");
+if (state.isDefaultBackDirectory("custom/back")) throw new Error("custom directory treated as default");
+const one = state.backImageState({ items: [{ name: "back.png" }], found: 1 });
+if (one.status !== "back.png" || !one.canImport || !one.canReveal || one.tone) throw new Error("single default back state failed");
+const multiple = state.backImageState({ items: [{ name: "a.png" }, { name: "b.jpg" }], found: 2 });
+if (multiple.status !== "2 recognized images. Keep exactly one." || multiple.tone !== "warn") throw new Error("multiple back warning failed");
+const custom = state.backImageState({ dir: "custom/back", items: [{ name: "custom.png" }], found: 1 });
+if (custom.defaultDirectory || custom.canImport || !custom.canReveal || custom.status !== "custom.png") throw new Error("custom directory state failed");
+const fronts = state.backImageState({ onlyFronts: true, items: [{ name: "unused.png" }], found: 1 });
+if (fronts.status !== "Not used for front pages only." || fronts.canImport || fronts.canReveal || fronts.tone !== "muted") throw new Error("front-only state failed");
+const missing = state.backImageState({ dir: "missing", exists: false });
+if (missing.status !== "Folder not found." || missing.canReveal || missing.tone !== "warn") throw new Error("missing folder state failed");
+const truncated = state.backImageState({ dir: "large", truncated: true });
+if (truncated.status !== "Could not safely check every file." || truncated.tone !== "warn") throw new Error("truncated folder state failed");
 let calls = [], fetchCalls = [], mode = "ok";
 const internals = { invoke(method, params) {
   calls.push({ method, params, receiver: this });
@@ -61,7 +85,8 @@ if (browserResult.name !== "browser.png" || fetchCalls[0]?.[0] !== "/api/back-im
 console.log("ok: card-back native payload, cancellation, rejection isolation, and explicit browser path pass");
 '''.strip()
     result = subprocess.run(
-        ["node", "--input-type=module", "-", str(UI / "back-image-transport.js"), str(UI / "transport.js")],
+        ["node", "--input-type=module", "-", str(UI / "back-image-transport.js"),
+         str(UI / "transport.js"), str(UI / "back-image-state.js")],
         input=node, text=True, capture_output=True,
     )
     if result.returncode:

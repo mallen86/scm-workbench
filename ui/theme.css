@@ -1114,6 +1114,38 @@ body.mode-simple .console { display: none; }
 .gap10 { margin-top: 10px; }
 .mt0 { margin-top: 0 !important; }
 
+/* Card-back preflight: part of the PDF form, not a separate workflow card.
+   Simple mode gets one full-width row immediately before Run. Advanced mode
+   keeps the same state and actions attached to the Card back folder field. */
+.back-image-inline {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.back-image-inline.simple { margin-top: 18px; padding: 10px 12px; }
+.back-image-inline.in-field { margin-top: 2px; padding: 7px 8px; flex-wrap: wrap; }
+.back-image-label {
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
+  font-size: 12px; font-weight: 700; color: var(--text);
+}
+.back-image-label svg { width: 15px; height: 15px; color: var(--accent); }
+.back-image-status {
+  flex: 1 1 120px; min-width: 0; overflow: hidden;
+  font-size: 12px; line-height: 1.4; white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.back-image-inline.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--border-soft)); }
+.back-image-inline.warn .back-image-status { color: var(--warn); }
+.back-image-inline.muted { background: transparent; }
+.back-image-inline.muted .back-image-status { color: var(--faint); }
+.back-image-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.back-image-actions[hidden], .back-image-actions > [hidden] { display: none; }
+.back-image-inline .back-image-source { width: 180px; padding: 6px 9px; font-size: 12px; }
+.back-image-inline .btn { padding: 6px 9px; font-size: 12px; }
+.back-image-inline .btn svg { width: 14px; height: 14px; }
+
 /* run bar */
 .runbar {
   display: flex; align-items: center; gap: 12px;
