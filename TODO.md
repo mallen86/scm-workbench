@@ -60,3 +60,4 @@
 - [x] You can cancel a job in advanced mode using the console but there's no way to cancel a job in simple mode. Add a button to cancel the job all the way on the right in the same row as the label and progress bar.
 - [x] At the moment there's no way to easily add a back image. The only method right now is to go to settings, open the data folder, and navigate to the back folder and manually put the image in. Let's add an easy way to do this.
 - [x] Verify all the image fetch methods have real progress percentages if able.
+- [ ] Integrate card-back selection into the Create PDF form instead of showing a separate section. Put it before the run action, keep it compact in Simple mode, and make Advanced mode reflect the selected card back folder.
