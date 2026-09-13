@@ -137,11 +137,21 @@ function installBackImageControl(card, { simple }) {
     placeholder: "Path to image file",
     "aria-label": "Card back image path",
   });
+  let operationBusy = false;
+  let lastView = null;
+  let remove = null;
+  const setOperationBusy = value => {
+    operationBusy = value;
+    browse.disabled = value;
+    if (remove) remove.disabled = value;
+    if (sourceInput) sourceInput.disabled = value;
+  };
   const browse = el("button", {
     class: "btn back-image-choose",
     type: "button",
     title: native ? "Choose a card back image for game/back" : "Import the image at the path",
     onclick: async () => {
+      if (operationBusy) return;
       if (!isDefaultBackDirectory(currentDirectory()) || currentOnlyFronts()) {
         refresh();
         return;
@@ -152,7 +162,7 @@ function installBackImageControl(card, { simple }) {
         sourceInput.focus();
         return;
       }
-      browse.disabled = true;
+      setOperationBusy(true);
       try {
         const existing = S.info?.scm?.back_images || [];
         if (existing.length) {
@@ -178,10 +188,62 @@ function installBackImageControl(card, { simple }) {
       } catch (error) {
         toast("warn", error?.message || "The card back image could not be imported.");
       } finally {
-        browse.disabled = false;
+        setOperationBusy(false);
       }
     },
   }, ico("image"), native ? "Choose image" : "Import image");
+  remove = el("button", {
+    class: "btn danger back-image-remove",
+    type: "button",
+    onclick: async () => {
+      if (operationBusy || !lastView?.canRemove
+          || !isDefaultBackDirectory(currentDirectory()) || currentOnlyFronts()) {
+        refresh();
+        return;
+      }
+      const count = lastView.count;
+      const confirmed = await confirmModal({
+        title: count === 1 ? "Remove the card back image?" : "Remove all card back images?",
+        text: count === 1
+          ? "The recognized card back in game/back will be permanently deleted. Placeholders and non-image files stay. This cannot be undone."
+          : "All recognized card back images in game/back will be permanently deleted. Placeholders and non-image files stay. This cannot be undone.",
+        okLabel: count === 1 ? "Remove image" : "Remove images",
+        danger: true,
+        icon: "trash",
+        iconCls: "warn",
+      });
+      if (!confirmed) return;
+      setOperationBusy(true);
+      try {
+        const result = await deleteImages("game/back");
+        if (!result?.ok) {
+          // Deletion preflights every candidate, but an OS error can still
+          // interrupt the unlink loop after some files are gone. Always
+          // re-read the directory so a partial failure cannot leave stale UI.
+          refresh();
+          afterFormChange("create_pdf", S.forms.create_pdf);
+          toast("err", result?.errors?.[0] || "Removing the card back image failed.");
+          return;
+        }
+        if (S.info?.scm) S.info.scm.back_images = [];
+        refresh();
+        afterFormChange("create_pdf", S.forms.create_pdf);
+        const deleted = Number(result.deleted) || 0;
+        toast("ok", deleted === 0
+          ? "No card back image needed removing."
+          : deleted === 1 ? "Removed the card back image." : `Removed ${deleted} card back images.`);
+      } catch (error) {
+        // A native transport error is final and is never retried over HTTP,
+        // but the worker may have completed filesystem work before the reply
+        // failed. Reconcile the visible state without repeating the deletion.
+        refresh();
+        afterFormChange("create_pdf", S.forms.create_pdf);
+        toast("warn", error?.message || "The card back image could not be removed.");
+      } finally {
+        setOperationBusy(false);
+      }
+    },
+  }, ico("trash"), simple ? "Remove image" : "Remove");
   const reveal = el("button", {
     class: "btn btn-ghost back-image-reveal",
     type: "button",
@@ -194,7 +256,7 @@ function installBackImageControl(card, { simple }) {
       }
     },
   }, ico("folder"), simple ? "Reveal folder" : "Reveal");
-  const actions = el("div", { class: "back-image-actions" }, sourceInput, browse, reveal);
+  const actions = el("div", { class: "back-image-actions" }, sourceInput, browse, remove, reveal);
   const control = el("div", { class: `back-image-inline ${simple ? "simple" : "in-field"}` },
     ...(simple ? [el("span", { class: "back-image-label" }, ico("image"), "Card back")] : []),
     status,
@@ -217,6 +279,7 @@ function installBackImageControl(card, { simple }) {
   let refreshTimer = null;
 
   const paint = view => {
+    lastView = view;
     let text = view.status;
     if (simple && !view.defaultDirectory && !view.onlyFronts) {
       text += ` Folder: ${view.directory}`;
@@ -227,12 +290,16 @@ function installBackImageControl(card, { simple }) {
     control.classList.toggle("muted", view.tone === "muted");
     if (sourceInput) sourceInput.hidden = !view.canImport;
     browse.hidden = !view.canImport;
+    remove.hidden = !view.canRemove;
     reveal.hidden = !view.canReveal;
-    actions.hidden = !view.canImport && !view.canReveal;
+    actions.hidden = !view.canImport && !view.canRemove && !view.canReveal;
     const label = native
       ? (view.count ? (simple ? "Change image" : "Change") : (simple ? "Choose image" : "Choose"))
       : (simple ? "Import image" : "Import");
     browse.replaceChildren(ico("image"), label);
+    remove.replaceChildren(ico("trash"), view.count > 1
+      ? (simple ? "Clear images" : "Clear") : (simple ? "Remove image" : "Remove"));
+    remove.title = view.count > 1 ? "Remove all recognized images from game/back" : "Remove the card back image";
     reveal.title = `Reveal ${view.directory} in the file manager`;
   };
 

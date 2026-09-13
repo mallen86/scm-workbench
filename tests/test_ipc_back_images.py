@@ -72,6 +72,19 @@ class BackImageTests(unittest.TestCase):
         self.assertTrue((back / "EMPTY.md").exists())
         self.assertFalse((back / "old.png").exists())
 
+    def test_remove_flow_deletes_recognized_backs_only(self):
+        back = self.fixture.scm / "game" / "back"
+        (back / "one.png").write_bytes(PNG)
+        (back / "two.jpg").write_bytes(JPEG)
+        (back / "notes.txt").write_text("keep", encoding="utf-8")
+        result = server.delete_images("game/back", self.settings)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["names"], ["one.png", "two.jpg"])
+        self.assertTrue((back / "EMPTY.md").exists())
+        self.assertEqual((back / "notes.txt").read_text(encoding="utf-8"), "keep")
+        self.assertEqual(server._scan_back_images(self.fixture.scm), [])
+
     def test_source_bounds_magic_bytes_and_final_symlink_are_rejected(self):
         source = self.root / "not-an-image"
         source.write_bytes(b"plain text")

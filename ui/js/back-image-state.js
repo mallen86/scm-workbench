@@ -62,6 +62,7 @@ export function backImageState({
     tone,
     onlyFronts,
     canImport: defaultDirectory && !onlyFronts,
+    canRemove: defaultDirectory && !onlyFronts && exists && !truncated && !unavailable && count > 0,
     canReveal: !onlyFronts && exists && !unavailable,
   };
 }

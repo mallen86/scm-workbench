@@ -34,7 +34,7 @@
 - [x] When the fetch card art job is done in simple mode, the "Go to Create PDF" button is underneath the done message on the left inside of all the way on the right like the other buttons on the page, move it to align with the other buttons. The same issue is present on the create pdf page when the pdf is ready, the buttons show up under the text on the left.
 - [x] When a job is cancelled in simple mode the job status has some odd text at the bottom saying something about fixing the form. I'm not sure what that's about but it's incorrect and should be removed. At the same time remove the text showing the last line of the job log.
 - [x] With the new back image flow, if the image is removed manually then the UI doesn't update to show there's no back image.
-- [ ] With the new back image flow, there's no way to remove a back image through the app. Add a delete/remove/clear button.
+- [x] With the new back image flow, there's no way to remove a back image through the app. Add a delete/remove/clear button.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

@@ -36,6 +36,11 @@ def main():
         return fail("card-back state is not refreshed after an external filesystem change")
     if "Choose image" not in page or "Reveal folder" not in page:
         return fail("Create PDF does not expose the card-back actions")
+    if ('class: "btn danger back-image-remove"' not in page or
+            'deleteImages("game/back")' not in page or
+            'title: count === 1 ? "Remove the card back image?"' not in page or
+            'danger: true' not in page):
+        return fail("default card-back removal is missing or not confirmed")
     if 'afterFormChange("create_pdf", S.forms.create_pdf);' not in page:
         return fail("a card-back import does not refresh the Create PDF preview")
     if ('title: "Replace the card back image?"' not in page or
@@ -52,17 +57,19 @@ const state = await import(dataUrl(stateSource));
 if (state.backDirectory("  ") !== "game/back" || !state.isDefaultBackDirectory("./game/back/")) throw new Error("default directory normalization failed");
 if (state.isDefaultBackDirectory("custom/back")) throw new Error("custom directory treated as default");
 const one = state.backImageState({ items: [{ name: "back.png" }], found: 1 });
-if (one.status !== "back.png" || !one.canImport || !one.canReveal || one.tone) throw new Error("single default back state failed");
+if (one.status !== "back.png" || !one.canImport || !one.canRemove || !one.canReveal || one.tone) throw new Error("single default back state failed");
+const empty = state.backImageState({ items: [], found: 0 });
+if (empty.canRemove) throw new Error("empty default back state exposed removal");
 const multiple = state.backImageState({ items: [{ name: "a.png" }, { name: "b.jpg" }], found: 2 });
-if (multiple.status !== "2 recognized images. Keep exactly one." || multiple.tone !== "warn") throw new Error("multiple back warning failed");
+if (multiple.status !== "2 recognized images. Keep exactly one." || multiple.tone !== "warn" || !multiple.canRemove) throw new Error("multiple back warning failed");
 const custom = state.backImageState({ dir: "custom/back", items: [{ name: "custom.png" }], found: 1 });
-if (custom.defaultDirectory || custom.canImport || !custom.canReveal || custom.status !== "custom.png") throw new Error("custom directory state failed");
+if (custom.defaultDirectory || custom.canImport || custom.canRemove || !custom.canReveal || custom.status !== "custom.png") throw new Error("custom directory state failed");
 const fronts = state.backImageState({ onlyFronts: true, items: [{ name: "unused.png" }], found: 1 });
-if (fronts.status !== "Not used for front pages only." || fronts.canImport || fronts.canReveal || fronts.tone !== "muted") throw new Error("front-only state failed");
+if (fronts.status !== "Not used for front pages only." || fronts.canImport || fronts.canRemove || fronts.canReveal || fronts.tone !== "muted") throw new Error("front-only state failed");
 const missing = state.backImageState({ dir: "missing", exists: false });
-if (missing.status !== "Folder not found." || missing.canReveal || missing.tone !== "warn") throw new Error("missing folder state failed");
-const truncated = state.backImageState({ dir: "large", truncated: true });
-if (truncated.status !== "Could not safely check every file." || truncated.tone !== "warn") throw new Error("truncated folder state failed");
+if (missing.status !== "Folder not found." || missing.canRemove || missing.canReveal || missing.tone !== "warn") throw new Error("missing folder state failed");
+const truncated = state.backImageState({ items: [{ name: "partial.png" }], found: 1, truncated: true });
+if (truncated.status !== "Could not safely check every file." || truncated.canRemove || truncated.tone !== "warn") throw new Error("truncated folder state failed");
 let calls = [], fetchCalls = [], mode = "ok";
 const internals = { invoke(method, params) {
   calls.push({ method, params, receiver: this });
