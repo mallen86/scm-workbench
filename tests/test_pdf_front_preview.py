@@ -133,6 +133,39 @@ class PdfFrontPreviewTests(unittest.TestCase):
         with server._PDF_PREVIEW_OP_LOCK:
             self.assertFalse(server._PDF_PREVIEW_OPS)
 
+    def test_first_page_slots_follow_verified_layouts_without_a_fixed_card_cap(self):
+        info = server.get_info()
+        scm_info = info["scm"]
+        scm_info["paper_sizes"].extend([
+            {"name": "a3", "width": "297mm", "height": "420mm", "aliases": []},
+            {"name": "arch_b", "width": "12in", "height": "18in", "aliases": ["poster"]},
+        ])
+        scm_info["card_sizes"].append({
+            "name": "micro", "width": "32mm", "height": "45mm", "aliases": ["tiny"],
+        })
+        scm_info["layouts"].update({
+            "a3": {"standard": {"default": {"num_rows": 3, "num_cols": 6}}},
+            "arch_b": {"micro": {
+                "default": {"num_rows": 6, "num_cols": 12},
+                "borderless": {"num_rows": 9, "num_cols": 9},
+            }},
+        })
+        scm_info["specialty"].append({
+            "name": "full-sheet", "paper": "letter", "width": "1in", "height": "1in",
+            "rows": 10, "cols": 10,
+        })
+        settings = server.load_settings()
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "a3", "card_size": "standard"}, settings), 18)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "poster", "card_size": "tiny"}, settings), 72)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "arch_b", "card_size": "micro", "borderless": True}, settings), 81)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"specialty": "full-sheet"}, settings), 100)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "a3", "card_size": "standard", "skip": [0, "1", 99]}, settings), 16)
+
     def test_sources_are_limited_to_the_pinned_checkout(self):
         outside = self.fixture.outside / "front"
         outside.mkdir()
@@ -207,6 +240,24 @@ class PdfFrontPreviewTests(unittest.TestCase):
             server._pdf_preview_copy_sample(
                 self.record(), root, identity, parts, self.fixture.data / "unused")
 
+    def test_private_normalized_samples_fill_large_first_page_layouts(self):
+        fronts = self.fixture.data / "normalized-fronts"
+        fronts.mkdir(parents=True)
+        first = VALID_JPEG + b"first\xff\xd9"
+        second = VALID_JPEG + b"second\xff\xd9"
+        (fronts / "0001.jpg").write_bytes(first)
+        (fronts / "0002.jpg").write_bytes(second)
+        server._pdf_preview_fill_page(self.record(), fronts, 2, 72)
+        files = sorted(fronts.iterdir())
+        self.assertEqual(len(files), 72)
+        self.assertEqual(files[2].read_bytes(), first)
+        self.assertEqual(files[3].read_bytes(), second)
+        if os.name != "nt":
+            self.assertEqual(len({path.stat().st_ino for path in files}), 72)
+        with self.assertRaises(server.PdfPreviewError):
+            server._pdf_preview_fill_page(
+                self.record(), fronts, 2, server.PDF_PREVIEW_PAGE_SLOT_MAX + 1)
+
     def test_render_uses_private_overrides_and_returns_only_bounded_jpeg(self):
         source_before = {
             path.relative_to(self.fixture.scm): (path.read_bytes(), path.stat().st_mtime_ns)
@@ -245,7 +296,7 @@ class PdfFrontPreviewTests(unittest.TestCase):
                 result = server._render_pdf_preview(record)
             self.assertTrue(result["ok"])
             self.assertEqual(base64.b64decode(result["data"]), VALID_JPEG)
-            self.assertEqual((result["sampled"], result["available"]), (1, 1))
+            self.assertEqual((result["sampled"], result["placed"], result["available"]), (1, 1, 1))
             self.assertEqual(len(calls), 3)
             renderer = calls[1][0]
             self.assertEqual(calls[1][2].get("PYTHONDONTWRITEBYTECODE"), "1")

@@ -79,7 +79,9 @@ def main() -> int:
             check=True, stdin=subprocess.DEVNULL, timeout=15,
         )
         typical_value = json.loads(typical_prepared.read_text(encoding="utf-8"))
-        if typical_value.get("count") != 16 or len(list(typical_fronts.iterdir())) != 16:
+        dimensions = typical_value.get("dimensions") or []
+        if (typical_value.get("count") != 16 or len(list(typical_fronts.iterdir())) != 16 or
+                len(dimensions) != 16 or any(max(pair) > 640 for pair in dimensions)):
             raise SystemExit("PDF preview helper rejected a bounded high-resolution sample")
 
         # A tiny file can claim enormous decoded dimensions. Prove that the

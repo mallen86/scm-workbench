@@ -5287,11 +5287,14 @@ PDF_PREVIEW_NAME_MAX_BYTES = 255
 PDF_PREVIEW_SCAN_MAX_SCANNED = 8192
 PDF_PREVIEW_SCAN_MAX_CANDIDATES = 1024
 PDF_PREVIEW_SAMPLE_MAX = 16
+PDF_PREVIEW_PAGE_SLOT_MAX = 256
 PDF_PREVIEW_SOURCE_MAX_BYTES = 32 * 1024 * 1024
 PDF_PREVIEW_SOURCE_TOTAL_MAX_BYTES = 128 * 1024 * 1024
 PDF_PREVIEW_IO_CHUNK = 64 * 1024
 PDF_PREVIEW_PPI = 75
 PDF_PREVIEW_JPEG_MAX_BYTES = 512 * 1024
+PDF_PREVIEW_NORMALIZED_LONG_EDGE = 640
+PDF_PREVIEW_NORMALIZED_MAX_BYTES = 2 * 1024 * 1024
 PDF_PREVIEW_PAGE_MAX_BYTES = 64 * 1024 * 1024
 PDF_PREVIEW_RENDER_TIMEOUT = 15.0
 PDF_PREVIEW_OPERATION_TTL = 60.0
@@ -5493,6 +5496,59 @@ def _pdf_preview_validate_paper(info: dict, args: dict, settings: dict) -> None:
             layout_pixels > PDF_PREVIEW_MAX_LAYOUT_PIXELS or
             estimated_page_bytes > PDF_PREVIEW_MAX_PAGE_MEMORY_BYTES):
         raise PdfPreviewError("Preview unavailable because the selected paper size is too large for a safe live preview.")
+
+
+def _pdf_preview_named_definition(items: list, value: str) -> Optional[dict]:
+    wanted = value.casefold()
+    return next((item for item in items
+                 if any(isinstance(name, str) and name.casefold() == wanted
+                        for name in [item.get("name"), *(item.get("aliases") or [])])), None)
+
+
+def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
+    """Return the verified number of usable card positions on page one."""
+    scm_info = info.get("scm") or {}
+    specialty_name = str(args.get("specialty") or "")
+    if specialty_name:
+        specialty = next((item for item in scm_info.get("specialty", [])
+                          if item.get("name") == specialty_name), None)
+        layout = {"num_rows": specialty.get("rows"), "num_cols": specialty.get("cols")} \
+            if specialty else None
+    else:
+        defaults = settings.get("defaults", {})
+        paper = _pdf_preview_named_definition(
+            scm_info.get("paper_sizes", []),
+            str(args.get("paper_size") or defaults.get("paper_size") or "letter"),
+        )
+        card = _pdf_preview_named_definition(
+            scm_info.get("card_sizes", []),
+            str(args.get("card_size") or defaults.get("card_size") or "standard"),
+        )
+        variant = "borderless" if args.get("borderless") else "default"
+        layout = None
+        if paper and card:
+            layout = (((scm_info.get("layouts") or {}).get(paper.get("name")) or {})
+                      .get(card.get("name")) or {}).get(variant)
+    rows = layout.get("num_rows") if isinstance(layout, dict) else None
+    columns = layout.get("num_cols") if isinstance(layout, dict) else None
+    if (isinstance(rows, bool) or isinstance(columns, bool) or
+            not isinstance(rows, int) or not isinstance(columns, int) or
+            rows < 1 or columns < 1 or rows > 32 or columns > 32 or
+            rows * columns > PDF_PREVIEW_PAGE_SLOT_MAX):
+        raise PdfPreviewError("Preview unavailable because the first-page layout could not be safely verified.")
+    total = rows * columns
+    skipped = set()
+    for value in args.get("skip") or []:
+        try:
+            index = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 <= index < total:
+            skipped.add(index)
+    usable = total - len(skipped)
+    if usable < 1:
+        raise PdfPreviewError("Preview unavailable because every position on the first page is skipped.")
+    return usable
 
 
 def _pdf_preview_identity(value: os.stat_result) -> tuple:
@@ -5746,7 +5802,11 @@ def _pdf_preview_copy_sample(record: dict, root: Path, root_identity: tuple,
                   _pdf_preview_scan_posix(root, root_identity, source_parts))
     if not candidates:
         raise PdfPreviewError("Add front images to see a representative preview.", retryable=True)
-    selected = candidates[:PDF_PREVIEW_SAMPLE_MAX]
+    requested = record.get("page_slots", PDF_PREVIEW_SAMPLE_MAX)
+    if (isinstance(requested, bool) or not isinstance(requested, int) or
+            requested < 1 or requested > PDF_PREVIEW_PAGE_SLOT_MAX):
+        raise PdfPreviewError("The first-page preview layout is outside safe bounds.")
+    selected = candidates[:min(PDF_PREVIEW_SAMPLE_MAX, requested)]
     total_expected = sum(item["identity"][2] for item in selected)
     if any(item["identity"][2] < 1 or item["identity"][2] > PDF_PREVIEW_SOURCE_MAX_BYTES
            for item in selected):
@@ -5947,6 +6007,62 @@ def _pdf_preview_read_json(path: Path) -> dict:
     return value
 
 
+def _pdf_preview_fill_page(record: dict, front_dir: Path, sampled: int, placed: int) -> None:
+    """Fill a verified first-page layout from bounded normalized samples.
+
+    Source card images remain capped at the small representative sample. Larger
+    layouts reuse those private low-resolution JPEGs so the rendered page shows
+    every available position without reading an unbounded number of user files.
+    """
+    if (isinstance(sampled, bool) or isinstance(placed, bool) or
+            not isinstance(sampled, int) or not isinstance(placed, int) or
+            sampled < 1 or sampled > PDF_PREVIEW_SAMPLE_MAX or
+            placed < sampled or placed > PDF_PREVIEW_PAGE_SLOT_MAX):
+        raise PdfPreviewError("The first-page preview sample is outside safe bounds.")
+    if placed == sampled:
+        return
+    payloads = []
+    expected = {f"{index:04d}.jpg" for index in range(1, sampled + 1)}
+    try:
+        observed_names = set()
+        with os.scandir(front_dir) as entries:
+            for entry in entries:
+                observed_names.add(entry.name)
+                if len(observed_names) > sampled:
+                    break
+    except OSError as exc:
+        raise PdfPreviewError("The prepared preview sample could not be inspected.") from exc
+    if observed_names != expected:
+        raise PdfPreviewError("The preview helper returned unexpected sample files.")
+    for name in sorted(expected):
+        payload, _observed = _pdf_preview_read_private(
+            front_dir / name, PDF_PREVIEW_NORMALIZED_MAX_BYTES)
+        if not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9"):
+            raise PdfPreviewError("The preview helper returned an invalid normalized image.")
+        payloads.append(payload)
+    for index in range(sampled + 1, placed + 1):
+        _pdf_preview_cancelled(record)
+        destination = front_dir / f"{index:04d}.jpg"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(destination, flags, 0o600)
+            try:
+                view = memoryview(payloads[(index - 1) % sampled])
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short private preview write")
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise PdfPreviewError("The complete first-page sample could not be prepared.",
+                                  retryable=True) from exc
+
+
 def _render_pdf_preview(record: dict) -> dict:
     root = record["scm_root"]
     root_identity = record["scm_identity"]
@@ -5964,6 +6080,7 @@ def _render_pdf_preview(record: dict) -> dict:
 
     sampled, available = _pdf_preview_copy_sample(
         record, root, root_identity, record["source_parts"], raw_dir)
+    placed = min(available, record.get("page_slots", PDF_PREVIEW_SAMPLE_MAX))
     _pdf_preview_cancelled(record)
 
     preview_args = dict(args)
@@ -6012,13 +6129,14 @@ def _render_pdf_preview(record: dict) -> dict:
     valid_dimensions = (isinstance(dimensions, list) and len(dimensions) == sampled and
                         all(isinstance(pair, list) and len(pair) == 2 and
                             all(isinstance(value, int) and not isinstance(value, bool) and
-                                1 <= value <= 1600 for value in pair)
+                                1 <= value <= PDF_PREVIEW_NORMALIZED_LONG_EDGE for value in pair)
                             for pair in dimensions))
     if (set(prepared) != {"version", "count", "dimensions"} or
             isinstance(prepared.get("version"), bool) or prepared.get("version") != 1 or
             isinstance(prepared.get("count"), bool) or prepared.get("count") != sampled or
             not valid_dimensions):
         raise PdfPreviewError("The preview helper returned invalid sample metadata.")
+    _pdf_preview_fill_page(record, front_dir, sampled, placed)
 
     _pdf_preview_run_child(
         record, argv, root, env,
@@ -6059,6 +6177,7 @@ def _render_pdf_preview(record: dict) -> dict:
         "width": metadata["width"],
         "height": metadata["height"],
         "sampled": sampled,
+        "placed": placed,
         "available": available,
     }
     if len(json.dumps(result, separators=(",", ":")).encode("utf-8")) > PDF_PREVIEW_RESULT_MAX_BYTES:
@@ -6159,6 +6278,7 @@ def start_pdf_preview(raw_args: dict) -> dict:
         settings = copy.deepcopy(load_settings())
         info = copy.deepcopy(get_info())
         _pdf_preview_validate_paper(info, args, settings)
+        page_slots = _pdf_preview_page_slots(info, args, settings)
         scm_root, scm_identity, source_parts = _pdf_preview_source(settings, args)
     except PdfPreviewError as exc:
         return exc.result()
@@ -6198,6 +6318,7 @@ def start_pdf_preview(raw_args: dict) -> dict:
                 "scm_root": scm_root,
                 "scm_identity": scm_identity,
                 "source_parts": source_parts,
+                "page_slots": page_slots,
             }
             thread = threading.Thread(target=_run_pdf_preview_operation,
                                       args=(operation_id,), daemon=True,

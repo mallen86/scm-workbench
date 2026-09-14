@@ -22,7 +22,7 @@ This is a visual aid, not a print proof. It does not promise to contain every ca
 
 The existing command preview is intentionally side-effect free and only assembles the command. The upstream renderer has no first-page mode. It creates all pages in memory, writes them only after rendering the full input set, and deletes hidden files from its input directories before rendering.
 
-Calling it directly against the user's folders for every form change would therefore be unsafe and wasteful. SCM Workbench can avoid both problems by staging a small sample in a private temporary tree, forcing low-resolution front-only image output, and displaying only `page1.png` after converting it to a bounded JPEG.
+Calling it directly against the user's folders for every form change would therefore be unsafe and wasteful. SCM Workbench avoids both problems by staging a small representative sample in a private temporary tree, normalizing it, repeating those private copies only as needed to fill the verified first-page layout, forcing low-resolution front-only image output, and displaying only `page1.png` after converting it to a bounded JPEG.
 
 A local benchmark with the unchanged renderer at 150 PPI took about 1.26 seconds for 9 synthetic card images and 1.83 seconds for 90 images on the development Mac. A bounded sample, lower internal resolution, debouncing, cancellation, and single-flight admission should make a representative preview responsive without rendering the full deck.
 
@@ -32,8 +32,8 @@ Add a preview panel to the Create PDF page near the validation or command summar
 
 The panel should:
 
-- be titled `Representative front-page preview`;
-- explain that it is low quality and uses up to 16 front images;
+- be titled `First Page Preview`;
+- explain that it is low quality and uses a bounded representative selection of front images to fill the first-page layout;
 - preserve the previous preview, dimmed, while a replacement is rendering;
 - show clear empty, loading, unavailable, cancelled, and failed states;
 - update after relevant form changes settle;
@@ -75,14 +75,14 @@ Scan recognized front images with explicit limits. The initial target bounds are
 
 - at most 8,192 directory entries scanned;
 - at most 1,024 recognized candidates considered;
-- at most 16 images staged;
+- at most 16 source images copied and decoded;
 - at most 32 MiB per source image;
 - at most 128 MiB copied in one operation;
 - at most 4,096 UTF-8 bytes per path and 255 UTF-8 bytes per source name.
 
-Choose up to 16 images using a deterministic natural-name order. The preview is representative, so exact parity with upstream's deck ordering is not required. Rename staged files to safe sequential names while retaining recognized suffixes.
+Choose up to 16 source images using a deterministic natural-name order. The preview is representative, so exact parity with upstream's deck ordering is not required. Rename staged files to safe sequential names while retaining recognized suffixes. After normalization, verify the selected layout's row and column counts and repeat the private normalized JPEGs until every available first-page position is represented. Layout capacity is bounded to 256 positions, while current upstream layouts use at most 100.
 
-Open each source through a stable regular-file handle, verify its identity and size before and after copying, and reject links, devices, FIFOs, directories, and files that change while being read. Copy into a private operation directory below Workbench data. Do not hardlink or symlink source files into the staging tree.
+Open each source through a stable regular-file handle, verify its identity and size before and after copying, and reject links, devices, FIFOs, directories, and files that change while being read. Copy into a private operation directory below Workbench data. Do not hardlink or symlink source files into the staging tree. Repeated normalized files are also exclusive private copies rather than links.
 
 Create empty staged `back` and `double_sided` directories. This lets the unchanged upstream CLI use `--only_fronts` without reading card backs or rejecting real double-sided files. Its hidden-file cleanup then affects only the disposable staging tree.
 
@@ -114,7 +114,7 @@ These checks affect only preview availability. They must not alter real job vali
 
 ### 6. Produce one bounded image
 
-The unchanged CLI may create more than one low-resolution staged page when the selected layout holds fewer than 16 cards. Read and display only `page1.png`; delete every other temporary page without publishing it.
+Give the unchanged CLI no more normalized fronts than the verified number of usable positions on page one, so the disposable render produces one complete first-page layout rather than extra pages. Read and display only `page1.png` and never publish another temporary page.
 
 Run a small Workbench-owned helper under the selected interpreter to load `page1.png` with Pillow, apply EXIF-safe conversion if needed, constrain the longest edge to 900 pixels, and encode RGB JPEG at approximately quality 60. The helper must not import upstream modules.
 
@@ -156,6 +156,7 @@ Suggested terminal result shape:
   "width": 900,
   "height": 695,
   "sampled": 16,
+  "placed": 72,
   "available": 87
 }
 ```
@@ -205,7 +206,7 @@ Keep staging and destructive filesystem logic out of page code. Keep the worker'
 Cover:
 
 - the normal one-page result and base64/JPEG bounds;
-- deterministic sampling and the 16-image cap;
+- deterministic source sampling, the 16-source cap, and complete 18-card, 72-card, and specialty first-page layouts;
 - empty, missing, unsafe, external, linked, reparse, special-file, oversized, and changing sources;
 - scan, path, name, source-byte, paper-geometry, subprocess-output, JPEG, and response limits;
 - staged hidden files cannot cause deletion from the real source directory;
@@ -252,7 +253,7 @@ Run the complete Python, frontend contract, JavaScript syntax, Rust formatting/t
 ## Acceptance criteria
 
 - Create PDF shows one clearly labeled low-quality preview of the first front page.
-- The preview uses no more than 16 staged fronts and never renders the full user deck.
+- The preview reads no more than 16 source fronts, fills the verified first-page capacity with private normalized copies, and never renders later pages or the full user deck.
 - The unchanged upstream CLI remains the sole layout renderer.
 - Preview generation never mutates user or managed-repository files.
 - Preview activity never appears in job history or publishes an artifact.

@@ -57,7 +57,9 @@ class Phase0Fixture:
                 "defaults": {"card_radius": "3mm"},
                 "card_sizes": {"standard": {"width": "63mm", "height": "88mm"}},
                 "paper_sizes": {"letter": {"width": "8.5in", "height": "11in"}},
-                "layouts": {"letter": {"standard": {"default": {}}}},
+                "layouts": {"letter": {"standard": {"default": {
+                "num_rows": 2, "num_cols": 4,
+            }}}},
                 "specialty_layouts": {},
             },
         )

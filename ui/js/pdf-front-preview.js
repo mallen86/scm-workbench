@@ -33,7 +33,7 @@ export function pdfFrontPreviewPanel() {
       el("span", { class: "pdf-preview-title" }, ico("eye"), "First Page Preview"),
       el("span", { class: "pdf-preview-tag" }, "Low quality")),
     el("p", { class: "pdf-preview-intro" },
-      "Built from up to 16 front images. Card backs and final print quality are not shown."),
+      "Uses a representative selection of front images to fill the first-page layout. Card backs and final print quality are not shown."),
     el("div", { class: "pdf-preview-stage", "data-pdf-preview-stage": "", "aria-live": "polite" },
       el("div", { class: "pdf-preview-empty" },
         ico("image"),
@@ -182,16 +182,18 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     });
     image.onload = scheduleStageFit;
     image.src = `data:image/jpeg;base64,${result.data}`;
-    const sampleText = result.available === result.sampled
-      ? `Built from ${result.sampled} ${result.sampled === 1 ? "front" : "fronts"}.`
-      : `Built from ${result.sampled} of ${result.available} discovered fronts.`;
+    const sampleText = result.placed > result.sampled
+      ? `Filled ${result.placed} first-page positions using ${result.sampled} representative fronts from ${result.available} discovered fronts.`
+      : result.available === result.sampled
+        ? `Built from ${result.sampled} ${result.sampled === 1 ? "front" : "fronts"}.`
+        : `Built from ${result.sampled} of ${result.available} discovered fronts.`;
     return el("figure", { class: "pdf-preview-figure" },
       image,
       el("figcaption", {}, sampleText,
         " This represents the first front page at reduced quality and may not reflect full deck ordering."));
   };
 
-  const showLoading = (message = "Sampling up to 16 fronts and rendering the first page.") => {
+  const showLoading = (message = "Preparing representative fronts and rendering the complete first-page layout.") => {
     const loading = el("div", { class: "pdf-preview-loading" },
       el("span", { class: "spinner", "aria-hidden": "true" }),
       el("div", {}, el("strong", {}, "Building a low quality preview"),
@@ -220,8 +222,9 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
         result.data.length > 700000 || !Number.isInteger(result.width) ||
         !Number.isInteger(result.height) || result.width < 1 || result.height < 1 ||
         result.width > 900 || result.height > 900 ||
-        !Number.isInteger(result.sampled) || !Number.isInteger(result.available) ||
-        result.sampled < 1 || result.sampled > 16 || result.available < result.sampled ||
+        !Number.isInteger(result.sampled) || !Number.isInteger(result.placed) ||
+        !Number.isInteger(result.available) || result.sampled < 1 || result.sampled > 16 ||
+        result.placed < result.sampled || result.placed > 256 || result.available < result.placed ||
         result.data.length % 4 !== 0 || !result.data.startsWith("/9j/") ||
         !/^[A-Za-z0-9+/]+={0,2}$/.test(result.data)) {
       showError("The preview image response was invalid.", true);

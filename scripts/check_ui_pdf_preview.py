@@ -71,6 +71,8 @@ def main() -> int:
         'removeEventListener?.("resize", scheduleStageFit)',
         'document.addEventListener("visibilitychange"',
         "sampled > 16",
+        "placed > 256",
+        "Filled ${result.placed} first-page positions",
         "data.length > 700000",
     ):
         if required not in controller:
@@ -219,7 +221,7 @@ const transportUrl = dataUrl(`
   }
   export function pollPdfPreview(id) {
     globalThis.previewPolls.push(id);
-    return Promise.resolve({ok:true,status:"done",result:{ok:true,mime:"image/jpeg",data:"/9j/",width:10,height:12,sampled:1,available:1}});
+    return Promise.resolve({ok:true,status:"done",result:{ok:true,mime:"image/jpeg",data:"/9j/",width:10,height:12,sampled:1,placed:1,available:1}});
   }
   export function cancelPdfPreview(id) { globalThis.previewCancels.push(id); return Promise.resolve({ok:true}); }
 `);

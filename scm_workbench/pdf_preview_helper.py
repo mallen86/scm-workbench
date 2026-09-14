@@ -27,7 +27,7 @@ SOURCE_IMAGE_MAX_PIXELS = 25_000_000
 # per-image limit. Keep total work bounded by the maximum sample count and let
 # the parent process enforce its overall render deadline.
 SOURCE_IMAGES_TOTAL_PIXELS = SAMPLE_MAX * SOURCE_IMAGE_MAX_PIXELS
-NORMALIZED_LONG_EDGE = 1600
+NORMALIZED_LONG_EDGE = 640
 NORMALIZED_JPEG_MAX_BYTES = 2 * 1024 * 1024
 PAGE_MAX_BYTES = 64 * 1024 * 1024
 PAGE_MAX_PIXELS = 4_000_000
