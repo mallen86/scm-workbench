@@ -30,8 +30,12 @@ def main() -> int:
         "target: '.form-card[data-kind^=\"fetch:\"] .field[data-key=\"deck_source\"]'",
         "target: '.form-card[data-kind^=\"fetch:\"] .runbar'",
         'page: "pdf"',
+        'targets: Object.freeze([',
+        "'.form-card[data-kind=\"create_pdf\"] .field[data-key=\"card_size\"]'",
+        "'.form-card[data-kind=\"create_pdf\"] .field[data-key=\"paper_size\"]'",
         'target: ".back-image-inline"',
         "target: '.form-card[data-kind=\"create_pdf\"] .runbar'",
+        'go("fetch");',
         "export function startGuidedTutorial()",
         "export function stopGuidedTutorial()",
         'event.key === "Escape"',
@@ -50,13 +54,15 @@ def main() -> int:
             return fail(f"guided tutorial performs work instead of explaining it: {forbidden}")
 
     step_copy = re.findall(r'^    (?:title|text): "([^"]*)"', tutorial, re.MULTILINE)
-    if len(step_copy) != 10:
-        return fail(f"guided tutorial does not have five titled steps: {step_copy}")
+    if len(step_copy) != 12:
+        return fail(f"guided tutorial does not have six titled steps: {step_copy}")
     if any(dash in text for text in step_copy for dash in ("\u2014", "\u2013")):
         return fail("guided tutorial user-facing text contains an en or em dash")
-    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Add a card back", "Generate the PDF"):
+    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Choose card and paper sizes", "Add a card back", "Generate the PDF"):
         if phrase not in step_copy:
             return fail(f"guided tutorial does not cover {phrase}")
+    if "Select Only fronts in the form when a back is not needed." in tutorial:
+        return fail("the card-back step still gives incorrect Only fronts guidance")
 
     for marker in (
         'import { startGuidedTutorial } from "./guided-tutorial.js";',
@@ -259,10 +265,15 @@ const tutorialUrl = dataUrl(tutorialSource
 const tutorial = await import(tutorialUrl);
 for (let index = 0; index < tutorial.GUIDED_TUTORIAL_STEPS.length; index++) {
   const step = tutorial.GUIDED_TUTORIAL_STEPS[index];
-  if (!globalThis.targets.has(step.target)) {
-    const target = new FakeNode("target", {rect:{left:300, top:180 + index * 20, right:850, bottom:240 + index * 20, width:550, height:60}});
+  const selectors = step.targets || [step.target];
+  for (let targetIndex = 0; targetIndex < selectors.length; targetIndex++) {
+    const selector = selectors[targetIndex];
+    if (globalThis.targets.has(selector)) continue;
+    const left = targetIndex ? 570 : 300;
+    const right = targetIndex ? 850 : 550;
+    const target = new FakeNode("target", {rect:{left, top:180 + index * 20, right, bottom:240 + index * 20, width:right - left, height:60}});
     target.page = step.page;
-    globalThis.targets.set(step.target, target);
+    globalThis.targets.set(selector, target);
   }
 }
 
@@ -274,7 +285,7 @@ if (!tutorial.guidedTutorialActive() || globalThis.sharedState.page !== "fetch" 
     !body.classList.contains("guided-tutorial-open")) fail("tutorial did not start with bounded lifecycle state");
 let root = body.querySelector(".guided-tour-root");
 let popover = body.querySelector(".guided-tour-popover");
-if (!root || !popover || !popover.textContent.includes("Step 1 of 5") ||
+if (!root || !popover || !popover.textContent.includes("Step 1 of 6") ||
     !popover.textContent.includes("Choose a game") ||
     globalThis.targets.get(tutorial.GUIDED_TUTORIAL_STEPS[0].target).scrolls !== 1)
   fail("first tutorial step did not point to the game chooser");
@@ -292,9 +303,15 @@ next();
 if (!popover.textContent.includes("Fetch card art")) fail("fetch action step did not render");
 next();
 if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.join() !== "fetch,pdf" ||
-    !popover.textContent.includes("Add a card back")) fail("card-back step did not navigate to Create PDF");
+    !popover.textContent.includes("Choose card and paper sizes")) fail("size step did not navigate to Create PDF");
+const spotlight = body.querySelector(".guided-tour-spotlight");
+if (spotlight.style.left !== "293px" || spotlight.style.width !== "564px")
+  fail("size step did not spotlight the combined card and paper controls");
 next();
-if (!popover.textContent.includes("Step 5 of 5") || !popover.textContent.includes("Generate the PDF") ||
+if (!popover.textContent.includes("Add a card back") || popover.textContent.includes("Only fronts"))
+  fail("card-back step is missing or still gives incorrect Only fronts guidance");
+next();
+if (!popover.textContent.includes("Step 6 of 6") || !popover.textContent.includes("Generate the PDF") ||
     !popover.textContent.includes("Finish")) fail("final PDF action step did not render");
 
 let prevented = false;
@@ -302,17 +319,19 @@ documentListeners.get("keydown")({key:"Escape", preventDefault() { prevented = t
 flushFrames();
 if (!prevented || tutorial.guidedTutorialActive() || body.querySelector(".guided-tour-root") ||
     body.classList.contains("guided-tutorial-open") || intervals.size ||
-    documentListeners.has("keydown") || windowListeners.has("resize") || windowListeners.has("popstate"))
-  fail("Escape did not stop the tutorial and clean every listener and timer");
+    documentListeners.has("keydown") || windowListeners.has("resize") || windowListeners.has("popstate") ||
+    globalThis.sharedState.page !== "pdf" || globalThis.navigations.at(-1) !== "pdf")
+  fail("Escape did not stop in place and clean every listener and timer");
 
 tutorial.startGuidedTutorial();
 flushFrames();
-for (let index = 0; index < 5; index++) {
+for (let index = 0; index < 6; index++) {
   documentListeners.get("keydown")({key:"ArrowRight", preventDefault() {}});
   flushFrames();
 }
-if (tutorial.guidedTutorialActive() || globalThis.toasts.at(-1)?.text !==
-    "Tutorial complete. You can replay it from Settings.") fail("finishing did not close the replayable tutorial");
+if (tutorial.guidedTutorialActive() || globalThis.sharedState.page !== "fetch" ||
+    globalThis.navigations.at(-1) !== "fetch" || globalThis.toasts.at(-1)?.text !==
+    "Tutorial complete. You can replay it from Settings.") fail("finishing did not return to Fetch card art and close the replayable tutorial");
 
 // Exercise both first-run choices. They must persist the welcome dismissal,
 // leave the setup screen, and only the affirmative choice may start the tour.
@@ -363,7 +382,7 @@ await buttonNamed(card, "Got it. Show me around").onclick();
 if (done !== 2 || globalThis.tourStarts !== 1 || globalThis.sharedState.info.settings.onboarded ||
     globalThis.welcomeToasts.at(-1)?.kind !== "err") fail("a failed onboarding save still left or started the tutorial");
 
-console.log("ok: optional tutorial routes through fetch, card-back, and PDF steps and cleans up on stop or finish");
+console.log("ok: optional tutorial covers PDF sizes, gives accurate card-back guidance, returns to fetch, and cleans up on stop or finish");
 ''',
         text=True,
         capture_output=True,

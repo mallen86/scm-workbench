@@ -27,9 +27,18 @@ export const GUIDED_TUTORIAL_STEPS = Object.freeze([
   }),
   Object.freeze({
     page: "pdf",
+    targets: Object.freeze([
+      '.form-card[data-kind="create_pdf"] .field[data-key="card_size"]',
+      '.form-card[data-kind="create_pdf"] .field[data-key="paper_size"]',
+    ]),
+    title: "Choose card and paper sizes",
+    text: "Choose the card dimensions and paper loaded in your printer. This combination controls how cards fit on each sheet and which cutting template matches.",
+  }),
+  Object.freeze({
+    page: "pdf",
     target: ".back-image-inline",
     title: "Add a card back",
-    text: "Choose an image here and Workbench safely copies it into the card-back folder. Select Only fronts in the form when a back is not needed.",
+    text: "Choose an image here and Workbench safely copies it into the card-back folder.",
   }),
   Object.freeze({
     page: "pdf",
@@ -67,12 +76,14 @@ function positionTutorial() {
   const { popover, spotlight } = state;
   const width = window.innerWidth;
   const height = window.innerHeight;
-  const target = state.target?.isConnected ? state.target : null;
+  const configuredTargets = state.targets || [];
+  const targets = configuredTargets.length && configuredTargets.every(target => target?.isConnected)
+    ? configuredTargets : [];
 
   popover.style.visibility = "hidden";
   popover.style.left = "0px";
   popover.style.top = "0px";
-  if (!target) {
+  if (!targets.length) {
     state.root.classList.add("no-target");
     spotlight.hidden = true;
     const card = popover.getBoundingClientRect();
@@ -84,7 +95,13 @@ function positionTutorial() {
   }
 
   state.root.classList.remove("no-target");
-  const rect = target.getBoundingClientRect();
+  const rects = targets.map(target => target.getBoundingClientRect());
+  const rect = {
+    left: Math.min(...rects.map(item => item.left)),
+    right: Math.max(...rects.map(item => item.right)),
+    top: Math.min(...rects.map(item => item.top)),
+    bottom: Math.max(...rects.map(item => item.bottom)),
+  };
   const left = clamp(rect.left - TARGET_PAD, EDGE_GAP / 2, width - EDGE_GAP / 2);
   const right = clamp(rect.right + TARGET_PAD, EDGE_GAP / 2, width - EDGE_GAP / 2);
   const top = clamp(rect.top - TARGET_PAD, EDGE_GAP / 2, height - EDGE_GAP / 2);
@@ -171,14 +188,16 @@ function findTarget(generation, attempt = 0) {
   const state = active;
   if (!state || generation !== state.generation) return;
   const step = GUIDED_TUTORIAL_STEPS[state.index];
-  const target = $(step.target);
-  if (!target?.isConnected && attempt < TARGET_WAIT_MAX) {
+  const selectors = step.targets || [step.target];
+  const targets = selectors.map(selector => $(selector));
+  const ready = targets.length === selectors.length && targets.every(target => target?.isConnected);
+  if (!ready && attempt < TARGET_WAIT_MAX) {
     state.targetTimer = setTimeout(() => findTarget(generation, attempt + 1), TARGET_WAIT_MS);
     return;
   }
   state.targetTimer = null;
-  state.target = target?.isConnected ? target : null;
-  state.target?.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "auto" });
+  state.targets = ready ? targets : [];
+  state.targets[0]?.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "auto" });
   schedulePosition();
 }
 
@@ -187,7 +206,7 @@ function renderStep() {
   const state = active;
   if (!state) return;
   clearPending(state);
-  state.target = null;
+  state.targets = [];
   const step = GUIDED_TUTORIAL_STEPS[state.index];
   const last = state.index === GUIDED_TUTORIAL_STEPS.length - 1;
   state.popover.replaceChildren(
@@ -229,6 +248,7 @@ function moveTo(index) {
   if (!active) return;
   if (index >= GUIDED_TUTORIAL_STEPS.length) {
     stopGuidedTutorial();
+    go("fetch");
     toast("ok", "Tutorial complete. You can replay it from Settings.");
     return;
   }
@@ -279,7 +299,7 @@ export function startGuidedTutorial() {
     popover,
     returnFocus,
     index: 0,
-    target: null,
+    targets: [],
     targetTimer: null,
     positionFrame: null,
     positionTimer: setInterval(schedulePosition, 250),
