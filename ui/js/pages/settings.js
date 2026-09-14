@@ -593,6 +593,7 @@ PAGES.settings = (root) => {
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/silhouette-card-maker", "silhouette-card-maker on GitHub") }, ico("external"), "silhouette-card-maker on GitHub"),
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/Alan-Cha/scm-extras", "scm-extras on GitHub") }, ico("external"), "scm-extras on GitHub"),
     el("button", { class: "btn", onclick: () => openUrl("https://github.com/mallen86/scm-workbench", "scm-workbench on GitHub") }, ico("external"), "scm-workbench on GitHub"),
+    el("button", { class: "btn", onclick: () => openUrl("https://discord.gg/jhsKmAgbXc", "SCM Discord") }, ico("external"), "Join the SCM Discord!"),
   ));
   wrap.append(ac);
   return wrap;

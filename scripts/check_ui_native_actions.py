@@ -109,6 +109,13 @@ def main() -> int:
             return fail(f"nav.js does not open the docs link through openUrl: {marker}")
     if 'export async function openUrl(' not in (UI / "core.js").read_text(encoding="utf-8"):
         return fail("core.js no longer exports the openUrl action")
+    settings = (UI / "pages" / "settings.js").read_text(encoding="utf-8")
+    for marker in (
+        'openUrl("https://discord.gg/jhsKmAgbXc", "SCM Discord")',
+        'ico("external"), "Join the SCM Discord!"',
+    ):
+        if marker not in settings:
+            return fail(f"settings is missing the Discord action: {marker}")
     for marker in (".nav-item .nav-ext {", ".nav-item .nav-ext svg {"):
         if marker not in css:
             return fail(f"theme.css is missing the docs item mark style: {marker}")
