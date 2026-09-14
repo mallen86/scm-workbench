@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
 // URL reaches the OS browser. A release link must remain on GitHub and have
@@ -329,6 +329,19 @@ PAGES.settings = (root) => {
     } }, ico("check"), "Save defaults"),
   ));
   wrap.append(dc);
+
+  // The first-run welcome can start this walkthrough, and Settings keeps it
+  // replayable after the user skips, stops, or finishes it.
+  const tc = el("div", { class: "card guided-tutorial-card" });
+  tc.append(el("div", { class: "card-head" },
+    el("div", { class: "card-ico" }, ico("book")),
+    el("div", { class: "grow" }, el("h2", {}, "Guided tutorial"),
+      el("p", {}, "Walk through fetching card art, adding a card back, and generating a PDF. The tutorial never changes a setting or starts a job."))));
+  tc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px; align-items:center" },
+    el("button", { class: "btn primary", type: "button", onclick: startGuidedTutorial },
+      ico("book"), "Start guided tutorial"),
+    el("span", { class: "small faint" }, "You can stop at any step.")));
+  wrap.append(tc);
 
   // repos
   const rc = el("div", { class: "card" });

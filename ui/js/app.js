@@ -11,6 +11,7 @@
      forms.js     manifest-driven forms: option renderer, cards, preview, run
      console.js   jobs list, the live console pane, footer actions
      prep.js      repo clone/update progress rows + watcher
+     guided-tutorial.js  optional walkthrough of the core workflow
      info.js      refreshInfo() and the boot-failure banner
      pages/*.js   one module per page (history, fetch, pdf, offset, ...)
    ========================================================================== */

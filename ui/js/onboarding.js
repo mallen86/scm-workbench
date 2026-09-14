@@ -1,11 +1,36 @@
 /* onboarding: the one-time welcome card. It belongs to the first-run setup
    screen and appears there once the managed repos are ready, so the staged
-   workflow it describes is the next thing the user sees after setup. The
-   dismissed flag lives in the settings file, so it never comes back. */
+   workflow it describes is the next thing the user sees after setup. An
+   accepted or skipped welcome is persisted, so it does not come back. */
 
-import { S, el } from "./core.js";
+import { S, el, toast } from "./core.js";
+import { startGuidedTutorial } from "./guided-tutorial.js";
 import { bootPage } from "./nav.js";
 import { setSettings } from "./settings-transport.js";
+
+
+let finishPending = false;
+async function finishOnboarding(onDone, startTour) {
+  if (finishPending) return;
+  finishPending = true;
+  try {
+    await setSettings({ onboarded: true });
+  } catch (error) {
+    finishPending = false;
+    toast("err", error?.message || "Could not save the welcome choice. Please try again.");
+    return;
+  }
+  S.info.settings.onboarded = true;
+  // The card only exists on the setup screen, so dismissing it means leaving
+  // that screen; the caller may pick a different landing page.
+  try {
+    if (typeof onDone === "function") onDone();
+    else bootPage();
+    if (startTour) startGuidedTutorial();
+  } finally {
+    finishPending = false;
+  }
+}
 
 
 export function onboardCard(onDone) {
@@ -28,15 +53,17 @@ export function onboardCard(onDone) {
         el("div", { class: "n" }, n), el("div", { class: "t" }, t), el("div", { class: "d" }, d),
       )),
     ),
-    el("div", { style: "margin-top:16px" },
-      el("button", { class: "btn primary", onclick: async () => {
-        await setSettings({ onboarded: true });
-        S.info.settings.onboarded = true;
-        // The card only exists on the setup screen, so dismissing it means
-        // leaving that screen; the caller may pick a different landing page.
-        if (typeof onDone === "function") onDone();
-        else bootPage();
-      } }, "Got it. Show me around"),
+    el("div", { class: "onboard-actions" },
+      el("button", {
+        class: "btn primary",
+        type: "button",
+        onclick: () => finishOnboarding(onDone, true),
+      }, "Got it. Show me around"),
+      el("button", {
+        class: "btn",
+        type: "button",
+        onclick: () => finishOnboarding(onDone, false),
+      }, "Skip tutorial"),
     ),
   );
 }

@@ -141,6 +141,7 @@ python scripts/check_ui_fetch_recents.py
 python scripts/check_ui_jobs.py
 python scripts/check_ui_repos.py
 python scripts/check_ui_onboarding.py
+python scripts/check_ui_tutorial.py
 python scripts/check_ui_preview.py
 python scripts/check_ui_pdf_preview.py
 python scripts/check_ui_artifacts.py

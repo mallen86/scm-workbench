@@ -19,6 +19,8 @@ That's the whole install. The app puts nothing on your machine: no Python, no pa
 
 On first launch a window opens immediately, and the setup work (fetching the newest copy of each repo, installing the scripts' dependencies into the private runtime) proceeds in the background with live progress in the UI. silhouette-card-maker tracks its latest release; scm-extras tracks its main branch, since it publishes no releases. **Settings → “Managed repo copies”** redoes any of it on demand, or pins a copy to a specific tag or release. Prefer your own clones? Point **Settings → repos** at them and the managed copies simply stay unused.
 
+When setup finishes, the welcome screen offers an optional five-step tutorial for fetching card art, adding a card back, and creating a PDF. Stop it at any step or replay it later from **Settings → Guided tutorial**.
+
 **Updating the app** works the same way: it checks GitHub for a newer release at start-up and once a day (Settings → “App updates” shows the button, the last-checked time, and the outcome). When a new release is out, the button becomes *Download & install*. The install replaces the app only — your data folder (settings, images, decklists) is never touched — and the app reopens itself as the new version, keeping the old one as a backup. Until the release repo is made public the check can't see its releases, and the card says so plainly; once it's public, no setup is needed at all.
 
 ## What you get
