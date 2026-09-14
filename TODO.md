@@ -36,7 +36,7 @@
 - [x] With the new back image flow, if the image is removed manually then the UI doesn't update to show there's no back image.
 - [x] With the new back image flow, there's no way to remove a back image through the app. Add a delete/remove/clear button.
 - [x] Generating a PDF preview at the default window width and then making the window wider results in the bottom of the PDF cut off.
-- [ ] Change the text of the preview section from "Representative front-page preview" to "First Page Preview". Remove "This is not a print proof." from the preview section description.
+- [x] Change the text of the preview section from "Representative front-page preview" to "First Page Preview". Remove "This is not a print proof." from the preview section description.
 - [ ] Don't set a maximum for the number of cards on the sheet. Certain card and paper sizes can have 72 cards (micro/arch_b). More reasonable situations like standard/a3 can have 18 cards.
 
 # Features

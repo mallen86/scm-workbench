@@ -28,12 +28,12 @@ function validOperationId(value) {
 
 
 export function pdfFrontPreviewPanel() {
-  return el("section", { class: "pdf-front-preview", "aria-label": "Representative PDF preview" },
+  return el("section", { class: "pdf-front-preview", "aria-label": "First page PDF preview" },
     el("div", { class: "pdf-preview-head" },
-      el("span", { class: "pdf-preview-title" }, ico("eye"), "Representative front-page preview"),
+      el("span", { class: "pdf-preview-title" }, ico("eye"), "First Page Preview"),
       el("span", { class: "pdf-preview-tag" }, "Low quality")),
     el("p", { class: "pdf-preview-intro" },
-      "Built from up to 16 front images. Card backs and final print quality are not shown. This is not a print proof."),
+      "Built from up to 16 front images. Card backs and final print quality are not shown."),
     el("div", { class: "pdf-preview-stage", "data-pdf-preview-stage": "", "aria-live": "polite" },
       el("div", { class: "pdf-preview-empty" },
         ico("image"),
@@ -176,7 +176,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
   const resultFigure = (result, updating = false) => {
     const image = el("img", {
       class: `pdf-preview-image${updating ? " updating" : ""}`,
-      alt: "Low quality representative preview of the first PDF front page",
+      alt: "Low quality preview of the first PDF page",
       width: result.width,
       height: result.height,
     });

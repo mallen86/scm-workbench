@@ -62,9 +62,9 @@ def main() -> int:
         "document.removeEventListener(COMMAND_PREVIEW_EVENT",
         "image.removeAttribute(\"src\")",
         'updatePreview("create_pdf")',
-        "Representative front-page preview",
+        "First Page Preview",
+        '"aria-label": "First page PDF preview"',
         "Card backs and final print quality are not shown.",
-        "This is not a print proof.",
         "pdf-preview-refreshing",
         "scheduleStageFit",
         'addEventListener?.("resize", scheduleStageFit)',
@@ -75,6 +75,9 @@ def main() -> int:
     ):
         if required not in controller:
             return fail(f"PDF preview lifecycle contract is missing {required}")
+    for removed in ("Representative front-page preview", "This is not a print proof."):
+        if removed in controller:
+            return fail(f"removed PDF preview copy is still present: {removed}")
     for required in (
         "pdfFrontPreviewPanel()",
         "commandPreview.before(visualPreview)",
