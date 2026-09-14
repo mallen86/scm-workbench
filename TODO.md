@@ -35,6 +35,9 @@
 - [x] When a job is cancelled in simple mode the job status has some odd text at the bottom saying something about fixing the form. I'm not sure what that's about but it's incorrect and should be removed. At the same time remove the text showing the last line of the job log.
 - [x] With the new back image flow, if the image is removed manually then the UI doesn't update to show there's no back image.
 - [x] With the new back image flow, there's no way to remove a back image through the app. Add a delete/remove/clear button.
+- [ ] Generating a PDF preview at the default window width and then making the window wider results in the bottom of the PDF cut off.
+- [ ] Change the text of the preview section from "Representative front-page preview" to "First Page Preview". Remove "This is not a print proof." from the preview section description.
+- [ ] Don't set a maximum for the number of cards on the sheet. Certain card and paper sizes can have 72 cards (micro/arch_b). More reasonable situations like standard/a3 can have 18 cards.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
