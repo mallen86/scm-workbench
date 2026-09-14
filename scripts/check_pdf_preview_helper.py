@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import struct
 import subprocess
@@ -11,6 +12,8 @@ import sys
 import tempfile
 import zlib
 from pathlib import Path
+
+from PIL import Image
 
 
 PNG = base64.b64decode(
@@ -54,6 +57,30 @@ def main() -> int:
                 not (1 <= encoded_value.get("width", 0) <= 900) or
                 not (1 <= encoded_value.get("height", 0) <= 900)):
             raise SystemExit("PDF preview helper returned an invalid bounded JPEG")
+
+        # Sixteen ordinary high-resolution card images exceed the old 128
+        # million aggregate-pixel cap even though each image is safely below
+        # the per-image cap and decoding is sequential. Keep that real-world
+        # sample working while preserving both per-image and count bounds.
+        typical_raw = work / "typical-raw"
+        typical_fronts = work / "typical-fronts"
+        typical_raw.mkdir()
+        typical_fronts.mkdir()
+        source = Image.new("RGB", (3000, 3000), "#855a43")
+        source_bytes = io.BytesIO()
+        source.save(source_bytes, "JPEG", quality=60)
+        source.close()
+        for index in range(1, 17):
+            (typical_raw / f"{index:04d}.img").write_bytes(source_bytes.getvalue())
+        typical_prepared = work / "typical-prepared.json"
+        subprocess.run(
+            [sys.executable, str(helper), "prepare", str(typical_raw),
+             str(typical_fronts), str(typical_prepared)],
+            check=True, stdin=subprocess.DEVNULL, timeout=15,
+        )
+        typical_value = json.loads(typical_prepared.read_text(encoding="utf-8"))
+        if typical_value.get("count") != 16 or len(list(typical_fronts.iterdir())) != 16:
+            raise SystemExit("PDF preview helper rejected a bounded high-resolution sample")
 
         # A tiny file can claim enormous decoded dimensions. Prove that the
         # Pillow boundary rejects that decompression bomb before publication.

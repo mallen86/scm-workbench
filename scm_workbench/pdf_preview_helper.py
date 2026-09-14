@@ -23,7 +23,10 @@ from PIL import Image, ImageOps
 
 SAMPLE_MAX = 16
 SOURCE_IMAGE_MAX_PIXELS = 25_000_000
-SOURCE_IMAGES_TOTAL_PIXELS = 128_000_000
+# Decode one image at a time, so aggregate memory remains bounded by the
+# per-image limit. Keep total work bounded by the maximum sample count and let
+# the parent process enforce its overall render deadline.
+SOURCE_IMAGES_TOTAL_PIXELS = SAMPLE_MAX * SOURCE_IMAGE_MAX_PIXELS
 NORMALIZED_LONG_EDGE = 1600
 NORMALIZED_JPEG_MAX_BYTES = 2 * 1024 * 1024
 PAGE_MAX_BYTES = 64 * 1024 * 1024
