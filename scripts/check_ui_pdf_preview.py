@@ -66,6 +66,9 @@ def main() -> int:
         "Card backs and final print quality are not shown.",
         "This is not a print proof.",
         "pdf-preview-refreshing",
+        "scheduleStageFit",
+        'addEventListener?.("resize", scheduleStageFit)',
+        'removeEventListener?.("resize", scheduleStageFit)',
         'document.addEventListener("visibilitychange"',
         "sampled > 16",
         "data.length > 700000",
@@ -89,6 +92,7 @@ def main() -> int:
     for selector in (
         ".pdf-front-preview", ".pdf-preview-stage", ".pdf-preview-image",
         ".pdf-preview-loading", ".pdf-preview-error", ".pdf-validation-summary",
+        "--pdf-preview-fit-height",
     ):
         if selector not in css:
             return fail(f"PDF preview styling is missing {selector}")
@@ -174,19 +178,27 @@ const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value).toStr
 class FakeNode {
   constructor(tag = "div", attrs = {}) {
     this.tag = tag; this.attrs = attrs; this.children = []; this.nodeType = 1;
-    this.isConnected = true; this._html = ""; this.src = "";
+    this.isConnected = true; this._html = ""; this.src = ""; this.layoutHeight = 0;
+    this.style = {
+      values: {},
+      setProperty(name, value) { this.values[name] = String(value); },
+      removeProperty(name) { delete this.values[name]; },
+      getPropertyValue(name) { return this.values[name] || ""; },
+    };
   }
   append(...children) { this.children.push(...children.flat(Infinity).filter(Boolean)); }
   set innerHTML(value) { this._html = value; if (value === "") this.children = []; }
   get innerHTML() { return this._html; }
   querySelector(selector) {
     if (selector === "img" && this.tag === "img") return this;
+    if (selector.startsWith(".") && String(this.class || "").split(/\s+/).includes(selector.slice(1))) return this;
     for (const child of this.children) {
       if (child?.querySelector) { const found = child.querySelector(selector); if (found) return found; }
     }
     return null;
   }
   removeAttribute(name) { if (name === "src") this.src = ""; delete this.attrs[name]; }
+  getBoundingClientRect() { return { height: this.layoutHeight }; }
 }
 const coreUrl = dataUrl(`
   export function el(tag, attrs = {}, ...kids) {
@@ -218,6 +230,22 @@ globalThis.document = {
   visibilityState: "visible",
   addEventListener(name, listener) { listeners.set(name, listener); },
   removeEventListener(name, listener) { if (listeners.get(name) === listener) listeners.delete(name); },
+};
+const windowListeners = new Map();
+globalThis.window = {
+  addEventListener(name, listener) { windowListeners.set(name, listener); },
+  removeEventListener(name, listener) { if (windowListeners.get(name) === listener) windowListeners.delete(name); },
+};
+let nextFrame = 0;
+const frames = new Map();
+globalThis.requestAnimationFrame = callback => { const id = ++nextFrame; frames.set(id, callback); return id; };
+globalThis.cancelAnimationFrame = id => frames.delete(id);
+globalThis.getComputedStyle = () => ({
+  paddingTop: "18px", paddingBottom: "18px", borderTopWidth: "1px", borderBottomWidth: "1px",
+});
+const flushFrames = () => {
+  const pending = [...frames.values()]; frames.clear();
+  for (const callback of pending) callback();
 };
 let rewritten = source
   .replace('from "./core.js"', `from "${coreUrl}"`)
@@ -261,6 +289,16 @@ previewStarts[1].resolve({ok:true,operation:{id:"b".repeat(32),status:"running"}
 await new Promise(resolve => setTimeout(resolve, 230));
 if (previewPolls.join() !== "b".repeat(32) || stage.children[0]?.tag !== "figure")
   fail("current operation was not polled and painted");
+const fittedFigure = stage.querySelector(".pdf-preview-figure");
+fittedFigure.layoutHeight = 481;
+flushFrames();
+if (stage.style.getPropertyValue("--pdf-preview-fit-height") !== "519px")
+  fail("the rendered figure did not establish a complete stage height");
+fittedFigure.layoutHeight = 500;
+windowListeners.get("resize")?.();
+flushFrames();
+if (stage.style.getPropertyValue("--pdf-preview-fit-height") !== "538px")
+  fail("window resizing did not refit the complete preview height");
 const startsBeforeBlock = previewStarts.length;
 emitResult({ppi:700}, {cmd:"python create_pdf.py",errors:[],warnings:["No fronts"],no_front_images:true});
 await new Promise(resolve => setTimeout(resolve, 800));
@@ -271,9 +309,10 @@ await new Promise(resolve => setTimeout(resolve, 800));
 previewStarts[2].resolve({ok:true,operation:{id:"c".repeat(32),status:"running"}});
 await Promise.resolve(); await Promise.resolve();
 dispose();
-if (!previewCancels.includes("c".repeat(32)) || listeners.has("wb:command-preview"))
-  fail("page disposal did not cancel and remove the validated-preview listener");
-console.log("ok: PDF preview controller cancels stale starts, paints only the current result, and disposes active work");
+if (!previewCancels.includes("c".repeat(32)) || listeners.has("wb:command-preview") ||
+    windowListeners.has("resize") || stage.style.getPropertyValue("--pdf-preview-fit-height"))
+  fail("page disposal did not cancel work and remove preview lifecycle state");
+console.log("ok: PDF preview controller refits resized images, cancels stale starts, paints only the current result, and disposes active work");
 ''',
         text=True,
         capture_output=True,

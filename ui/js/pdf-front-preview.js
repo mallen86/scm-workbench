@@ -60,6 +60,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     focusTimer: null,
     pollTimer: null,
     retryTimer: null,
+    resizeFrame: null,
     pollAbort: null,
     polls: 0,
     retries: 0,
@@ -76,14 +77,49 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     state.focusTimer = null;
     state.pollTimer = null;
     state.retryTimer = null;
+    if (state.resizeFrame !== null && typeof globalThis.cancelAnimationFrame === "function") {
+      globalThis.cancelAnimationFrame(state.resizeFrame);
+    }
+    state.resizeFrame = null;
     state.pollAbort?.abort();
     state.pollAbort = null;
+  };
+
+  // WebKit can retain the stage's narrow-window grid height after the page
+  // image grows during a window resize. Give the stage an explicit minimum
+  // based on its current figure so overflow clipping can never hide the page's
+  // bottom edge or caption. The next frame sees the post-resize image width.
+  const scheduleStageFit = () => {
+    if (state.disposed || !panel.isConnected || !stage.style ||
+        typeof globalThis.requestAnimationFrame !== "function" ||
+        typeof globalThis.getComputedStyle !== "function") return;
+    if (state.resizeFrame !== null && typeof globalThis.cancelAnimationFrame === "function") {
+      globalThis.cancelAnimationFrame(state.resizeFrame);
+    }
+    state.resizeFrame = globalThis.requestAnimationFrame(() => {
+      state.resizeFrame = null;
+      if (state.disposed || !panel.isConnected) return;
+      const figure = stage.querySelector?.(".pdf-preview-figure");
+      if (!figure?.getBoundingClientRect) {
+        stage.style.removeProperty("--pdf-preview-fit-height");
+        return;
+      }
+      const styles = globalThis.getComputedStyle(stage);
+      const verticalSpace = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]
+        .reduce((total, key) => total + (Number.parseFloat(styles[key]) || 0), 0);
+      const figureHeight = figure.getBoundingClientRect().height;
+      if (Number.isFinite(figureHeight) && figureHeight > 0) {
+        stage.style.setProperty("--pdf-preview-fit-height",
+          `${Math.max(330, Math.ceil(figureHeight + verticalSpace))}px`);
+      }
+    });
   };
 
   const replaceStage = (...children) => {
     if (state.disposed || !panel.isConnected) return;
     stage.innerHTML = "";
     stage.append(...children);
+    scheduleStageFit();
   };
 
   const showWaiting = message => replaceStage(
@@ -144,6 +180,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
       width: result.width,
       height: result.height,
     });
+    image.onload = scheduleStageFit;
     image.src = `data:image/jpeg;base64,${result.data}`;
     const sampleText = result.available === result.sampled
       ? `Built from ${result.sampled} ${result.sampled === 1 ? "front" : "fronts"}.`
@@ -333,6 +370,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
   document.addEventListener(COMMAND_PREVIEW_EVENT, onCommandPreview);
   document.addEventListener("visibilitychange", onVisibilityChange);
   globalThis.window?.addEventListener?.("focus", onWindowFocus);
+  globalThis.window?.addEventListener?.("resize", scheduleStageFit);
 
   return () => {
     if (state.disposed) return;
@@ -341,7 +379,9 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     document.removeEventListener(COMMAND_PREVIEW_EVENT, onCommandPreview);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     globalThis.window?.removeEventListener?.("focus", onWindowFocus);
+    globalThis.window?.removeEventListener?.("resize", scheduleStageFit);
     cancelCurrent();
+    stage.style?.removeProperty?.("--pdf-preview-fit-height");
     const image = stage.querySelector?.("img");
     if (image) image.removeAttribute("src");
     state.lastResult = null;

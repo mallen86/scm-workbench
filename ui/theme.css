@@ -669,7 +669,7 @@ select.input option { background: var(--surface); color: var(--text); }
   grid-row: 1 / span 2;
   display: grid;
   place-items: center;
-  min-height: 330px;
+  min-height: var(--pdf-preview-fit-height, 330px);
   padding: 18px;
   overflow: hidden;
   border: 1px solid var(--border-soft);
