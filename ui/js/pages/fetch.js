@@ -2,7 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
-import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { go, uiMode } from "../nav.js";import { clearJobCompletion, jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
+import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { recentFetchLayout } from "../fetch-recents.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { JOBS_UPDATED_EVENT } from "../job-events.js";import { go, uiMode } from "../nav.js";import { clearJobCompletion, jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
@@ -13,19 +13,54 @@ PAGES.fetch = (root) => {
       el("div", { class: "grow" }, el("h2", {}, "Game"), el("p", {}, "Each game has one plugin. Formats and options match your selection.")),
     ),
   );
-  const grid = el("div", { class: "plugin-grid" });
-  const slugs = Object.keys(S.manifest).filter(k => k.startsWith("fetch:")).sort();
-  for (const kind of slugs) {
-    const slug = kind.slice(6);
-    grid.append(el("button", {
+  const pickerBody = el("div", { class: "plugin-sections" });
+  const slugs = Object.keys(S.manifest).filter(k => k.startsWith("fetch:"))
+    .map(kind => kind.slice(6)).sort();
+  const pluginCard = slug => {
+    const kind = `fetch:${slug}`;
+    const choices = S.manifest[kind].groups
+      .find(group => group.title === "Format")?.options[0].choices || [];
+    const formatCount = Math.max(0, choices.length - 1);
+    return el("button", {
       class: `plugin-card ${S.plugin === slug ? "active" : ""}`,
+      type: "button",
+      "aria-pressed": S.plugin === slug ? "true" : "false",
       onclick: () => { S.plugin = slug; go("fetch", { plugin: slug }); },
     },
       el("div", { class: "pc-t" }, S.manifest[kind].game),
-      el("div", { class: "pc-f" }, `${(S.manifest[kind].groups.find(g => g.title === "Format")?.options[0].choices || []).length - 1} formats`),
-    ));
-  }
-  picker.append(grid);
+      el("div", { class: "pc-f" }, `${formatCount} format${formatCount === 1 ? "" : "s"}`),
+    );
+  };
+  const pluginGrid = plugins => el("div", { class: "plugin-grid" },
+    plugins.map(pluginCard));
+  const pluginSection = (title, plugins) => el("section", { class: "plugin-section" },
+    el("h3", { class: "plugin-section-title" }, title), pluginGrid(plugins));
+  let recentSignature = null;
+  const renderPluginPicker = () => {
+    const layout = recentFetchLayout(S.jobs, slugs);
+    const signature = layout.recent.join("\u0000");
+    if (signature === recentSignature && pickerBody.childElementCount) return;
+    recentSignature = signature;
+    pickerBody.innerHTML = "";
+    if (!layout.hasRecent) {
+      pickerBody.append(pluginSection("All games", layout.all));
+      return;
+    }
+    pickerBody.append(pluginSection("Recently used", layout.recent));
+    const allGames = el("details", { class: "plugin-all" },
+      el("summary", {},
+        el("span", { class: "plugin-summary-title" }, "All games"),
+        el("span", { class: "plugin-summary-meta" }, `${layout.all.length} games`,
+          el("span", { class: "plugin-summary-arrow", "aria-hidden": "true" }, ico("arrow")))),
+      pluginGrid(layout.all));
+    allGames.open = layout.allOpen;
+    pickerBody.append(allGames);
+  };
+  const onJobsUpdated = () => renderPluginPicker();
+  document.addEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+  wrap.__dispose = () => document.removeEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+  picker.append(pickerBody);
+  renderPluginPicker();
   wrap.append(picker);
 
   const kind = "fetch:" + S.plugin;

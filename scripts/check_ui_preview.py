@@ -117,6 +117,7 @@ const coreUrl = dataUrl(`
 const jobsUrl = dataUrl("export const jobs = {}; ");
 const prepUrl = dataUrl("export const repoReady = () => true; ");
 const navUrl = dataUrl("export const uiMode = () => \"advanced\"; ");
+const jobEventsUrl = dataUrl("export const publishJobsUpdated = () => {}; ");
 globalThis.releases = [];
 const previewStubUrl = dataUrl(`
   export function preview() {
@@ -125,6 +126,7 @@ const previewStubUrl = dataUrl(`
 `);
 const formsForTest = formsSource
   .replace('from "./core.js"', `from "${coreUrl}"`)
+  .replace('from "./job-events.js"', `from "${jobEventsUrl}"`)
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewStubUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)

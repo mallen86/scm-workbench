@@ -26,7 +26,7 @@ On first launch a window opens immediately, and the setup work (fetching the new
 | Page | What it does |
 | --- | --- |
 | **Job history** | every run, live and from earlier sessions; click one to reopen its page with the exact settings it ran with |
-| **Fetch card art** | the card-art fetchers for every game: a decklist from a file (with the OS file picker), pasted text, or a URL — including the MTG preferences |
+| **Fetch card art** | the card-art fetchers for every game, with recently used games kept at the top and the full catalog tucked away after the first run: use a decklist file, pasted text, or a URL |
 | **Create PDF** | print-ready PDFs from your card images, with a low quality representative first-page preview before you run: sizes, registration, specialty layouts, fit and crop, PPI, quality, borderless and more |
 | **Offset & calibration** | calibration sheets, print-offset measurement, and a per-paper-size offset table |
 | **Cutting templates** | DXF and `.studio3` templates, single or batch, plus a gallery of everything in the repos |

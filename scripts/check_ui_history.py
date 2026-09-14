@@ -200,10 +200,12 @@ const navUrl = dataUrl(`
   export const go = (page, prefill) => { globalThis.histGo = { page, prefill }; };
 `);
 const jobsUrl = dataUrl(`export const jobs = {};`);
+const jobEventsUrl = dataUrl(`export const publishJobsUpdated = () => {};`);
 const previewUrl = dataUrl(`export const preview = () => Promise.resolve({});`);
 const prepUrl = dataUrl(`export const repoReady = () => true;`);
 const formsSource = fs.readFileSync(process.argv[2], "utf8")
   .replace('from "./core.js"', `from "${coreUrl}"`)
+  .replace('from "./job-events.js"', `from "${jobEventsUrl}"`)
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)
