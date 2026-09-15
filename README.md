@@ -8,6 +8,8 @@ SCM Workbench is a desktop app for turning card game decklists into printable PD
 
 It runs [silhouette-card-maker](https://github.com/Alan-Cha/silhouette-card-maker) and [scm-extras](https://github.com/Alan-Cha/scm-extras) behind the scenes. You choose options in the app, and Workbench handles the commands, downloads, progress, and files for you. No terminal or Python setup is needed.
 
+None of this would be possible without the excellent work by [Alan Cha](https://github.com/Alan-Cha), thank you!
+
 ## Download and install
 
 [Download the latest version from GitHub Releases.](https://github.com/mallen86/scm-workbench/releases/latest) On the release page, choose the file for your computer.
