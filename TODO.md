@@ -41,6 +41,7 @@
 - [x] PDF preview on Windows falsely says a front image changed when Windows reports a stale cached path timestamp.
 - [x] Keep collision-versioned cutting-template paths consistently spelled on Windows.
 - [x] Make Windows card-back replacement tolerate stale path timestamps and keep its rollback tests platform-correct.
+- [x] Make fetch image warning tooltips appear promptly and remain repeatable on Windows.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

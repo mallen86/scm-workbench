@@ -83,10 +83,21 @@ def main() -> int:
                    "createFetchProgress", "stage ${view.stage} of 2", "fetchProgress.active",
                    "if (opts.slotTotal)", "fetchProgress.setDeckTotal", "fetchProgress.warningView()",
                    'ico("warncircle")', 'ico("alert")', "job?.image_warnings",
-                   'title: text, "aria-label": text'):
+                   'if (warningState !== paintedImageWarnings)', 'tabindex: "0"',
+                   '"data-tooltip": text, "aria-label": text'):
         if marker not in jobstrip:
             print(f"FAIL: PDF job progress/completion persistence is missing {marker}")
             return 1
+    warning_block = jobstrip[jobstrip.find("const showImageWarnings"):
+                             jobstrip.find("const attachProgress")]
+    if "title: text" in warning_block:
+        print("FAIL: fetch warnings still rely on delayed native title tooltips")
+        return 1
+    state_guard = warning_block.find("if (warningState !== paintedImageWarnings)")
+    icon_reset = warning_block.find('warningIcons.innerHTML = "";')
+    if state_guard < 0 or icon_reset < state_guard:
+        print("FAIL: streamed fetch lines can still replace an actively hovered warning icon")
+        return 1
     if jobstrip.count("jobs.list().then(result") < 2:
         print("FAIL: rebuilt job strips do not immediately refresh canonical completion state")
         return 1
@@ -162,7 +173,11 @@ def main() -> int:
                    ".jobstrip.done .js-actions { grid-column: 2; grid-row: 1; justify-self: end;",
                    ".jobstrip .js-progress-row { display: flex;",
                    ".jobstrip .fetch-warning.retry { color: var(--warn); }",
-                   ".jobstrip .fetch-warning.missing { color: var(--err); }"):
+                   ".jobstrip .fetch-warning.missing { color: var(--err); }",
+                   ".jobstrip .fetch-warning::after {",
+                   "content: attr(data-tooltip);",
+                   ".jobstrip .fetch-warning:hover::after,",
+                   ".jobstrip .fetch-warning:focus-visible::after {"):
         if marker not in theme:
             print(f"FAIL: completed job actions are not on the message row: {marker}")
             return 1

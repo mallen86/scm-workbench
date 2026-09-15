@@ -62,6 +62,7 @@ export function jobStrip(kind, opts = {}) {
   let imageDone = 0, imageTotal = 0;
   let fetchProgress = createFetchProgress();
   let renameTimer = null;
+  let paintedImageWarnings = "";
   let stoppingId = null;
   cancel.onclick = async () => {
     const id = cancel.dataset.jobId;
@@ -92,14 +93,22 @@ export function jobStrip(kind, opts = {}) {
     const saved = job?.image_warnings || {};
     const multiple404s = live.multiple404s || saved.multiple_404s;
     const missingData = live.missingData || saved.missing_data;
-    warningIcons.innerHTML = "";
-    if (multiple404s) {
-      const text = "Multiple image requests returned 404. Some images may have succeeded on retry.";
-      warningIcons.append(el("span", { class: "fetch-warning retry", title: text, "aria-label": text }, ico("warncircle")));
-    }
-    if (missingData) {
-      const text = "One or more cards have no image data.";
-      warningIcons.append(el("span", { class: "fetch-warning missing", title: text, "aria-label": text }, ico("alert")));
+    const warningState = `${multiple404s ? "retry" : ""}|${missingData ? "missing" : ""}`;
+    // This runs for every streamed output line. Keep unchanged icons mounted
+    // so an active pointer hover or keyboard focus is never torn down.
+    if (warningState !== paintedImageWarnings) {
+      paintedImageWarnings = warningState;
+      warningIcons.innerHTML = "";
+      if (multiple404s) {
+        const text = "Multiple image requests returned 404. Some images may have succeeded on retry.";
+        warningIcons.append(el("span", { class: "fetch-warning retry", role: "img",
+          tabindex: "0", "data-tooltip": text, "aria-label": text }, ico("warncircle")));
+      }
+      if (missingData) {
+        const text = "One or more cards have no image data.";
+        warningIcons.append(el("span", { class: "fetch-warning missing", role: "img",
+          tabindex: "0", "data-tooltip": text, "aria-label": text }, ico("alert")));
+      }
     }
     const hasWarnings = multiple404s || missingData;
     warningIcons.hidden = !hasWarnings;
