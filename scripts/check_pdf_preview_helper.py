@@ -26,6 +26,9 @@ def main() -> int:
     helper = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / "scm_workbench/pdf_preview_helper.py"
     if not helper.is_file():
         raise SystemExit("PDF preview helper is missing")
+    helper_source = helper.read_text(encoding="utf-8")
+    if 'opened.draft("RGB", (NORMALIZED_LONG_EDGE, NORMALIZED_LONG_EDGE))' not in helper_source:
+        raise SystemExit("PDF preview helper does not request reduced-resolution image decoding")
     with tempfile.TemporaryDirectory(prefix="scm-pdf-preview-helper-") as temporary:
         work = Path(temporary)
         raw = work / "raw"

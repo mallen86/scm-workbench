@@ -112,6 +112,11 @@ def prepare(raw_dir: Path, front_dir: Path, metadata_path: Path) -> None:
             if total_pixels > SOURCE_IMAGES_TOTAL_PIXELS:
                 raise ValueError("preview source pixels exceed the aggregate limit")
             opened.seek(0)
+            # JPEG decoders can select a reduced native resolution before
+            # loading pixels. The original dimensions above remain the safety
+            # boundary; this only avoids decoding detail that the 640 px
+            # representative sample would immediately discard.
+            opened.draft("RGB", (NORMALIZED_LONG_EDGE, NORMALIZED_LONG_EDGE))
             transposed = ImageOps.exif_transpose(opened)
             transposed.load()
             normalized = _rgb(transposed)

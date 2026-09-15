@@ -35,6 +35,7 @@ The panel should:
 - be titled `First Page Preview`;
 - explain that it is low quality and uses a bounded representative selection of front images to fill the first-page layout;
 - preserve the previous preview, dimmed, while a replacement is rendering;
+- scale the explicitly enlarged preview with the current viewport while keeping the ordinary in-page preview compact;
 - show clear empty, loading, unavailable, cancelled, and failed states;
 - update after relevant form changes settle;
 - update when the page opens or the app regains focus, so external front-image changes are reflected;
@@ -82,7 +83,7 @@ Scan recognized front images with explicit limits. The initial target bounds are
 
 Choose up to 16 source images using a deterministic natural-name order. The preview is representative, so exact parity with upstream's deck ordering is not required. Rename staged files to safe sequential names while retaining recognized suffixes. After normalization, verify the selected layout's row and column counts and repeat the private normalized JPEGs until every available first-page position is represented. Layout capacity is bounded to 256 positions, while current upstream layouts use at most 100.
 
-Open each source through a stable regular-file handle, verify its identity and size before and after copying, and reject links, devices, FIFOs, directories, and files that change while being read. Copy into a private operation directory below Workbench data. Do not hardlink or symlink source files into the staging tree. Repeated normalized files are also exclusive private copies rather than links.
+Open each source through a stable regular-file handle, verify its identity and size before and after copying, and reject links, devices, FIFOs, directories, and files that change while being read. Copy into a private operation directory below Workbench data. Do not hardlink or symlink source files into the staging tree. Repeated normalized files are also exclusive private copies rather than links. After validating the original dimensions, request a reduced native decode from formats such as JPEG before normalization so pixels that will immediately be discarded are not decoded at full resolution.
 
 Create empty staged `back` and `double_sided` directories. This lets the unchanged upstream CLI use `--only_fronts` without reading card backs or rejecting real double-sided files. Its hidden-file cleanup then affects only the disposable staging tree.
 
@@ -172,7 +173,7 @@ Add a dedicated transport facade and preview controller rather than calling nati
 The controller should:
 
 1. wait for the ordinary command preview to validate the current form;
-2. debounce a render for 750 to 1,000 ms;
+2. after the command preview's 250 ms validation debounce, wait another 300 ms to coalesce validated changes before rendering;
 3. snapshot the form arguments and assign a monotonically increasing generation;
 4. cancel the previous operation when a newer generation starts;
 5. poll at a bounded interval;

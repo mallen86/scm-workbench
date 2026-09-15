@@ -54,7 +54,7 @@ def main() -> int:
         if required not in forms:
             return fail(f"validated command-preview hook is missing {required}")
     for required in (
-        "PREVIEW_DEBOUNCE_MS = 750",
+        "PREVIEW_DEBOUNCE_MS = 300",
         "POLL_MAX = 100",
         "RETRY_MAX = 3",
         "cancelPdfPreview(operationId)",
@@ -67,8 +67,11 @@ def main() -> int:
         "Card backs and final print quality are not shown.",
         "pdf-preview-refreshing",
         "scheduleStageFit",
-        'addEventListener?.("resize", scheduleStageFit)',
-        'removeEventListener?.("resize", scheduleStageFit)',
+        "fitLightboxImage",
+        "viewportWidth * 0.9",
+        "viewportHeight * 0.88",
+        'addEventListener?.("resize", onWindowResize)',
+        'removeEventListener?.("resize", onWindowResize)',
         'document.addEventListener("visibilitychange"',
         "focusRefreshBlocked",
         "state.renderActive = true",
@@ -108,6 +111,9 @@ def main() -> int:
         ".pdf-front-preview", ".pdf-preview-stage", ".pdf-preview-image",
         ".pdf-preview-loading", ".pdf-preview-error", ".pdf-validation-summary",
         ".pdf-preview-enlarge", ".pdf-preview-lightbox", ".pdf-preview-lightbox-image",
+        ".pdf-preview-image {\n  display: block;\n  max-width: 100%;\n  max-height: 440px;",
+        "max-width: min(90vw, calc(100vw - 48px))",
+        "max-height: min(88vh, calc(100vh - 86px))",
         "--pdf-preview-fit-height",
     ):
         if selector not in css:
@@ -248,6 +254,8 @@ const transportUrl = dataUrl(`
   export function cancelPdfPreview(id) { globalThis.previewCancels.push(id); return Promise.resolve({ok:true}); }
 `);
 globalThis.FakeNode = FakeNode;
+globalThis.innerWidth = 1600;
+globalThis.innerHeight = 1000;
 globalThis.previewStarts = [];
 globalThis.previewPolls = [];
 globalThis.previewCancels = [];
@@ -305,7 +313,7 @@ listeners.get("visibilitychange")?.();
 await new Promise(resolve => setTimeout(resolve, 130));
 if (formRefreshes !== 1)
   fail("a transient focus return restarted the PDF preview debounce");
-await new Promise(resolve => setTimeout(resolve, 680));
+await new Promise(resolve => setTimeout(resolve, 250));
 if (previewStarts.length !== 1 || previewStarts[0].args.ppi !== 200)
   fail("rapid validated changes were not debounced to the newest arguments");
 // The same focus return can occur while the hidden renderer is still starting.
@@ -326,9 +334,9 @@ previewStarts.length = 0; previewPolls.length = 0; previewCancels.length = 0;
 emit({ppi:300});
 if (!String(stage.children[0]?.class || "").includes("pdf-preview-refreshing"))
   fail("the previous successful image was not retained while refreshing");
-await new Promise(resolve => setTimeout(resolve, 800));
+await new Promise(resolve => setTimeout(resolve, 425));
 emit({ppi:600});
-await new Promise(resolve => setTimeout(resolve, 800));
+await new Promise(resolve => setTimeout(resolve, 425));
 if (previewStarts.length !== 2) fail("settled validated form events did not start both generations");
 previewStarts[0].resolve({ok:true,operation:{id:"a".repeat(32),status:"running"}});
 await Promise.resolve(); await Promise.resolve();
@@ -345,8 +353,14 @@ let lightboxButton = lightbox?.querySelector(".pdf-preview-lightbox-page");
 let lightboxImage = lightbox?.querySelector(".pdf-preview-lightbox-image");
 if (!lightbox || lightbox?.attrs?.role !== "dialog" || lightbox?.attrs?.["aria-modal"] !== "true" ||
     lightboxButton?.tag !== "button" || lightboxImage?.src !== stage.querySelector("img")?.src ||
+    lightboxImage?.style?.width !== "733px" || lightboxImage?.style?.height !== "880px" ||
     document.activeElement !== lightboxButton || !listeners.has("keydown"))
-  fail("clicking the PDF page did not open and focus the expanded in-app preview");
+  fail("clicking the PDF page did not open, size, and focus the expanded in-app preview");
+globalThis.innerWidth = 2000;
+globalThis.innerHeight = 1200;
+windowListeners.get("resize")?.();
+if (lightboxImage?.style?.width !== "880px" || lightboxImage?.style?.height !== "1056px")
+  fail("the expanded PDF preview did not grow with the viewport");
 let tabPrevented = false;
 listeners.get("keydown")?.({key:"Tab", preventDefault() { tabPrevented = true; }});
 if (!tabPrevented || document.activeElement !== lightboxButton)
@@ -375,11 +389,11 @@ previewTrigger.onclick();
 emitResult({ppi:700}, {cmd:"python create_pdf.py",errors:[],warnings:["No fronts"],no_front_images:true});
 if (document.body.querySelector(".pdf-preview-lightbox") || listeners.has("keydown"))
   fail("a replaced preview left its expanded dialog attached");
-await new Promise(resolve => setTimeout(resolve, 800));
+await new Promise(resolve => setTimeout(resolve, 425));
 if (previewStarts.length !== startsBeforeBlock)
   fail("blocked validation started a representative render");
 emit({ppi:900});
-await new Promise(resolve => setTimeout(resolve, 800));
+await new Promise(resolve => setTimeout(resolve, 425));
 previewStarts[2].resolve({ok:true,operation:{id:"c".repeat(32),status:"running"}});
 await Promise.resolve(); await Promise.resolve();
 dispose();

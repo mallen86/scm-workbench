@@ -472,6 +472,36 @@ class PdfFrontPreviewTests(unittest.TestCase):
         self.assertIsNotNone(proc.poll())
         self.assertTrue(caught and caught[0].cancelled)
 
+    def test_helper_requests_reduced_jpeg_decode_after_checking_original_size(self):
+        if importlib.util.find_spec("PIL") is None:
+            self.skipTest("Pillow is intentionally supplied by the selected SCM runtime")
+        from PIL import Image, JpegImagePlugin
+        original_max_image_pixels = Image.MAX_IMAGE_PIXELS
+        from scm_workbench import pdf_preview_helper
+        self.addCleanup(setattr, Image, "MAX_IMAGE_PIXELS", original_max_image_pixels)
+
+        source = self.fixture.data / "draft-raw"
+        fronts = self.fixture.data / "draft-fronts"
+        source.mkdir(parents=True)
+        fronts.mkdir()
+        card = source / "0001.img"
+        with Image.new("RGB", (1200, 1600), "#855a43") as image:
+            image.save(card, "JPEG", quality=80)
+        calls = []
+        original_draft = JpegImagePlugin.JpegImageFile.draft
+
+        def tracked_draft(image, mode, size):
+            calls.append((image.size, mode, size))
+            return original_draft(image, mode, size)
+
+        metadata = self.fixture.data / "draft-prepared.json"
+        with mock.patch.object(JpegImagePlugin.JpegImageFile, "draft", new=tracked_draft):
+            pdf_preview_helper.prepare(source, fronts, metadata)
+        self.assertEqual(calls, [((1200, 1600), "RGB", (640, 640))])
+        prepared = json.loads(metadata.read_text(encoding="utf-8"))
+        self.assertEqual(prepared["count"], 1)
+        self.assertLessEqual(max(prepared["dimensions"][0]), 640)
+
     def test_real_helper_prepare_and_encode_when_pillow_is_available(self):
         if importlib.util.find_spec("PIL") is None:
             self.skipTest("Pillow is intentionally supplied by the selected SCM runtime")

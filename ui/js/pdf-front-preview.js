@@ -7,7 +7,10 @@ import {
 } from "./pdf-preview-transport.js";
 
 
-const PREVIEW_DEBOUNCE_MS = 750;
+// Command validation already waits 250 ms after a form edit. This shorter
+// second-stage pause still coalesces its validated events without adding most
+// of another second before useful rendering begins.
+const PREVIEW_DEBOUNCE_MS = 300;
 const POLL_DELAY_MS = 175;
 const POLL_MAX = 100;
 const RETRY_DELAY_MS = 2000;
@@ -109,6 +112,19 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     }
   };
 
+  const fitLightboxImage = () => {
+    const lightbox = state.lightbox;
+    const viewportWidth = Number(globalThis.innerWidth);
+    const viewportHeight = Number(globalThis.innerHeight);
+    if (!lightbox || !Number.isFinite(viewportWidth) || viewportWidth <= 0 ||
+        !Number.isFinite(viewportHeight) || viewportHeight <= 0) return;
+    const maxWidth = Math.max(1, Math.min(viewportWidth * 0.9, viewportWidth - 48));
+    const maxHeight = Math.max(1, Math.min(viewportHeight * 0.88, viewportHeight - 86));
+    const scale = Math.min(maxWidth / lightbox.result.width, maxHeight / lightbox.result.height);
+    lightbox.image.style.width = `${Math.max(1, Math.round(lightbox.result.width * scale))}px`;
+    lightbox.image.style.height = `${Math.max(1, Math.round(lightbox.result.height * scale))}px`;
+  };
+
   const openLightbox = (result, trigger) => {
     if (state.disposed || !panel.isConnected || !document.body?.append) return;
     closeLightbox(false);
@@ -133,7 +149,8 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
       "aria-label": "Expanded first page PDF preview",
       "aria-describedby": "pdf-preview-lightbox-hint",
     }, el("div", { class: "pdf-preview-lightbox-backdrop", onclick: () => closeLightbox() }), button);
-    state.lightbox = { root, image, button, trigger };
+    state.lightbox = { root, image, button, trigger, result };
+    fitLightboxImage();
     document.body.append(root);
     document.addEventListener("keydown", onLightboxKeyDown);
     button.focus?.();
@@ -449,13 +466,17 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     }, 100);
   };
   const onWindowFocus = () => refreshIfMounted();
+  const onWindowResize = () => {
+    scheduleStageFit();
+    fitLightboxImage();
+  };
   const onVisibilityChange = () => {
     if (document.visibilityState === "visible") refreshIfMounted();
   };
   document.addEventListener(COMMAND_PREVIEW_EVENT, onCommandPreview);
   document.addEventListener("visibilitychange", onVisibilityChange);
   globalThis.window?.addEventListener?.("focus", onWindowFocus);
-  globalThis.window?.addEventListener?.("resize", scheduleStageFit);
+  globalThis.window?.addEventListener?.("resize", onWindowResize);
 
   return () => {
     if (state.disposed) return;
@@ -465,7 +486,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     document.removeEventListener(COMMAND_PREVIEW_EVENT, onCommandPreview);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     globalThis.window?.removeEventListener?.("focus", onWindowFocus);
-    globalThis.window?.removeEventListener?.("resize", scheduleStageFit);
+    globalThis.window?.removeEventListener?.("resize", onWindowResize);
     cancelCurrent();
     stage.style?.removeProperty?.("--pdf-preview-fit-height");
     const image = stage.querySelector?.("img");
