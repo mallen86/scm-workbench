@@ -570,7 +570,12 @@ exposed through native IPC; its remote-input boundary is hardened before and dur
 native exposure. Release metadata is capped at 2 MiB and validated
 against the configured repository, fixed GitHub URL shapes, exact supported artifact
 names, and bounded asset fields. Concurrent checks share one locked lookup and publish
-strict, atomic state. Release notes are tag-bound, size-limited, HTML-escaped Markdown;
+strict, atomic state. In packaged windows, startup performs a fresh asynchronous
+native check before painting its resulting update notice; the same controller repeats
+the check every 24 hours while the WebView remains open. An
+ordinary worker startup does not wait for a helper result: the bounded reconciliation
+poll runs only when a valid update token still matches a durable handoff job. Release
+notes are tag-bound, size-limited, HTML-escaped Markdown;
 the WebView treats that renderer as its sole remote HTML boundary and renders all other
 release metadata as text nodes. Downloads have a 60-second total deadline, a 1 GiB
 ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
@@ -741,9 +746,10 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo test && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo check --features custom-protocol)
 ```
 
-The packaged smoke checks use temporary data and
-`SCM_WORKBENCH_NO_BOOTSTRAP=1`; they prove that the worker is live while
-port 8038 remains closed, the embedded index/assets rendered, the private
+The packaged smoke checks use temporary data,
+`SCM_WORKBENCH_NO_BOOTSTRAP=1`, and `SCM_WORKBENCH_NO_UPDATE_CHECK=1`; the
+last setting keeps release-network availability out of lifecycle verification. They
+prove that the worker is live while port 8038 remains closed, the embedded index/assets rendered, the private
 `ready` handshake and five unconditional public reads (`info`, `manifest`,
 `settings.get`, `jobs.list`, and `updates.get`) used native IPC, no WebView HTTP
 request occurred, and the worker is reaped on both soft close and hard shell

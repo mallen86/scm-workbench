@@ -1817,7 +1817,23 @@ def run_update_check() -> dict:
 
 
 def _poll_update_result(timeout: float = 60.0) -> None:
-    """Bounded startup poll: helper completion can race worker startup."""
+    """Wait only when this process is completing an authenticated handoff."""
+    try:
+        if reconcile_update_result():
+            return
+    except Exception:
+        pass
+    token = os.environ.get("SCM_WORKBENCH_UPDATE_TOKEN", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        return
+    try:
+        waiting = any(isinstance(job, dict) and job.get("kind") == "update" and
+                      job.get("status") == "handoff" and job.get("update_token") == token
+                      for job in read_persisted_jobs())
+    except Exception:
+        waiting = False
+    if not waiting:
+        return
     deadline = time.monotonic() + max(0.0, timeout)
     while time.monotonic() < deadline:
         try:
@@ -1825,16 +1841,18 @@ def _poll_update_result(timeout: float = 60.0) -> None:
                 return
         except Exception:
             pass
-        if not (DATA_DIR / ".update-result.json").exists():
+        if not os.path.lexists(DATA_DIR / ".update-result.json"):
             time.sleep(0.5)
         else:
             time.sleep(0.1)
 
 
 def _update_daemon() -> None:
-    """Check at server start, then once a day while the app is open."""
+    """Reconcile a handoff, then perform fallback checks when state is due."""
     time.sleep(1)
     _poll_update_result()
+    if os.environ.get("SCM_WORKBENCH_NO_UPDATE_CHECK") == "1":
+        return
     while True:
         try:
             reconcile_update_result()
@@ -3094,6 +3112,10 @@ def updates_view() -> dict:
 
 def _update_check_result(force: bool) -> dict:
     """Return the browser-compatible final body for an update check."""
+    if os.environ.get("SCM_WORKBENCH_NO_UPDATE_CHECK") == "1":
+        cached = copy.deepcopy(current_update_state(load_update_state()))
+        cached["cached"] = True
+        return {"ok": True, "state": cached}
     if not force:
         st = load_update_state()
         if st.get("status") in ("up-to-date", "update-available") and st.get("checked_at") is not None:

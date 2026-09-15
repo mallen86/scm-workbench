@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, ico } from "./core.js";import { jobs } from "./jobs.js";import { getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
+import { $, S, el, ico } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -20,7 +20,10 @@ let _updLastDone = null;
 let _updLastAt = null;
 let _updRequestPending = false;
 let _updJobStatus = null;
+let _automaticCheckTimer = null;
+let _automaticCheckPending = null;
 const UPDATE_ACTIVE_STATUSES = new Set(["running", "handoff"]);
+const AUTOMATIC_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export function updateInstallActive() {
   return _updRequestPending || UPDATE_ACTIVE_STATUSES.has(_updJobStatus) ||
@@ -233,4 +236,28 @@ export async function refreshUpdateNotice() {
   const tag = state.status === "update-available" ? String(state.latest || "") : "";
   if (!tag || S.updateNoticeDismissed === tag) { removeUpdateNotice(); return; }
   renderUpdateNotice(tag, state);
+}
+
+function runAutomaticUpdateCheck() {
+  if (_automaticCheckPending) return _automaticCheckPending;
+  const work = (async () => {
+    // Resolve the fresh state before exposing an install action so a persisted
+    // older release cannot race the lookup. Repaint afterward so a release
+    // discovered now is visible without visiting Settings.
+    removeUpdateNotice();
+    try { await checkUpdates(true); } catch { /* manual checks still expose errors */ }
+    try { await refreshUpdateNotice(); } catch { /* startup remains non-blocking */ }
+  })();
+  _automaticCheckPending = work;
+  work.finally(() => {
+    if (_automaticCheckPending === work) _automaticCheckPending = null;
+  }).catch(() => {});
+  return work;
+}
+
+/** Check once at packaged startup and once per day for the lifetime of the UI. */
+export function startAutomaticUpdateChecks() {
+  if (_automaticCheckTimer !== null) return _automaticCheckPending || Promise.resolve();
+  _automaticCheckTimer = setInterval(() => { runAutomaticUpdateCheck(); }, AUTOMATIC_UPDATE_INTERVAL_MS);
+  return runAutomaticUpdateCheck();
 }

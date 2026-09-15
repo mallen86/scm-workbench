@@ -46,6 +46,7 @@
 - [x] Checking for updates from the settings brings up the notification in the sidebar about the update. Clicking the update button in the settings starts the update but doesn't clear the notification from the sidebar. The update button in the settings stays clickable during the update. If the update button in settings is clicked to start an update then clear the sidebar notification and disable the update button until the update is done or failed.
 - [x] The cancel button for the jobs in simple mode has a weird square to the left of the text. Make it an actual X and also change the button to red to highlight the "danger" of clicking the button.
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
+- [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

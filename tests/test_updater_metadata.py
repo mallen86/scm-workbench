@@ -720,6 +720,54 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(forced, {"ok": True, "state": checked})
         run.assert_called_once_with()
 
+    def test_ordinary_startup_does_not_wait_for_an_update_result(self):
+        with patch.dict(os.environ, {"SCM_WORKBENCH_UPDATE_TOKEN": ""}), \
+                patch.object(server, "reconcile_update_result", return_value=False) as reconcile, \
+                patch.object(server.time, "sleep") as sleep:
+            server._poll_update_result()
+        reconcile.assert_called_once_with()
+        sleep.assert_not_called()
+
+    def test_reconciled_handoff_does_not_wait_again(self):
+        token = "a" * 64
+        with patch.dict(os.environ, {"SCM_WORKBENCH_UPDATE_TOKEN": token}), \
+                patch.object(server, "read_persisted_jobs", return_value=[]), \
+                patch.object(server, "reconcile_update_result", return_value=False) as reconcile, \
+                patch.object(server.time, "sleep") as sleep:
+            server._poll_update_result()
+        reconcile.assert_called_once_with()
+        sleep.assert_not_called()
+
+    def test_authenticated_handoff_waits_for_its_pending_result(self):
+        token = "a" * 64
+        handoff = {"kind": "update", "status": "handoff", "update_token": token}
+        with patch.dict(os.environ, {"SCM_WORKBENCH_UPDATE_TOKEN": token}), \
+                patch.object(server, "read_persisted_jobs", return_value=[handoff]), \
+                patch.object(server, "reconcile_update_result",
+                             side_effect=[False, False, True]) as reconcile, \
+                patch.object(server.time, "sleep") as sleep:
+            server._poll_update_result()
+        self.assertEqual(reconcile.call_count, 3)
+        sleep.assert_called_once_with(0.5)
+
+    def test_packaging_smoke_can_disable_release_lookups(self):
+        server.save_update_state(self.valid_state())
+        with patch.dict(os.environ, {"SCM_WORKBENCH_NO_UPDATE_CHECK": "1"}), \
+                patch.object(server, "run_update_check") as run:
+            result = server._update_check_result(True)
+        self.assertTrue(result["state"]["cached"])
+        self.assertEqual(result["state"]["status"], "up-to-date")
+        run.assert_not_called()
+
+        with patch.dict(os.environ, {"SCM_WORKBENCH_NO_UPDATE_CHECK": "1"}), \
+                patch.object(server, "_poll_update_result") as poll, \
+                patch.object(server, "run_update_check") as run, \
+                patch.object(server.time, "sleep") as sleep:
+            server._update_daemon()
+        sleep.assert_called_once_with(1)
+        poll.assert_called_once_with()
+        run.assert_not_called()
+
     def test_update_check_is_singleflight_and_waiters_get_same_result(self):
         asset_name = current_asset_name()
         asset = {

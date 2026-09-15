@@ -58,6 +58,9 @@ def main():
                    'job.progress?.restart_at', 'Restarting in ${seconds}',
                    'setInterval(tick, 250)', "export function updateInstallActive()",
                    "export async function startUpdateInstall()", "UPDATE_ACTIVE_STATUSES",
+                   "export function startAutomaticUpdateChecks()",
+                   "AUTOMATIC_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000",
+                   "await checkUpdates(true)", "await refreshUpdateNotice()",
                    "_updRequestPending = true", "removeUpdateNotice();"):
         if marker not in updater_ui:
             return fail(f"update progress strip is missing {marker}")
@@ -87,12 +90,22 @@ def main():
         return fail("a manual check does not refresh the sidebar notice")
     app = (UI / "app.js").read_text(encoding="utf-8")
     for marker in ('import { getTauriInvoke } from "./transport.js";',
-                   'import { refreshUpdateNotice } from "./updater-ui.js";',
-                   "if (getTauriInvoke()) Promise.resolve().then(() => refreshUpdateNotice()).catch(() => {});"):
+                   'import { startAutomaticUpdateChecks } from "./updater-ui.js";',
+                   "if (getTauriInvoke()) Promise.resolve().then(() => startAutomaticUpdateChecks()).catch(() => {});"):
         if marker not in app:
             return fail(f"packaged startup update read is missing {marker}")
-    if "getUpdates" in app:
-        return fail("startup still reads the update state twice")
+    if "getUpdates" in app or "checkUpdates" in app:
+        return fail("startup bypasses the shared automatic-update controller")
+    backend = (ROOT / "scm_workbench" / "server.py").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
+    for marker in ('token = os.environ.get("SCM_WORKBENCH_UPDATE_TOKEN", "")',
+                   'if not re.fullmatch(r"[0-9a-f]{64}", token):',
+                   'os.environ.get("SCM_WORKBENCH_NO_UPDATE_CHECK") == "1"'):
+        if marker not in backend:
+            return fail(f"automatic update backend is missing {marker}")
+    if workflow.count("SCM_WORKBENCH_NO_UPDATE_CHECK=1") != 2 or \
+            workflow.count('SCM_WORKBENCH_NO_UPDATE_CHECK = "1"') != 2:
+        return fail("packaging lifecycle smokes do not disable release-network checks")
     for path in UI.rglob("*.js"):
         text = path.read_text(encoding="utf-8")
         if path != FACADE and any(route in text for route in ("/api/updates", "/api/release-notes")):
@@ -201,15 +214,28 @@ globalThis.__updateJobs = {
 const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
 globalThis.__updateState = { state: {} };
+globalThis.__automaticChecks = [];
 globalThis.__startUpdateRequest = async () => ({ ok: true, job: { id: "update-1" } });
-const updaterUpdates = dataUrl(`export const getUpdates = async () => globalThis.__updateState; export const startUpdate = async () => globalThis.__startUpdateRequest();`);
+const updaterUpdates = dataUrl(`
+  export const getUpdates = async () => globalThis.__updateState;
+  export const checkUpdates = async force => {
+    globalThis.__automaticChecks.push(force);
+    if (globalThis.__automaticCheckResult) globalThis.__updateState = globalThis.__automaticCheckResult;
+    return globalThis.__updateState;
+  };
+  export const startUpdate = async () => globalThis.__startUpdateRequest();
+`);
 const loadedUpdaterSource = updaterSource
   .replace('from "./core.js"', `from "${updaterCore}"`)
   .replace('from "./jobs.js"', `from "${updaterJobs}"`)
   .replace('from "./updates-transport.js"', `from "${updaterUpdates}"`);
 const realInterval = globalThis.setInterval, realClearInterval = globalThis.clearInterval;
 let intervalCleared = false;
-globalThis.setInterval = fn => { globalThis.__updateTick = fn; return 41; };
+globalThis.setInterval = (fn, delay) => {
+  if (delay === 24 * 60 * 60 * 1000) { globalThis.__automaticUpdateTick = fn; return 42; }
+  globalThis.__updateTick = fn;
+  return 41;
+};
 globalThis.clearInterval = id => { if (id === 41) intervalCleared = true; };
 const updaterUi = await import(dataUrl(loadedUpdaterSource));
 updaterUi.startUpdateStrip("update-1");
@@ -271,8 +297,26 @@ listedJob = { ...listedJob, status: "fail" };
 globalThis.__updateTick();
 await new Promise(resolve => realTimeout(resolve, 0));
 if (updaterUi.updateInstallActive()) fail("install actions did not re-enable after update failure");
+
+// Packaged startup forces a fresh check before painting its result. Its daily
+// timer repeats that flow without allowing duplicate scheduler installation.
+updaterUi.stopUpdateStrip();
+globalThis.__updateState = { state: { status: "up-to-date", latest: "v5" } };
+globalThis.__automaticCheckResult = { state: { status: "update-available", latest: "v6", published: "2026-01-03T00:00:00Z" } };
+await updaterUi.startAutomaticUpdateChecks();
+if (globalThis.__automaticChecks.length !== 1 || globalThis.__automaticChecks[0] !== true ||
+    !globalThis.__updateNodes.get("#updatenotice")?.isConnected || !globalThis.__automaticUpdateTick)
+  fail("packaged startup did not force a fresh check and paint its resulting notice");
+await updaterUi.startAutomaticUpdateChecks();
+if (globalThis.__automaticChecks.length !== 1)
+  fail("automatic update scheduling was installed more than once");
+globalThis.__automaticUpdateTick();
+await new Promise(resolve => realTimeout(resolve, 0));
+await new Promise(resolve => realTimeout(resolve, 0));
+if (globalThis.__automaticChecks.length !== 2 || globalThis.__automaticChecks[1] !== true)
+  fail("the daily automatic update timer did not perform a fresh check");
 globalThis.setInterval = realInterval; globalThis.clearInterval = realClearInterval;
-console.log("ok: update transport, shared install state, notices, persistent failures, and restart countdown pass");
+console.log("ok: update transport, automatic checks, shared install state, notices, persistent failures, and restart countdown pass");
 '''.strip()
     result = subprocess.run([node, "--input-type=module", "-", str(FACADE), str(UPDATER_UI)], input=script,
                             text=True, capture_output=True)

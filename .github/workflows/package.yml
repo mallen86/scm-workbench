@@ -164,6 +164,7 @@ jobs:
           ws="$GITHUB_WORKSPACE"
           app="$ws/build/macos/SCM Workbench.app"
           export PYTHONDONTWRITEBYTECODE=1
+          export SCM_WORKBENCH_NO_UPDATE_CHECK=1
           "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
           "$app/Contents/runtime/python/install/bin/python3.13" "$ws/scripts/check_pdf_preview_helper.py" "$app/Contents/app/scm_workbench/pdf_preview_helper.py"
           data="$(mktemp -d /private/tmp/scm-workbench-smoke.XXXXXX)/scm-data"
@@ -256,6 +257,7 @@ jobs:
           ws="$GITHUB_WORKSPACE"
           app="$ws/build/macos/SCM Workbench.app"
           export PYTHONDONTWRITEBYTECODE=1
+          export SCM_WORKBENCH_NO_UPDATE_CHECK=1
           data="$(mktemp -d /private/tmp/scm-workbench-reap.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
           export SCM_WORKBENCH_NO_BOOTSTRAP=1
@@ -473,6 +475,7 @@ jobs:
           New-Item -ItemType Directory -Force $requestedData | Out-Null
           $env:SCM_WORKBENCH_DATA = (Resolve-Path $requestedData).Path
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
+          $env:SCM_WORKBENCH_NO_UPDATE_CHECK = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $stdout = Join-Path $env:RUNNER_TEMP "wb-shell-stdout.log"
           $stderr = Join-Path $env:RUNNER_TEMP "wb-shell-stderr.log"
@@ -540,6 +543,7 @@ jobs:
           New-Item -ItemType Directory -Force $requestedData | Out-Null
           $env:SCM_WORKBENCH_DATA = (Resolve-Path $requestedData).Path
           $env:SCM_WORKBENCH_NO_BOOTSTRAP = "1"
+          $env:SCM_WORKBENCH_NO_UPDATE_CHECK = "1"
           $log = Join-Path $env:SCM_WORKBENCH_DATA "server-tauri.log"
           $proc = Start-Process -FilePath (Join-Path $ws "build\windows\SCM Workbench.exe") -PassThru
           function Test-WorkbenchPort {
