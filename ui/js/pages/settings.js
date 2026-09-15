@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes } from "../updates-transport.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
 // URL reaches the OS browser. A release link must remain on GitHub and have
@@ -91,7 +91,7 @@ function showWhatsNew(tag, releaseUrl) {
     }
   })();
 }
-import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { refreshUpdateNotice, startUpdateStrip } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
+import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { refreshUpdateNotice, startUpdateInstall, updateInstallActive } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   let repoInitPending = false;
@@ -471,6 +471,11 @@ PAGES.settings = (root) => {
         uStatus.textContent = "Asking GitHub for the newest release…";
         return;
       }
+      if (updateInstallActive()) {
+        setBtn("Updating…", null, true);
+        uStatus.textContent = "Working. Progress appears in the strip at bottom left. The app closes and reopens as the new version when it is done.";
+        return;
+      }
       switch (st.status) {
         case "never":
           setBtn("Check for updates", doCheck);
@@ -543,10 +548,21 @@ PAGES.settings = (root) => {
     }
 
     const startUpdate = async () => {
+      if (updateInstallActive()) return;
+      uBtn.disabled = true;
+      uStatus.textContent = "Starting the update…";
       let r;
-      try { r = await startUpdateRequest(); }
-      catch (error) { toast("err", error?.message || "The update could not start."); return; }
-      if (!r.ok) { toast("warn", r.errors?.[0] || "The update could not start."); return; }
+      try { r = await startUpdateInstall(); }
+      catch (error) {
+        toast("err", error?.message || "The update could not start.");
+        await render();
+        return;
+      }
+      if (!r.ok) {
+        toast("warn", r.errors?.[0] || "The update could not start.");
+        await render();
+        return;
+      }
       uStatus.textContent = "Working. Progress appears in the strip at bottom left. The app closes and reopens as the new version when it is done.";
       const job = r.job || {};
       // The console (advanced mode) keeps its live transcript view; the strip
@@ -563,7 +579,7 @@ PAGES.settings = (root) => {
         }
         toggleConsole();
       }
-      startUpdateStrip(job.id);
+      await render();
     };
 
     uBtn.onclick = null;   // render() owns the button from here

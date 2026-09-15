@@ -112,11 +112,13 @@ def main() -> int:
     # Simple mode cancels the exact running strip job through the shared facade.
     # The control is outside the grid so it cannot increase the label row's
     # height or push the progress bar down.
-    for marker in ('class: "btn sm ghost js-cancel"', 'title: "Cancel this job"',
-                   "const result = await jobs.kill(id);", "cancel.dataset.jobId = run.id;",
-                   "cancel.hidden = false;", "cancel.disabled = stoppingId === run.id;",
+    for marker in ('class: "btn sm danger js-cancel"', 'title: "Cancel this job"',
+                   'ico("x"), "Cancel"', "const result = await jobs.kill(id);",
+                   "cancel.dataset.jobId = run.id;", "cancel.hidden = false;",
+                   "cancel.disabled = stoppingId === run.id;",
+                   ".btn.danger { color: var(--err);",
                    ".jobstrip .js-cancel { position: absolute; top: 8px; right: 10px;"):
-        source = theme if marker.startswith(".jobstrip") else jobstrip
+        source = theme if marker.startswith(".") else jobstrip
         if marker not in source:
             print(f"FAIL: simple-mode job cancellation is missing {marker}")
             return 1

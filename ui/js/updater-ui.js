@@ -18,6 +18,14 @@ let _updStrip = null;
 let _updTimer = null;
 let _updLastDone = null;
 let _updLastAt = null;
+let _updRequestPending = false;
+let _updJobStatus = null;
+const UPDATE_ACTIVE_STATUSES = new Set(["running", "handoff"]);
+
+export function updateInstallActive() {
+  return _updRequestPending || UPDATE_ACTIVE_STATUSES.has(_updJobStatus) ||
+    (S.jobs || []).some(job => job?.kind === "update" && UPDATE_ACTIVE_STATUSES.has(job.status));
+}
 
 function updStrip() {
   if (_updStrip && _updStrip.isConnected) return _updStrip;
@@ -37,6 +45,7 @@ export function stopUpdateStrip() {
   if (_updTimer) { clearInterval(_updTimer); _updTimer = null; }
   if (_updStrip) { _updStrip.remove(); _updStrip = null; }
   _updLastDone = null; _updLastAt = null;
+  _updJobStatus = null;
 }
 
 function updateStrip(job) {
@@ -118,11 +127,13 @@ async function finishUpdateStrip(job) {
 
 export function startUpdateStrip(jobId) {
   stopUpdateStrip();
+  _updJobStatus = "running";
   const tick = async () => {
     let rows;
     try { rows = (await jobs.list()).jobs || []; } catch { return; }
     const j = rows.find(x => x.id === jobId) || rows.find(x => x.kind === "update");
     if (!j) return;
+    _updJobStatus = j.status;
     updateStrip(j);
     if (j.status !== "running") {
       if (_updTimer) { clearInterval(_updTimer); _updTimer = null; }
@@ -152,6 +163,24 @@ function removeUpdateNotice() {
 
 const displayTag = tag => "v" + String(tag || "").replace(/^v/, "");
 
+/** Start one update from any UI entry point and synchronize shared chrome. */
+export async function startUpdateInstall() {
+  if (updateInstallActive()) {
+    return { ok: false, errors: ["An update is already running."] };
+  }
+  _updRequestPending = true;
+  try {
+    const result = await startUpdateRequest();
+    if (result?.ok) {
+      removeUpdateNotice();
+      startUpdateStrip(result.job?.id);
+    }
+    return result;
+  } finally {
+    _updRequestPending = false;
+  }
+}
+
 function renderUpdateNotice(tag, state) {
   if (_noticeTag === tag && $("#updatenotice")) return;
   removeUpdateNotice();
@@ -174,7 +203,7 @@ function renderUpdateNotice(tag, state) {
     install.disabled = true;
     let result;
     try {
-      result = await startUpdateRequest();
+      result = await startUpdateInstall();
     } catch (error) {
       install.disabled = false;
       meta.textContent = error?.message || "The update could not start.";
@@ -185,10 +214,7 @@ function renderUpdateNotice(tag, state) {
       meta.textContent = result?.errors?.[0] || "The update could not start.";
       return;
     }
-    // The progress strip replaces the notice: it is the same seat, and the
-    // notice would only restate what the strip already shows.
-    removeUpdateNotice();
-    startUpdateStrip(result.job?.id);
+    // startUpdateInstall replaces this notice with the shared progress strip.
   };
   actions.append(install);
   const notice = el("div", { class: "repoprog sidebar-note", id: "updatenotice" }, head, row, actions);

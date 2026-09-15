@@ -29,8 +29,8 @@ export function jobStrip(kind, opts = {}) {
   const warningIcons = el("div", { class: "js-progress-warnings", hidden: true });
   const progressRow = el("div", { class: "js-progress-row" }, warningIcons, bar);
   const body = el("div", { class: "js-body" });
-  const cancel = el("button", { type: "button", class: "btn sm ghost js-cancel", hidden: true,
-    title: "Cancel this job", "aria-label": "Cancel this job" }, ico("stop"), "Cancel");
+  const cancel = el("button", { type: "button", class: "btn sm danger js-cancel", hidden: true,
+    title: "Cancel this job", "aria-label": "Cancel this job" }, ico("x"), "Cancel");
   strip.append(
     el("div", { class: "js-top" }, el("span", { class: "js-ico" }, ico(opts.icon || "play")), label),
     progressRow,

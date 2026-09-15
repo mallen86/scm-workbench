@@ -38,19 +38,27 @@ def main():
     ):
         if marker not in source:
             return fail(f"updates facade is missing {marker}")
-    if 'import { getUpdates, checkUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "../updates-transport.js";' not in page:
+    if 'import { getUpdates, checkUpdates, getUpdateNotes } from "../updates-transport.js";' not in page:
         return fail("settings page does not import the updates facade")
-    for marker in ("getUpdates()", "checkUpdates(true)", "getUpdateNotes(tag)", "startUpdateRequest()",
+    if 'import { refreshUpdateNotice, startUpdateInstall, updateInstallActive } from "../updater-ui.js";' not in page:
+        return fail("settings page does not use the shared update-install controller")
+    for marker in ("getUpdates()", "checkUpdates(true)", "getUpdateNotes(tag)", "startUpdateInstall()",
                    "let checkPending = false", "checkPending = true", "checkPending = false",
-                   "if (checkPending || st.checking)", 'setBtn("Check for updates", doCheck)'):
+                   "if (checkPending || st.checking)", "if (updateInstallActive())",
+                   'setBtn("Updating…", null, true)', "uBtn.disabled = true;",
+                   'setBtn("Check for updates", doCheck)'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
+    if "startUpdateRequest" in page or "startUpdateStrip(job.id)" in page:
+        return fail("settings bypasses the shared update-install controller")
     if "checkUpdates(!fresh)" in page:
         return fail("manual update checks still reuse the scheduled-check cache")
     for marker in ("async function finishUpdateStrip(job)", "await jobs.log(job.id)",
                    "await finishUpdateStrip(j)", 'head.textContent = failed ? "SCM Workbench update failed"',
                    'job.progress?.restart_at', 'Restarting in ${seconds}',
-                   'setInterval(tick, 250)'):
+                   'setInterval(tick, 250)', "export function updateInstallActive()",
+                   "export async function startUpdateInstall()", "UPDATE_ACTIVE_STATUSES",
+                   "_updRequestPending = true", "removeUpdateNotice();"):
         if marker not in updater_ui:
             return fail(f"update progress strip is missing {marker}")
     # The standing "an update is ready" notice: the scheduled check runs in the
@@ -175,20 +183,26 @@ class Element {
   }
   append(...children) { for (const child of children.flat()) { if (child instanceof Element) this.children.push(child); else if (child != null) this.textContent += String(child); } }
   before(child) { globalThis.__insertedUpdateStrip = child; child.isConnected = true; }
-  remove() { this.isConnected = false; }
+  remove() { this.isConnected = false; if (this.id) globalThis.__updateNodes.delete("#" + this.id); }
   get firstElementChild() { return this.children[0] || null; }
 }
+globalThis.__updateNodes = new Map();
 globalThis.__updateFoot = new Element("footer");
-globalThis.__makeUpdateElement = (tag, attrs, children) => new Element(tag, attrs, children);
+globalThis.__makeUpdateElement = (tag, attrs, children) => {
+  const node = new Element(tag, attrs, children);
+  if (node.id) globalThis.__updateNodes.set("#" + node.id, node);
+  return node;
+};
 let listedJob = { id: "update-1", kind: "update", title: "Update to v2", status: "fail", progress: { stage: "extract" } };
 globalThis.__updateJobs = {
   list: async () => ({ jobs: [listedJob] }),
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
-const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
+const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
-// The sidebar notice reads the update state; keep it inert for the strip test.
-const updaterUpdates = dataUrl(`export const getUpdates = async () => ({ state: {} }); export const startUpdate = async () => ({ ok: true, job: { id: "update-1" } });`);
+globalThis.__updateState = { state: {} };
+globalThis.__startUpdateRequest = async () => ({ ok: true, job: { id: "update-1" } });
+const updaterUpdates = dataUrl(`export const getUpdates = async () => globalThis.__updateState; export const startUpdate = async () => globalThis.__startUpdateRequest();`);
 const loadedUpdaterSource = updaterSource
   .replace('from "./core.js"', `from "${updaterCore}"`)
   .replace('from "./jobs.js"', `from "${updaterJobs}"`)
@@ -222,10 +236,43 @@ Date.now = realNow;
 listedJob = { id: "update-3", kind: "update", title: "Update to v4", status: "running", progress: { stage: "download", done: 2, total: 10 } };
 updaterUi.startUpdateStrip("update-3");
 await new Promise(resolve => realTimeout(resolve, 0));
-if (countdownStrip.isConnected || !globalThis.__insertedUpdateStrip?.isConnected)
-  fail("a new update did not replace the retained countdown strip");
+if (countdownStrip.isConnected || !globalThis.__insertedUpdateStrip?.isConnected || !updaterUi.updateInstallActive())
+  fail("a new update did not replace the retained countdown strip or report active");
+listedJob = { ...listedJob, status: "fail" };
+globalThis.__updateTick();
+await new Promise(resolve => realTimeout(resolve, 0));
+if (updaterUi.updateInstallActive()) fail("a failed update left install actions disabled");
+
+// Both the Settings action and the sidebar notice use one admission guard.
+// A successful Settings-style start removes the standing notice immediately,
+// rejects a concurrent second click, and stays active until terminal failure.
+updaterUi.stopUpdateStrip();
+globalThis.__updateState = { state: { status: "update-available", latest: "v5", published: "2026-01-02T00:00:00Z" } };
+await updaterUi.refreshUpdateNotice();
+const standingNotice = globalThis.__updateNodes.get("#updatenotice");
+if (!standingNotice?.isConnected) fail("the update notice fixture was not rendered");
+let resolveStart, startCalls = 0;
+globalThis.__startUpdateRequest = () => {
+  startCalls++;
+  return new Promise(resolve => { resolveStart = resolve; });
+};
+const firstStart = updaterUi.startUpdateInstall();
+if (!updaterUi.updateInstallActive()) fail("an update request did not disable install actions immediately");
+const duplicateStart = await updaterUi.startUpdateInstall();
+if (duplicateStart.ok !== false || startCalls !== 1) fail("concurrent update clicks reached the transport");
+listedJob = { id: "update-4", kind: "update", title: "Update to v5", status: "running", progress: { stage: "download", done: 1, total: 10 } };
+resolveStart({ ok: true, job: { id: "update-4" } });
+const acceptedStart = await firstStart;
+await new Promise(resolve => realTimeout(resolve, 0));
+if (!acceptedStart.ok || standingNotice.isConnected || globalThis.__updateNodes.has("#updatenotice"))
+  fail("an accepted update did not clear the standing sidebar notice");
+if (!updaterUi.updateInstallActive()) fail("an accepted update re-enabled install actions while running");
+listedJob = { ...listedJob, status: "fail" };
+globalThis.__updateTick();
+await new Promise(resolve => realTimeout(resolve, 0));
+if (updaterUi.updateInstallActive()) fail("install actions did not re-enable after update failure");
 globalThis.setInterval = realInterval; globalThis.clearInterval = realClearInterval;
-console.log("ok: update transport, forced checks, persistent failures, and restart countdown pass");
+console.log("ok: update transport, shared install state, notices, persistent failures, and restart countdown pass");
 '''.strip()
     result = subprocess.run([node, "--input-type=module", "-", str(FACADE), str(UPDATER_UI)], input=script,
                             text=True, capture_output=True)
