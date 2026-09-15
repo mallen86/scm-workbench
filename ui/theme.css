@@ -770,6 +770,21 @@ select.input option { background: var(--surface); color: var(--text); }
   width: 100%;
   min-width: 0;
 }
+.pdf-preview-enlarge {
+  appearance: none;
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  background: transparent;
+  cursor: zoom-in;
+}
+.pdf-preview-enlarge:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 75%, white);
+  outline-offset: 5px;
+}
 .pdf-preview-image {
   display: block;
   max-width: 100%;
@@ -779,6 +794,11 @@ select.input option { background: var(--surface); color: var(--text); }
   border-radius: 2px;
   background: white;
   box-shadow: 0 10px 30px rgba(0, 0, 0, .38);
+  transition: transform .14s ease, box-shadow .14s ease;
+}
+.pdf-preview-enlarge:hover .pdf-preview-image {
+  transform: translateY(-1px);
+  box-shadow: 0 13px 34px rgba(0, 0, 0, .44);
 }
 .pdf-preview-figure figcaption {
   max-width: 520px;
@@ -786,6 +806,64 @@ select.input option { background: var(--surface); color: var(--text); }
   font-size: 10.5px;
   line-height: 1.45;
   text-align: center;
+}
+.pdf-preview-enlarge-hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--accent);
+  font-weight: 700;
+}
+.pdf-preview-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 180;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  isolation: isolate;
+}
+.pdf-preview-lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: rgba(5, 8, 15, .82);
+  backdrop-filter: blur(5px);
+}
+.pdf-preview-lightbox-page {
+  appearance: none;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 48px);
+  padding: 0;
+  border: 0;
+  color: #fff;
+  background: transparent;
+  cursor: zoom-out;
+}
+.pdf-preview-lightbox-page:focus-visible { outline: none; }
+.pdf-preview-lightbox-page:focus-visible .pdf-preview-lightbox-image {
+  outline: 3px solid color-mix(in srgb, var(--accent) 78%, white);
+  outline-offset: 5px;
+}
+.pdf-preview-lightbox-image {
+  display: block;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 86px);
+  width: auto;
+  height: auto;
+  border-radius: 3px;
+  background: white;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .62);
+}
+.pdf-preview-lightbox-hint {
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
 }
 .pdf-validation-summary {
   display: flex;

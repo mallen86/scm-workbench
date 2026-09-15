@@ -66,6 +66,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     retries: 0,
     lastDetail: null,
     lastResult: null,
+    lightbox: null,
   };
 
   const clearTimers = () => {
@@ -83,6 +84,58 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     state.resizeFrame = null;
     state.pollAbort?.abort();
     state.pollAbort = null;
+  };
+
+  const closeLightbox = (restoreFocus = true) => {
+    const lightbox = state.lightbox;
+    if (!lightbox) return;
+    state.lightbox = null;
+    document.removeEventListener("keydown", onLightboxKeyDown);
+    lightbox.image.removeAttribute("src");
+    lightbox.root.remove();
+    if (restoreFocus && lightbox.trigger?.isConnected) {
+      lightbox.trigger.focus?.({ preventScroll: true });
+    }
+  };
+
+  const onLightboxKeyDown = event => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeLightbox();
+    } else if (event.key === "Tab" && state.lightbox) {
+      event.preventDefault();
+      state.lightbox.button.focus?.();
+    }
+  };
+
+  const openLightbox = (result, trigger) => {
+    if (state.disposed || !panel.isConnected || !document.body?.append) return;
+    closeLightbox(false);
+    const image = el("img", {
+      class: "pdf-preview-lightbox-image",
+      alt: "Expanded low quality preview of the first PDF page",
+      width: result.width,
+      height: result.height,
+    });
+    image.src = `data:image/jpeg;base64,${result.data}`;
+    const button = el("button", {
+      class: "pdf-preview-lightbox-page",
+      type: "button",
+      "aria-label": "Close expanded first page PDF preview",
+      onclick: () => closeLightbox(),
+    }, image, el("span", { class: "pdf-preview-lightbox-hint", id: "pdf-preview-lightbox-hint" },
+      "Click the page again to return."));
+    const root = el("div", {
+      class: "pdf-preview-lightbox",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Expanded first page PDF preview",
+      "aria-describedby": "pdf-preview-lightbox-hint",
+    }, el("div", { class: "pdf-preview-lightbox-backdrop", onclick: () => closeLightbox() }), button);
+    state.lightbox = { root, image, button, trigger };
+    document.body.append(root);
+    document.addEventListener("keydown", onLightboxKeyDown);
+    button.focus?.();
   };
 
   // WebKit can retain the stage's narrow-window grid height after the page
@@ -117,6 +170,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
 
   const replaceStage = (...children) => {
     if (state.disposed || !panel.isConnected) return;
+    closeLightbox(false);
     stage.innerHTML = "";
     stage.append(...children);
     scheduleStageFit();
@@ -182,15 +236,23 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     });
     image.onload = scheduleStageFit;
     image.src = `data:image/jpeg;base64,${result.data}`;
+    const enlarge = el("button", {
+      class: "pdf-preview-enlarge",
+      type: "button",
+      "aria-label": "Enlarge first page PDF preview",
+      title: "Enlarge preview",
+      onclick: () => openLightbox(result, enlarge),
+    }, image);
     const sampleText = result.placed > result.sampled
       ? `Filled ${result.placed} first-page positions using ${result.sampled} representative fronts from ${result.available} discovered fronts.`
       : result.available === result.sampled
         ? `Built from ${result.sampled} ${result.sampled === 1 ? "front" : "fronts"}.`
         : `Built from ${result.sampled} of ${result.available} discovered fronts.`;
     return el("figure", { class: "pdf-preview-figure" },
-      image,
+      enlarge,
       el("figcaption", {}, sampleText,
-        " This represents the first front page at reduced quality and may not reflect full deck ordering."));
+        " This represents the first front page at reduced quality and may not reflect full deck ordering.",
+        el("span", { class: "pdf-preview-enlarge-hint" }, "Click the page to enlarge it.")));
   };
 
   const showLoading = (message = "Preparing representative fronts and rendering the complete first-page layout.") => {
@@ -377,6 +439,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
 
   return () => {
     if (state.disposed) return;
+    closeLightbox(false);
     state.disposed = true;
     state.generation += 1;
     document.removeEventListener(COMMAND_PREVIEW_EVENT, onCommandPreview);

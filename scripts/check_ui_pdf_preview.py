@@ -74,6 +74,14 @@ def main() -> int:
         "placed > 256",
         "Filled ${result.placed} first-page positions",
         "data.length > 700000",
+        'class: "pdf-preview-enlarge"',
+        '"aria-label": "Enlarge first page PDF preview"',
+        'onclick: () => openLightbox(result, enlarge)',
+        'class: "pdf-preview-lightbox"',
+        '"aria-label": "Close expanded first page PDF preview"',
+        'document.addEventListener("keydown", onLightboxKeyDown)',
+        'document.removeEventListener("keydown", onLightboxKeyDown)',
+        "closeLightbox(false);\n    state.disposed = true;",
     ):
         if required not in controller:
             return fail(f"PDF preview lifecycle contract is missing {required}")
@@ -97,6 +105,7 @@ def main() -> int:
     for selector in (
         ".pdf-front-preview", ".pdf-preview-stage", ".pdf-preview-image",
         ".pdf-preview-loading", ".pdf-preview-error", ".pdf-validation-summary",
+        ".pdf-preview-enlarge", ".pdf-preview-lightbox", ".pdf-preview-lightbox-image",
         "--pdf-preview-fit-height",
     ):
         if selector not in css:
@@ -191,7 +200,13 @@ class FakeNode {
       getPropertyValue(name) { return this.values[name] || ""; },
     };
   }
-  append(...children) { this.children.push(...children.flat(Infinity).filter(Boolean)); }
+  append(...children) {
+    const added = children.flat(Infinity).filter(Boolean);
+    for (const child of added) {
+      if (child && typeof child === "object") { child.parentNode = this; child.isConnected = this.isConnected; }
+    }
+    this.children.push(...added);
+  }
   set innerHTML(value) { this._html = value; if (value === "") this.children = []; }
   get innerHTML() { return this._html; }
   querySelector(selector) {
@@ -203,6 +218,11 @@ class FakeNode {
     return null;
   }
   removeAttribute(name) { if (name === "src") this.src = ""; delete this.attrs[name]; }
+  remove() {
+    if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this);
+    this.parentNode = null; this.isConnected = false;
+  }
+  focus() { globalThis.document.activeElement = this; }
   getBoundingClientRect() { return { height: this.layoutHeight }; }
 }
 const coreUrl = dataUrl(`
@@ -233,6 +253,8 @@ globalThis.formRefreshes = 0;
 const listeners = new Map();
 globalThis.document = {
   visibilityState: "visible",
+  body: new FakeNode("body"),
+  activeElement: null,
   addEventListener(name, listener) { listeners.set(name, listener); },
   removeEventListener(name, listener) { if (listeners.get(name) === listener) listeners.delete(name); },
 };
@@ -294,6 +316,29 @@ previewStarts[1].resolve({ok:true,operation:{id:"b".repeat(32),status:"running"}
 await new Promise(resolve => setTimeout(resolve, 230));
 if (previewPolls.join() !== "b".repeat(32) || stage.children[0]?.tag !== "figure")
   fail("current operation was not polled and painted");
+const previewTrigger = stage.querySelector(".pdf-preview-enlarge");
+if (previewTrigger?.tag !== "button") fail("the rendered PDF page is not an enlarge button");
+previewTrigger.onclick();
+let lightbox = document.body.querySelector(".pdf-preview-lightbox");
+let lightboxButton = lightbox?.querySelector(".pdf-preview-lightbox-page");
+let lightboxImage = lightbox?.querySelector(".pdf-preview-lightbox-image");
+if (!lightbox || lightbox?.attrs?.role !== "dialog" || lightbox?.attrs?.["aria-modal"] !== "true" ||
+    lightboxButton?.tag !== "button" || lightboxImage?.src !== stage.querySelector("img")?.src ||
+    document.activeElement !== lightboxButton || !listeners.has("keydown"))
+  fail("clicking the PDF page did not open and focus the expanded in-app preview");
+let tabPrevented = false;
+listeners.get("keydown")?.({key:"Tab", preventDefault() { tabPrevented = true; }});
+if (!tabPrevented || document.activeElement !== lightboxButton)
+  fail("the expanded PDF preview did not keep keyboard focus in its dialog");
+lightboxButton.onclick();
+if (document.body.querySelector(".pdf-preview-lightbox") || lightboxImage.src ||
+    document.activeElement !== previewTrigger || listeners.has("keydown"))
+  fail("clicking the expanded PDF page did not close it and restore focus");
+previewTrigger.onclick();
+let escapePrevented = false;
+listeners.get("keydown")?.({key:"Escape", preventDefault() { escapePrevented = true; }});
+if (!escapePrevented || document.body.querySelector(".pdf-preview-lightbox") || listeners.has("keydown"))
+  fail("Escape did not close the expanded PDF preview cleanly");
 const fittedFigure = stage.querySelector(".pdf-preview-figure");
 fittedFigure.layoutHeight = 481;
 flushFrames();
@@ -305,7 +350,10 @@ flushFrames();
 if (stage.style.getPropertyValue("--pdf-preview-fit-height") !== "538px")
   fail("window resizing did not refit the complete preview height");
 const startsBeforeBlock = previewStarts.length;
+previewTrigger.onclick();
 emitResult({ppi:700}, {cmd:"python create_pdf.py",errors:[],warnings:["No fronts"],no_front_images:true});
+if (document.body.querySelector(".pdf-preview-lightbox") || listeners.has("keydown"))
+  fail("a replaced preview left its expanded dialog attached");
 await new Promise(resolve => setTimeout(resolve, 800));
 if (previewStarts.length !== startsBeforeBlock)
   fail("blocked validation started a representative render");
@@ -315,9 +363,10 @@ previewStarts[2].resolve({ok:true,operation:{id:"c".repeat(32),status:"running"}
 await Promise.resolve(); await Promise.resolve();
 dispose();
 if (!previewCancels.includes("c".repeat(32)) || listeners.has("wb:command-preview") ||
+    listeners.has("keydown") || document.body.querySelector(".pdf-preview-lightbox") ||
     windowListeners.has("resize") || stage.style.getPropertyValue("--pdf-preview-fit-height"))
   fail("page disposal did not cancel work and remove preview lifecycle state");
-console.log("ok: PDF preview controller refits resized images, cancels stale starts, paints only the current result, and disposes active work");
+console.log("ok: PDF preview controller enlarges and restores the page, refits resized images, cancels stale starts, paints only the current result, and disposes active work");
 ''',
         text=True,
         capture_output=True,
