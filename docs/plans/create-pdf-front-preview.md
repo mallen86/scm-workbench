@@ -102,6 +102,8 @@ Clone the normalized Create PDF arguments and override only the preview-specific
 
 Keep the real front-page layout and finishing arguments, including card and paper size, specialty layout, registration, borderless mode, front fit and crop, front extensions, front bleed, skipped positions, label, and outline.
 
+Force Matplotlib's non-interactive `Agg` backend in the private preview environment. Upstream uses `pyplot` only to render files, and allowing Windows to select `TkAgg` creates a short-lived `TkTopLevel` window that can take foreground focus.
+
 The operation must use the Python interpreter selected in Settings, set `stdin=subprocess.DEVNULL`, capture bounded output, and use the existing child process-group or Windows job containment behavior.
 
 ### 5. Bound paper geometry before launch

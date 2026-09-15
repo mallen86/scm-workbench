@@ -64,6 +64,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     pollAbort: null,
     polls: 0,
     retries: 0,
+    renderActive: false,
     lastDetail: null,
     lastResult: null,
     lightbox: null,
@@ -176,8 +177,11 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     scheduleStageFit();
   };
 
-  const showWaiting = message => replaceStage(
-    el("div", { class: "pdf-preview-empty" }, ico("image"), el("span", {}, message)));
+  const showWaiting = message => {
+    state.renderActive = false;
+    replaceStage(el("div", { class: "pdf-preview-empty" },
+      ico("image"), el("span", {}, message)));
+  };
 
   const paintValidation = result => {
     if (!validationPanel || state.disposed || !validationPanel.isConnected) return;
@@ -209,6 +213,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
   };
 
   const showError = (message, retryable = false) => {
+    state.renderActive = false;
     const actions = [];
     if (retryable && state.lastDetail) {
       actions.push(el("button", { class: "btn secondary pdf-preview-retry", type: "button",
@@ -221,6 +226,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
   };
 
   const cancelCurrent = () => {
+    state.renderActive = false;
     clearTimers();
     const operationId = state.operationId;
     state.operationId = null;
@@ -280,6 +286,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
   };
 
   const showResult = result => {
+    state.renderActive = false;
     if (result?.mime !== "image/jpeg" || typeof result.data !== "string" ||
         result.data.length > 700000 || !Number.isInteger(result.width) ||
         !Number.isInteger(result.height) || result.width < 1 || result.height < 1 ||
@@ -369,6 +376,7 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
       else showWaiting("Complete the PDF settings to see the first front page.");
       return;
     }
+    state.renderActive = true;
     showLoading();
     try {
       // Do not abort a start request. If this generation becomes stale, its
@@ -421,11 +429,23 @@ export function mountPdfFrontPreview(panel, validationPanel = null) {
     paintValidation(event.detail.result);
     schedule(event.detail);
   };
+  const focusRefreshBlocked = () => state.renderActive ||
+    state.debounceTimer !== null || state.retryTimer !== null || state.operationId !== null;
   const refreshIfMounted = () => {
     if (state.disposed || !panel.isConnected) return;
     if (state.focusTimer) clearTimeout(state.focusTimer);
+    state.focusTimer = null;
+    // Starting a hidden renderer can briefly take and return native focus on
+    // Windows. Revalidating in response would publish the same form again,
+    // cancel its active render, and put the panel back into the debounce state.
+    // An already-settling preview has current args and rescans its source, so
+    // only an idle preview needs the external-change refresh.
+    if (focusRefreshBlocked()) return;
     state.focusTimer = setTimeout(() => {
-      if (!state.disposed && panel.isConnected) updatePreview("create_pdf");
+      state.focusTimer = null;
+      if (!state.disposed && panel.isConnected && !focusRefreshBlocked()) {
+        updatePreview("create_pdf");
+      }
     }, 100);
   };
   const onWindowFocus = () => refreshIfMounted();

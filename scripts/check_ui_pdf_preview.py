@@ -70,6 +70,8 @@ def main() -> int:
         'addEventListener?.("resize", scheduleStageFit)',
         'removeEventListener?.("resize", scheduleStageFit)',
         'document.addEventListener("visibilitychange"',
+        "focusRefreshBlocked",
+        "state.renderActive = true",
         "sampled > 16",
         "placed > 256",
         "Filled ${result.placed} first-page positions",
@@ -296,11 +298,30 @@ const emit = value => emitResult(value, {
 });
 emit({ppi:100});
 emit({ppi:200});
-await new Promise(resolve => setTimeout(resolve, 800));
+// A native Windows control can briefly return focus while the form's validated
+// generation is still in its debounce period. That must not restart the wait.
+windowListeners.get("focus")?.();
+listeners.get("visibilitychange")?.();
+await new Promise(resolve => setTimeout(resolve, 130));
+if (formRefreshes !== 1)
+  fail("a transient focus return restarted the PDF preview debounce");
+await new Promise(resolve => setTimeout(resolve, 680));
 if (previewStarts.length !== 1 || previewStarts[0].args.ppi !== 200)
   fail("rapid validated changes were not debounced to the newest arguments");
+// The same focus return can occur while the hidden renderer is still starting.
+// Neither focus nor a visible transition may cancel that active generation.
+windowListeners.get("focus")?.();
+listeners.get("visibilitychange")?.();
+await new Promise(resolve => setTimeout(resolve, 130));
+if (formRefreshes !== 1 || previewStarts.length !== 1)
+  fail("a transient focus return restarted the active PDF preview");
 previewStarts[0].resolve({ok:true,operation:{id:"d".repeat(32),status:"running"}});
 await new Promise(resolve => setTimeout(resolve, 230));
+const refreshesBeforeIdleFocus = formRefreshes;
+windowListeners.get("focus")?.();
+await new Promise(resolve => setTimeout(resolve, 130));
+if (formRefreshes !== refreshesBeforeIdleFocus + 1)
+  fail("an idle PDF preview no longer refreshes after returning from external changes");
 previewStarts.length = 0; previewPolls.length = 0; previewCancels.length = 0;
 emit({ppi:300});
 if (!String(stage.children[0]?.class || "").includes("pdf-preview-refreshing"))

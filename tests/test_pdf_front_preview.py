@@ -334,7 +334,8 @@ class PdfFrontPreviewTests(unittest.TestCase):
                 (Path(argv[output_index]) / "page1.png").write_bytes(VALID_PNG)
 
         try:
-            with mock.patch.object(server, "_pdf_preview_run_child", side_effect=fake_child):
+            with (mock.patch.dict(os.environ, {"MPLBACKEND": "TkAgg"}),
+                  mock.patch.object(server, "_pdf_preview_run_child", side_effect=fake_child)):
                 result = server._render_pdf_preview(record)
             self.assertTrue(result["ok"])
             self.assertEqual(base64.b64decode(result["data"]), VALID_JPEG)
@@ -342,6 +343,7 @@ class PdfFrontPreviewTests(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             renderer = calls[1][0]
             self.assertEqual(calls[1][2].get("PYTHONDONTWRITEBYTECODE"), "1")
+            self.assertTrue(all(call[2].get("MPLBACKEND") == "Agg" for call in calls))
             self.assertEqual(renderer[renderer.index("--ppi") + 1], "75")
             self.assertIn("--output_images", renderer)
             self.assertIn("--only_fronts", renderer)

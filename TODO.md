@@ -42,6 +42,7 @@
 - [x] Keep collision-versioned cutting-template paths consistently spelled on Windows.
 - [x] Make Windows card-back replacement tolerate stale path timestamps and keep its rollback tests platform-correct.
 - [x] Make fetch image warning tooltips appear promptly and remain repeatable on Windows.
+- [x] Keep Matplotlib's Windows preview window from taking focus, and prevent transient focus events from restarting the render.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

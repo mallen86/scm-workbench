@@ -6111,6 +6111,11 @@ def _render_pdf_preview(record: dict) -> dict:
         raise PdfPreviewError(errors[0] if errors else "The representative preview command is incomplete.")
     env = dict(env)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Upstream imports pyplot and Windows otherwise selects the interactive
+    # Tk backend. Its short-lived "matplotlib" TkTopLevel can become the
+    # foreground window even though the Python console itself was suppressed.
+    # This is a headless render, so use the non-interactive raster backend.
+    env["MPLBACKEND"] = "Agg"
     if Path(os.path.abspath(os.fspath(cwd))) != root:
         raise PdfPreviewError("The connected SCM checkout changed while preparing the preview.", retryable=True)
     try:
