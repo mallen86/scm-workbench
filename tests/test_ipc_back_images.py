@@ -130,12 +130,14 @@ class BackImageTests(unittest.TestCase):
         unrelated.write_text("keep", encoding="utf-8")
         source = self.root / "picked.png"
         source.write_bytes(PNG)
-        source_fd = os.open(source, os.O_RDONLY)
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         try:
             source_stat = os.fstat(source_fd)
+
             def stable_open(path):
-                fd = os.open(path, os.O_RDONLY)
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
                 return fd, os.fstat(fd)
+
             with mock.patch.object(server, "_open_windows_regular_file", side_effect=stable_open):
                 result = server._import_back_image_windows(
                     source_fd, source_stat, source.name, back)
@@ -144,6 +146,43 @@ class BackImageTests(unittest.TestCase):
         self.assertEqual(result["name"], "picked (2).png")
         self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
         self.assertTrue((back / "picked (2).png").exists())
+
+    def test_windows_transaction_uses_handle_identity_for_cached_path_timestamp(self):
+        back = self.fixture.scm / "game" / "back"
+        old = back / "old.png"
+        old.write_bytes(PNG)
+        source = self.root / "new.jpg"
+        source.write_bytes(JPEG)
+        real_lstat = os.lstat
+
+        class CachedPathStat:
+            def __init__(self, observed):
+                self._observed = observed
+                self.st_ctime_ns = observed.st_ctime_ns - 500_000
+
+            def __getattr__(self, name):
+                return getattr(self._observed, name)
+
+        def cached_lstat(path):
+            observed = real_lstat(path)
+            return CachedPathStat(observed) if Path(path) == old else observed
+
+        def stable_open(path):
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            return fd, os.fstat(fd)
+
+        source_fd, source_stat = stable_open(source)
+        try:
+            with mock.patch.object(server.os, "lstat", side_effect=cached_lstat), \
+                    mock.patch.object(server, "_open_windows_regular_file",
+                                      side_effect=stable_open):
+                result = server._import_back_image_windows(
+                    source_fd, source_stat, source.name, back)
+        finally:
+            os.close(source_fd)
+        self.assertEqual(result["name"], "new.jpg")
+        self.assertFalse(old.exists())
+        self.assertEqual([item["name"] for item in result["back_images"]], ["new.jpg"])
 
     def test_post_move_identity_change_restores_all_old_names(self):
         back = self.fixture.scm / "game" / "back"
@@ -193,7 +232,7 @@ class BackImageTests(unittest.TestCase):
         real_unlink = server.os.unlink
 
         def fail_quarantine_cleanup(name, *args, **kwargs):
-            if name == "old.png" and kwargs.get("dir_fd") is not None:
+            if Path(os.fspath(name)).name == "old.png":
                 raise OSError("fixture cleanup failure")
             return real_unlink(name, *args, **kwargs)
 
@@ -215,20 +254,35 @@ class BackImageTests(unittest.TestCase):
         old.write_bytes(PNG)
         source = self.root / "new.jpg"
         source.write_bytes(JPEG)
-        real = server._rename_delete_candidate
         state = {"publish_seen": False}
+        if os.name == "nt":
+            real_rename = server.os.rename
 
-        def flaky(directory_fd, source_name, destination_name, **kwargs):
-            if source_name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
-                state["publish_seen"] = True
-                raise OSError("fixture publish failure")
-            if state["publish_seen"]:
-                raise OSError("fixture rollback failure")
-            return real(directory_fd, source_name, destination_name, **kwargs)
+            def flaky(source_path, destination_path, *args, **kwargs):
+                if Path(os.fspath(source_path)).name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
+                    state["publish_seen"] = True
+                    raise OSError("fixture publish failure")
+                if state["publish_seen"]:
+                    raise OSError("fixture rollback failure")
+                return real_rename(source_path, destination_path, *args, **kwargs)
+
+            rename_patch = mock.patch.object(server.os, "rename", side_effect=flaky)
+        else:
+            real_rename = server._rename_delete_candidate
+
+            def flaky(directory_fd, source_name, destination_name, **kwargs):
+                if source_name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
+                    state["publish_seen"] = True
+                    raise OSError("fixture publish failure")
+                if state["publish_seen"]:
+                    raise OSError("fixture rollback failure")
+                return real_rename(directory_fd, source_name, destination_name, **kwargs)
+
+            rename_patch = mock.patch.object(
+                server, "_rename_delete_candidate", side_effect=flaky)
 
         stderr = io.StringIO()
-        with mock.patch.object(server, "_rename_delete_candidate", side_effect=flaky), \
-                mock.patch.object(server.sys, "stderr", stderr):
+        with rename_patch, mock.patch.object(server.sys, "stderr", stderr):
             with self.assertRaises(server.BackImageImportError):
                 server.import_back_image(str(source), self.settings)
         self.assertIn("quarantined", stderr.getvalue())
@@ -244,14 +298,27 @@ class BackImageTests(unittest.TestCase):
         old.write_bytes(PNG)
         source = self.root / "new.jpg"
         source.write_bytes(JPEG)
-        real_rename = server._rename_delete_candidate
+        if os.name == "nt":
+            real_rename = server.os.rename
 
-        def fail_publish(directory_fd, source_name, destination_name, **kwargs):
-            if source_name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
-                raise OSError("fixture publish failure")
-            return real_rename(directory_fd, source_name, destination_name, **kwargs)
+            def fail_publish(source_path, destination_path, *args, **kwargs):
+                if Path(os.fspath(source_path)).name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
+                    raise OSError("fixture publish failure")
+                return real_rename(source_path, destination_path, *args, **kwargs)
 
-        with mock.patch.object(server, "_rename_delete_candidate", side_effect=fail_publish):
+            rename_patch = mock.patch.object(server.os, "rename", side_effect=fail_publish)
+        else:
+            real_rename = server._rename_delete_candidate
+
+            def fail_publish(directory_fd, source_name, destination_name, **kwargs):
+                if source_name.startswith(server.BACK_IMAGE_TEMP_PREFIX):
+                    raise OSError("fixture publish failure")
+                return real_rename(directory_fd, source_name, destination_name, **kwargs)
+
+            rename_patch = mock.patch.object(
+                server, "_rename_delete_candidate", side_effect=fail_publish)
+
+        with rename_patch:
             with self.assertRaises(server.BackImageImportError):
                 server.import_back_image(str(source), self.settings)
         self.assertEqual(old.read_bytes(), PNG)

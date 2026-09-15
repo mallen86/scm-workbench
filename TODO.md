@@ -38,6 +38,9 @@
 - [x] Generating a PDF preview at the default window width and then making the window wider results in the bottom of the PDF cut off.
 - [x] Change the text of the preview section from "Representative front-page preview" to "First Page Preview". Remove "This is not a print proof." from the preview section description.
 - [x] Don't set a maximum for the number of cards on the sheet. Certain card and paper sizes can have 72 cards (micro/arch_b). More reasonable situations like standard/a3 can have 18 cards.
+- [x] PDF preview on Windows falsely says a front image changed when Windows reports a stale cached path timestamp.
+- [x] Keep collision-versioned cutting-template paths consistently spelled on Windows.
+- [x] Make Windows card-back replacement tolerate stale path timestamps and keep its rollback tests platform-correct.
 
 # Features
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

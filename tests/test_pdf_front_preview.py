@@ -240,6 +240,48 @@ class PdfFrontPreviewTests(unittest.TestCase):
             server._pdf_preview_copy_sample(
                 self.record(), root, identity, parts, self.fixture.data / "unused")
 
+    def test_windows_scan_uses_handle_identity_when_path_timestamp_is_stale(self):
+        front = self.fixture.scm / "game/front"
+        card = front / "card.png"
+        root, identity, parts = server._pdf_preview_source(
+            server.load_settings(), {"front_dir": "game/front"})
+        real_lstat = os.lstat
+        swapped = False
+
+        class CachedPathStat:
+            def __init__(self, observed):
+                self._observed = observed
+                self.st_ctime_ns = observed.st_ctime_ns - 500_000
+
+            def __getattr__(self, name):
+                return getattr(self._observed, name)
+
+        def cached_lstat(path):
+            observed = real_lstat(path)
+            if Path(path) != card:
+                return observed
+            cached = CachedPathStat(observed)
+            if swapped:
+                cached.st_ino = observed.st_ino + 1
+            return cached
+
+        def portable_stable_open(path):
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            return fd, os.fstat(fd)
+
+        expected_fd, expected_stat = portable_stable_open(card)
+        os.close(expected_fd)
+        expected_identity = server._pdf_preview_identity(expected_stat)
+        with mock.patch.object(server.os, "lstat", side_effect=cached_lstat), \
+                mock.patch.object(server, "_open_windows_regular_file",
+                                  side_effect=portable_stable_open):
+            candidates = server._pdf_preview_scan_windows(root, identity, parts)
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["identity"], expected_identity)
+            swapped = True
+            with self.assertRaisesRegex(server.PdfPreviewError, "changed while"):
+                server._pdf_preview_scan_windows(root, identity, parts)
+
     def test_private_normalized_samples_fill_large_first_page_layouts(self):
         fronts = self.fixture.data / "normalized-fronts"
         fronts.mkdir(parents=True)

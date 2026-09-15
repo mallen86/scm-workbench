@@ -4614,10 +4614,9 @@ def _dxf_output_without_overwriting(cwd: Optional[Path], value: str) -> str:
             version += 1
             probe = directory / f"{base}-v{version}{suffix}"
             if not os.path.lexists(probe):
-                # Keep the caller's spelling: relative stays relative, absolute
-                # stays absolute, and only the filename changes.
-                return str(Path(candidate.parent) / probe.name) if not candidate.is_absolute() \
-                    else str(probe)
+                # Keep the caller's exact directory spelling, including its
+                # separator style, and replace only the final filename.
+                return raw[:-len(candidate.name)] + probe.name
     except (OSError, ValueError):
         # An unreadable directory must not turn into a failed job: fall back to
         # the name that was asked for.
@@ -5745,7 +5744,13 @@ def _pdf_preview_scan_windows(root: Path, root_identity: tuple,
                     fd, stable = _open_windows_regular_file(path)
                     try:
                         os.lseek(fd, 0, os.SEEK_SET)
-                        if _pdf_preview_identity(stable) != _pdf_preview_identity(observed):
+                        # Windows path stats can expose cached directory-entry
+                        # timestamps that differ from the authoritative values
+                        # returned by the opened handle.  The path stat only
+                        # needs to identify the object that was opened; retain
+                        # the complete handle identity below as the baseline
+                        # for reopen and post-copy change detection.
+                        if not os.path.samestat(stable, observed):
                             raise PdfPreviewError("A front image changed while it was being inspected.", retryable=True)
                         head = os.read(fd, 16)
                     finally:
@@ -7696,7 +7701,11 @@ def _import_back_image_windows(source_fd: int, source_stat: os.stat_result,
                     fd, stable = _open_windows_regular_file(leaf)
                     try:
                         os.lseek(fd, 0, os.SEEK_SET)
-                        if (_back_image_identity(stable) != _back_image_identity(st)
+                        # As in PDF preview staging, Windows may return stale
+                        # directory-entry timestamps for the path.  Match the
+                        # opened object here, then retain its authoritative
+                        # handle identity for the post-rename check.
+                        if (not os.path.samestat(stable, st)
                                 or not _image_header_is_image(os.read(fd, 16))):
                             continue
                     finally:
