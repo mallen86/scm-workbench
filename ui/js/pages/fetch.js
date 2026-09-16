@@ -109,7 +109,7 @@ PAGES.fetch = (root) => {
         ico("check"), el("span", {}, "Card art is ready. Images are in place for the PDF.")));
       const actions = el("div", { class: "js-actions" },
         el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF"));
-      if (uiMode() !== "simple") actions.append(el("button", { class: "btn btn-ghost", onclick: () => go("postprocess", { scope: "all" }) }, ico("sparkle"), "Post-process images"));
+      if (uiMode() !== "simple") actions.append(el("button", { class: "btn btn-ghost", onclick: () => go("postprocess", { scope: "both" }) }, ico("sparkle"), "Post-process images"));
       body.append(actions);
     },
   }));

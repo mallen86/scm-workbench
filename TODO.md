@@ -90,3 +90,4 @@
     - [x] Remove the text "Select Only fronts in the form when a back is not needed." from the step 4 (or step 5 if you've already added the new step above). Only fronts will remove any double-sided cards which are independent of the backs
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
+- [ ] Add the Advanced-only managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.

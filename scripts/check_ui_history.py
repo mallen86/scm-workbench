@@ -427,7 +427,7 @@ if (simple.visibleItems.indexOf("history") >= simple.visibleItems.indexOf("docs"
 const advanced = read(false);
 if (JSON.stringify(advanced.separatorSections) !== JSON.stringify(["workflow", "cutting", "history", "reference", "system"]))
   fail(`advanced mode hides a section header: ${JSON.stringify(advanced.separatorSections)}`);
-const advancedOrder = ["fetch", "pdf", "offset", "templates", "extras", "history", "sizes", "utilities", "docs", "settings"];
+const advancedOrder = ["fetch", "postprocess", "pdf", "offset", "templates", "extras", "history", "sizes", "utilities", "docs", "settings"];
 if (JSON.stringify(advanced.visibleItems) !== JSON.stringify(advancedOrder))
   fail(`advanced mode order is ${JSON.stringify(advanced.visibleItems)}, expected ${JSON.stringify(advancedOrder)}`);
 

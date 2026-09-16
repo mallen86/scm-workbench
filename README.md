@@ -80,6 +80,7 @@ Use **Settings > Open data folder** if you want to view or back up your Workbenc
 ## Help
 
 - Open **Documentation** in the Workbench sidebar for the silhouette-card-maker guide.
+- Read [Image post-processing](docs/image-postprocessing.md) for the Advanced-mode Python processor contract, dependency rules, and a Scryfall 4× upscaling example.
 - Read [First run on macOS](docs/macos-first-run.md) if the Mac app is blocked or does not finish opening.
 - [Join the SCM Discord](https://discord.gg/jhsKmAgbXc) to ask questions and meet other users.
 - [Open a GitHub issue](https://github.com/mallen86/scm-workbench/issues) to report a Workbench problem.

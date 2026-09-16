@@ -27,7 +27,8 @@ function setEditorValue(value) {
   const d = state.draft || (state.draft = { name: "New processor", source: TEMPLATE, requirements: "" });
   d.name = value?.name ?? d.name;
   d.source = value?.source ?? d.source;
-  d.requirements = value?.requirements ?? d.requirements;
+  const requirements = value?.requirements ?? d.requirements;
+  d.requirements = Array.isArray(requirements) ? requirements.join("\n") : String(requirements || "");
   const name = document.querySelector(".pp-name");
   const source = document.querySelector(".pp-source");
   const req = document.querySelector(".pp-requirements");
@@ -52,7 +53,10 @@ async function refreshProcessors(selectId = state.selected) {
   const requested = selectId || S.postprocessPrefill?.processor_id;
   state.selected = state.processors.some(p => p.id === requested) ? requested : state.processors[0]?.id || null;
   if (state.selected) await loadProcessor(state.selected);
-  else setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+  else {
+    state.loaded = null;
+    setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+  }
   repaintLibrary();
   patchRunForm();
 }
@@ -90,13 +94,23 @@ function repaintLibrary() {
   }
 }
 
+async function newProcessor() {
+  if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
+  state.selected = null;
+  state.loaded = null;
+  state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
+  setEditorValue(state.draft);
+  repaintLibrary();
+  patchRunForm();
+}
+
 async function duplicateProcessor(p) {
   try { await postprocessors.duplicate(p.id, `${p.name || "Processor"} copy`, revision(p)); await refreshProcessors(); toast("ok", "Processor duplicated."); }
   catch (error) { toast("err", error.message || "Could not duplicate processor."); }
 }
 async function deleteProcessor(p) {
   if (!await confirmModal({ title: "Delete processor?", text: `Delete “${p.name || "processor"}” and its saved revisions?`, okLabel: "Delete processor", danger: true })) return;
-  try { await postprocessors.delete(p.id, revision(p)); state.selected = null; await refreshProcessors(); toast("ok", "Processor deleted."); }
+  try { await postprocessors.delete(p.id, revision(p)); state.selected = null; state.loaded = null; await refreshProcessors(); toast("ok", "Processor deleted."); }
   catch (error) { toast("err", error.message || "Could not delete processor."); }
 }
 
@@ -128,13 +142,28 @@ async function revert() {
 async function trustRevision() {
   const p = state.loaded || selectedProcessor();
   if (!p) return toast("warn", "Save a processor before trusting it.");
+  const approved = await confirmModal({
+    title: "Trust this Python revision?",
+    text: "This code and its installed libraries run as your user account and can access your files and network. Only continue if you trust the exact source and packages shown here.",
+    okLabel: "Trust revision",
+    danger: true,
+  });
+  if (!approved) return;
   try { await postprocessors.trust(p.id, revision(p), p.environment_fingerprint || p.environment?.fingerprint || null); await refreshProcessors(p.id); toast("ok", "This exact revision is trusted."); }
   catch (error) { toast("err", error.message || "Could not trust this revision."); }
 }
 async function installLibraries() {
   const p = state.loaded || selectedProcessor();
   if (!p) return toast("warn", "Save a processor first.");
-  try { await doRun("postprocess_dependencies", null, { args: { processor_id: p.id, revision_hash: revision(p), requirements: state.draft?.requirements || "" } }); toast("info", "Library installation started."); }
+  if (state.dirty) return toast("warn", "Save the requirements as a new revision before installing them.");
+  const requirements = String(state.draft?.requirements || "").trim();
+  const approved = await confirmModal({
+    title: "Install processor libraries?",
+    text: requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    okLabel: "Install libraries",
+  });
+  if (!approved) return;
+  try { await doRun("postprocess_dependencies", null, { args: { processor_id: p.id, revision_hash: revision(p), requirements } }); }
   catch (error) { toast("err", error.message || "Could not start library installation."); }
 }
 
@@ -188,7 +217,7 @@ PAGES.postprocess = root => {
   const wrap = el("div", {});
   wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to fetched card images."));
   wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
-  const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run."))), el("div", { class: "pp-library-list" }));
+  const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor")), el("div", { class: "pp-library-list" }));
   wrap.append(library);
   const editor = el("section", { class: "card pp-editor" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("file")), el("div", { class: "grow" }, el("h2", {}, "Processor editor"), el("p", {}, "Saving creates an immutable, untrusted revision.")), el("span", { class: "pp-dirty" }, "Saved revision")),
     el("label", {}, "Processor name", el("input", { class: "input pp-name", spellcheck: "false" })),
