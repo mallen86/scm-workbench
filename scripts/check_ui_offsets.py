@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static and Node contract for the offset mutation transport facade."""
+"""Static and Node contracts for offset transport and calibration inventory."""
 from pathlib import Path
 import re
 import shutil
@@ -25,6 +25,7 @@ def main() -> int:
     if not PAGE.is_file():
         return fail("offset page is missing")
     page = PAGE.read_text(encoding="utf-8")
+    forms = (UI / "forms.js").read_text(encoding="utf-8")
     nav = (UI / "nav.js").read_text(encoding="utf-8")
     index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
     for required in (
@@ -40,11 +41,17 @@ def main() -> int:
             return fail(f"offset facade is missing {required}")
     for marker in (
         'import { setOffset, deleteOffset } from "../offset-transport.js";',
+        'import { watchJobDone } from "./utilities.js";',
+        "export function renderCalibrationFiles",
+        "export async function regenerateCalibration",
+        'refreshInfo({ keepForms: true })',
         "setOffset(",
         "deleteOffset(",
     ):
         if marker not in page:
             return fail(f"offset page is missing {marker}")
+    if 'kind === "calibration" || kind === "dxf_batch"' in forms:
+        return fail("calibration still uses the fixed-delay inventory refresh")
     for marker in (
         'import { go, uiMode } from "../nav.js";',
         'if (uiMode() !== "simple") wrap.append(formCard("offset_pdf"',
@@ -127,10 +134,116 @@ if (requests.length !== 3 || requests[0].url !== "/api/offset" ||
     requests[1].options.body !== JSON.stringify({ size: "letter", x: 1, y: 2, angle: 3 }) ||
     requests[2].options.body !== JSON.stringify({ size: "letter", delete: true }))
   fail("browser offset URL or exact compatibility body is incorrect");
-console.log("ok: native/browser offset.set and offset.delete payloads, truncation, and no-fallback contract pass");
+
+// The calibration card must render only the backend's current file inventory,
+// then re-read and repaint that inventory after generation actually finishes.
+const pageState = {
+  S: {
+    info: {
+      scm: {
+        calibration: [{ name: "custom-wide", path: "/scm/calibration/custom-wide.pdf", size: 17 }],
+        paper_sizes: [{ name: "legal" }, { name: "phantom" }],
+      },
+    },
+    forms: {},
+  },
+  watch: null,
+  refreshOptions: null,
+  currentGrid: null,
+  doRunCalls: [],
+  async doRun(kind, button) {
+    this.doRunCalls.push({ kind, button });
+    return { id: "calibration-job" };
+  },
+  watchJobDone(id, callback) { this.watch = { id, callback }; },
+  async refreshInfo(options) {
+    this.refreshOptions = options;
+    this.S.info.scm.calibration = [
+      { name: "letter", path: "/scm/calibration/letter-calibration.pdf", size: 21 },
+      { name: "legal", path: "/scm/calibration/legal-calibration.pdf", size: 22 },
+    ];
+  },
+  toasts: [],
+};
+globalThis.offsetPageTest = pageState;
+const coreStub = `
+export const S = globalThis.offsetPageTest.S;
+export const PAGES = {};
+export const $ = selector => selector === ".calibration-files" ? globalThis.offsetPageTest.currentGrid : null;
+export const $$ = () => [];
+export function el(tag, attrs = {}, ...children) {
+  const node = {
+    tag, children: [], isConnected: true,
+    append(...items) { this.children.push(...items.filter(item => item !== null && item !== undefined)); },
+    replaceChildren(...items) { this.children = items.filter(item => item !== null && item !== undefined); },
+  };
+  Object.assign(node, attrs || {});
+  node.append(...children);
+  return node;
+}
+export const fmtBytes = value => String(value);
+export const ico = name => ({ icon: name });
+export const pageHead = () => ({});
+export const toast = (...args) => globalThis.offsetPageTest.toasts.push(args);
+`;
+const stubs = {
+  "../core.js": coreStub,
+  "../native-actions.js": `export const openFile = async () => ({ ok: true });`,
+  "../offset-transport.js": `export const setOffset = async () => ({}); export const deleteOffset = async () => ({});`,
+  "../forms.js": `
+    export const afterFormChange = () => {};
+    export const defaultArgs = () => ({});
+    export const doRun = (...args) => globalThis.offsetPageTest.doRun(...args);
+    export const formCard = () => ({});
+    export const numSteppers = () => ({});
+  `,
+  "../info.js": `export const refreshInfo = options => globalThis.offsetPageTest.refreshInfo(options);`,
+  "../nav.js": `export const go = () => {}; export const uiMode = () => "advanced";`,
+  "../repo-setup.js": `export const connectCardNeeded = () => false; export const repoSetupCard = () => ({});`,
+  "./utilities.js": `export const watchJobDone = (...args) => globalThis.offsetPageTest.watchJobDone(...args);`,
+};
+let pageSource = fs.readFileSync(process.argv[4], "utf8");
+for (const [specifier, stub] of Object.entries(stubs)) {
+  const quoted = `"${specifier}"`;
+  if (!pageSource.includes(quoted)) fail(`offset page stopped importing ${specifier}`);
+  pageSource = pageSource.replaceAll(quoted, `"${dataUrl(stub)}"`);
+}
+const page = await import(dataUrl(pageSource));
+const grid = {
+  children: [], isConnected: true,
+  append(...items) { this.children.push(...items); },
+  replaceChildren(...items) { this.children = [...items]; },
+};
+const textOf = value => typeof value === "string" ? value
+  : value && Array.isArray(value.children) ? value.children.map(textOf).join(" ") : "";
+page.renderCalibrationFiles(grid);
+let labels = textOf(grid);
+if (grid.children.length !== 1 || !labels.includes("custom-wide") ||
+    labels.includes("legal") || labels.includes("phantom"))
+  fail("calibration buttons were not enumerated exclusively from the current file inventory");
+const generated = await page.regenerateCalibration(grid);
+if (generated?.id !== "calibration-job" || pageState.doRunCalls.length !== 1 ||
+    pageState.doRunCalls[0].kind !== "calibration" || pageState.watch?.id !== "calibration-job")
+  fail("calibration regeneration did not register a terminal-job refresh");
+// Simulate leaving and returning to the page while generation runs. The job's
+// watcher must repaint the currently connected card, not its detached grid.
+grid.isConnected = false;
+const liveGrid = {
+  children: [], isConnected: true,
+  append(...items) { this.children.push(...items); },
+  replaceChildren(...items) { this.children = [...items]; },
+};
+pageState.currentGrid = liveGrid;
+await pageState.watch.callback({ status: "ok" });
+labels = textOf(liveGrid);
+if (!same(pageState.refreshOptions, { keepForms: true }) || liveGrid.children.length !== 2 ||
+    !liveGrid.children.every(child => child.class === "fileitem") ||
+    !labels.includes("letter") || !labels.includes("legal") || labels.includes("custom-wide"))
+  fail("terminal calibration refresh did not repaint the actual generated files");
+console.log("ok: offset transport and completion-based calibration inventory contracts pass");
 '''.strip()
     result = subprocess.run(
-        [node, "--input-type=module", "-", str(FACADE), str(UI / "transport.js")],
+        [node, "--input-type=module", "-", str(FACADE), str(UI / "transport.js"), str(PAGE)],
         input=node_script, text=True, capture_output=True,
     )
     if result.returncode:

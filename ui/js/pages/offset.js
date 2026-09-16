@@ -1,7 +1,53 @@
 /* pages/offset — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { setOffset, deleteOffset } from "../offset-transport.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";/* =============================== offset page ============================== */
+import { $, $$, PAGES, S, el, fmtBytes, ico, pageHead, toast } from "../core.js";import { openFile } from "../native-actions.js";import { setOffset, deleteOffset } from "../offset-transport.js";import { afterFormChange, defaultArgs, doRun, formCard, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { connectCardNeeded, repoSetupCard } from "../repo-setup.js";import { watchJobDone } from "./utilities.js";/* =============================== offset page ============================== */
+
+export function renderCalibrationFiles(grid) {
+  const files = Array.isArray(S.info?.scm?.calibration) ? S.info.scm.calibration : [];
+  grid.replaceChildren();
+  for (const c of files) {
+    // The inventory comes from the PDFs currently present in the connected
+    // checkout. Do not derive this list from a fixed set of paper sizes.
+    grid.append(el("button", { class: "fileitem",
+      title: `Open ${c.name} in the default app, such as Preview`,
+      onclick: async () => {
+        try {
+          const r = await openFile(c.path);
+          if (r.ok) toast("ok", `Opening ${c.name} in the default app`);
+          else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
+        } catch (error) {
+          toast("warn", error?.message || `Couldn't open ${c.name}.`);
+        }
+      } },
+      el("span", { class: "fi-ico" }, ico("file")),
+      el("span", { class: "fi-main" },
+        el("span", { class: "fi-name" }, c.name),
+        el("span", { class: "fi-sub" }, `${fmtBytes(c.size)} | click to open`),
+      )));
+  }
+  if (!files.length) grid.append(el("div", { class: "empty" }, "No calibration PDFs found."));
+}
+
+
+export async function regenerateCalibration(grid) {
+  const job = await doRun("calibration", null);
+  if (!job) return null;
+  // Generation can take longer than the old fixed refresh delay. Re-read the
+  // directory only when the job is terminal, then update this card in place so
+  // newly introduced sizes appear without discarding the user's offset form.
+  watchJobDone(job.id, async () => {
+    try {
+      await refreshInfo({ keepForms: true });
+      const liveGrid = grid.isConnected ? grid : $(".calibration-files");
+      if (liveGrid) renderCalibrationFiles(liveGrid);
+    } catch (error) {
+      toast("warn", error?.message || "Calibration finished, but the sheet list couldn't be refreshed.");
+    }
+  });
+  return job;
+}
+
 
 PAGES.offset = (root) => {
   const wrap = el("div", {});
@@ -45,33 +91,13 @@ PAGES.offset = (root) => {
   if (uiMode() !== "simple") wrap.append(formCard("offset_pdf", { icon: "target" }));
 
   const cal = el("div", { class: "card" });
+  const grid = el("div", { class: "filegrid calibration-files" });
   cal.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("zap")),
     el("div", { class: "grow" }, el("h2", {}, "Calibration sheets"), el("p", {}, "One two page PDF per paper size. Print on both sides with a long edge flip, then compare the front and back dot grids.")),
-    el("button", { class: "btn", onclick: () => doRun("calibration", null) }, ico("refresh"), "Regenerate all"),
+    el("button", { class: "btn", onclick: () => regenerateCalibration(grid) }, ico("refresh"), "Regenerate all"),
   ));
-  const grid = el("div", { class: "filegrid" });
-  for (const c of S.info.scm.calibration) {
-    // Same mechanism as the cutting-template buttons: the server opens the
-    // file in its default app (the webview can't window.open or render PDFs).
-    grid.append(el("button", { class: "fileitem",
-      title: `Open ${c.name} in the default app, such as Preview`,
-      onclick: async () => {
-        try {
-          const r = await openFile(c.path);
-          if (r.ok) toast("ok", `Opening ${c.name} in the default app`);
-          else toast("warn", r.errors?.[0] || r.error || `Couldn't open ${c.name}.`);
-        } catch (error) {
-          toast("warn", error?.message || `Couldn't open ${c.name}.`);
-        }
-      } },
-      el("span", { class: "fi-ico" }, ico("file")),
-      el("span", { class: "fi-main" },
-        el("span", { class: "fi-name" }, c.name),
-        el("span", { class: "fi-sub" }, `${fmtBytes(c.size)} | click to open`),
-      )));
-  }
-  if (!S.info.scm.calibration.length) grid.append(el("div", { class: "empty" }, "No calibration PDFs found."));
+  renderCalibrationFiles(grid);
   cal.append(grid);
   wrap.append(cal);
   wrap.__patch = () => { if (uiMode() !== "simple") patchOffsetForm(); };

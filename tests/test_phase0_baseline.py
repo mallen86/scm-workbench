@@ -364,6 +364,33 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual((info_status, manifest_status, second_info_status), (200, 200, 200))
         self.assertEqual(scan.call_count, 2)
 
+    def test_info_enumerates_actual_calibration_pdf_files(self):
+        calibration = self.fixture.scm / "calibration"
+        calibration.mkdir()
+        letter = calibration / "letter-calibration.pdf"
+        legal = calibration / "legal-calibration.PDF"
+        ignored = calibration / "notes.txt"
+        fake_pdf = calibration / "not-a-file.pdf"
+        letter.write_bytes(b"letter")
+        legal.write_bytes(b"legal")
+        ignored.write_text("not a PDF", encoding="utf-8")
+        fake_pdf.mkdir()
+        try:
+            info = server.read_scm_info(self.fixture.scm, self.fixture.extras)
+            self.assertEqual(
+                [(entry["name"], entry["path"], entry["size"]) for entry in info["calibration"]],
+                [
+                    ("legal", str(legal), len(b"legal")),
+                    ("letter", str(letter), len(b"letter")),
+                ],
+            )
+        finally:
+            fake_pdf.rmdir()
+            ignored.unlink()
+            legal.unlink()
+            letter.unlink()
+            calibration.rmdir()
+
     def test_simple_pdf_presets_expand_to_fixed_cli_values_in_titled_sections(self):
         status, manifest = self.request("GET", "/api/manifest")
         self.assertEqual(status, 200)

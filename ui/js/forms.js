@@ -701,7 +701,10 @@ export async function doRun(kind, btn, opts = {}) {
       const { refreshJobs, openConsole } = await import("./console.js");
       refreshJobs();
       if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over
-      if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
+      if (kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
+        // Calibration owns a completion-based refresh on its page because the
+        // generated file inventory must not be sampled while the job is still
+        // running. Other inventory-changing jobs retain the legacy delay.
         // clean_up changes image inventory, not form choices. Preserve the live
         // fetch form object so its completion preview cannot serialize
         // `undefined` and remain stuck at “Waiting for the server”.

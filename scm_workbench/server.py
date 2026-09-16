@@ -798,10 +798,17 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
 
     cal = scm / "calibration"
     if cal.is_dir():
-        info["calibration"] = [
-            {"name": p.stem.replace("-calibration", ""), "path": str(p), "size": p.stat().st_size}
-            for p in sorted(cal.glob("*.pdf"))
-        ]
+        for path in sorted(cal.iterdir(), key=lambda candidate: candidate.name.casefold()):
+            try:
+                if path.is_symlink() or not path.is_file() or path.suffix.lower() != ".pdf":
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            name = path.stem
+            if name.lower().endswith("-calibration"):
+                name = name[:-len("-calibration")]
+            info["calibration"].append({"name": name, "path": str(path), "size": size})
 
     offset = None
     try:
