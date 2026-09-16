@@ -59,6 +59,7 @@ if __name__ == "__main__":
     sys.modules["scm_workbench.server"] = sys.modules[__name__]
 
 from scm_workbench import repo_sync, updater
+from scm_workbench import postprocessing
 
 # The one version constant the whole app reports (About-card line, banner,
 # and the updater's notion of "what am I running"). It is pinned per build
@@ -1463,6 +1464,32 @@ def build_manifest(info: dict) -> dict:
                 ["ignore_set_and_collector_number"],
             ]
 
+    # ------------------------------------------------------- Image postprocess
+    # Processor summaries are deliberately the only registry data embedded in
+    # the manifest; source code never enters the global info payload.
+    try:
+        pp = postprocessing.ProcessorStore(DATA_DIR, effective_dirs(load_settings())[0])
+        processor_choices = [[p["id"], p["name"]] for p in pp.list()]
+    except Exception:
+        processor_choices = []
+    kinds["postprocess_images"] = {
+        "title": "Post-process images", "page": "postprocess", "needs": ["scm"],
+        "advanced_only": True, "cwd": "scm",
+        "description": "Apply one trusted processor to fetched front and double-sided images.",
+        "groups": [{"title": "Image scope", "options": [
+            _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default=""),
+            _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"]], default="both"),
+        ]}],
+    }
+    kinds["postprocess_dependencies"] = {
+        "title": "Install processor libraries", "page": "postprocess", "needs": ["scm"],
+        "advanced_only": True, "internal": True, "cwd": "scm",
+        "groups": [{"title": "Processor", "options": [
+            _opt("processor_id", "Processor", "text", default=""),
+            _opt("revision_hash", "Revision", "text", default=""),
+            _opt("requirements", "Requirements", "textarea", default=""),
+        ]}],
+    }
     return kinds
 
 
@@ -5111,6 +5138,58 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         cwd = extras
         argv += ["generate_readme_tables.py"]
 
+    elif kind == "postprocess_images":
+        if str(settings.get("ui_mode", "advanced")) == "simple":
+            errors.append("image post-processing is available only in Advanced mode")
+            return argv, None, env, title, warnings, errors
+        if not require_repo("SCM", scm):
+            return argv, None, env, title, warnings, errors
+        cwd = scm
+        processor_id = str(args.get("processor_id") or "")
+        scope = str(args.get("scope") or "both")
+        try:
+            store = postprocessing.ProcessorStore(DATA_DIR, cwd)
+            item = store.get(processor_id, include_source=False)
+            status = store.status(processor_id, interpreter=python)
+            meta = status["environment"]
+            trusted = status["processor"].get("trusted")
+            if item.get("revision") != item.get("active_revision"):
+                errors.append("processor revision is stale")
+            if not trusted:
+                errors.append("processor revision is not trusted for its dependency environment")
+            if not meta.get("ready"):
+                errors.append("processor libraries are not ready")
+            records = postprocessing.discover_images(cwd, scope)
+            if not records:
+                errors.append("no recognized images were found in the selected scope")
+        except postprocessing.PostProcessingError as exc:
+            errors.append(str(exc))
+            records = ()
+        except Exception as exc:
+            errors.append(f"could not prepare image processor: {exc}")
+            records = ()
+        if errors:
+            return argv, cwd, env, title, warnings, errors
+        # The actual private manifest is created in start_job, after the job
+        # lease is held.  This display command deliberately contains no source.
+        argv += ["-I", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", "<private-manifest>"]
+        env["SCM_WORKBENCH_POSTPROCESS"] = "1"
+    elif kind == "postprocess_dependencies":
+        if str(settings.get("ui_mode", "advanced")) == "simple":
+            errors.append("processor libraries are available only in Advanced mode")
+            return argv, None, env, title, warnings, errors
+        if not require_repo("SCM", scm):
+            return argv, None, env, title, warnings, errors
+        cwd = scm
+        try:
+            store = postprocessing.ProcessorStore(DATA_DIR, cwd)
+            item = store.get(str(args.get("processor_id") or ""), include_source=False)
+            if str(args.get("revision_hash") or "") != item.get("revision"):
+                errors.append("processor revision is stale")
+            postprocessing.normalize_requirements(args.get("requirements") or "")
+        except Exception as exc:
+            errors.append(str(exc))
+        argv += [str(python), "-m", "pip", "install", "--isolated", "--no-input", "--only-binary=:all:", "--target", "<private-environment>"]
     elif kind.startswith("fetch:"):
         if not require_repo("SCM", scm):
             return argv, None, env, title, warnings, errors
@@ -5899,6 +5978,9 @@ def build_preview(kind: str, raw_args: dict) -> dict:
     builder, and cached repo snapshot used by jobs.  It only assembles a
     command: ``write_deck=False`` keeps preview requests side-effect free.
     """
+    settings = load_settings()
+    if kind in ("postprocess_images", "postprocess_dependencies") and str(settings.get("ui_mode", "advanced")) == "simple":
+        raise PreviewError(status=403, http_body={"error": "post-processing requires Advanced mode"}, ipc_code="forbidden", message="post-processing requires Advanced mode")
     manifest = get_manifest()
     if kind not in manifest:
         raise PreviewError(
@@ -5912,7 +5994,6 @@ def build_preview(kind: str, raw_args: dict) -> dict:
         )
 
     normalized, errors, norm_warns = normalize_args(manifest[kind], raw_args)
-    settings = load_settings()
     argv, cwd, env, title, warnings, errs = build_command(
         kind, normalized, settings, get_info_cached(), write_deck=False,
     )
@@ -7167,6 +7248,7 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "pump_thread": None,
         "scm_path": str(cwd) if cwd else None,
         "offset_lease": offset_lease,
+        "postprocess_lease": False,
     }
     if kind.startswith("fetch:"):
         # What the second stage will walk, for the progress bar. Absent (0)
@@ -7223,7 +7305,17 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         if offset_lease:
             OFFSET_LEASE.release()
         return None, _offset_errors([f"could not write job log: {exc}"])
-    if not _acquire_image_job_lease():
+    postprocess_lease = False
+    if kind == "postprocess_images":
+        if not _acquire_postprocess_lease():
+            try: log_f.close()
+            except Exception: pass
+            if offset_lease: OFFSET_LEASE.release()
+            try: Path(job["log_file"]).unlink()
+            except OSError: pass
+            return None, ["another image operation is using the SCM checkout; try again when it finishes"]
+        postprocess_lease = True
+    elif not _acquire_image_job_lease():
         # A real job takes precedence over an automatically generated visual
         # preview. Stop that disposable work and retry the lease once; an
         # active deletion or another real job still returns the ordinary busy
@@ -7252,6 +7344,22 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         with JOBS_LOCK:
             if _UPDATE_QUIESCING:
                 raise RuntimeError("the app update is being handed off; try again after it restarts")
+            if kind == "postprocess_images":
+                store = _postprocessor_store()
+                item = store.get(args["processor_id"])
+                records = postprocessing.discover_images(cwd, args.get("scope", "both"))
+                run_dir = DATA_DIR / "postprocessing" / "runs" / job_id
+                entries = postprocessing.stage_images(records, run_dir)
+                source_path = store._processor(item["id"]) / "revisions" / f"{item['revision']}.py"
+                private_manifest = run_dir / "manifest.json"
+                private_manifest.write_text(json.dumps({"source_path": str(source_path), "run_root": str(run_dir), "entries": list(entries)}, separators=(",", ":")), encoding="utf-8")
+                job["postprocess_entries"] = list(entries)
+                job["postprocess_run"] = str(run_dir)
+                job["image_total"] = len(entries)
+                argv = [str(job_python(load_settings())), "-I", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
+                job["cmd"] = _fmt_argv(argv)
+                env = _utf8_env()
+                cwd = run_dir
             # Child scripts must never inherit the worker's JSON-lines stdin.
             # Some upstream paths prompt interactively (for example, multiple
             # card backs); EOF makes that job fail instead of consuming native
@@ -7312,6 +7420,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 _release_image_job_lease()
             except RuntimeError:
                 pass
+        if postprocess_lease:
+            _release_postprocess_lease(); postprocess_lease = False
         with JOBS_LOCK:
             JOBS[job_id] = job
     return job, []
@@ -7416,6 +7526,25 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         elif rc == 0:
             status = "ok"
 
+        if job.get("kind") == "postprocess_images" and rc == 0 and not kill_requested:
+            try:
+                entries = job.get("postprocess_entries") or []
+                postprocessing.validate_staged_results(entries, run_dir=job["postprocess_run"])
+                replacements = []
+                expected = {}
+                for entry in entries:
+                    source = Path(entry["source"]); staged = Path(entry["staged"])
+                    if postprocessing._digest_file(staged) != entry["digest"]:
+                        replacements.append((source, staged))
+                        if entry.get("identity"): expected[str(source)] = entry["identity"]
+                if replacements:
+                    tx = postprocessing.PublicationTransaction(Path(job["postprocess_run"]).parent.parent / "transactions", job["id"])
+                    tx.publish(replacements, expected=expected)
+                _append_job_line(job, "(post-processing: validated and committed)", log_f=log_f)
+            except Exception as exc:
+                status = "fail"
+                _append_job_line(job, f"post-processing failed; originals were not changed: {exc}", log_f=log_f)
+
         # SCM writes its shared file before rendering.  A nonzero render exit
         # therefore does not discard a valid -s result; only malformed data is
         # ignored.  Use the job's snapshotted checkout, never current Settings.
@@ -7501,6 +7630,12 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
                 _release_image_job_lease()
             except RuntimeError:
                 pass
+        if job.get("postprocess_lease"):
+            job["postprocess_lease"] = False
+            try: _release_postprocess_lease()
+            except RuntimeError: pass
+        if job.get("postprocess_run"):
+            shutil.rmtree(job["postprocess_run"], ignore_errors=True)
         _persist_jobs()
 
 
@@ -7829,16 +7964,35 @@ _IMAGE_JOB_STATE_LOCK = threading.Lock()
 _IMAGE_JOB_USERS = 0
 _IMAGE_PREVIEW_USERS = 0
 _REPO_MUTATION_USERS = 0
+_POSTPROCESS_USERS = 0
 
 
 def _acquire_image_job_lease() -> bool:
     """Admit jobs concurrently, but never during deletion or a PDF preview."""
     global _IMAGE_JOB_USERS
     with _IMAGE_JOB_STATE_LOCK:
-        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS:
+        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS or _POSTPROCESS_USERS:
             return False
         _IMAGE_JOB_USERS += 1
         return True
+
+
+def _acquire_postprocess_lease() -> bool:
+    global _POSTPROCESS_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if (_IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or _IMAGE_PREVIEW_USERS or
+                _REPO_MUTATION_USERS or _POSTPROCESS_USERS):
+            return False
+        _POSTPROCESS_USERS = 1
+        return True
+
+
+def _release_postprocess_lease() -> None:
+    global _POSTPROCESS_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if not _POSTPROCESS_USERS:
+            raise RuntimeError("post-processing lease is not held")
+        _POSTPROCESS_USERS = 0
 
 
 def _release_image_job_lease() -> None:
@@ -7854,7 +8008,7 @@ def _acquire_image_preview_lease() -> bool:
     global _IMAGE_PREVIEW_USERS
     with _IMAGE_JOB_STATE_LOCK:
         if (_IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or
-                _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS):
+                _IMAGE_PREVIEW_USERS or _REPO_MUTATION_USERS or _POSTPROCESS_USERS):
             return False
         _IMAGE_PREVIEW_USERS = 1
         return True
@@ -7871,7 +8025,7 @@ def _release_image_preview_lease() -> None:
 def _acquire_repo_mutation_lease() -> bool:
     global _REPO_MUTATION_USERS
     with _IMAGE_JOB_STATE_LOCK:
-        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or _IMAGE_PREVIEW_USERS:
+        if _IMAGE_DELETE_LOCK.locked() or _IMAGE_JOB_USERS or _IMAGE_PREVIEW_USERS or _POSTPROCESS_USERS:
             return False
         # Repository operations retain their established internal per-repo
         # locking and may coexist with each other. The count only fences them
@@ -7926,7 +8080,7 @@ def _image_delete_lock():
             raise _image_delete_error("image deletion is busy", 409)
         with _IMAGE_JOB_STATE_LOCK:
             jobs_active = (_IMAGE_JOB_USERS > 0 or _IMAGE_PREVIEW_USERS > 0 or
-                           _REPO_MUTATION_USERS > 0)
+                           _REPO_MUTATION_USERS > 0 or _POSTPROCESS_USERS > 0)
         if jobs_active:
             _IMAGE_DELETE_LOCK.release()
             raise _image_delete_error("a job or another operation is using the SCM checkout", 409)
@@ -9560,6 +9714,103 @@ def delete_template(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, in
         return {"ok": False, "errors": [_bounded_action_error(error.message)]}, error.status
 
 
+# ============================================================================
+# Image post-processing registry and native/HTTP compatibility surface
+# ============================================================================
+
+POSTPROCESS_SOURCE_MAX_BYTES = postprocessing.SOURCE_MAX_BYTES
+POSTPROCESS_RESPONSE_MAX_BYTES = 512 * 1024
+
+
+def _postprocessor_store() -> postprocessing.ProcessorStore:
+    scm, _ = effective_dirs(load_settings())
+    return postprocessing.ProcessorStore(DATA_DIR, scm)
+
+
+def _postprocessor_error(exc: Exception) -> dict:
+    return {"ok": False, "errors": [" ".join(str(exc).split())[:256] or "post-processor operation failed"]}
+
+
+def postprocessors_list() -> dict:
+    store = _postprocessor_store()
+    rows = []
+    for item in store.list():
+        try:
+            rows.append({**item, **store.status(item["id"])["processor"]})
+        except postprocessing.PostProcessingError:
+            rows.append(item)
+    return {"processors": rows}
+
+
+def postprocessor_get(processor_id: str) -> dict:
+    store = _postprocessor_store()
+    item = store.get(processor_id)
+    status = store.status(processor_id)
+    return {**item, "environment": status["environment"], "environment_fingerprint": status["environment"]["fingerprint"]}
+
+
+def postprocessor_save(params: dict) -> dict:
+    if str(load_settings().get("ui_mode", "advanced")) == "simple":
+        return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
+    allowed = {"processor_id", "name", "source", "requirements", "expected_revision"}
+    if set(params) - allowed or not isinstance(params.get("name"), str) or not isinstance(params.get("source"), str):
+        return _postprocessor_error(postprocessing.ValidationError("save requires name and source"))
+    if len(params["source"].encode("utf-8")) > POSTPROCESS_SOURCE_MAX_BYTES:
+        return _postprocessor_error(postprocessing.ValidationError("source is too large"))
+    store = _postprocessor_store()
+    item = store.save(params["name"], params["source"], params.get("requirements", ""), processor_id=params.get("processor_id"), expected_revision=params.get("expected_revision"))
+    invalidate_manifest_cache()
+    return {"ok": True, "processor": item, **item}
+
+
+def postprocessor_duplicate(processor_id: str, params: dict) -> dict:
+    if str(load_settings().get("ui_mode", "advanced")) == "simple":
+        return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
+    allowed = {"processor_id", "name", "expected_revision"}
+    if set(params) - allowed or params.get("processor_id") != processor_id or not isinstance(params.get("name"), str):
+        return _postprocessor_error(postprocessing.ValidationError("duplicate requires processor_id and name"))
+    item = _postprocessor_store().duplicate(processor_id, name=params["name"], expected_revision=params.get("expected_revision"))
+    invalidate_manifest_cache()
+    return {"ok": True, "processor": item, **item}
+
+
+def postprocessor_trust(processor_id: str, params: dict) -> dict:
+    if str(load_settings().get("ui_mode", "advanced")) == "simple":
+        return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
+    if set(params) != {"processor_id", "revision_hash", "environment_fingerprint"} or params.get("processor_id") != processor_id:
+        return _postprocessor_error(postprocessing.ValidationError("trust requires processor_id, revision_hash, and environment_fingerprint"))
+    item = _postprocessor_store().trust(processor_id, params["revision_hash"], params.get("environment_fingerprint"))
+    invalidate_manifest_cache()
+    return {"ok": True, "processor": item, **item}
+
+
+def postprocessor_delete(processor_id: str, params: dict) -> dict:
+    if str(load_settings().get("ui_mode", "advanced")) == "simple":
+        return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
+    if set(params) != {"processor_id", "expected_revision"} or params.get("processor_id") != processor_id:
+        return _postprocessor_error(postprocessing.ValidationError("delete requires processor_id and expected_revision"))
+    _postprocessor_store().delete(processor_id, expected_revision=params.get("expected_revision"))
+    invalidate_manifest_cache()
+    return {"ok": True, "processor_id": processor_id}
+
+
+def postprocessor_status(processor_id: str) -> dict:
+    return _postprocessor_store().status(processor_id)
+
+
+def postprocessor_import_selected(source_path: str) -> dict:
+    if str(load_settings().get("ui_mode", "advanced")) == "simple":
+        return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
+    try:
+        if len(source_path.encode("utf-8")) > ACTION_PATH_MAX_BYTES or has_forbidden_action_controls(source_path):
+            raise postprocessing.ValidationError("selected processor path is invalid")
+        item = _postprocessor_store().import_selected(source_path)
+        invalidate_manifest_cache()
+        return {"ok": True, "processor": item, **item}
+    except Exception as exc:
+        return _postprocessor_error(exc)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"SCMWorkbench/{SERVER_VERSION}"
     protocol_version = "HTTP/1.1"
@@ -9679,6 +9930,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._preview(q)
             if path == "/api/settings":
                 return self._json(load_settings())
+            if path == "/api/postprocessors":
+                return self._json(postprocessors_list())
+            m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})(/status)?", path)
+            if m:
+                try:
+                    return self._json(postprocessor_status(m.group(1)) if m.group(2) else postprocessor_get(m.group(1)))
+                except Exception as exc:
+                    return self._json(_postprocessor_error(exc), 404)
             if path == "/api/updates":
                 return self._json(updates_view())
             if path.startswith("/api/"):
@@ -9702,6 +9961,19 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path = url.path
         try:
+            if path == "/api/postprocessors":
+                body = self._body(strict=True)
+                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+                try: return self._json(postprocessor_save(body), 200)
+                except Exception as exc: return self._json(_postprocessor_error(exc), 400)
+            m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})/(duplicate|trust)", path)
+            if m:
+                body = self._body(strict=True)
+                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+                try:
+                    result = postprocessor_duplicate(m.group(1), body) if m.group(2) == "duplicate" else postprocessor_trust(m.group(1), body)
+                    return self._json(result, 200)
+                except Exception as exc: return self._json(_postprocessor_error(exc), 400)
             if path == "/api/jobs":
                 body = self._body()
                 job, errors = start_job(str(body.get("kind", "")), body.get("args") or {})
@@ -9954,6 +10226,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 500)
             except Exception:
                 pass
+
+    def do_DELETE(self):
+        url = urlparse(self.path)
+        m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})", url.path)
+        if not m:
+            return self._json({"error": f"no such route: {url.path}"}, 404)
+        try:
+            body = self._body(strict=True)
+            if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+            return self._json(postprocessor_delete(m.group(1), body), 200)
+        except Exception as exc:
+            return self._json(_postprocessor_error(exc), 400)
 
     # ---- handlers ----
 

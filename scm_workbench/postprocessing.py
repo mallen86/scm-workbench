@@ -440,7 +440,21 @@ class PublicationTransaction:
                     raise IntegrityError("destination is not a stable regular file")
                 os.replace(dest, quarantine); item["moved"] = True
                 data["phase"] = "quarantined"; self._write(data); self._phase("quarantine")
-                os.replace(stage, dest); item["published"] = True
+                # The run directory may live below Workbench DATA_DIR while
+                # the checkout is on another filesystem.  Copy to a sibling
+                # temp first, then atomically replace the destination.
+                fd, temp_name = tempfile.mkstemp(prefix=f".wb-new-{self.id}-", dir=str(dest.parent))
+                sibling = Path(temp_name)
+                try:
+                    with os.fdopen(fd, "wb") as out, stage.open("rb") as inp:
+                        shutil.copyfileobj(inp, out, length=1024 * 1024)
+                        out.flush(); os.fsync(out.fileno())
+                    _no_links(sibling)
+                    os.replace(sibling, dest)
+                finally:
+                    try: sibling.unlink()
+                    except OSError: pass
+                item["published"] = True
                 data["phase"] = "publishing"; self._write(data); self._phase("publish")
             data["phase"] = "committed"; self._write(data); self._phase("committed")
             self._cleanup(data)
@@ -458,6 +472,8 @@ class PublicationTransaction:
         for item in data["items"]:
             try: Path(item["quarantine"]).unlink()
             except FileNotFoundError: pass
+            try: Path(item["staged"]).unlink()
+            except FileNotFoundError: pass
         try: self.journal.unlink()
         except FileNotFoundError: pass
 
@@ -474,7 +490,7 @@ class PublicationTransaction:
                 # replacement before restoring the original.
                 dest.unlink()
             if item.get("moved") and quarantine.exists(): os.replace(quarantine, dest)
-            if stage.exists() and not item.get("published"): stage.unlink()
+            if stage.exists(): stage.unlink()
         try: self.journal.unlink()
         except FileNotFoundError: pass
 
@@ -591,10 +607,17 @@ class ProcessorStore:
                 except PostProcessingError: continue
         return tuple(result)
 
-    def trust(self, processor_id: str, revision: str, environment: str) -> dict:
+    def trust(self, processor_id: str, revision: str, environment: str | None = None, *, interpreter: str | Path = sys.executable) -> dict:
         item = self.get(processor_id, revision=revision, include_source=False)
-        _safe_component(environment, "environment fingerprint", 128)
-        metadata = self._metadata(processor_id); metadata["trusted"] = revision; metadata["environment"] = environment; _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
+        # Trust is tied to the exact revision and dependency fingerprint.  For
+        # the empty environment there is nothing to install, so compute the
+        # stable fingerprint instead of requiring the UI to know it.
+        fingerprint = environment or self.environment_metadata(item["requirements"], interpreter=interpreter)["fingerprint"]
+        _safe_component(fingerprint, "environment fingerprint", 128)
+        metadata = self._metadata(processor_id)
+        metadata["trusted"] = revision
+        metadata["environment"] = fingerprint
+        _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
         return self.get(processor_id, revision=revision, include_source=False)
 
     def delete(self, processor_id: str, *, expected_revision: str | None = None) -> None:
@@ -602,13 +625,63 @@ class ProcessorStore:
         if expected_revision is not None and expected_revision != metadata.get("active_revision"): raise ConflictError("processor revision is stale")
         shutil.rmtree(self._processor(processor_id))
 
-    def duplicate(self, processor_id: str, *, name: str | None = None) -> dict:
-        item = self.get(processor_id); return self.save(name or (item["name"] + " copy"), item["source"], item["requirements"])
+    def duplicate(self, processor_id: str, *, name: str | None = None, expected_revision: str | None = None) -> dict:
+        item = self.get(processor_id)
+        if expected_revision is not None and expected_revision != item["active_revision"]:
+            raise ConflictError("processor revision is stale")
+        return self.save(name or (item["name"] + " copy"), item["source"], item["requirements"])
+
+    def import_selected(self, source_path: str | Path, *, name: str | None = None) -> dict:
+        """Import one stable, regular UTF-8 Python file selected by the OS picker."""
+        path = Path(source_path)
+        try:
+            before = os.lstat(path)
+            if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or getattr(before, "st_reparse_tag", 0):
+                raise ValidationError("selected processor is not a regular file")
+            if before.st_size > SOURCE_MAX_BYTES:
+                raise ValidationError("source is too large")
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            if hasattr(os, "O_NOFOLLOW"): flags |= os.O_NOFOLLOW
+            fd = os.open(path, flags)
+            try:
+                observed = os.fstat(fd)
+                if (observed.st_dev, observed.st_ino, observed.st_size) != (before.st_dev, before.st_ino, before.st_size):
+                    raise ValidationError("selected processor changed while opening")
+                raw = b""
+                while len(raw) <= SOURCE_MAX_BYTES:
+                    chunk = os.read(fd, min(64 * 1024, SOURCE_MAX_BYTES + 1 - len(raw)))
+                    if not chunk: break
+                    raw += chunk
+                after = os.fstat(fd)
+            finally:
+                os.close(fd)
+            if len(raw) > SOURCE_MAX_BYTES or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                raise ValidationError("selected processor changed while reading")
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError("selected processor is not UTF-8") from exc
+        except OSError as exc:
+            raise ValidationError("could not read selected processor") from exc
+        clean_name = name or path.stem or "Imported processor"
+        return self.save(clean_name, source, "")
 
     def environment_metadata(self, requirements: Sequence[str], lock_hash: str = "", *, interpreter: str | Path = sys.executable) -> dict:
         req = normalize_requirements(requirements); fingerprint = environment_fingerprint(req, lock_hash, interpreter=interpreter, contract=self.contract)
         path = self.root / "environments" / fingerprint; ready = _read_json(path / "ready.json", "environment marker", missing=None)
+        # The private empty environment is always compatible and needs no pip
+        # job.  Materialize its marker so trust/status and execution agree.
+        if not req and not isinstance(ready, dict):
+            path.mkdir(parents=True, exist_ok=True)
+            _atomic_json(path / "ready.json", {"version": 1, "fingerprint": fingerprint, "requirements": [], "empty": True})
+            ready = {"empty": True}
         return {"fingerprint": fingerprint, "requirements": list(req), "ready": isinstance(ready, dict), "path": str(path)}
+
+    def status(self, processor_id: str, *, interpreter: str | Path = sys.executable) -> dict:
+        item = self.get(processor_id, include_source=False)
+        environment = self.environment_metadata(item["requirements"], interpreter=interpreter)
+        trusted = item.get("trusted") and self._metadata(processor_id).get("environment") == environment["fingerprint"]
+        return {"processor": {**item, "trusted": bool(trusted), "environment_fingerprint": self._metadata(processor_id).get("environment")},
+                "environment": environment}
 
     def cleanup(self, *, max_age: float = 24 * 3600) -> None:
         cutoff = time.time() - max_age

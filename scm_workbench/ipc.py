@@ -37,7 +37,7 @@ PRIVATE_METHODS = frozenset((
     "ready",
     "files.export_selected", "files.export_poll", "files.export_cancel",
     "fs.delete_images_start", "fs.delete_images_poll",
-    "back_images.import_selected",
+    "back_images.import_selected", "postprocessors.import_selected",
 ))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview",
@@ -48,6 +48,9 @@ ALLOWED_METHODS = frozenset((
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
     "offset.set", "offset.delete", "decklists.import_selected",
+    "postprocessors.list", "postprocessors.get", "postprocessors.save",
+    "postprocessors.duplicate", "postprocessors.trust", "postprocessors.delete",
+    "postprocessors.status",
 )) | PRIVATE_METHODS
 
 
@@ -202,6 +205,44 @@ def dispatch(request: dict) -> dict:
                 result = server.import_back_image(params["source_path"])
             except server.BackImageImportError as error:
                 result = {"ok": False, "errors": [error.message]}
+        elif method.startswith("postprocessors."):
+            if method == "postprocessors.list":
+                if params: return _bad_params(request_id, "postprocessors.list does not accept parameters")
+                result = server.postprocessors_list()
+            elif method == "postprocessors.get":
+                if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
+                    return _bad_params(request_id, "postprocessors.get requires exactly processor_id")
+                result = server.postprocessor_get(params["processor_id"])
+            elif method == "postprocessors.save":
+                required = {"name", "source", "requirements", "processor_id", "expected_revision"}
+                if set(params) - required or not isinstance(params.get("name"), str) or not isinstance(params.get("source"), str) or not isinstance(params.get("requirements"), str):
+                    return _bad_params(request_id, "postprocessors.save has invalid parameters")
+                try:
+                    if len(params["source"].encode("utf-8")) > server.POSTPROCESS_SOURCE_MAX_BYTES or len(params["requirements"].encode("utf-8")) > server.postprocessing.REQUIREMENTS_MAX_BYTES:
+                        return _bad_params(request_id, "postprocessor payload is too large")
+                except UnicodeEncodeError:
+                    return _bad_params(request_id, "postprocessor payload must be valid UTF-8")
+                result = server.postprocessor_save(params)
+            elif method == "postprocessors.duplicate":
+                if set(params) != {"processor_id", "name", "expected_revision"} or not all(isinstance(params.get(k), str) for k in ("processor_id", "name")) or (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str)):
+                    return _bad_params(request_id, "postprocessors.duplicate requires processor_id, name, and expected_revision")
+                result = server.postprocessor_duplicate(params["processor_id"], params)
+            elif method == "postprocessors.trust":
+                if set(params) != {"processor_id", "revision_hash", "environment_fingerprint"} or not all(isinstance(params.get(k), str) for k in ("processor_id", "revision_hash")) or (params.get("environment_fingerprint") is not None and not isinstance(params.get("environment_fingerprint"), str)):
+                    return _bad_params(request_id, "postprocessors.trust requires processor_id, revision_hash, and environment_fingerprint")
+                result = server.postprocessor_trust(params["processor_id"], params)
+            elif method == "postprocessors.delete":
+                if set(params) != {"processor_id", "expected_revision"} or not isinstance(params.get("processor_id"), str) or (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str)):
+                    return _bad_params(request_id, "postprocessors.delete requires processor_id and expected_revision")
+                result = server.postprocessor_delete(params["processor_id"], params)
+            elif method == "postprocessors.status":
+                if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
+                    return _bad_params(request_id, "postprocessors.status requires exactly processor_id")
+                result = server.postprocessor_status(params["processor_id"])
+            else:  # private native picker operation
+                if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
+                    return _bad_params(request_id, "postprocessors.import_selected requires exactly source_path")
+                result = server.postprocessor_import_selected(params["source_path"])
         elif method == "settings.set":
             if set(params) != {"changes"}:
                 return _bad_params(request_id, "settings.set requires exactly changes")
