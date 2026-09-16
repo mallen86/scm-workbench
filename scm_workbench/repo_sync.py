@@ -14,7 +14,10 @@ created and updated:
     fallback when the diff is too large or the API misbehaves.
   * User-generated files (card art, decklists, printed PDFs, offsets, …) are
     all *untracked* in the repos, so an update never deletes or overwrites
-    them. Locally-edited *tracked* files are reconciled against a stored hash
+    them. Reproducible calibration sheets are the one derived-data exception:
+    when a source change removes a configured paper size, its untracked sheet
+    is removed so the managed checkout cannot advertise a stale size.
+    Locally-edited *tracked* files are reconciled against a stored hash
     manifest (which always records the PRISTINE upstream hash per path):
       - upstream-only change   -> new content applied
       - user-only change       -> local content kept
@@ -2178,11 +2181,16 @@ def _sync_deps(key: str, log=print) -> None:
 
 
 # User data lives in these repo subfolders (decklists, fetched card images,
-# generated output, calibration data, and the cutting templates the Workbench
-# itself generates). A re-deploy must never lose it: copies are staged before
-# the tree is replaced and put back afterwards, and the update paths exempt
-# these from the deletions an upstream change would otherwise apply.
-# Upstream placeholder files (README/EMPTY) are not user data.
+# generated output, offsets, and the cutting templates the Workbench itself
+# generates). A re-deploy must never lose it: copies are staged before the tree
+# is replaced and put back afterwards, and the update paths exempt these from
+# the deletions an upstream change would otherwise apply. Upstream placeholder
+# files (README/EMPTY) are not user data.
+#
+# Calibration PDFs are reproducible outputs rather than durable user data. They
+# normally survive updates like any other untracked file, but a source change
+# must remove a generated sheet when its paper size disappears from layouts.json
+# or a rollback keeps advertising a size the selected source does not support.
 #
 # cutting_templates/dxf and cutting_templates/borderless/dxf are where the
 # Workbench writes a template it generated. They are the user's own files, and
@@ -2191,11 +2199,65 @@ USER_DATA_PATHS = ("data", "game/front", "game/back", "game/double_sided",
                    "game/decklist", "game/output",
                    "cutting_templates/dxf", "cutting_templates/borderless/dxf")
 _PRISTINE_NAMES = {"README.md", "EMPTY.md"}
+_CALIBRATION_SUFFIX = "-calibration.pdf"
 
 
 def _is_user_data_rel(rel: str) -> bool:
     """True when an already-validated relative path is one of the user slots."""
     return any(rel == base or rel.startswith(base + "/") for base in USER_DATA_PATHS)
+
+
+def _configured_paper_sizes(repo: Path):
+    """Return the checkout's paper-size names, or None when unknowable."""
+    try:
+        layouts = _load_json_object(safe_path(repo, "assets/layouts.json"),
+                                    "SCM layouts", None)
+    except RepoError:
+        return None
+    if not isinstance(layouts, dict):
+        return None
+    paper_sizes = layouts.get("paper_sizes")
+    if not isinstance(paper_sizes, dict) or any(not isinstance(name, str) or not name
+                                                for name in paper_sizes):
+        return None
+    return set(paper_sizes)
+
+
+def _remove_obsolete_generated_calibrations(repo: Path, before, after,
+                                             manifest_files: dict, log=print) -> int:
+    """Remove untracked sheets for paper sizes dropped by a source change."""
+    if before is None or after is None:
+        return 0
+    after_names = {name.casefold() for name in after}
+    removed_sizes = {name.casefold() for name in before if name.casefold() not in after_names}
+    if not removed_sizes:
+        return 0
+    if not isinstance(manifest_files, dict):
+        raise RepoError("invalid repository manifest shape")
+    repo = safe_destination(repo).resolve()
+    calibration = safe_path(repo, "calibration")
+    if not calibration.exists():
+        return 0
+    if calibration.is_symlink() or not calibration.is_dir():
+        raise RepoError("calibration output path is unsafe")
+    removed = 0
+    for path in sorted(calibration.iterdir(), key=lambda item: item.name.casefold()):
+        rel = validate_repo_path(str(path.relative_to(repo)).replace(os.sep, "/"))
+        safe_path(repo, rel)
+        if path.is_symlink():
+            raise RepoError("refusing a symbolic link in calibration output")
+        if not path.is_file() or not path.name.casefold().endswith(_CALIBRATION_SUFFIX):
+            continue
+        paper_size = path.name[:-len(_CALIBRATION_SUFFIX)]
+        # Target-owned files and retained tracked conflicts follow normal
+        # manifest reconciliation; only derived, untracked output is disposable.
+        if paper_size.casefold() not in removed_sizes or rel in manifest_files:
+            continue
+        _secure_unlink_relative(repo, rel)
+        removed += 1
+    if removed:
+        log(f"[repos] removed {removed} stale calibration sheet(s) for paper sizes absent from the target")
+    return removed
 
 
 def stash_user_data(repo: Path, dest: Path, log=print) -> list:
@@ -2947,10 +3009,11 @@ def _carry_over_local_files_the_archive_lacks(source: Path, dest: Path, log=prin
 
     Enumerating the folders that are *expected* to hold user data is not enough
     for that, because it silently omits whatever nobody thought of: a custom
-    cutting template the Workbench generated, a calibration sheet, a note the
-    user dropped in the repo. This pass is the backstop, and its rule is the
-    one the module promises: a re-deploy replaces upstream's files and never
-    removes anything else.
+    cutting template the Workbench generated, a custom calibration sheet, a
+    note the user dropped in the repo. This pass is the backstop, and its rule
+    is the one the module promises: a re-deploy replaces upstream's files and
+    never removes anything else. The narrow derived-data cleanup later removes
+    only generator-named sheets for paper sizes dropped by the target source.
 
     The documented user slots are still staged separately, and before this, so
     that user data keeps winning over a same-named upstream file. Here, a path
@@ -3170,8 +3233,11 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
         # Fingerprint upstream before overlaying preserved local content so
         # the manifest continues to record pristine hashes.
         pristine = _fingerprint_tree(key, target, tx["candidate"], progress=True)
+        old_paper_sizes = None
         if repo.exists():
             _validate_tree(repo)
+            if key == "scm":
+                old_paper_sizes = _configured_paper_sizes(repo)
             _copy_authorized_user_data(repo, tx["candidate"], log)
             if old_manifest is not None:
                 _copy_existing_local_edits(repo, tx["candidate"], old_manifest, log)
@@ -3179,6 +3245,10 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
             # the user's, including files no list of "user data folders" would
             # have predicted. Without this a re-deploy silently discarded them.
             _carry_over_local_files_the_archive_lacks(repo, tx["candidate"], log)
+        if key == "scm":
+            _remove_obsolete_generated_calibrations(
+                tx["candidate"], old_paper_sizes,
+                _configured_paper_sizes(tx["candidate"]), pristine["files"], log)
         man = pristine
         candidate_paths = set(_validate_tree(tx["candidate"]))
         if old_manifest is not None:
@@ -3222,6 +3292,7 @@ def _cmd_update_locked(key, force_full=False, log=print):
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
     repo = safe_destination(repo_dir(key))
     _validate_tree(repo)
+    old_paper_sizes = _configured_paper_sizes(repo) if key == "scm" else None
     target = resolve_target(key, source)
     if deployed["sha"] == target["sha"]:
         return {"ok": True, "noop": True}
@@ -3275,6 +3346,10 @@ def _cmd_update_locked(key, force_full=False, log=print):
             ops = {p: None for p in upstream}
             deletes = [p for p in man["files"] if p not in upstream and not _is_authorized_user_path(p)]
             result = apply_changes(key, man, target, ops, deletes, lambda p: upstream.get(p), log, repo_root=tx["candidate"])
+        if key == "scm":
+            result["deleted"] += _remove_obsolete_generated_calibrations(
+                tx["candidate"], old_paper_sizes,
+                _configured_paper_sizes(tx["candidate"]), result["manifest"]["files"], log)
         _validate_tree(tx["candidate"])
         result["manifest"] = _with_local_edits(tx["candidate"], result["manifest"])
         _validate_final_manifest(tx["candidate"], result["manifest"])
