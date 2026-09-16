@@ -359,6 +359,8 @@ class HttpContractTests(unittest.TestCase):
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(options["extend_corners_simple"]["simple_only"])
         self.assertTrue(options["extend_corners_simple"]["available"])
+        for key in ("mpcfill_crop", "extend_corners_simple"):
+            self.assertIn("switch to Advanced mode", options[key]["help"])
 
         settings = server.load_settings()
         settings["ui_mode"] = "simple"
