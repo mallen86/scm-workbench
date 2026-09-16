@@ -5,7 +5,7 @@ import { toggleConsole, refreshJobs } from "./console.js";import { $, $$, PAGES,
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
-    preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
+    preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", postprocess: "Image post-processing", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
@@ -37,6 +37,18 @@ export function pageFromPath() {
 
 
 export function go(page, prefill, { push = true, anim = true } = {}) {
+  if (uiMode() === "simple" && page && !SIMPLE_PAGES.includes(page)) page = "fetch";
+  const existingPage = $("#page").firstElementChild;
+  if (page !== S.page && typeof S.pageGuard === "function" && existingPage?.isConnected) {
+    const guard = S.pageGuard;
+    Promise.resolve().then(() => guard()).then(ok => {
+      if (ok !== false) {
+        S.pageGuard = null;
+        go(page, prefill, { push, anim });
+      }
+    }).catch(() => {});
+    return false;
+  }
   if (prefill) applyPrefill(page, prefill);
   const pageEl = $("#page");
   const previous = pageEl.firstElementChild;
@@ -92,6 +104,9 @@ export function applyPrefill(page, prefill) {
   // in that kind's form slot, so the page opens on exactly what the job ran.
   if (prefill.kind && S.manifest?.[prefill.kind]?.page === page) {
     S.forms[prefill.kind] = restoreArgs(prefill.kind, prefill.args || {});
+    if (page === "postprocess") S.postprocessPrefill = { ...prefill };
+  } else if (page === "postprocess" && prefill.processor_id) {
+    S.postprocessPrefill = { ...prefill };
   } else if (page === "pdf" && prefill.card_size) {
     S.forms.create_pdf = defaultArgs("create_pdf");
     S.forms.create_pdf.card_size = prefill.card_size;

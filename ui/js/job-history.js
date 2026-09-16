@@ -38,6 +38,7 @@ export function jobPrefill(job) {
 
 const KIND_ICONS = [
   [/^fetch:/, "download"],
+  [/^postprocess_/, "sparkle"],
   [/^create_pdf$/, "pdf"],
   [/^(offset_pdf|calibration)$/, "target"],
   [/^dxf_/, "scissors"],

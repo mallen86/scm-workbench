@@ -18,6 +18,7 @@
 import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, go } from "./nav.js";import { bindConsole, startJobsPoll } from "./console.js";import { firstBootPageNeeded, startPrepWatcher } from "./prep.js";import { api, iconize, $, $$ } from "./core.js";import { getTauriInvoke } from "./transport.js";import { startAutomaticUpdateChecks } from "./updater-ui.js";import "./pages/history.js";
 import "./pages/preparing.js";
 import "./pages/fetch.js";
+import "./pages/postprocess.js";
 import "./pages/pdf.js";
 import "./pages/offset.js";
 import "./pages/templates.js";
