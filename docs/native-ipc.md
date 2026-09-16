@@ -34,8 +34,10 @@ only browser fallback is explicit POST `/api/fs`. Decklist import and
 card-back image import are separate native commands (`wb_decklist_import` and
 `wb_back_image_import`), not public `wb_rpc` methods: each command owns a
 parented single-file picker and sends one validated private frame
-(`decklists.import_selected` or `back_images.import_selected`) to the worker.
-Standalone-browser surfaces
+(`decklists.import_selected`, `back_images.import_selected`, or
+`postprocessors.import_selected`) to the worker. The postprocessor import is
+also a private native command (`wb_postprocessor_import`), not a public RPC
+method. Standalone-browser surfaces
 remain on their existing HTTP compatibility paths; the packaged UI uses native
 IPC for its migrated calls.
 
@@ -212,6 +214,32 @@ are deterministic and bounded to 8192 scanned entries, 1024 results, and a
 ### Card-back import
 
 `wb_back_image_import` is a no-argument Tauri command with a parented single-file image picker. It is not a public `wb_rpc` method. The command sends only the selected UTF-8 path to the private worker method `back_images.import_selected`; picker cancellation returns JSON `null`, and a native invocation failure is final rather than an HTTP fallback.
+
+### Python postprocessor import
+
+`wb_postprocessor_import` is a no-argument Tauri command with a parented
+single-file picker filtered to `.py` files. It is not a public `wb_rpc` method
+and its capability is granted only to the embedded `main` window. On a
+selection, Rust converts the picker result to UTF-8, rejects control characters
+(including DEL) and paths longer than **4096 UTF-8 bytes**, then sends exactly
+this private worker frame (with no picker metadata or other fields):
+
+```json
+{"source_path":"<selected UTF-8 path>"}
+```
+
+The worker method is `postprocessors.import_selected`; a direct call through
+public `wb_rpc` is rejected as `unknown_method`. Picker cancellation returns
+JSON `null`. The worker owns stable-file validation, source-size and UTF-8
+validation, revision creation, and all postprocessor semantics. Its
+application rejection must be an object containing only `ok:false` and a
+non-empty `errors` array of at most eight messages, each at most 256 bytes.
+Rust caps the complete application result at 512 KiB before returning it to
+the WebView; malformed application errors are rejected as native failures.
+Picker, UTF-8 conversion, worker transport, timeout, and malformed-response
+failures reject the native invocation. A native failure is final and is never
+retried through HTTP. The selected path is not returned to JavaScript before
+the private worker call.
 
 The worker accepts paths up to 4096 UTF-8 bytes and opens the selected final object as a stable regular-file handle. It rejects controls, symlinks/reparse points, non-files, files larger than 8 MiB, and files whose magic bytes are not one of the image formats recognized by Workbench. Import holds the SCM repository lock and the image/job exclusion fence, preserves placeholders and unrelated user files, and publishes one copied image through a bounded temporary-file transaction. POSIX keeps no-follow directory handles throughout the transaction. Windows revalidates destination components and moved files while retaining the platform's existing path-based component-swap limitation. Existing recognized back images are moved into an unpredictable nested quarantine directory and validated again before publication. They are removed only after publication succeeds; cleanup is best effort so a cleanup failure leaves recoverable hidden backups while pre-publication failures restore every original name. The result is bounded and includes the deterministic current `back_images` state. Browser compatibility uses `POST /api/back-images/import` only with an explicit `{path}` body. A create PDF command counts recognized images the way upstream does, resolving links rather than refusing them, and rejects more than one image or a scan that exceeds its bounds. Child jobs receive no stdin, so an upstream prompt outside that guard fails without hanging or consuming native protocol input.
 

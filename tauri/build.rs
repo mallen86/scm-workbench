@@ -9,6 +9,7 @@ fn main() {
             "wb_pick_repo_directory",
             "wb_decklist_import",
             "wb_back_image_import",
+            "wb_postprocessor_import",
             "wb_save_artifact",
         ]),
     ))

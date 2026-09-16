@@ -270,6 +270,45 @@ impl WorkerRpc {
         Ok(value)
     }
 
+    /// Private protocol edge owned by the native Python processor picker. The
+    /// command supplies the only path accepted here and the public RPC
+    /// allowlist deliberately excludes this worker method.
+    pub(crate) fn import_selected_postprocessor(&self, source_path: &str) -> Result<Value, String> {
+        let value = self.call_unchecked(
+            "postprocessors.import_selected",
+            json!({"source_path": source_path}),
+        )?;
+        let encoded = serde_json::to_vec(&value)
+            .map_err(|_| "malformed postprocessor import response".to_string())?;
+        if encoded.len() > 512 * 1024 {
+            return Err("postprocessor import response too large".to_string());
+        }
+        let Some(object) = value.as_object() else {
+            return Err("malformed postprocessor import response".to_string());
+        };
+        if object.get("ok").and_then(Value::as_bool) == Some(false) {
+            let valid_errors = object.len() == 2
+                && object
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .is_some_and(|errors| {
+                        !errors.is_empty()
+                            && errors.len() <= 8
+                            && errors.iter().all(|error| {
+                                error.as_str().is_some_and(|message| {
+                                    !message.is_empty() && message.len() <= 256
+                                })
+                            })
+                    });
+            if !valid_errors {
+                return Err("malformed postprocessor import response".to_string());
+            }
+        } else if object.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("malformed postprocessor import response".to_string());
+        }
+        Ok(value)
+    }
+
     /// Private artifact-export edges. These are intentionally typed helpers:
     /// the WebView can call only the public `wb_rpc` command, whose allowlist
     /// rejects all three method names.
@@ -762,6 +801,7 @@ mod tests {
             "repos.poll ",
             "decklists.import_selected",
             "back_images.import_selected",
+            "postprocessors.import_selected",
             "files.export_selected",
             "files.export_poll",
             "files.export_cancel",
@@ -787,6 +827,22 @@ mod tests {
         );
         assert_eq!(
             rpc.import_selected_back_image("/tmp/back.png"),
+            Err("worker unavailable".into())
+        );
+    }
+
+    #[test]
+    fn private_postprocessor_method_is_not_public() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "postprocessors.import_selected",
+                json!({"source_path": "/tmp/processor.py"})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.import_selected_postprocessor("/tmp/processor.py"),
             Err("worker unavailable".into())
         );
     }

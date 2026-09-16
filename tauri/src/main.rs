@@ -271,6 +271,47 @@ async fn wb_back_image_import(
     state.inner().import_selected_back_image(source_path)
 }
 
+/// Native postprocessor import owns the picker. The selected source is passed
+/// only to the private worker import boundary; browsers cannot provide this
+/// absolute-path capability.
+#[tauri::command]
+async fn wb_postprocessor_import(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+) -> Result<Value, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Import Python processor")
+        .add_filter("Python files", &["py"])
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "Python processor picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "Python processor picker failed".to_string()))?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected processor path is unavailable".to_string())?;
+    let source_path = path
+        .to_str()
+        .ok_or_else(|| "selected processor path is not valid UTF-8".to_string())?;
+    if source_path.as_bytes().len() > 4096
+        || source_path
+            .chars()
+            .any(|character| character.is_control() || character == '\u{7f}')
+    {
+        return Err("selected processor path is invalid".to_string());
+    }
+    state.inner().import_selected_postprocessor(source_path)
+}
+
 /// Native artifact save. The selected destination is consumed here and is
 /// never returned to JavaScript before the worker has copied it. Rust only
 /// accepts an opaque grant and a bounded basename hint from the WebView.
@@ -389,6 +430,7 @@ fn main() {
             wb_pick_repo_directory,
             wb_decklist_import,
             wb_back_image_import,
+            wb_postprocessor_import,
             wb_save_artifact
         ])
         .manage(worker_slot.clone())
