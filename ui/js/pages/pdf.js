@@ -467,7 +467,7 @@ export function patchOffsetToggle(kind) {
   const card = $(`.form-card[data-kind="${kind}"]`);
   const field = card && $$(".field", card).find(f => f.dataset.key === "load_offset");
   const input = field && $("input[type=checkbox]", field);
-  if (!input) return;
+  if (!input || field.classList.contains("option-unavailable")) return;
 
   const refresh = () => {
     const a = S.forms[kind] || (S.forms[kind] = defaultArgs(kind));

@@ -40,6 +40,10 @@ def main() -> int:
         "const isCurrent = () =>",
         "if (!isCurrent()) return;",
         "renderPreview(box, d);",
+        "o.available === false",
+        "o.unavailable_choices || {}",
+        'control.disabled = true',
+        'runBtn.classList.add("capability-disabled")',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")
@@ -106,7 +110,8 @@ if (!browserError || browserError.message !== "bad preview") fail("browser previ
 // repaint the box after the second request has become current.  Small import
 // stubs keep this a DOM-free test of forms.js's real sequencing branch.
 const coreUrl = dataUrl(`
-  export const S = { forms: { fixture: { value: 1 } }, info: null };
+  globalThis.formState = { forms: { fixture: { value: 1 } }, info: null, manifest: {} };
+  export const S = globalThis.formState;
   export const $ = () => null;
   export const $$ = () => [];
   export const confirmModal = () => Promise.resolve(false);
@@ -132,6 +137,23 @@ const formsForTest = formsSource
   .replace('from "./prep.js"', `from "${prepUrl}"`)
   .replace('from "./nav.js"', `from "${navUrl}"`);
 const forms = await import(dataUrl(formsForTest));
+
+// Capability metadata must reset unsupported values both for a fresh form and
+// when restoring an older job-history entry. A disabled choice cannot remain
+// selected merely because it used to exist in another SCM checkout.
+globalThis.formState.manifest.capability_fixture = { groups: [{ options: [
+  { key: "borderless", type: "toggle", default: true, available: false, unavailable_value: false },
+  { key: "variant", type: "segment", default: "borderless",
+    choices: [["default", "Default"], ["borderless", "Borderless"]],
+    unavailable_choices: { borderless: "unsupported" } },
+] }] };
+const capabilityDefaults = forms.defaultArgs("capability_fixture");
+if (capabilityDefaults.borderless !== false || capabilityDefaults.variant !== "default")
+  fail("capability-aware defaults retained an unsupported value");
+const capabilityRestored = forms.restoreArgs("capability_fixture", { borderless: true, variant: "borderless" });
+if (capabilityRestored.borderless !== false || capabilityRestored.variant !== "default")
+  fail("job-history restore reactivated an unsupported value");
+
 const box = {
   dataset: { kind: "fixture" }, isConnected: true, innerHTML: "initial", paints: 0,
   append() { this.paints++; },

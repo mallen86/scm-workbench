@@ -80,6 +80,9 @@ class OffsetTests(unittest.TestCase):
             "scm_dir": str(self.fixture.scm),
             "extras_dir": str(self.fixture.extras),
         })
+        # Capability discovery is a separate subprocess boundary. Prime it
+        # before individual tests replace Popen with the job process double.
+        server.get_manifest()
         # A failed test must not poison the process-wide non-blocking lease.
         if server.OFFSET_LEASE.locked():
             server.OFFSET_LEASE.release()

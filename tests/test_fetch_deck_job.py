@@ -35,7 +35,10 @@ class StartedFetchDeckTotalTests(unittest.TestCase):
         self.repo = Path(self.temp.name) / "scm"
         (self.repo / "game" / "decklist").mkdir(parents=True)
         (self.repo / "plugins" / "mtg").mkdir(parents=True)
-        (self.repo / "plugins" / "mtg" / "fetch.py").write_text("# fixture\n", encoding="utf-8")
+        (self.repo / "plugins" / "mtg" / "fetch.py").write_text(
+            "import argparse\nparser = argparse.ArgumentParser()\nparser.parse_args()\n",
+            encoding="utf-8",
+        )
         self.env = mock.patch.dict(
             os.environ,
             {"SCM_WORKBENCH_DATA": str(self.data), "SCM_WORKBENCH_SCM": str(self.repo)},
@@ -48,6 +51,10 @@ class StartedFetchDeckTotalTests(unittest.TestCase):
         server.JOBS_FILE = self.data / "jobs.json"
         server.LOGS_DIR = self.data / "logs"
         self.data.mkdir(parents=True, exist_ok=True)
+        server.invalidate_manifest_cache()
+        settings = {"scm_dir": str(self.repo), "extras_dir": str(self.repo)}
+        with mock.patch.object(server, "load_settings", return_value=settings):
+            server.get_manifest()
         server.JOBS.clear()
 
     def tearDown(self):

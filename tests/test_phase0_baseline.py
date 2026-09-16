@@ -44,8 +44,56 @@ class Phase0Fixture:
 
     @staticmethod
     def _marker(path: Path) -> None:
+        """Write a no-op script with realistic, machine-probeable help text."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# fixture marker; upstream owns this implementation\n", encoding="utf-8")
+        common = {
+            "create_pdf.py": [
+                "--front_dir_path", "--back_dir_path", "--double_sided_dir_path",
+                "--output_path", "--output_images", "--card_size", "--paper_size",
+                "--registration", "--registration_orientation", "--specialty",
+                "--only_fronts", "--fit", "--fit_backs", "--crop", "--crop_backs",
+                "--extend_edges", "--extend_edges_backs", "--extend_corners",
+                "--extend_corners_backs", "--extend_bleed", "--extend_bleed_backs",
+                "--ppi", "--quality", "--skip", "--label", "--show_outline",
+                "--borderless", "--load_offset",
+            ],
+            "offset_pdf.py": [
+                "--pdf_path", "--output_pdf_path", "-x", "-y", "-a", "--ppi", "-s",
+            ],
+            "generate.py": ["--all"],
+            "fetch.py": [
+                "-i", "--prefer_older_sets", "--prefer_set", "--ignore_set",
+                "--prefer_showcase", "--prefer_extra_art", "--prefer_lang",
+                "--prefer_ub", "--ignore_ub", "--tokens",
+            ],
+        }
+        dxf = {
+            "single": [
+                "--card_size", "--card_width", "--card_height", "--card_radius",
+                "--card_name", "--paper_size", "--paper_width", "--paper_height",
+                "--paper_name", "--variant", "--orientation", "--save",
+            ],
+            "batch": ["--all", "--optimize"],
+            "list": [],
+        }
+        script = f'''# fixture marker; upstream owns the real implementation
+import argparse
+import sys
+
+# Constructing an argparse parser makes --help probing explicitly safe while
+# the fixture remains a no-op for ordinary job delegation tests.
+_probe_parser = argparse.ArgumentParser(add_help=False)
+if "--help" in sys.argv:
+    command = sys.argv[1] if {path.name!r} == "generate_dxf.py" and len(sys.argv) > 1 else ""
+    options = {dxf!r}.get(command, []) if {path.name!r} == "generate_dxf.py" else {common!r}.get({path.name!r}, [])
+    suffix = f" {{command}}" if command else ""
+    print(f"Usage: {path.name}{{suffix}} [OPTIONS]")
+    print("Options:")
+    for option in options:
+        print(f"  {{option}} VALUE")
+    print("  --help")
+'''
+        path.write_text(script, encoding="utf-8")
 
     def _make_scm(self) -> None:
         self.scm.mkdir()
@@ -57,9 +105,10 @@ class Phase0Fixture:
                 "defaults": {"card_radius": "3mm"},
                 "card_sizes": {"standard": {"width": "63mm", "height": "88mm"}},
                 "paper_sizes": {"letter": {"width": "8.5in", "height": "11in"}},
-                "layouts": {"letter": {"standard": {"default": {
-                "num_rows": 2, "num_cols": 4,
-            }}}},
+                "layouts": {"letter": {"standard": {
+                    "default": {"num_rows": 2, "num_cols": 4},
+                    "borderless": {"num_rows": 3, "num_cols": 3},
+                }}},
                 "specialty_layouts": {},
             },
         )

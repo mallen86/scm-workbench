@@ -19,6 +19,7 @@ Requires Python 3.10+ (3.12+ recommended to match silhouette-card-maker).
 """
 
 import argparse
+import ast
 import base64
 import io
 import json
@@ -40,6 +41,7 @@ import uuid
 import webbrowser
 import unicodedata
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import errno
 import html
@@ -751,14 +753,30 @@ def read_scm_info(scm: Optional[Path], extras: Optional[Path]) -> dict:
         })
 
     merged: Dict[str, Any] = {}
-    for paper, cards in (layouts.get("layouts") or {}).items():
-        for card, variants in cards.items():
-            for variant, defn in variants.items():
-                merged.setdefault(paper, {}).setdefault(card, {})[variant] = defn
-    for paper, cards in (extra.get("layouts") or {}).items():
-        for card, variants in cards.items():
-            for variant, defn in variants.items():
-                merged.setdefault(paper, {}).setdefault(card, {})[variant] = defn
+
+    def merge_layouts(source: Any) -> None:
+        if not isinstance(source, dict):
+            return
+        for paper, cards in source.items():
+            if not isinstance(paper, str) or not isinstance(cards, dict):
+                continue
+            for card, variants in cards.items():
+                if not isinstance(card, str) or not isinstance(variants, dict):
+                    continue
+                target = merged.setdefault(paper, {}).setdefault(card, {})
+                # SCM before v3 stored one layout definition directly under
+                # paper/card.  v3 introduced named variants (default and
+                # borderless). Normalize the legacy shape so old checkouts can
+                # still render and preview their ordinary layouts.
+                if "num_rows" in variants or "num_cols" in variants:
+                    target["default"] = variants
+                    continue
+                for variant, defn in variants.items():
+                    if isinstance(variant, str) and isinstance(defn, dict):
+                        target[variant] = defn
+
+    merge_layouts(layouts.get("layouts") or {})
+    merge_layouts(extra.get("layouts") or {})
     info["layouts"] = merged
 
     for name, d in (layouts.get("specialty_layouts") or {}).items():
@@ -1032,17 +1050,25 @@ def build_manifest(info: dict) -> dict:
                 "title": "MTG card preferences",
                 "collapsible": True,
                 "options": [
-                    _opt("prefer_set", "Prefer sets", "chips", placeholder="e.g. ONE, M25", default=[]),
-                    _opt("ignore_set", "Exclude sets", "chips", default=[]),
+                    _opt("prefer_set", "Prefer sets", "chips", placeholder="e.g. ONE, M25", default=[],
+                         requires_flags=["--prefer_set"]),
+                    _opt("ignore_set", "Exclude sets", "chips", default=[], requires_flags=["--ignore_set"]),
                     _opt("prefer_lang", "Preferred languages (printed code)", "choice_chips",
-                         choices=[[l, l.upper()] for l in MTG_LANGS], default=[]),
-                    _opt("prefer_older_sets", "Prefer older sets", "toggle", default=False, width="quarter"),
-                    _opt("prefer_showcase", "Prefer showcase art", "toggle", default=False, width="quarter"),
-                    _opt("prefer_extra_art", "Prefer full / borderless / extended art", "toggle", default=False, width="quarter"),
-                    _opt("prefer_ub", "Prefer Universe Beyond", "toggle", default=False, width="quarter"),
-                    _opt("ignore_ub", "Exclude Universe Beyond", "toggle", default=False, width="quarter"),
-                    _opt("tokens", "Also fetch related tokens", "toggle", default=False, width="quarter"),
-                    _opt("ignore_set_and_collector_number", "Ignore set & collector numbers", "toggle", default=False, width="quarter"),
+                         choices=[[l, l.upper()] for l in MTG_LANGS], default=[], requires_flags=["--prefer_lang"]),
+                    _opt("prefer_older_sets", "Prefer older sets", "toggle", default=False, width="quarter",
+                         requires_flags=["--prefer_older_sets"]),
+                    _opt("prefer_showcase", "Prefer showcase art", "toggle", default=False, width="quarter",
+                         requires_flags=["--prefer_showcase"]),
+                    _opt("prefer_extra_art", "Prefer full / borderless / extended art", "toggle", default=False, width="quarter",
+                         requires_flags=["--prefer_extra_art"]),
+                    _opt("prefer_ub", "Prefer Universe Beyond", "toggle", default=False, width="quarter",
+                         requires_flags=["--prefer_ub"]),
+                    _opt("ignore_ub", "Exclude Universe Beyond", "toggle", default=False, width="quarter",
+                         requires_flags=["--ignore_ub"]),
+                    _opt("tokens", "Also fetch related tokens", "toggle", default=False, width="quarter",
+                         requires_flags=["--tokens"]),
+                    _opt("ignore_set_and_collector_number", "Ignore set & collector numbers", "toggle", default=False, width="quarter",
+                         requires_flags=["-i"]),
                 ],
             })
         return groups
@@ -1052,6 +1078,10 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------------ PDF
     kinds["create_pdf"] = {
         "title": "Create PDF", "page": "pdf", "needs": ["scm"], "cwd": "scm",
+        "script": {
+            "repo": "scm", "path": "create_pdf.py", "help_args": ["--help"],
+            "required_flags": ["--output_path", "--card_size", "--paper_size", "--ppi"],
+        },
         # the simple-mode layout: rows of the flat section — the two
         # dropdowns alone up top, the four toggles together below
         "simple_rows": [
@@ -1064,38 +1094,50 @@ def build_manifest(info: dict) -> dict:
                 "title": "Sources & output",
                 "options": [
                     _opt("front_dir", "Front images folder", "path", default="game/front", width="half",
-                         help="Folder containing card front images."),
+                         requires_flags=["--front_dir_path"], help="Folder containing card front images."),
                     _opt("back_dir", "Card back folder", "path", default="game/back", width="half",
-                         help="Folder containing the optional card back image."),
+                         requires_flags=["--back_dir_path"], help="Folder containing the optional card back image."),
                     _opt("double_sided_dir", "Double-sided folder", "path", default="game/double_sided", width="half",
+                         requires_flags=["--double_sided_dir_path"],
                          help="Folder containing cards with different front and back art."),
-                    _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="full"),
-                    _opt("output_images", "Output images instead of a PDF", "toggle", default=False, width="third"),
-                    _opt("only_fronts", "Front pages only", "toggle", default=False, width="third", simple=True),
+                    _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="full",
+                         requires_flags=["--output_path"]),
+                    _opt("output_images", "Output images instead of a PDF", "toggle", default=False, width="third",
+                         requires_flags=["--output_images"]),
+                    _opt("only_fronts", "Front pages only", "toggle", default=False, width="third", simple=True,
+                         requires_flags=["--only_fronts"]),
                 ],
             },
             {
                 "title": "Card, paper & registration",
                 "options": [
-                    _opt("card_size", "Card size", "select", choices=card_choices, default="standard", width="third", simple=True),
-                    _opt("paper_size", "Paper size", "select", choices=paper_choices, default="letter", width="third", simple=True),
+                    _opt("card_size", "Card size", "select", choices=card_choices, default="standard", width="third", simple=True,
+                         requires_flags=["--card_size"]),
+                    _opt("paper_size", "Paper size", "select", choices=paper_choices, default="letter", width="third", simple=True,
+                         requires_flags=["--paper_size"]),
                     _opt("registration", "Registration marks", "segment",
-                         choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third"),
+                         choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third",
+                         requires_flags=["--registration"]),
                     _opt("specialty", "Specialty layout", "select", choices=specialty_choices, default="", width="third",
+                         requires_flags=["--specialty"],
                          help="Overrides the card size, paper size, and registration settings."),
                     _opt("registration_orientation", "Registration orientation", "select",
                          choices=[["", "Auto (follow layout)"], ["portrait", "Portrait"], ["landscape", "Landscape"]],
-                         default="", width="third"),
+                         default="", width="third", requires_flags=["--registration_orientation"]),
                     _opt("borderless", "Borderless (tighter inset)", "toggle", default=False, width="third", simple=True,
+                         requires_flags=["--borderless"],
                          help="Fits more cards on each page by using a smaller inset."),
                 ],
             },
             {
                 "title": "Quality",
                 "options": [
-                    _opt("ppi", "Resolution (PPI)", "range", default=1200, min=150, max=1200, step=10, width="third"),
-                    _opt("quality", "Compression quality", "range", default=100, min=0, max=100, step=1, width="third"),
+                    _opt("ppi", "Resolution (PPI)", "range", default=1200, min=150, max=1200, step=10, width="third",
+                         requires_flags=["--ppi"]),
+                    _opt("quality", "Compression quality", "range", default=100, min=0, max=100, step=1, width="third",
+                         requires_flags=["--quality"]),
                     _opt("load_offset", "Apply saved offset", "toggle", default=False, width="third", simple=True,
+                         requires_flags=["--load_offset"],
                          help="Applies the saved X, Y, and angle offset. Uses the matching paper specific row, or the global value when no row exists."),
                 ],
             },
@@ -1105,20 +1147,29 @@ def build_manifest(info: dict) -> dict:
                 "options": [
                     _opt("fit", "Fit front images", "segment",
                          choices=[["stretch", "Stretch"], ["crop", "Center crop"]], default="stretch", width="third",
-                         help="Stretch can distort images. Crop preserves their aspect ratio."),
+                         requires_flags=["--fit"], help="Stretch can distort images. Crop preserves their aspect ratio."),
                     _opt("fit_backs", "Fit back images", "segment",
                          choices=[["", "Auto (like fronts)"], ["stretch", "Stretch"], ["crop", "Center crop"]],
-                         default="", width="third"),
+                         default="", width="third", requires_flags=["--fit_backs"]),
                     _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
+                         requires_flags=["--crop"],
                          help="Applies a 3mm crop to front images to remove MPCFill padding. A value in “Crop edges (fronts)” overrides this toggle."),
-                    _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third"),
-                    _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third"),
-                    _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="3mm", width="third"),
-                    _opt("extend_edges_backs", "Extend edges (backs)", "text", placeholder="3mm", width="third"),
-                    _opt("extend_corners", "Extend rounded corners (fronts)", "text", placeholder="3mm", width="third"),
-                    _opt("extend_corners_backs", "Extend rounded corners (backs)", "text", placeholder="3mm", width="third"),
-                    _opt("extend_bleed", "Extend outer bleed (front pages)", "text", placeholder="3mm", width="third"),
-                    _opt("extend_bleed_backs", "Extend outer bleed (back pages)", "text", placeholder="3mm", width="third"),
+                    _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third",
+                         requires_flags=["--crop"]),
+                    _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third",
+                         requires_flags=["--crop_backs"]),
+                    _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_edges"]),
+                    _opt("extend_edges_backs", "Extend edges (backs)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_edges_backs"]),
+                    _opt("extend_corners", "Extend rounded corners (fronts)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_corners"]),
+                    _opt("extend_corners_backs", "Extend rounded corners (backs)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_corners_backs"]),
+                    _opt("extend_bleed", "Extend outer bleed (front pages)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_bleed"]),
+                    _opt("extend_bleed_backs", "Extend outer bleed (back pages)", "text", placeholder="3mm", width="third",
+                         requires_flags=["--extend_bleed_backs"]),
                 ],
             },
             {
@@ -1126,9 +1177,11 @@ def build_manifest(info: dict) -> dict:
                 "collapsible": True,
                 "options": [
                     _opt("skip", "Skip card indexes", "chips", int=True, placeholder="0, 4", width="half",
+                         requires_flags=["--skip"],
                          help="Card indexes to skip, starting from zero. This can work around bad registration."),
-                    _opt("label", "Custom page label", "text", width="half"),
-                    _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half"),
+                    _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
+                    _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
+                         requires_flags=["--show_outline"]),
                 ],
             },
         ],
@@ -1137,6 +1190,11 @@ def build_manifest(info: dict) -> dict:
     # --------------------------------------------------------------- Offset
     kinds["offset_pdf"] = {
         "title": "Offset PDF", "page": "offset", "needs": ["scm"], "cwd": "scm",
+        "script": {
+            "repo": "scm", "path": "offset_pdf.py", "help_args": ["--help"],
+            "required_flags": ["--pdf_path", "--ppi"],
+            "required_any_flags": ["-x", "-y", "-a"],
+        },
         "description": "Shifts and reassembles a printed PDF using an X/Y offset and rotation angle to correct printer misalignment.",
         "groups": [
             {
@@ -1145,9 +1203,9 @@ def build_manifest(info: dict) -> dict:
                     _opt("pdf_path", "Input PDF", "select",
                          choices=[["", "— pick a PDF —"]] + [[p, p] for p in scm["output_pdfs"]]
                                + [["game/output/game.pdf", "game/output/game.pdf (default)"]],
-                         default="game/output/game.pdf", width="half"),
+                         default="game/output/game.pdf", width="half", requires_flags=["--pdf_path"]),
                     _opt("output_pdf_path", "Output PDF (blank = auto)", "path", width="half",
-                         help="Defaults to <input>_offset.pdf beside the input file."),
+                         requires_flags=["--output_pdf_path"], help="Defaults to <input>_offset.pdf beside the input file."),
                 ],
             },
             {
@@ -1159,11 +1217,16 @@ def build_manifest(info: dict) -> dict:
                              for p in scm["paper_sizes"]],
                          default="", width="third",
                          help="Select a paper specific row to prefill and save. Leave blank to use the global offset."),
-                    _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter"),
-                    _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter"),
-                    _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter"),
-                    _opt("ppi", "PPI", "range", default=1200, min=150, max=1200, step=10, width="half"),
-                    _opt("save", "Save these as the new offset", "toggle", default=False, width="half"),
+                    _opt("x_offset", "X offset (px, right +)", "number", default="", width="quarter",
+                         requires_flags=["-x"]),
+                    _opt("y_offset", "Y offset (px, up +)", "number", default="", width="quarter",
+                         requires_flags=["-y"]),
+                    _opt("angle", "Angle (deg, clockwise +)", "number", step=0.1, default="", width="quarter",
+                         requires_flags=["-a"]),
+                    _opt("ppi", "PPI", "range", default=1200, min=150, max=1200, step=10, width="half",
+                         requires_flags=["--ppi"]),
+                    _opt("save", "Save these as the new offset", "toggle", default=False, width="half",
+                         requires_flags=["-s"]),
                     _opt("use_saved", "Prefill fields from the saved offset", "toggle", default=True, width="half"),
                 ],
             },
@@ -1173,6 +1236,9 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------ Calibration
     kinds["calibration"] = {
         "title": "Calibration sheets", "page": "offset", "needs": ["scm"], "cwd": "scm",
+        # This script has no CLI parser and performs work at module top level,
+        # so it must never be executed merely to ask for help.
+        "script": {"repo": "scm", "path": "generate_calibration.py", "probe": "exists"},
         "description": "Generates a two page alignment sheet for each paper size. Print on both sides with a long edge flip, compare the dot grids, and measure the offset.",
         "groups": [],
     }
@@ -1180,45 +1246,64 @@ def build_manifest(info: dict) -> dict:
     # ------------------------------------------------------------- Templates
     kinds["dxf_single"] = {
         "title": "Generate a cutting template (DXF)", "page": "templates", "needs": ["scm"], "cwd": "scm",
+        "script": {
+            "repo": "scm", "path": "generate_dxf.py", "help_args": ["single", "--help"],
+            "usage_command": "single",
+            "required_flags": ["--card_size", "--paper_size", "--orientation"],
+        },
         "description": "Creates one DXF cutting template for a card and paper size combination.",
         "groups": [
             {
                 "title": "Card size",
                 "options": [
-                    _opt("card_mode", "Use", "segment", choices=[["named", "A named size"], ["custom", "Custom dimensions"]], default="named", width="half"),
+                    _opt("card_mode", "Use", "segment", choices=[["named", "A named size"], ["custom", "Custom dimensions"]],
+                         default="named", width="half", choice_requires={
+                             "named": ["--card_size"], "custom": ["--card_width", "--card_height"],
+                         }),
                     _opt("card_size", "Named card size", "select",
                          choices=[["", "— pick —"]] + [[c["name"], f"{c['name']} — {c.get('width') or '?'} × {c.get('height') or '?'}"] for c in scm["card_sizes"]],
-                         default="standard", width="half"),
-                    _opt("card_width", "Custom width", "text", placeholder="63mm · 2.5in", width="quarter"),
-                    _opt("card_height", "Custom height", "text", placeholder="88mm · 3.5in", width="quarter"),
-                    _opt("card_radius", "Custom corner radius", "text", placeholder="3mm", width="quarter"),
+                         default="standard", width="half", requires_flags=["--card_size"]),
+                    _opt("card_width", "Custom width", "text", placeholder="63mm · 2.5in", width="quarter",
+                         requires_flags=["--card_width"]),
+                    _opt("card_height", "Custom height", "text", placeholder="88mm · 3.5in", width="quarter",
+                         requires_flags=["--card_height"]),
+                    _opt("card_radius", "Custom corner radius", "text", placeholder="3mm", width="quarter",
+                         requires_flags=["--card_radius"]),
                     _opt("card_name", "Card label (for filename)", "text", width="quarter",
-                         help="Optional. Used only for the output filename."),
+                         requires_flags=["--card_name"], help="Optional. Used only for the output filename."),
                 ],
             },
             {
                 "title": "Paper size",
                 "options": [
-                    _opt("paper_mode", "Use", "segment", choices=[["named", "A named size"], ["custom", "Custom dimensions"]], default="named", width="half"),
+                    _opt("paper_mode", "Use", "segment", choices=[["named", "A named size"], ["custom", "Custom dimensions"]],
+                         default="named", width="half", choice_requires={
+                             "named": ["--paper_size"], "custom": ["--paper_width", "--paper_height"],
+                         }),
                     _opt("paper_size", "Named paper size", "select",
                          choices=[["", "— pick —"]] + [[p["name"], f"{p['name']} — {p.get('width') or '?'} × {p.get('height') or '?'}"] for p in scm["paper_sizes"]],
-                         default="letter", width="half"),
-                    _opt("paper_width", "Custom width (shorter side)", "text", placeholder="8.5in · 210mm", width="quarter"),
-                    _opt("paper_height", "Custom height (longer side)", "text", placeholder="11in · 297mm", width="quarter"),
+                         default="letter", width="half", requires_flags=["--paper_size"]),
+                    _opt("paper_width", "Custom width (shorter side)", "text", placeholder="8.5in · 210mm", width="quarter",
+                         requires_flags=["--paper_width"]),
+                    _opt("paper_height", "Custom height (longer side)", "text", placeholder="11in · 297mm", width="quarter",
+                         requires_flags=["--paper_height"]),
                     _opt("paper_name", "Paper label", "text", width="quarter",
+                         requires_flags=["--paper_name"],
                          help="Optional. Used for the output filename and saved paper size."),
                 ],
             },
             {
                 "title": "Layout & output",
                 "options": [
-                    _opt("variant", "Variant", "segment", choices=[["default", "Default"], ["borderless", "Borderless"]], default="default", width="third"),
+                    _opt("variant", "Variant", "segment", choices=[["default", "Default"], ["borderless", "Borderless"]],
+                         default="default", width="third", choice_requires={"borderless": ["--variant"]}),
                     _opt("orientation", "Orientation", "segment",
                          choices=[["optimize", "Optimize"], ["landscape", "Landscape"], ["portrait", "Portrait"]],
-                         default="optimize", width="third"),
+                         default="optimize", width="third", requires_flags=["--orientation"]),
                     _opt("output_path", "Output file (blank = auto)", "path", width="full",
                          help="Defaults to cutting_templates/dxf/<paper>-<card>-v1.dxf, or the borderless/dxf folder for borderless output. An existing name is never replaced; the next version is used instead."),
-                    _opt("save", "Save new size / layout to layouts.json", "toggle", default=True, width="half"),
+                    _opt("save", "Save new size / layout to layouts.json", "toggle", default=True, width="half",
+                         requires_flags=["--save"]),
                 ],
             },
         ],
@@ -1226,6 +1311,10 @@ def build_manifest(info: dict) -> dict:
 
     kinds["dxf_batch"] = {
         "title": "Batch generate DXF templates", "page": "templates", "needs": ["scm"], "cwd": "scm",
+        "script": {
+            "repo": "scm", "path": "generate_dxf.py", "help_args": ["batch", "--help"],
+            "usage_command": "batch",
+        },
         "description": "Generates DXF templates for the repo's standard paper and card size matrix.",
         "groups": [
             {
@@ -1233,7 +1322,7 @@ def build_manifest(info: dict) -> dict:
                 "options": [
                     _opt("mode", "Mode", "segment",
                          choices=[["missing", "Missing only"], ["all", "Regenerate all"], ["optimize", "Re-optimize orientations"]],
-                         default="missing"),
+                         default="missing", choice_requires={"all": ["--all"], "optimize": ["--optimize"]}),
                 ],
             },
         ],
@@ -1241,6 +1330,10 @@ def build_manifest(info: dict) -> dict:
 
     kinds["dxf_list"] = {
         "title": "List available sizes", "page": "utilities", "needs": ["scm"], "cwd": "scm",
+        "script": {
+            "repo": "scm", "path": "generate_dxf.py", "help_args": ["list", "--help"],
+            "usage_command": "list",
+        },
         "description": "Prints every card and paper size known to the repo, including extras.",
         "groups": [],
     }
@@ -1286,12 +1379,14 @@ def build_manifest(info: dict) -> dict:
     # ---------------------------------------------------------------- Extras
     kinds["extras_generate"] = {
         "title": "Generate extras DXF templates", "page": "extras", "needs": ["extras"], "cwd": "extras",
+        "script": {"repo": "extras", "path": "generate.py", "help_args": ["--help"]},
         "description": "Generates DXF templates for extra card sizes (MTG and Sorcery) in scm-extras/cutting_templates/. Finds Silhouette Card Maker as a sibling folder and sets SCM_EXTRA_LAYOUTS.",
         "groups": [
             {
                 "title": "Mode",
                 "options": [
-                    _opt("mode", "Mode", "segment", choices=[["missing", "Missing only"], ["all", "Regenerate all"]], default="missing"),
+                    _opt("mode", "Mode", "segment", choices=[["missing", "Missing only"], ["all", "Regenerate all"]],
+                         default="missing", choice_requires={"all": ["--all"]}),
                 ],
             },
         ],
@@ -1299,6 +1394,7 @@ def build_manifest(info: dict) -> dict:
 
     kinds["extras_tables"] = {
         "title": "Extras README tables", "page": "extras", "needs": ["extras"], "cwd": "extras",
+        "script": {"repo": "extras", "path": "generate_readme_tables.py", "probe": "exists"},
         "description": "Renders markdown size tables for the extra card sizes.",
         "groups": [],
     }
@@ -1312,6 +1408,7 @@ def build_manifest(info: dict) -> dict:
             # distinguishable even though the button/heading title is generic
             "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
+            "script": {"repo": "scm", "path": f"plugins/{slug}/fetch.py", "help_args": ["--help"]},
             "description": f"Downloads {meta['title']} card images from a decklist into the game folders.",
             # Simple mode lays the form out as one flat row per group — the
             # standard 3-per-row rhythm the PDF page uses (create_pdf's
@@ -1550,6 +1647,7 @@ def update_settings(changes: Any) -> dict:
             return {"ok": False, "errors": ["merged settings exceed 64 KiB when encoded"]}
         save_settings(settings)
         invalidate_manifest_cache()
+        _invalidate_script_capability_cache()
         _INFO_SNAP.clear()
         _REPOS_MTIME.clear()
     return {"ok": True, "settings": settings}
@@ -2186,6 +2284,7 @@ def run_repo_check(key: str, force: bool = False) -> dict:
 
 def _invalidate_repo_views() -> None:
     invalidate_manifest_cache()
+    _invalidate_script_capability_cache()
     _INFO_SNAP.clear()
     _REPOS_MTIME.clear()
 
@@ -4571,6 +4670,20 @@ def bundled_python() -> Path:
     return exe
 
 
+def job_python(settings: dict, warnings: Optional[List[str]] = None) -> Path:
+    """Resolve the interpreter used by both capability probes and real jobs."""
+    python = bundled_python()
+    configured = settings.get("python")
+    if configured:
+        candidate = Path(str(configured))
+        candidate = candidate if candidate.is_absolute() else Path(__file__).resolve().parent / candidate
+        if candidate.exists():
+            python = candidate
+        elif warnings is not None:
+            warnings.append(f"Configured python not found ({candidate}); using {python.name}.")
+    return python
+
+
 def app_packages_dir() -> Optional[Path]:
     """The bundle's support site-packages (Resources/app_packages), if any."""
     base = Path(__file__).resolve()
@@ -4660,14 +4773,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             "Give it a minute and try again — or watch the dashboard banner.")
     errors: List[str] = []
     scm, extras = effective_dirs(settings)
-    python = bundled_python()
-    if settings.get("python"):
-        p = Path(settings["python"])
-        p = p if p.is_absolute() else Path(__file__).resolve().parent / p
-        if p.exists():
-            python = p
-        else:
-            warnings.append(f"Configured python not found ({p}); using {python.name}.")
+    python = job_python(settings, warnings)
     # A job can never run on the app's own stub: on Windows the stub is a
     # fixed "run the app" binary, so Popen'ing it would launch another copy
     # of this app (which launches another, …). Until the private runtime is
@@ -4684,6 +4790,9 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
     title = spec.get("job_title") or spec.get("title") or kind
     env = _utf8_env()
     argv = [str(python)]
+    if spec.get("available") is False:
+        errors.append(spec.get("unavailable_reason") or "The connected repository does not support this workflow.")
+        return argv, None, env, title, warnings, errors
 
     def require_repo(name: str, path: Optional[Path], hint: str = "") -> bool:
         if path is None or not Path(path).is_dir():
@@ -4754,6 +4863,12 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         card = str(a.get("card_size") or d.get("card_size") or "standard")
         paper = str(a.get("paper_size") or d.get("paper_size") or "letter")
         argv += ["--card_size", card, "--paper_size", paper]
+        if a.get("borderless"):
+            variants = (((info.get("scm") or {}).get("layouts") or {}).get(paper) or {}).get(card) or {}
+            if a.get("specialty"):
+                errors.append("Borderless mode cannot be combined with a specialty layout.")
+            elif not isinstance(variants, dict) or not isinstance(variants.get("borderless"), dict):
+                errors.append(f"No borderless layout is available for {paper} + {card} in the connected repository.")
         emit("registration", "--registration", default="3")
         if a.get("registration_orientation"): argv += ["--registration_orientation", str(a["registration_orientation"])]
         if a.get("specialty"): argv += ["--specialty", str(a["specialty"])]
@@ -4783,6 +4898,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
+        quality_available = "quality" in a
         quality = a.get("quality")
         quality = int(quality) if quality not in (None, "") else int(d.get("quality", 100))
         if simple and quality == 100:
@@ -4790,7 +4906,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             # setting is the preference that governs
             quality = int(d.get("quality", 100))
         argv += ["--ppi", str(ppi)]
-        if not (simple and quality == 100):
+        if quality_available and not (simple and quality == 100):
             argv += ["--quality", str(quality)]
         for idx in a.get("skip") or []:
             argv += ["--skip", str(idx)]
@@ -4891,7 +5007,8 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                     paper = paper_name
                     argv += ["--paper_name", paper_name]
         variant = str(a.get("variant") or "default")
-        argv += ["--variant", variant]
+        if variant != "default" or _script_supports_flag(spec, "--variant"):
+            argv += ["--variant", variant]
         argv += ["--orientation", str(a.get("orientation") or "optimize")]
         out = a.get("output_path")
         if not out:
@@ -5039,6 +5156,411 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
     return argv, cwd, env, title, warnings, errors
 
 
+# Script capability discovery is deliberately bounded and side-effect-aware.
+# Option-bearing upstream scripts are queried through their ordinary --help
+# command in a child process; known scripts without a CLI parser are checked for
+# a safe regular file only, because importing or executing them could perform the
+# job itself. The manifest remains the one schema: requirements live beside
+# each option and are resolved into available/unavailable metadata here.
+SCRIPT_CAPABILITY_SOURCE_MAX_BYTES = 512 * 1024
+SCRIPT_CAPABILITY_OUTPUT_MAX_BYTES = 256 * 1024
+SCRIPT_CAPABILITY_FLAG_MAX = 128
+SCRIPT_CAPABILITY_TIMEOUT = 5.0
+SCRIPT_CAPABILITY_CACHE_MAX = 256
+SCRIPT_CAPABILITY_FAILURE_TTL = 15.0
+_SCRIPT_FLAG_RE = re.compile(r"(?<![\w-])--?[A-Za-z][A-Za-z0-9_-]{0,126}(?![\w-])")
+_SCRIPT_CAPABILITY_CACHE: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+_SCRIPT_CAPABILITY_CACHE_LOCK = threading.Lock()
+
+
+class _ScriptCapabilityFailure(Exception):
+    def __init__(self, status: str):
+        super().__init__(status)
+        self.status = status
+
+
+def _script_capability_source(root: Optional[Path], relative: str) -> tuple[Path, bytes, tuple]:
+    """Open one fixed repo-relative script without following repository links."""
+    rel = Path(str(relative))
+    if root is None or not Path(root).is_dir() or rel.is_absolute() or not rel.parts or any(
+            part in ("", ".", "..") for part in rel.parts):
+        raise _ScriptCapabilityFailure("missing")
+    current = Path(root)
+    try:
+        for index, part in enumerate(rel.parts):
+            current = current / part
+            observed = os.lstat(current)
+            if _is_reparse_or_symlink(observed):
+                raise _ScriptCapabilityFailure("unsafe")
+            if index < len(rel.parts) - 1 and not stat.S_ISDIR(observed.st_mode):
+                raise _ScriptCapabilityFailure("missing")
+        if not stat.S_ISREG(observed.st_mode):
+            raise _ScriptCapabilityFailure("missing")
+        if observed.st_size > SCRIPT_CAPABILITY_SOURCE_MAX_BYTES:
+            raise _ScriptCapabilityFailure("source_too_large")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(current, flags)
+        try:
+            stable = os.fstat(fd)
+            if (_is_reparse_or_symlink(stable) or not stat.S_ISREG(stable.st_mode) or
+                    stable.st_dev != observed.st_dev or stable.st_ino != observed.st_ino or
+                    stable.st_size != observed.st_size):
+                raise _ScriptCapabilityFailure("unsafe")
+            chunks: List[bytes] = []
+            remaining = SCRIPT_CAPABILITY_SOURCE_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            after = os.fstat(fd)
+            if (len(payload) > SCRIPT_CAPABILITY_SOURCE_MAX_BYTES or
+                    after.st_dev != stable.st_dev or after.st_ino != stable.st_ino or
+                    after.st_size != stable.st_size or after.st_mtime_ns != stable.st_mtime_ns):
+                raise _ScriptCapabilityFailure("source_too_large" if len(payload) > SCRIPT_CAPABILITY_SOURCE_MAX_BYTES else "unsafe")
+        finally:
+            os.close(fd)
+    except _ScriptCapabilityFailure:
+        raise
+    except (OSError, ValueError):
+        raise _ScriptCapabilityFailure("missing")
+    fingerprint = (stable.st_dev, stable.st_ino, stable.st_size, stable.st_mtime_ns)
+    return current, payload, fingerprint
+
+
+def _script_has_cli_help_parser(payload: bytes) -> bool:
+    """Recognize Click/argparse parser construction without importing the script."""
+    try:
+        tree = ast.parse(payload.decode("utf-8"))
+    except (SyntaxError, UnicodeError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+        if name in {"ArgumentParser", "command", "group"}:
+            return True
+    return False
+
+
+def _capability_probe_env() -> dict:
+    env = _utf8_env()
+    # Discovery is observational: do not leave import bytecode in a connected
+    # checkout, and request stable plain-text help from CLI frameworks.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["SCM_WORKBENCH_CAPABILITY_PROBE"] = "1"
+    env["NO_COLOR"] = "1"
+    env["TERM"] = "dumb"
+    if os.environ.get("SCM_WORKBENCH_PACKAGED"):
+        packages = app_packages_dir()
+        if packages:
+            env["PYTHONPATH"] = str(packages)
+    return env
+
+
+def _run_script_help(argv: list[str], cwd: Path, env: dict) -> dict:
+    """Run one help probe with process-tree, time, and captured-output bounds."""
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
+            **_proc_kwargs(),
+        )
+    except (OSError, ValueError):
+        return {"status": "error", "flags": [], "usage": ""}
+
+    captured = bytearray()
+    overflow = threading.Event()
+    drained = threading.Event()
+
+    def drain() -> None:
+        stream = proc.stdout
+        try:
+            while stream is not None:
+                chunk = stream.read(8192)
+                if not chunk:
+                    break
+                room = SCRIPT_CAPABILITY_OUTPUT_MAX_BYTES - len(captured)
+                if room > 0:
+                    captured.extend(chunk[:room])
+                if len(chunk) > room:
+                    overflow.set()
+                    break
+        except Exception:
+            pass
+        finally:
+            drained.set()
+
+    reader = threading.Thread(target=drain, daemon=True, name="script-capability-output")
+    try:
+        reader.start()
+    except Exception:
+        _terminate_and_reap(proc)
+        return {"status": "error", "flags": [], "usage": ""}
+
+    deadline = time.monotonic() + SCRIPT_CAPABILITY_TIMEOUT
+    status = "ok"
+    return_code: Optional[int] = None
+    while True:
+        if overflow.is_set():
+            status = "output_too_large"
+            break
+        return_code = proc.poll()
+        if return_code is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            status = "timeout"
+            break
+        overflow.wait(min(0.025, remaining))
+    if status != "ok":
+        _terminate_and_reap(proc)
+        return_code = proc.poll()
+    else:
+        try:
+            return_code = proc.wait(timeout=1)
+        except Exception:
+            status = "error"
+            _terminate_and_reap(proc)
+    drained.wait(1)
+    reader.join(timeout=1)
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except Exception:
+        pass
+    if status != "ok":
+        return {"status": status, "flags": [], "usage": ""}
+    if return_code != 0:
+        return {"status": "nonzero", "flags": [], "usage": "", "return_code": return_code}
+
+    text = bytes(captured).decode("utf-8", "replace")
+    lines = text.splitlines()
+    usage = next((" ".join(line.split())[:512] for line in lines
+                  if line.lstrip().lower().startswith("usage:")), "")
+    discovered = set()
+    for line in lines:
+        declaration = line.lstrip()
+        if not declaration.startswith("-"):
+            continue
+        # Click and argparse separate the option declaration from prose with
+        # two or more spaces. Ignore flags merely mentioned in descriptions.
+        declaration = re.split(r"\s{2,}", declaration, maxsplit=1)[0]
+        discovered.update(_SCRIPT_FLAG_RE.findall(declaration))
+        if len(discovered) > SCRIPT_CAPABILITY_FLAG_MAX:
+            return {"status": "too_many_options", "flags": [], "usage": usage}
+    return {"status": "ok", "flags": sorted(discovered), "usage": usage}
+
+
+def _script_capability_cache_get(key: tuple) -> Optional[dict]:
+    now = time.monotonic()
+    with _SCRIPT_CAPABILITY_CACHE_LOCK:
+        entry = _SCRIPT_CAPABILITY_CACHE.get(key)
+        if entry is None:
+            return None
+        expires, result = entry
+        if expires and now >= expires:
+            _SCRIPT_CAPABILITY_CACHE.pop(key, None)
+            return None
+        _SCRIPT_CAPABILITY_CACHE.move_to_end(key)
+        return copy.deepcopy(result)
+
+
+def _script_capability_cache_put(key: tuple, result: dict) -> None:
+    expires = 0.0 if result.get("status") == "ok" else time.monotonic() + SCRIPT_CAPABILITY_FAILURE_TTL
+    with _SCRIPT_CAPABILITY_CACHE_LOCK:
+        _SCRIPT_CAPABILITY_CACHE[key] = (expires, copy.deepcopy(result))
+        _SCRIPT_CAPABILITY_CACHE.move_to_end(key)
+        while len(_SCRIPT_CAPABILITY_CACHE) > SCRIPT_CAPABILITY_CACHE_MAX:
+            _SCRIPT_CAPABILITY_CACHE.popitem(last=False)
+
+
+def _probe_script_capability(config: dict, roots: dict, settings: dict) -> dict:
+    relative = str(config.get("path") or "")
+    root = roots.get(str(config.get("repo") or ""))
+    try:
+        path, payload, fingerprint = _script_capability_source(root, relative)
+    except _ScriptCapabilityFailure as exc:
+        return {"status": exc.status, "flags": [], "usage": ""}
+
+    probe = str(config.get("probe") or "help")
+    if probe == "exists":
+        return {"status": "ok", "flags": [], "usage": "", "enumerated": False}
+    if probe != "help" or not _script_has_cli_help_parser(payload):
+        return {"status": "no_safe_help", "flags": [], "usage": ""}
+
+    python = job_python(settings)
+    try:
+        py_stat = os.stat(python)
+        py_fingerprint = (py_stat.st_dev, py_stat.st_ino, py_stat.st_size, py_stat.st_mtime_ns)
+    except OSError:
+        py_fingerprint = None
+    key = (
+        str(Path(root)), relative, fingerprint, str(python), py_fingerprint,
+        tuple(str(value) for value in config.get("help_args", ["--help"])),
+        str(config.get("usage_command") or ""),
+    )
+    cached = _script_capability_cache_get(key)
+    if cached is not None:
+        return cached
+
+    if (os.environ.get("SCM_WORKBENCH_PACKAGED") and not os.environ.get("SCM_WORKBENCH_PYTHON")
+            and os.name == "nt" and Path(str(python)).resolve() == Path(sys.executable).resolve()):
+        result = {"status": "runtime_unavailable", "flags": [], "usage": ""}
+        _script_capability_cache_put(key, result)
+        return result
+
+    argv = [str(python), str(path), *[str(value) for value in config.get("help_args", ["--help"])]]
+    result = _run_script_help(argv, Path(root), _capability_probe_env())
+    try:
+        _after_path, _after_payload, after_fingerprint = _script_capability_source(root, relative)
+        if after_fingerprint != fingerprint:
+            result = {"status": "unsafe", "flags": [], "usage": ""}
+    except _ScriptCapabilityFailure as exc:
+        result = {"status": exc.status, "flags": [], "usage": ""}
+    command = str(config.get("usage_command") or "")
+    if result.get("status") == "ok" and command:
+        usage = str(result.get("usage") or "")
+        if not re.search(rf"(?:^|\s){re.escape(command)}(?:\s|$)", usage, re.IGNORECASE):
+            result = {"status": "wrong_command_shape", "flags": result.get("flags", []), "usage": usage}
+    _script_capability_cache_put(key, result)
+    return result
+
+
+def _script_capability_reason(config: dict, result: dict) -> str:
+    script = str(config.get("path") or "The upstream script")
+    status = result.get("status")
+    if status == "missing":
+        return f"{script} is not present as a regular file in the connected repository."
+    if status == "unsafe":
+        return f"{script} cannot be inspected because it is a link or changed while being read."
+    if status == "source_too_large":
+        return f"{script} is too large to inspect safely."
+    if status == "no_safe_help":
+        return f"{script} does not expose a recognizable Click or argparse help command."
+    if status == "timeout":
+        return f"{script} did not return its option list within {SCRIPT_CAPABILITY_TIMEOUT:g} seconds."
+    if status == "output_too_large":
+        return f"{script} returned too much help text to inspect safely."
+    if status == "too_many_options":
+        return f"{script} returned too many command-line options to inspect safely."
+    if status == "nonzero":
+        return f"{script} exited before listing its options; check that the configured Python can run this repository."
+    if status == "runtime_unavailable":
+        return "The app's private Python runtime is still being prepared."
+    if status == "wrong_command_shape":
+        command = str(config.get("usage_command") or "command")
+        return f"{script} does not expose the expected {command} command."
+    return f"{script} options could not be inspected."
+
+
+def _manifest_options(spec: dict):
+    for group in spec.get("groups", []):
+        yield from group.get("options", [])
+
+
+def _disable_manifest_option(option: dict, reason: str) -> None:
+    option["available"] = False
+    option["unavailable_reason"] = reason
+    option["unavailable_value"] = [] if option.get("type") in ("chips", "choice_chips") \
+        else False if option.get("type") == "toggle" else ""
+
+
+def _has_layout_variant(info: dict, variant: str) -> bool:
+    layouts = (info.get("scm") or {}).get("layouts") or {}
+    return any(isinstance(variants, dict) and isinstance(variants.get(variant), dict)
+               for cards in layouts.values() if isinstance(cards, dict)
+               for variants in cards.values())
+
+
+def _apply_script_capabilities(manifest: dict, settings: dict, info: dict) -> None:
+    scm, extras = effective_dirs(settings)
+    roots = {"scm": scm, "extras": extras}
+    targets = [(kind, spec) for kind, spec in manifest.items() if isinstance(spec.get("script"), dict)]
+
+    def inspect(item: tuple[str, dict]) -> tuple[str, dict]:
+        kind, spec = item
+        try:
+            return kind, _probe_script_capability(spec["script"], roots, settings)
+        except Exception:
+            return kind, {"status": "error", "flags": [], "usage": ""}
+
+    results: Dict[str, dict] = {}
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(6, len(targets)), thread_name_prefix="script-capability") as pool:
+            for kind, result in pool.map(inspect, targets):
+                results[kind] = result
+
+    for kind, spec in targets:
+        config = spec["script"]
+        result = results.get(kind) or {"status": "error", "flags": [], "usage": ""}
+        flags = set(result.get("flags") or [])
+        config["capabilities"] = {
+            "status": result.get("status", "error"),
+            "flags": sorted(flags),
+            "usage": str(result.get("usage") or "")[:512],
+            "enumerated": result.get("enumerated", True),
+        }
+        reason = None
+        if result.get("status") != "ok":
+            reason = _script_capability_reason(config, result)
+        else:
+            required = set(config.get("required_flags") or [])
+            missing = sorted(required - flags)
+            required_any = set(config.get("required_any_flags") or [])
+            if missing:
+                reason = f"{config['path']} is missing options required by Workbench: {', '.join(missing)}."
+            elif required_any and not (required_any & flags):
+                reason = f"{config['path']} is missing every supported form of: {', '.join(sorted(required_any))}."
+        spec["available"] = reason is None
+        if reason:
+            spec["unavailable_reason"] = reason
+
+        for option in _manifest_options(spec):
+            if reason:
+                _disable_manifest_option(option, reason)
+                continue
+            missing = sorted(set(option.get("requires_flags") or []) - flags)
+            if missing:
+                _disable_manifest_option(
+                    option,
+                    f"{config['path']} does not support {', '.join(missing)} in the connected repository.",
+                )
+            else:
+                option["available"] = True
+            unavailable_choices = {}
+            for value, required_flags in (option.get("choice_requires") or {}).items():
+                choice_missing = sorted(set(required_flags or []) - flags)
+                if choice_missing:
+                    unavailable_choices[str(value)] = (
+                        f"{config['path']} does not support {', '.join(choice_missing)} in the connected repository."
+                    )
+            if unavailable_choices:
+                option["unavailable_choices"] = unavailable_choices
+
+        # Borderless PDF rendering needs both the CLI switch and v3's layout
+        # data. A script copied independently from its assets must not expose a
+        # control that can only fail at runtime.
+        if kind == "create_pdf" and reason is None and not _has_layout_variant(info, "borderless"):
+            borderless = next((option for option in _manifest_options(spec)
+                               if option.get("key") == "borderless"), None)
+            if borderless is not None:
+                _disable_manifest_option(
+                    borderless,
+                    "The connected repository has no borderless layout definitions.",
+                )
+
+
+def _script_supports_flag(spec: dict, flag: str) -> bool:
+    capabilities = (spec.get("script") or {}).get("capabilities")
+    return capabilities is None or flag in set(capabilities.get("flags") or [])
+
+
 MANIFEST_CACHE: Dict[str, dict] = {}
 MANIFEST_LOCK = threading.Lock()
 _REPOS_MTIME: Dict[str, float] = {}
@@ -5110,8 +5632,11 @@ def get_manifest() -> dict:
         # rides on the snapshot.
         now = time.time()
         if (not MANIFEST_CACHE or now - _REPOS_MTIME.get("t", 0) > 30 or _repos_changed()):
+            snapshot = _get_info_locked()
+            manifest = build_manifest(snapshot)
+            _apply_script_capabilities(manifest, load_settings(), snapshot)
             MANIFEST_CACHE.clear()
-            MANIFEST_CACHE.update(build_manifest(_get_info_locked()))
+            MANIFEST_CACHE.update(manifest)
             _REPOS_MTIME["t"] = now
     return MANIFEST_CACHE
 
@@ -5121,6 +5646,11 @@ def invalidate_manifest_cache() -> None:
         MANIFEST_CACHE.clear()
         _INFO_SNAP.clear()
         _REPOS_MTIME.clear()
+
+
+def _invalidate_script_capability_cache() -> None:
+    with _SCRIPT_CAPABILITY_CACHE_LOCK:
+        _SCRIPT_CAPABILITY_CACHE.clear()
 
 
 class PreviewError(Exception):
@@ -5134,6 +5664,24 @@ class PreviewError(Exception):
         self.message = message
 
 
+def _unavailable_value_matches(option: dict, value: Any) -> bool:
+    safe = option.get("unavailable_value", "")
+    if option.get("type") in ("chips", "choice_chips"):
+        return value in (None, "") or value == safe
+    if option.get("type") == "toggle":
+        return not bool(value)
+    return value is None or str(value).strip() == str(safe)
+
+
+def _supported_choice_default(option: dict) -> Any:
+    unavailable = option.get("unavailable_choices") or {}
+    default = option.get("default")
+    if str(default) not in unavailable:
+        return default
+    return next((value for value, _label in option.get("choices", [])
+                 if str(value) not in unavailable), "")
+
+
 def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
     """Coerce/validate raw client values against the manifest. Returns (args, errors, warnings)."""
     errors: List[str] = []
@@ -5143,6 +5691,10 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
         for o in g["options"]:
             key, t = o["key"], o["type"]
             v = raw.get(key)
+            if o.get("available") is False:
+                if key in raw and not _unavailable_value_matches(o, v):
+                    errors.append(f"{o['label']}: {o.get('unavailable_reason') or 'this option is unavailable.'}")
+                continue
             if t == "chips":
                 if isinstance(v, str):
                     v = [x.strip() for x in v.split(",") if x.strip()]
@@ -5200,6 +5752,23 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
                         args[key] = sv
             else:  # text / path
                 args[key] = "" if v is None else str(v).strip()
+
+            unavailable_choices = o.get("unavailable_choices") or {}
+            selected = args.get(key)
+            if isinstance(selected, list):
+                supported = []
+                for value in selected:
+                    reason = unavailable_choices.get(str(value))
+                    if reason:
+                        errors.append(f"{o['label']}: {reason}")
+                    else:
+                        supported.append(value)
+                args[key] = supported
+            else:
+                reason = unavailable_choices.get(str(selected))
+                if reason:
+                    errors.append(f"{o['label']}: {reason}")
+                    args[key] = _supported_choice_default(o)
     return args, errors, warns
 
 
@@ -5292,8 +5861,8 @@ def build_preview(kind: str, raw_args: dict) -> dict:
         "cwd": str(cwd) if cwd else None,
         "env": {k: v for k, v in env.items()
                 if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
-        "warnings": warnings + norm_warns + errors,
-        "errors": errs,
+        "warnings": warnings + norm_warns,
+        "errors": errors + [error for error in errs if error not in errors],
         "no_front_images": no_front,
     }
 
@@ -6303,6 +6872,8 @@ def start_pdf_preview(raw_args: dict) -> dict:
         spec = get_manifest().get("create_pdf")
         if spec is None:
             raise PdfPreviewError("Create PDF is unavailable.")
+        if spec.get("available") is False:
+            raise PdfPreviewError(spec.get("unavailable_reason") or "Create PDF is unavailable.")
         _pdf_preview_validate_manifest_numbers(spec, raw_args)
         args, errors, _warnings = normalize_args(spec, raw_args)
         if errors:
@@ -6414,6 +6985,10 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     # client may send hidden selections outside the manifest (e.g. dxf_single's
     # card_mode-paired select) — keep them if present
     args, errors, norm_warns = normalize_args(spec, raw_args)
+    # Unsupported capability values and other manifest-domain failures are
+    # final before command construction, which can persist pasted decklists.
+    if errors:
+        return None, errors
 
     info = get_info()
     argv, cwd, env, title, warnings, errs = build_command(kind, args, load_settings(), info)

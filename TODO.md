@@ -49,6 +49,7 @@
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 
 # Features
+- [x] Detect the options supported by each connected SCM Python script, disable unavailable workflows and form controls with an explanation, and reject stale unsupported settings before launch.
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
 - [x] Create a page that's only used on a fresh boot to show the repos being downloaded. The page should be able to be closed out so the user can navigate around if they want but this should be a nice way to ease people in.
 - [x] When the create PDF job is running, make the progress bar a real progress bar. The script outputs which image has been added by number ("Image 1: xyz.png", "Image 2: abc.png") and we can get the total from the number of images in the front image directory.

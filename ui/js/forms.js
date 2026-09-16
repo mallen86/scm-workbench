@@ -45,14 +45,36 @@ export function displayCmd(cmd, kind) {
 /* ============================== form system =============================== */
 /* Forms are rendered from the server manifest; values live in S.forms[kind]. */
 
+export function optionDefault(o) {
+  if (o.available === false) {
+    const unavailable = o.unavailable_value;
+    return Array.isArray(unavailable) ? [...unavailable] : (unavailable ?? "");
+  }
+  const unavailableChoices = o.unavailable_choices || {};
+  let value = o.default !== undefined ? o.default
+    : (o.type === "chips" || o.type === "choice_chips" ? [] : "");
+  if (Array.isArray(value)) {
+    return value.filter(candidate => !unavailableChoices[String(candidate)]);
+  }
+  if (unavailableChoices[String(value)]) {
+    value = (o.choices || []).find(([candidate]) => !unavailableChoices[String(candidate)])?.[0] ?? "";
+  }
+  return value;
+}
+
+
+function runButtonLocked(button) {
+  return !!button && (button.classList.contains("wait") || button.classList.contains("capability-disabled"));
+}
+
+
 export function defaultArgs(kind) {
   const spec = S.manifest[kind];
   if (!spec) return {};
   const args = {};
   for (const g of spec.groups || [])
     for (const o of g.options)
-      args[o.key] = o.type === "chips" || o.type === "choice_chips" ? (Array.isArray(o.default) ? [...o.default] : [])
-        : (o.default !== undefined ? o.default : (o.type === "number" || o.type === "range" ? (o.default ?? "") : ""));
+      args[o.key] = optionDefault(o);
   return args;
 }
 
@@ -74,10 +96,13 @@ export function restoreArgs(kind, raw) {
   if (!spec || !raw || typeof raw !== "object" || Array.isArray(raw)) return out;
   for (const g of spec.groups || []) {
     for (const o of g.options || []) {
-      if (!Object.prototype.hasOwnProperty.call(raw, o.key)) continue;
+      if (o.available === false || !Object.prototype.hasOwnProperty.call(raw, o.key)) continue;
       const v = raw[o.key];
+      if ((o.unavailable_choices || {})[String(v)]) continue;
       if (o.type === "chips" || o.type === "choice_chips") {
-        if (Array.isArray(v)) out[o.key] = v.filter(x => typeof x === "string");
+        if (Array.isArray(v)) out[o.key] = v.filter(
+          x => typeof x === "string" && !(o.unavailable_choices || {})[String(x)],
+        );
       } else if (o.type === "toggle") {
         if (typeof v === "boolean") out[o.key] = v;
       } else if (o.type === "number" || o.type === "range") {
@@ -147,7 +172,7 @@ export function updatePreview(kind) {
             showPreviewPending(box, "Waiting for the server to answer…");
             (S.previewBlock ||= {})[kind] = true;
             const runBtn = document.getElementById("run-" + kind);
-            if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = true;
+            if (runBtn && !runButtonLocked(runBtn)) runBtn.disabled = true;
             publishCommandPreview(kind, requestArgs, {
               cmd: null, warnings: [], errors: [], no_front_images: false, pending: true,
             });
@@ -161,7 +186,7 @@ export function updatePreview(kind) {
           });
           (S.previewBlock ||= {})[kind] = true;
           const runBtn = document.getElementById("run-" + kind);
-          if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = true;
+          if (runBtn && !runButtonLocked(runBtn)) runBtn.disabled = true;
         }
       });
   };
@@ -200,7 +225,7 @@ export function renderPreview(box, d) {
   (S.previewBlock ||= {})[kind] = blocked;
   if (!blocked && d.cmd) box.append(el("div", { class: "note ok" }, "✓ ready to run"));
   const runBtn = document.getElementById("run-" + kind);
-  if (runBtn && !runBtn.classList.contains("wait")) runBtn.disabled = blocked;
+  if (runBtn && !runButtonLocked(runBtn)) runBtn.disabled = blocked;
 }
 
 
@@ -262,6 +287,8 @@ export function renderOption(o, args, kind) {
       const sel = el("select", { class: "input" });
       for (const [v, lab] of o.choices) {
         const opt = el("option", { value: v }, lab);
+        const unavailable = (o.unavailable_choices || {})[String(v)];
+        if (unavailable) { opt.disabled = true; opt.title = unavailable; }
         if (String(args[o.key]) === String(v)) opt.selected = true;
         sel.append(opt);
       }
@@ -272,9 +299,12 @@ export function renderOption(o, args, kind) {
     case "segment": {
       const seg = el("div", { class: "seg" });
       for (const [v, lab] of o.choices) {
+        const unavailable = (o.unavailable_choices || {})[String(v)];
         seg.append(el("button", {
           type: "button",
           class: String(args[o.key]) === String(v) ? "active" : "",
+          disabled: !!unavailable,
+          title: unavailable || null,
           onclick: e => {
             args[o.key] = v;
             $$("button", seg).forEach(b => b.classList.remove("active"));
@@ -331,9 +361,12 @@ export function renderOption(o, args, kind) {
     case "choice_chips": {
       const box = el("div", { class: "choicechips" });
       for (const [v, lab] of o.choices) {
+        const unavailable = (o.unavailable_choices || {})[String(v)];
         box.append(el("button", {
           type: "button",
           class: (args[o.key] || []).includes(v) ? "active" : "",
+          disabled: !!unavailable,
+          title: unavailable || null,
           onclick: e => {
             const cur = args[o.key] = args[o.key] || [];
             const i = cur.indexOf(v);
@@ -358,6 +391,22 @@ export function renderOption(o, args, kind) {
       "Kept in the app's working area. When the run finishes, use the console's “Move to my files…” to save it elsewhere."));
   }
   if (o.help) wrap.append(el("span", { class: "help" }, o.help));
+  if (o.available === false) {
+    wrap.classList.add("option-unavailable");
+    wrap.setAttribute("aria-disabled", "true");
+    $$('input, select, textarea, button', wrap).forEach(control => { control.disabled = true; });
+    if (S.manifest?.[kind]?.available !== false) {
+      wrap.append(el("span", { class: "help capability-help" },
+        o.unavailable_reason || "Unavailable in the connected repository."));
+    }
+  } else {
+    const unavailableChoices = Object.entries(o.unavailable_choices || {});
+    if (unavailableChoices.length) {
+      const labels = new Map((o.choices || []).map(([value, text]) => [String(value), text]));
+      const details = unavailableChoices.map(([value, reason]) => `${labels.get(value) || value}: ${reason}`);
+      wrap.append(el("span", { class: "help capability-help" }, details.join(" ")));
+    }
+  }
   return wrap;
 }
 
@@ -400,6 +449,12 @@ export function formCard(kind, opts = {}) {
   // “— incomplete —” no matter which other option you then touch.
   for (const g of spec.groups || []) {
     for (const o of g.options || []) {
+      if (o.available === false) {
+        args[o.key] = optionDefault(o);
+        continue;
+      }
+      const unavailableChoices = o.unavailable_choices || {};
+      if (unavailableChoices[String(args[o.key])]) args[o.key] = optionDefault(o);
       if (!o.choices) continue;
       const vals = o.choices.map(c => String(c[0]));
       const cur = args[o.key];
@@ -410,7 +465,7 @@ export function formCard(kind, opts = {}) {
         }
       } else if (cur !== undefined && cur !== null && String(cur).trim() !== "") {
         if (!vals.includes(String(cur).trim())) {
-          args[o.key] = o.default !== undefined ? o.default : "";
+          args[o.key] = optionDefault(o);
           afterFormChange(kind, args);
         }
       }
@@ -540,7 +595,14 @@ export function formCard(kind, opts = {}) {
     const note = el("span", { class: "rb-note" }, "Runs in the background. Watch the job console below.");
     card.append(el("div", { class: "runbar" }, note, runBtn));
     const missing = (S.manifest[kind] ? S.manifest[kind].needs || [] : []).filter(k => !repoReady(k));
-    if (missing.length) {
+    if (spec.available === false) {
+      runBtn.disabled = true;
+      runBtn.classList.add("capability-disabled");
+      runBtn.innerHTML = "";
+      runBtn.append(ico("alert"), "Unavailable");
+      card.append(el("div", { class: "prep-note capability-note" },
+        spec.unavailable_reason || "The connected repository does not support this workflow."));
+    } else if (missing.length) {
       runBtn.disabled = true;
       runBtn.classList.add("wait");
       runBtn.innerHTML = "";
@@ -577,6 +639,11 @@ export function groupInner(opts, kind, args) {
 /* ================================ job control ============================== */
 
 export async function doRun(kind, btn, opts = {}) {
+  const spec = S.manifest?.[kind];
+  if (spec?.available === false) {
+    toast("err", spec.unavailable_reason || "The connected repository does not support this workflow.");
+    return null;
+  }
   if (!S.info || S.manifest[kind]) {
     for (const need of S.manifest[kind].needs || []) {
       if (need === "scm" && !S.info.scm.found) {
@@ -648,6 +715,8 @@ export async function doRun(kind, btn, opts = {}) {
   } finally {
     // don't silently re-enable a button the latest preview has since blocked
     // (e.g. the front directory is still empty)
-    if (btn && (startFailed || !S.previewBlock?.[kind])) { btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run"); }
+    if (btn && !runButtonLocked(btn) && (startFailed || !S.previewBlock?.[kind])) {
+      btn.disabled = false; btn.innerHTML = ""; btn.append(ico("play"), btn.dataset.label || "Run");
+    }
   }
 }

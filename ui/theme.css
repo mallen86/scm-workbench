@@ -363,6 +363,12 @@ hr.sep { border: none; height: 1px; background: var(--border-soft); margin: 16px
 .field > label .req { color: var(--err); }
 .field .help { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .field .help code { font-family: var(--mono); color: var(--muted); font-size: 11px; }
+.field.option-unavailable > label { color: var(--faint); }
+.field.option-unavailable :is(.input, .range, .rangeval, .seg, .switch, .chips, .choicechips, .numwrap) {
+  opacity: 0.58;
+}
+.field .capability-help { color: var(--warn); }
+.capability-note { color: var(--warn); }
 
 .input, select.input, textarea.input {
   width: 100%;
