@@ -31,6 +31,7 @@ class SettingsIpcTests(unittest.TestCase):
         server.MANIFEST_CACHE.clear()
         server._INFO_SNAP.clear()
         server._REPOS_MTIME.clear()
+        server._invalidate_script_capability_cache()
         server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.httpd = server.start_http("127.0.0.1", 0)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -43,6 +44,7 @@ class SettingsIpcTests(unittest.TestCase):
         self.thread.join(timeout=3)
         for name, value in self.saved.items():
             setattr(server, name, value)
+        server._invalidate_script_capability_cache()
         self.temp.cleanup()
 
     def native(self, changes):
@@ -115,15 +117,21 @@ class SettingsIpcTests(unittest.TestCase):
                                        "params": {"changes": {}, "extra": 1}})
                          ["error"]["code"], "bad_request")
 
-    def test_success_invalidates_both_caches(self):
+    def test_ui_only_change_preserves_manifest_and_capability_caches(self):
         server.MANIFEST_CACHE["old"] = {"stale": True}
         server._INFO_SNAP.update(t=1, v={"stale": True})
         server._REPOS_MTIME["t"] = 1
+        with server._SCRIPT_CAPABILITY_CACHE_LOCK:
+            server._SCRIPT_CAPABILITY_CACHE["old"] = (0.0, {"status": "ok"})
+
         response = self.native({"theme": "light"})
+
         self.assertTrue(response["result"]["ok"])
-        self.assertFalse(server.MANIFEST_CACHE)
+        self.assertEqual(server.MANIFEST_CACHE, {"old": {"stale": True}})
         self.assertFalse(server._INFO_SNAP)
-        self.assertFalse(server._REPOS_MTIME)
+        self.assertEqual(server._REPOS_MTIME, {"t": 1})
+        with server._SCRIPT_CAPABILITY_CACHE_LOCK:
+            self.assertIn("old", server._SCRIPT_CAPABILITY_CACHE)
 
     def test_repo_paths_and_python_apply_to_the_next_command_without_restart(self):
         scm = self.data / "new-scm"
@@ -132,12 +140,22 @@ class SettingsIpcTests(unittest.TestCase):
         scm.mkdir()
         extras.mkdir()
         python.write_bytes(b"python")
+        server.MANIFEST_CACHE["old"] = {"stale": True}
+        server._INFO_SNAP.update(t=1, v={"stale": True})
+        server._REPOS_MTIME["t"] = 1
+        with server._SCRIPT_CAPABILITY_CACHE_LOCK:
+            server._SCRIPT_CAPABILITY_CACHE["old"] = (0.0, {"status": "ok"})
 
         response = self.native({
             "scm_dir": str(scm), "extras_dir": str(extras), "python": str(python),
         })
 
         self.assertTrue(response["result"]["ok"])
+        self.assertFalse(server.MANIFEST_CACHE)
+        self.assertFalse(server._INFO_SNAP)
+        self.assertFalse(server._REPOS_MTIME)
+        with server._SCRIPT_CAPABILITY_CACHE_LOCK:
+            self.assertFalse(server._SCRIPT_CAPABILITY_CACHE)
         settings = server.load_settings()
         self.assertEqual(server.effective_dirs(settings), (scm, extras))
         argv, cwd, _env, _title, _warnings, errors = server.build_command(

@@ -1,4 +1,5 @@
 # Bugs
+- [x] Make Simple/Advanced switching immediate and reduce initial app startup work without weakening live script-capability checks.
 - [x] Keep self-update status and terminal failures visible in Simple mode after download progress ends.
 - [x] Ensure the manually-invoked update check always performs a fresh release check regardless of the scheduled-check cache.
 - [x] Fix the v0.4.0 macOS ZIP compatibility failure for v0.3.7 updaters, then make DMG the only macOS updater artifact for future releases.

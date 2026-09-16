@@ -1,7 +1,7 @@
 /* nav — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { toggleConsole, refreshJobs } from "./console.js";import { refreshInfo } from "./info.js";import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
+import { toggleConsole, refreshJobs } from "./console.js";import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
@@ -189,10 +189,8 @@ export function syncUiMode() {
 export async function setUiMode(mode) {
   const cur = uiMode();
   if (!mode || mode === cur) return;
-  // Save first, commit locally only once the server has confirmed — a
-  // settings GET landing before the commit (or the one fired just below)
-  // returning the previous value must not roll the switch back, or the
-  // user would have to click twice.
+  // Save first and commit locally only after the worker confirms it. A failed
+  // write must not leave the interface showing a mode that will not persist.
   try {
     await setSettings({ ui_mode: mode });
   } catch {
@@ -209,9 +207,7 @@ export async function setUiMode(mode) {
     if (page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
     toast("ok", mode === "simple" ? "Simple: navigation shows only the essentials." : "Advanced: every page and control is available.");
   }
-  // keepForms: a mode switch is a layout change, not a content change — the
-  // values sitting in the visible form must survive, and if anything else did
-  // clear S.forms[kind] in the meantime, the form card's afterFormChange
-  // re-owns the slot on the next edit (so the preview can't wedge dead).
-  refreshInfo({ keepForms: true }).catch(() => {});   // keep jobs/status/prep fresh for the re-render
+  // A mode switch changes only local presentation. Pollers already keep jobs
+  // and repository preparation current, so reloading info and the capability
+  // manifest here would add work while risking the form values being edited.
 }

@@ -74,6 +74,8 @@ def main() -> int:
     ):
         if marker not in source:
             return fail(f"settings caller is missing {marker}")
+    if 'from "./info.js"' in nav or "refreshInfo(" in nav:
+        return fail("mode switching still reloads repository info or the capability manifest")
     if "You may need to restart the server after changing the Python interpreter." in settings:
         return fail("settings still claims repository path changes require a restart")
     if "Reconnected. The new paths are in use." not in settings:

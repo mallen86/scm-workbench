@@ -58,6 +58,22 @@ class ScriptCapabilityTests(unittest.TestCase):
         self.assertIn("X_OFFSET", result["declarations"]["--x_offset"])
         self.assertTrue(result["usage"].startswith("usage:"))
 
+    def test_parser_only_probe_never_executes_the_script(self):
+        source = (
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.parse_args()\n"
+        )
+        with mock.patch.object(server, "_run_script_help",
+                               side_effect=AssertionError("parser-only probe executed")):
+            result, _repo = self._probe(source, config={"probe": "parser"})
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["flags"], [])
+        self.assertFalse(result["enumerated"])
+
+        missing, _repo = self._probe("print('not a CLI parser')\n", config={"probe": "parser"})
+        self.assertEqual(missing["status"], "no_safe_help")
+
     def test_script_change_during_probe_is_rejected(self):
         repo = self.root / "race"
         script = self._write(

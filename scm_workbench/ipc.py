@@ -107,7 +107,9 @@ def dispatch(request: dict) -> dict:
                 "process_group": bool(server._IPC_PROCESS_GROUP_READY),
             }
         elif method == "info":
-            result = server.get_info()
+            # Keep client info fresh, then share its bounded repository
+            # snapshot with the immediately following manifest request.
+            result = server.refresh_info_snapshot()
         elif method == "manifest":
             result = server.get_manifest()
         elif method == "settings.get":

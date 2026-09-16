@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from scm_workbench import repo_sync, server
 
@@ -346,6 +347,22 @@ class HttpContractTests(unittest.TestCase):
             self.assertTrue(spec.get("title"), kind)
             self.assertIn("groups", spec, kind)
             self.assertIn("cwd", spec, kind)
+        self.assertEqual(manifest["fetch:mtg"]["script"]["probe"], "help")
+        self.assertTrue(all(
+            manifest[f"fetch:{slug}"]["script"]["probe"] == "parser"
+            for slug in server.PLUGINS if slug != "mtg"
+        ))
+
+    def test_info_and_manifest_share_one_repository_snapshot(self):
+        server.invalidate_manifest_cache()
+        original = server.get_info
+        with mock.patch.object(server, "get_info", wraps=original) as scan:
+            info_status, _info = self.request("GET", "/api/info")
+            manifest_status, _manifest = self.request("GET", "/api/manifest")
+            self.assertEqual(scan.call_count, 1)
+            second_info_status, _second_info = self.request("GET", "/api/info")
+        self.assertEqual((info_status, manifest_status, second_info_status), (200, 200, 200))
+        self.assertEqual(scan.call_count, 2)
 
     def test_simple_pdf_presets_expand_to_fixed_cli_values_in_titled_sections(self):
         status, manifest = self.request("GET", "/api/manifest")

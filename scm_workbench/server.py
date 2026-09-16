@@ -1421,7 +1421,12 @@ def build_manifest(info: dict) -> dict:
             # distinguishable even though the button/heading title is generic
             "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
-            "script": {"repo": "scm", "path": f"plugins/{slug}/fetch.py", "help_args": ["--help"]},
+            # MTG has Workbench-controlled CLI preferences, so inspect its full
+            # help. Other fetchers have no gated options: recognizing their
+            # parser statically avoids starting dozens of dependency-heavy
+            # Python processes during app boot.
+            "script": {"repo": "scm", "path": f"plugins/{slug}/fetch.py",
+                       "probe": "help" if slug == "mtg" else "parser", "help_args": ["--help"]},
             "description": f"Downloads {meta['title']} card images from a decklist into the game folders.",
             # Simple mode lays the form out as one flat row per group — the
             # standard 3-per-row rhythm the PDF page uses (create_pdf's
@@ -1635,10 +1640,11 @@ def update_settings(changes: Any) -> dict:
     Invalid patches are application results (the HTTP transport sends them as
     400, while native settings.set returns this same result in its ``result``
     field).  The lock covers validation, load, merge, and atomic commit so this
-    helper is also safe against callers changing a patch concurrently.  A
-    successful save invalidates both manifest and repo snapshots so path/default
-    changes are visible immediately.  ``repos`` is intentionally not accepted
-    here; /api/repos/save remains its separate locked writer.
+    helper is also safe against callers changing a patch concurrently. Repo
+    paths and the job interpreter invalidate script capabilities immediately;
+    UI-only settings merely expire the info snapshot and leave the expensive,
+    still-valid manifest intact. ``repos`` is intentionally not accepted here;
+    /api/repos/save remains its separate locked writer.
     """
     with _SETTINGS_LOCK:
         errors = validate_settings_changes(changes)
@@ -1659,10 +1665,16 @@ def update_settings(changes: Any) -> dict:
         if encoded_size > SETTINGS_CHANGES_MAX_BYTES:
             return {"ok": False, "errors": ["merged settings exceed 64 KiB when encoded"]}
         save_settings(settings)
-        invalidate_manifest_cache()
-        _invalidate_script_capability_cache()
-        _INFO_SNAP.clear()
-        _REPOS_MTIME.clear()
+        if {"scm_dir", "extras_dir", "python"}.intersection(changes):
+            invalidate_manifest_cache()
+            _invalidate_script_capability_cache()
+        else:
+            # Theme, mode, defaults, onboarding, and launch preferences are
+            # returned through /api/info but cannot change script support.
+            # Preserve the manifest and capability caches so a mode toggle is
+            # a settings write plus a local rerender, not dozens of --help runs.
+            with MANIFEST_LOCK:
+                _INFO_SNAP.clear()
     return {"ok": True, "settings": settings}
 
 # ============================================================================
@@ -5176,10 +5188,11 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
 
 # Script capability discovery is deliberately bounded and side-effect-aware.
 # Option-bearing upstream scripts are queried through their ordinary --help
-# command in a child process; known scripts without a CLI parser are checked for
-# a safe regular file only, because importing or executing them could perform the
-# job itself. The manifest remains the one schema: requirements live beside
-# each option and are resolved into available/unavailable metadata here.
+# command in a child process. Optionless entry points need only a recognizable
+# Click/argparse parser in their bounded source, while known scripts without any
+# CLI parser are checked for a safe regular file only; importing or executing
+# either class could perform the job itself. The manifest remains the one schema:
+# requirements live beside each option and resolve to availability metadata here.
 SCRIPT_CAPABILITY_SOURCE_MAX_BYTES = 512 * 1024
 SCRIPT_CAPABILITY_OUTPUT_MAX_BYTES = 256 * 1024
 SCRIPT_CAPABILITY_FLAG_MAX = 128
@@ -5421,7 +5434,11 @@ def _probe_script_capability(config: dict, roots: dict, settings: dict) -> dict:
     probe = str(config.get("probe") or "help")
     if probe == "exists":
         return {"status": "ok", "flags": [], "usage": "", "enumerated": False}
-    if probe != "help" or not _script_has_cli_help_parser(payload):
+    has_parser = _script_has_cli_help_parser(payload)
+    if probe == "parser":
+        return ({"status": "ok", "flags": [], "usage": "", "enumerated": False}
+                if has_parser else {"status": "no_safe_help", "flags": [], "usage": ""})
+    if probe != "help" or not has_parser:
         return {"status": "no_safe_help", "flags": [], "usage": ""}
 
     python = job_python(settings)
@@ -5522,7 +5539,10 @@ def _apply_script_capabilities(manifest: dict, settings: dict, info: dict) -> No
 
     results: Dict[str, dict] = {}
     if targets:
-        with ThreadPoolExecutor(max_workers=min(6, len(targets)), thread_name_prefix="script-capability") as pool:
+        # Parser-only and existence checks finish in-process. At most seven
+        # current workflows execute --help, so ten workers let all of those
+        # bounded probes overlap without spawning one process per manifest row.
+        with ThreadPoolExecutor(max_workers=min(10, len(targets)), thread_name_prefix="script-capability") as pool:
             for kind, result in pool.map(inspect, targets):
                 results[kind] = result
 
@@ -5655,6 +5675,16 @@ def _get_info_locked() -> dict:
     c.clear()
     c.update(t=now, v=v)
     return v
+
+
+def refresh_info_snapshot() -> dict:
+    """Build fresh client info and publish it for an adjacent manifest read."""
+    with MANIFEST_LOCK:
+        now = time.time()
+        value = get_info()
+        _INFO_SNAP.clear()
+        _INFO_SNAP.update(t=now, v=value)
+        return value
 
 
 def get_info_cached() -> dict:
@@ -9598,7 +9628,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, _GIF_1PX, ctype="image/gif",
                                   extra=[("Access-Control-Allow-Origin", "*")])
             if path == "/api/info":
-                return self._json(get_info())
+                # Keep client info fresh, then share that same bounded snapshot
+                # with the immediately following manifest request at startup.
+                return self._json(refresh_info_snapshot())
             if path == "/api/release-notes":
                 tags = parse_qs(url.query, keep_blank_values=True).get("tag")
                 if tags is not None and (len(tags) != 1 or not tags[0] or

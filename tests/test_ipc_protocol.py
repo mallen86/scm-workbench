@@ -42,7 +42,7 @@ class IpcProtocolTests(unittest.TestCase):
         output = FlushCapture()
         diagnostics = io.StringIO()
         process_stdout = io.StringIO()
-        with mock.patch.object(server, "get_info", return_value=fake["info"]), \
+        with mock.patch.object(server, "refresh_info_snapshot", return_value=fake["info"]), \
              mock.patch.object(server, "get_manifest", return_value=fake["manifest"]), \
              mock.patch.object(server, "load_settings", return_value=fake["settings.get"]), \
              mock.patch.object(server, "_IPC_PROCESS_GROUP_READY", True), \
@@ -68,7 +68,7 @@ class IpcProtocolTests(unittest.TestCase):
             + b'{"id":4,"method":"info","params":{}}\n' \
             + b'{"id":"missing-params","method":"info"}\n'
         output = io.BytesIO()
-        with mock.patch.object(server, "get_info", return_value={}):
+        with mock.patch.object(server, "refresh_info_snapshot", return_value={}):
             ipc.serve_stdio(io.BytesIO(source), output)
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([r["error"]["code"] for r in responses],
@@ -81,7 +81,7 @@ class IpcProtocolTests(unittest.TestCase):
         oversized = b"x" * ipc.MAX_LINE_SIZE + b"\n"
         source = oversized + b"\xff\n" + b'{"id":"ok","method":"info","params":{}}\n'
         output = io.BytesIO()
-        with mock.patch.object(server, "get_info", return_value={"ok": True}):
+        with mock.patch.object(server, "refresh_info_snapshot", return_value={"ok": True}):
             ipc.serve_stdio(io.BytesIO(source), output)
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(responses[0]["error"]["code"], "bad_request")
@@ -92,7 +92,7 @@ class IpcProtocolTests(unittest.TestCase):
     def test_response_limit_replaces_oversized_result(self):
         output = io.BytesIO()
         request = b'{"id":"large","method":"info","params":{}}\n'
-        with mock.patch.object(server, "get_info", return_value={"data": "x" * 1000}):
+        with mock.patch.object(server, "refresh_info_snapshot", return_value={"data": "x" * 1000}):
             ipc.serve_stdio(io.BytesIO(request), output, max_response_size=256)
         response = json.loads(output.getvalue())
         self.assertEqual(response, {
@@ -129,7 +129,7 @@ class IpcProtocolTests(unittest.TestCase):
         # remain aligned and be processed.
         source = b"x" * 20 + b'{"id":"not-a-frame"}\n' + b'{"id":"ok","method":"info","params":{}}\n'
         output = io.BytesIO()
-        with mock.patch.object(server, "get_info", return_value={"ok": True}):
+        with mock.patch.object(server, "refresh_info_snapshot", return_value={"ok": True}):
             ipc.serve_stdio(io.BytesIO(source), output, max_line_size=64)
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(responses[0]["error"]["code"], "bad_request")
