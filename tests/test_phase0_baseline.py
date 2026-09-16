@@ -89,8 +89,9 @@ if "--help" in sys.argv:
     suffix = f" {{command}}" if command else ""
     print(f"Usage: {path.name}{{suffix}} [OPTIONS]")
     print("Options:")
+    metavars = {{"--extend_corners": "TEXT"}}
     for option in options:
-        print(f"  {{option}} VALUE")
+        print(f"  {{option}} {{metavars.get(option, 'VALUE')}}")
     print("  --help")
 '''
         path.write_text(script, encoding="utf-8")
@@ -345,6 +346,45 @@ class HttpContractTests(unittest.TestCase):
             self.assertTrue(spec.get("title"), kind)
             self.assertIn("groups", spec, kind)
             self.assertIn("cwd", spec, kind)
+
+    def test_simple_pdf_presets_expand_to_fixed_cli_values_in_titled_sections(self):
+        status, manifest = self.request("GET", "/api/manifest")
+        self.assertEqual(status, 200)
+        create = manifest["create_pdf"]
+        self.assertEqual(create["simple_rows"], [["card_size", "paper_size"]])
+        self.assertEqual(create["simple_sections"], [
+            {"title": "Print setup", "rows": [["borderless", "load_offset", "only_fronts"]]},
+            {"title": "Image finishing", "rows": [["mpcfill_crop", "extend_corners_simple"]]},
+        ])
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        self.assertTrue(options["extend_corners_simple"]["simple_only"])
+        self.assertTrue(options["extend_corners_simple"]["available"])
+
+        settings = server.load_settings()
+        settings["ui_mode"] = "simple"
+        server.save_settings(settings)
+        server.invalidate_manifest_cache()
+        args = {
+            "card_size": "standard", "paper_size": "letter",
+            "mpcfill_crop": True, "extend_corners_simple": True,
+        }
+        preview = server.build_preview("create_pdf", args)
+        self.assertFalse(preview["errors"])
+        self.assertIn("--crop 3mm", preview["cmd"])
+        self.assertIn("--extend_corners 3.5mm", preview["cmd"])
+
+        direct = server.build_preview("create_pdf", {**args, "extend_corners": "4mm"})
+        self.assertFalse(direct["errors"])
+        self.assertIn("--extend_corners 4mm", direct["cmd"])
+        self.assertNotIn("--extend_corners 3.5mm", direct["cmd"])
+
+        settings["ui_mode"] = "advanced"
+        server.save_settings(settings)
+        server.invalidate_manifest_cache()
+        advanced = server.build_preview("create_pdf", args)
+        self.assertFalse(advanced["errors"])
+        self.assertNotIn("--crop 3mm", advanced["cmd"])
+        self.assertNotIn("--extend_corners 3.5mm", advanced["cmd"])
 
     def test_custom_paper_label_names_the_dxf_and_saved_size(self):
         preview = server.build_preview("dxf_single", {

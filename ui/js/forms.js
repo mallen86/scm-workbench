@@ -496,21 +496,17 @@ export function formCard(kind, opts = {}) {
   };
 
   if (opts.flat) {
-    // Flat layout: no ordinary group headers or card title of its own. In
-    // simple mode only the options flagged `simple` in the manifest make it
-    // in (the everyday ones); everything else keeps its
-    // default behind the scenes. Each group becomes one form row; a
-    // kind-level `simple_rows` list (create_pdf, fetch:*) names which
-    // groups hold which option rows, in order. A group that names its own
-    // `simple_rows` (MTG's preferences group does: 7 toggles = 3+3+1
-    // per row) renders them as sub-rows inside the group's row. The fetch
-    // form is fully flat — every group, every option — unlike create_pdf,
-    // whose flat section shows only its `simple`-flagged options.
-    const rows = uiMode() === "simple" ? (spec.simple_rows || []) : [];
+    // Flat layout omits the card title and technical command box. Create PDF
+    // uses a manifest-owned compact row plus titled simple sections; Fetch
+    // keeps its ordinary groups, with optional group-level `simple_rows` for
+    // controls that need more than one row.
+    const simpleMode = uiMode() === "simple";
+    const rows = simpleMode ? (spec.simple_rows || []) : [];
+    const sections = simpleMode ? (spec.simple_sections || []) : [];
     // Render one group's options into one flat row. A group that names its
     // own `simple_rows` (MTG's preferences group) gets a sub-frow for each
     // of those rows — 3-per-row, the standard rhythm — inside its row.
-    const placeGroup = (g, keys) => {
+    const placeGroup = (g, keys, target = card) => {
       const row = el("div", { class: "frow" });
       // simple-mode visibility: create_pdf's flat section shows only its
       // `simple`-flagged options; the fetch form is fully flat, so every
@@ -521,9 +517,9 @@ export function formCard(kind, opts = {}) {
         if (node) target.append(node);
       };
       const fill = r => {
-        // flat rows split evenly, whatever the manifest widths say: the four-
-        // toggle row needs 25% apiece to fit, and a two-dropdown row reads
-        // better at half width than two one-thirds with dead space at the end
+        // Flat rows split evenly, whatever the manifest widths say: each
+        // titled toggle row fills the available width, and a two-dropdown row
+        // reads better at half width than with dead space at the end.
         const n = r.childElementCount;
         if (n > 1) {
           for (const f of r.children) {
@@ -549,16 +545,23 @@ export function formCard(kind, opts = {}) {
         }
         fill(row);
       }
-      if (!row.childElementCount) return;
-      card.append(row);
+      if (!row.childElementCount) return false;
+      target.append(row);
+      return true;
     };
-    if (kind === "create_pdf" && rows.length) {
-      // PDF's everyday options span several advanced groups, so its
-      // kind-level row plan deliberately flattens across those groups. This
-      // also gives simple-only controls (such as MPCFill Crop) their one
-      // intended home without exposing the advanced collapsible sections.
+    if (kind === "create_pdf" && (rows.length || sections.length)) {
+      // PDF's everyday options span several advanced groups, so its compact
+      // plans deliberately flatten across those groups. Simple-only presets
+      // get one intended home without entering the Advanced form.
       const simpleGroup = { options: (spec.groups || []).flatMap(g => g.options || []) };
       for (const keys of rows) placeGroup(simpleGroup, keys);
+      for (const section of sections) {
+        const label = el("div", { class: "section-label", "data-label": true }, section.title);
+        card.append(label);
+        let populated = false;
+        for (const keys of section.rows || []) populated = placeGroup(simpleGroup, keys) || populated;
+        if (!populated) label.remove();
+      }
     } else {
       // one frow per ordinary fetch group, in manifest order. Keep explicitly
       // collapsible preference groups collapsed in simple mode too: simplifying

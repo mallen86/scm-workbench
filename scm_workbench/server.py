@@ -1082,11 +1082,20 @@ def build_manifest(info: dict) -> dict:
             "repo": "scm", "path": "create_pdf.py", "help_args": ["--help"],
             "required_flags": ["--output_path", "--card_size", "--paper_size", "--ppi"],
         },
-        # the simple-mode layout: rows of the flat section — the two
-        # dropdowns alone up top, the four toggles together below
-        "simple_rows": [
-            ["card_size", "paper_size"],
-            ["borderless", "load_offset", "only_fronts", "mpcfill_crop"],
+        # Simple mode keeps the size selectors compact, then groups its
+        # everyday toggles under the same kind of subtitles used by the full
+        # form. The row/section plan remains manifest-owned rather than being
+        # hard-coded in the renderer.
+        "simple_rows": [["card_size", "paper_size"]],
+        "simple_sections": [
+            {
+                "title": "Print setup",
+                "rows": [["borderless", "load_offset", "only_fronts"]],
+            },
+            {
+                "title": "Image finishing",
+                "rows": [["mpcfill_crop", "extend_corners_simple"]],
+            },
         ],
         "description": "Lays out card images in a PDF that is ready to print, with registration marks for the cutting templates.",
         "groups": [
@@ -1154,6 +1163,10 @@ def build_manifest(info: dict) -> dict:
                     _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
                          requires_flags=["--crop"],
                          help="Applies a 3mm crop to front images to remove MPCFill padding. A value in “Crop edges (fronts)” overrides this toggle."),
+                    _opt("extend_corners_simple", "Extend Corners", "toggle", default=False, width="third", simple=True, simple_only=True,
+                         requires_flags=["--extend_corners"],
+                         requires_flag_metavars={"--extend_corners": ["TEXT"]},
+                         help="Extends rounded front and double-sided image corners by 3.5mm. A value in “Extend rounded corners (fronts)” overrides this toggle."),
                     _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third",
                          requires_flags=["--crop"]),
                     _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third",
@@ -4895,6 +4908,11 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 # the Crop boxes are the direct control - so a leftover value
                 # can't silently crop a PDF, and a typed value always wins.
                 v = "3mm"
+            if key == "extend_corners" and not v and a.get("extend_corners_simple") and simple:
+                # The simple preset mirrors MPCFill Crop: keep the direct CLI
+                # value authoritative, and never let a hidden simple-only value
+                # affect an Advanced-mode command.
+                v = "3.5mm"
             if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
@@ -5165,6 +5183,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
 SCRIPT_CAPABILITY_SOURCE_MAX_BYTES = 512 * 1024
 SCRIPT_CAPABILITY_OUTPUT_MAX_BYTES = 256 * 1024
 SCRIPT_CAPABILITY_FLAG_MAX = 128
+SCRIPT_CAPABILITY_DECLARATION_MAX_CHARS = 256
 SCRIPT_CAPABILITY_TIMEOUT = 5.0
 SCRIPT_CAPABILITY_CACHE_MAX = 256
 SCRIPT_CAPABILITY_FAILURE_TTL = 15.0
@@ -5344,17 +5363,28 @@ def _run_script_help(argv: list[str], cwd: Path, env: dict) -> dict:
     usage = next((" ".join(line.split())[:512] for line in lines
                   if line.lstrip().lower().startswith("usage:")), "")
     discovered = set()
+    declarations: Dict[str, str] = {}
     for line in lines:
         declaration = line.lstrip()
         if not declaration.startswith("-"):
             continue
         # Click and argparse separate the option declaration from prose with
-        # two or more spaces. Ignore flags merely mentioned in descriptions.
+        # two or more spaces. Ignore flags merely mentioned in descriptions,
+        # but retain the bounded declaration so fixed-value presets can verify
+        # that an older option accepts the value format they intend to send.
         declaration = re.split(r"\s{2,}", declaration, maxsplit=1)[0]
-        discovered.update(_SCRIPT_FLAG_RE.findall(declaration))
+        line_flags = _SCRIPT_FLAG_RE.findall(declaration)
+        discovered.update(line_flags)
+        for flag in line_flags:
+            declarations.setdefault(flag, declaration[:SCRIPT_CAPABILITY_DECLARATION_MAX_CHARS])
         if len(discovered) > SCRIPT_CAPABILITY_FLAG_MAX:
             return {"status": "too_many_options", "flags": [], "usage": usage}
-    return {"status": "ok", "flags": sorted(discovered), "usage": usage}
+    return {
+        "status": "ok",
+        "flags": sorted(discovered),
+        "usage": usage,
+        "declarations": dict(sorted(declarations.items())),
+    }
 
 
 def _script_capability_cache_get(key: tuple) -> Optional[dict]:
@@ -5500,6 +5530,7 @@ def _apply_script_capabilities(manifest: dict, settings: dict, info: dict) -> No
         config = spec["script"]
         result = results.get(kind) or {"status": "error", "flags": [], "usage": ""}
         flags = set(result.get("flags") or [])
+        declarations = result.get("declarations") or {}
         config["capabilities"] = {
             "status": result.get("status", "error"),
             "flags": sorted(flags),
@@ -5526,10 +5557,21 @@ def _apply_script_capabilities(manifest: dict, settings: dict, info: dict) -> No
                 _disable_manifest_option(option, reason)
                 continue
             missing = sorted(set(option.get("requires_flags") or []) - flags)
+            incompatible_values = []
+            for flag, accepted in (option.get("requires_flag_metavars") or {}).items():
+                accepted_values = [accepted] if isinstance(accepted, str) else list(accepted or [])
+                tokens = set(re.findall(r"[A-Z][A-Z0-9_-]*", str(declarations.get(flag) or "")))
+                if not any(str(value).upper() in tokens for value in accepted_values):
+                    incompatible_values.append(str(flag))
             if missing:
                 _disable_manifest_option(
                     option,
                     f"{config['path']} does not support {', '.join(missing)} in the connected repository.",
+                )
+            elif incompatible_values:
+                _disable_manifest_option(
+                    option,
+                    f"{config['path']} does not support the value format required for {', '.join(incompatible_values)} in the connected repository.",
                 )
             else:
                 option["available"] = True

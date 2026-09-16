@@ -31,12 +31,15 @@ def main() -> int:
     if "if (o && visible())" in forms:
         return fail("the blank simple-PDF runtime exception is still reachable")
     for marker in (
-        'if (kind === "create_pdf" && rows.length)',
+        'if (kind === "create_pdf" && (rows.length || sections.length))',
         "flatMap(g => g.options || [])",
         "for (const keys of rows) placeGroup(simpleGroup, keys)",
+        "for (const section of sections)",
+        'class: "section-label"',
+        "for (const keys of section.rows || [])",
     ):
         if marker not in forms:
-            return fail(f"simple PDF does not follow its cross-group row plan: {marker}")
+            return fail(f"simple PDF does not follow its titled cross-group plan: {marker}")
 
     for marker in (
         'import "./pages/preparing.js";',

@@ -55,6 +55,7 @@ class ScriptCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ok")
         self.assertTrue({"--borderless", "-x", "--x_offset", "--help"}.issubset(result["flags"]))
+        self.assertIn("X_OFFSET", result["declarations"]["--x_offset"])
         self.assertTrue(result["usage"].startswith("usage:"))
 
     def test_script_change_during_probe_is_rejected(self):
@@ -196,12 +197,17 @@ class ScriptCapabilityTests(unittest.TestCase):
         }
         layouts_path.write_text(json.dumps(layouts), encoding="utf-8")
 
-        # This is the pre-v3 Create PDF surface: required baseline flags are
-        # present, while --borderless and the newer finishing switches are not.
+        # This is a pre-v3 Create PDF surface: required baseline flags are
+        # present, --borderless is absent, and --extend_corners accepts only an
+        # integer rather than the dimensional value used by the Simple preset.
         fixture._marker(fixture.scm / "create_pdf.py")
         source = (fixture.scm / "create_pdf.py").read_text(encoding="utf-8")
         source = source.replace("'--borderless', ", "").replace("'--borderless',", "")
         source = source.replace("'--quality', ", "").replace("'--quality',", "")
+        source = source.replace(
+            '{"--extend_corners": "TEXT"}',
+            '{"--extend_corners": "INTEGER RANGE"}',
+        )
         (fixture.scm / "create_pdf.py").write_text(source, encoding="utf-8")
 
         settings = json.loads(json.dumps(server.DEFAULT_SETTINGS))
@@ -223,6 +229,9 @@ class ScriptCapabilityTests(unittest.TestCase):
         self.assertFalse(options["borderless"]["available"])
         self.assertIn("borderless", options["borderless"]["unavailable_reason"].lower())
         self.assertFalse(options["quality"]["available"])
+        self.assertTrue(options["extend_corners"]["available"])
+        self.assertFalse(options["extend_corners_simple"]["available"])
+        self.assertIn("value format", options["extend_corners_simple"]["unavailable_reason"])
         self.assertTrue(options["card_size"]["available"])
         self.assertIn("default", info["scm"]["layouts"]["letter"]["standard"])
         self.assertEqual(
@@ -242,6 +251,14 @@ class ScriptCapabilityTests(unittest.TestCase):
         self.assertFalse(command_errors)
         self.assertNotIn("--quality", argv)
         self.assertNotIn("--borderless", argv)
+
+        preset_raw = {
+            "card_size": "standard", "paper_size": "letter",
+            "extend_corners_simple": True,
+        }
+        preset_normalized, preset_errors, _warnings = server.normalize_args(create, preset_raw)
+        self.assertNotIn("extend_corners_simple", preset_normalized)
+        self.assertTrue(any("value format" in error for error in preset_errors))
 
         raw = {"card_size": "standard", "paper_size": "letter", "borderless": True}
         normalized, errors, _warnings = server.normalize_args(create, raw)

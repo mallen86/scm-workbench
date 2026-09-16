@@ -13,8 +13,8 @@ PAGES.pdf = (root) => {
     : "Lays out images from game/ folders in a PDF that is ready to print, with registration marks. The options below match create_pdf.py, and the command preview shows exactly what will run.";
   wrap.append(pageHead("Create PDF", description));
   if (connectCardNeeded()) wrap.append(repoSetupCard());
-  // Simple mode: the form is one flat section, with no group headers,
-  // collapsible wrappers, or technical command box. Advanced mode keeps the
+  // Simple mode: the form uses compact, titled everyday sections without
+  // collapsible wrappers or a technical command box. Advanced mode keeps the
   // full grouped layout and command preview.
   const pdfForm = formCard("create_pdf", {
     icon: "pdf", flat: simple, head: !simple, preview: simple ? "summary" : true,
