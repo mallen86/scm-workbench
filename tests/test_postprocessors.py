@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scm_workbench.postprocessing import (
     ConflictError,
@@ -14,6 +15,7 @@ from scm_workbench.postprocessing import (
     ValidationError,
     discover_images,
     environment_fingerprint,
+    interpreter_fingerprint,
     normalize_requirements,
     recover_transactions,
     revision_digest,
@@ -101,9 +103,24 @@ class PostprocessorTests(unittest.TestCase):
             unchanged = store.record_environment(item["id"], item["revision"], first_lock)
             self.assertTrue(unchanged["processor"]["trusted"])
 
+            edited = store.save(
+                "Libraries", SOURCE + "\n# source-only edit\n", "demo==1.0",
+                processor_id=item["id"], expected_revision=item["revision"],
+            )
+            edited_status = store.status(edited["id"])
+            self.assertTrue(edited_status["environment"]["ready"])
+            self.assertEqual(edited_status["environment"]["fingerprint"], first_fingerprint)
+            self.assertFalse(edited_status["processor"]["trusted"])
+            store.trust(edited["id"], edited["revision"], first_fingerprint)
+
             second_lock, _ = publish_environment("b" * 64)
-            changed = store.record_environment(item["id"], item["revision"], second_lock)
+            changed = store.record_environment(edited["id"], edited["revision"], second_lock)
             self.assertFalse(changed["processor"]["trusted"])
+            requirements_changed = store.save(
+                "Libraries", SOURCE + "\n# dependency edit\n", "demo==2.0",
+                processor_id=edited["id"], expected_revision=edited["revision"],
+            )
+            self.assertFalse(store.status(requirements_changed["id"])["environment"]["ready"])
 
             plain = store.save("No libraries", SOURCE, "")
             plain_fingerprint = store.environment_metadata([])["fingerprint"]
@@ -257,10 +274,36 @@ class PostprocessorTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b"external")
             self.assertTrue(tx.journal.exists())
 
+    def test_interpreter_probe_disables_bytecode_writes(self):
+        calls = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def wait(self, timeout):
+                return 0
+
+        def fake_popen(argv, **kwargs):
+            calls.append(argv)
+            kwargs["stdout"].write(json.dumps({
+                "implementation": "CPython", "version": [3, 13, 0], "abi": "",
+                "soabi": "cpython-313-test", "cache_tag": "cpython-313",
+                "platform": "test", "machine": "arm64",
+            }).encode("utf-8"))
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temp:
+            interpreter = Path(temp) / "python"
+            interpreter.write_bytes(b"fixture")
+            with mock.patch("scm_workbench.postprocessing.subprocess.Popen", side_effect=fake_popen):
+                self.assertEqual(len(interpreter_fingerprint(interpreter)), 64)
+        self.assertEqual(calls[0][1:4], ["-I", "-B", "-c"])
+
     def test_environment_and_pip_helpers_are_bounded(self):
         fingerprint = environment_fingerprint(["Pillow"])
         self.assertEqual(len(fingerprint), 64)
         argv = wheel_only_pip_argv("python", ["Pillow"], target="target", offline=True)
+        self.assertEqual(argv[:4], ["python", "-B", "-m", "pip"])
         self.assertIn("--only-binary=:all:", argv)
         self.assertIn("--no-index", argv)
         report = {"install": [{"metadata": {"name": "Pillow", "version": "1"}, "download_info": {"url": "https://files.pythonhosted.org/packages/Pillow.whl", "archive_info": {"hashes": {"sha256": "a" * 64}}}}]}

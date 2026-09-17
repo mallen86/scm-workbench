@@ -146,6 +146,7 @@ class PostprocessJobTests(unittest.TestCase):
         )
         job, errors = self.start_images(item)
         self.assertEqual(errors, [])
+        self.assertIn(" -B ", f" {job['cmd']} ")
         self.wait(job)
         self.assertEqual(job["status"], "ok", job["log_lines"])
         self.assertEqual(job["postprocess_outcome"], "committed")
@@ -326,6 +327,34 @@ class PostprocessJobTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "changed after installation"):
             server._verify_dependency_environment(trusted_status["environment"])
 
+        repair_stage = self.data / "postprocessing" / "environments" / ".install-fixture-repair"
+        repair_target = repair_stage / "site-packages"
+        repair_target.mkdir(parents=True)
+        (repair_target / "demo.py").write_text("VALUE = 1\n", encoding="utf-8")
+        repair_report = repair_stage / "resolve-report.json"
+        repair_report.write_text(json.dumps(report), encoding="utf-8")
+        repair_lock = repair_stage / "requirements.lock"
+        repair_lock.write_text(lock_text, encoding="utf-8")
+        repair_job = {
+            **job,
+            "id": "fixture-repair",
+            "dependency_stage": str(repair_stage),
+            "dependency_target": str(repair_target),
+            "dependency_report": str(repair_report),
+            "dependency_lock": str(repair_lock),
+        }
+        self.assertTrue(server._finalize_dependency_job(repair_job))
+        self.assertTrue(repair_job["dependency_environment_repaired"])
+        repaired = self.store.status(
+            item["id"], interpreter=server.job_python(self.settings),
+        )
+        self.assertTrue(repaired["processor"]["trusted"])
+        server._verify_dependency_environment(repaired["environment"])
+        self.assertEqual(
+            (Path(repaired["environment"]["path"]) / "site-packages" / "demo.py").read_text(encoding="utf-8"),
+            "VALUE = 1\n",
+        )
+
     def test_dependency_job_preserves_trust_for_unchanged_environment(self):
         item = self.save_and_trust(
             "def process_image(image_path, context):\n    return None\n"
@@ -340,6 +369,7 @@ class PostprocessJobTests(unittest.TestCase):
             job["stage_max_entries"], server.POSTPROCESS_INSTALL_STAGE_MAX_ENTRIES,
         )
         self.assertGreater(job["stage_max_entries"], server.POSTPROCESS_ENV_MAX_FILES)
+        self.assertIn(" -B ", f" {job['cmd']} ")
         self.wait(job)
         self.assertEqual(job["status"], "ok", job["log_lines"])
         status = self.store.status(item["id"], interpreter=server.job_python(self.settings))

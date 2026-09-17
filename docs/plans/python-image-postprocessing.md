@@ -310,7 +310,7 @@ At job start, under server-side validation:
 - pin the current SCM root and root identity;
 - reject stale UI revisions rather than silently running newer code.
 
-The command preview may show a display-safe command such as `python -I …/postprocess_runner.py --manifest <private>`, but it must not expose source, absolute managed paths, or package credentials. Actual argv remains an array and uses `shell=False`.
+The command preview may show a display-safe command such as `python -I -B …/postprocess_runner.py --manifest <private>`, but it must not expose source, absolute managed paths, or package credentials. Actual argv remains an array and uses `shell=False`.
 
 ### 2. Acquire the correct resource lease
 
@@ -360,7 +360,7 @@ Keep the original basename under role-specific private directories so common ima
 Launch the trusted `scm_workbench/postprocess_runner.py` with the pinned job interpreter:
 
 ```text
-python -I -u -X utf8 <trusted-runner> --manifest <private-manifest>
+python -I -B -u -X utf8 <trusted-runner> --manifest <private-manifest>
 ```
 
 Requirements:

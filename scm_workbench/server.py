@@ -4736,6 +4736,9 @@ def _utf8_env() -> dict:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # The packaged interpreter lives inside the signed app bundle. Jobs must
+    # not add bytecode beside its standard library or application modules.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     # scripts that print progress in a loop (the fetch plugins print a line
     # per batch of cards) otherwise sit in Python's 8 KB pipe buffer until the
     # process exits, so the UI sees the whole transcript as one chunk at the
@@ -5265,7 +5268,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             return argv, cwd, env, title, warnings, errors
         # The actual private manifest is created in start_job, after the job
         # lease is held.  This display command deliberately contains no source.
-        argv += ["-I", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", "<private-manifest>"]
+        argv += ["-I", "-B", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", "<private-manifest>"]
         env["SCM_WORKBENCH_POSTPROCESS"] = "1"
     elif kind == "postprocess_dependencies":
         if str(settings.get("ui_mode", "advanced")) == "simple":
@@ -5285,7 +5288,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         except Exception as exc:
             errors.append(str(exc))
             item = {"requirements": []}
-        argv = [str(python), "-I", "-u", str(_HERE / "postprocess_installer.py"),
+        argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_installer.py"),
                 "--manifest", "<private-installer-manifest>"]
     elif kind.startswith("fetch:"):
         if not require_repo("SCM", scm):
@@ -7273,11 +7276,11 @@ def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[s
             postprocessing._private(installer_manifest)
             json.dump(installer_payload, stream, separators=(",", ":"))
             stream.flush(); os.fsync(stream.fileno())
-        argv = [str(python), "-I", "-u", str(_HERE / "postprocess_installer.py"),
+        argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_installer.py"),
                 "--manifest", str(installer_manifest)]
     else:
         target.mkdir(mode=0o700)
-        argv = [str(python), "-I", "-X", "utf8", "-c",
+        argv = [str(python), "-I", "-B", "-X", "utf8", "-c",
                 "print('No third-party libraries are required.')"]
     job.update({
         "dependency_stage": str(stage),
@@ -7487,8 +7490,15 @@ def _finalize_dependency_job(job: dict) -> bool:
             if os.path.lexists(final):
                 existing = store.environment_metadata(requirements, lock_hash, interpreter=Path(job["dependency_python"]))
                 if existing.get("ready"):
-                    _verify_dependency_environment(existing)
-                    existing_ready = True
+                    try:
+                        _verify_dependency_environment(existing)
+                    except postprocessing.PostProcessingError:
+                        # A freshly validated stage may safely replace a changed
+                        # cached tree. Publication below remains atomic and keeps
+                        # the invalid tree as rollback material until commit.
+                        job["dependency_environment_repaired"] = True
+                    else:
+                        existing_ready = True
             if existing_ready:
                 # Fingerprint environments are immutable and shareable. Never
                 # replace an identical ready tree that a live runner may import.
@@ -7587,7 +7597,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         manifest_stream.flush(); os.fsync(manifest_stream.fileno())
     job["postprocess_entries"] = list(entries)
     job["image_total"] = len(entries)
-    argv = [str(python), "-I", "-u", str(_HERE / "postprocess_runner.py"),
+    argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_runner.py"),
             "--manifest", str(private_manifest)]
     return argv, run_dir, _postprocess_env(run_dir)
 
@@ -7913,7 +7923,7 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         if kind == "postprocess_images":
             run_dir = (DATA_DIR / "postprocessing" / "runs" / job_id).resolve(strict=False)
             private_manifest = run_dir / "manifest.json"
-            argv = [str(job_python(load_settings())), "-I", "-u",
+            argv = [str(job_python(load_settings())), "-I", "-B", "-u",
                     str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
             display_argv = [*argv[:-1], "<private-manifest>"]
             job.update({"cmd": _fmt_argv(display_argv), "postprocess_run": str(run_dir),
@@ -8457,8 +8467,11 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
                 status = "ok"
                 trust_result = ("existing trust remains valid" if trust_preserved else
                                 "trust approval was reset")
+                install_result = ("validated, repaired, and installed" if
+                                  job.get("dependency_environment_repaired") else
+                                  "validated and installed")
                 _append_job_line(
-                    job, f"(processor libraries: validated and installed; {trust_result})", log_f=log_f,
+                    job, f"(processor libraries: {install_result}; {trust_result})", log_f=log_f,
                 )
             except Exception as exc:
                 status = "fail"

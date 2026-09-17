@@ -84,11 +84,12 @@ def process_image(image_path, context):
                 "limits": LIMITS,
             }), encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, "-I", "scm_workbench/postprocess_runner.py", "--manifest", str(manifest)],
+                [sys.executable, "-I", "-B", "scm_workbench/postprocess_runner.py", "--manifest", str(manifest)],
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(image.read_bytes().endswith(b"\0"))
+            self.assertEqual(list(site_packages.rglob("*.pyc")), [])
 
     def test_non_none_result_fails(self):
         with tempfile.TemporaryDirectory() as temp:

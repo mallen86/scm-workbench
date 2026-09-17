@@ -902,6 +902,7 @@ fn spawn_worker(
                 .open(log_path)?;
             Stdio::from(f)
         })
+        .arg("-B")
         .arg("-X")
         .arg("utf8")
         .arg("-m")
@@ -920,10 +921,9 @@ fn spawn_worker(
     // the code-signature seal. Python compiling __pycache__ pyc's back into
     // that tree on the user's own first launch would break the seal of the
     // copy on disk: harmless while the quarantine is off, but the bundle
-    // would read "damaged" again the moment it was re-quarantined. Keeping
-    // the worker bytecode-less makes launches write-free (the few modules
-    // involved re-parse in a few milliseconds - invisible next to a first
-    // boot).
+    // would read "damaged" again the moment it was re-quarantined. The
+    // explicit -B above protects every platform; keep the environment guard
+    // on macOS too so launches stay write-free even if argv is refactored.
     #[cfg(target_os = "macos")]
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]

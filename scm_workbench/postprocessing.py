@@ -1093,7 +1093,7 @@ def interpreter_fingerprint(interpreter: str | Path = sys.executable) -> str:
                        {"PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL"}}
         with tempfile.TemporaryFile() as output:
             try:
-                process = subprocess.Popen([str(path), "-I", "-c", code], stdin=subprocess.DEVNULL,
+                process = subprocess.Popen([str(path), "-I", "-B", "-c", code], stdin=subprocess.DEVNULL,
                                            stdout=output, stderr=subprocess.DEVNULL,
                                            env=environment, shell=False)
                 process.wait(timeout=5)
@@ -1128,7 +1128,7 @@ def environment_fingerprint(requirements: Sequence[str], lock_hash: str = "", *,
 
 def wheel_only_pip_argv(interpreter: str | Path, requirements: Sequence[str], *, target: str | Path, report: str | Path | None = None, offline: bool = False) -> list[str]:
     req = normalize_requirements(requirements)
-    argv = [str(interpreter), "-m", "pip", "install", "--isolated", "--disable-pip-version-check", "--no-input", "--only-binary=:all:", "--target", str(target)]
+    argv = [str(interpreter), "-B", "-m", "pip", "install", "--isolated", "--disable-pip-version-check", "--no-input", "--only-binary=:all:", "--target", str(target)]
     if offline: argv += ["--no-index", "--require-hashes"]
     if report is not None: argv += ["--report", str(report)]
     return argv + list(req)
@@ -1236,6 +1236,8 @@ class ProcessorStore:
 
     def save(self, name: str, source: str, requirements: str | Sequence[str] | None = None, *, processor_id: str | None = None, expected_revision: str | None = None) -> dict:
         name = normalize_name(name); raw = validate_source(source); req = normalize_requirements(requirements); revision = revision_digest(source, req, self.contract)
+        current_meta = None
+        current_requirements: tuple[str, ...] = ()
         if processor_id is None:
             if len(_bounded_children(self.root / "processors", PROCESSOR_MAX_COUNT, "processor registry")) >= PROCESSOR_MAX_COUNT: raise ValidationError("processor limit reached")
             processor_id = uuid.uuid4().hex
@@ -1246,6 +1248,9 @@ class ProcessorStore:
         else:
             current_meta = self._metadata(processor_id); current = current_meta.get("active_revision")
             if expected_revision != current: raise ConflictError("processor revision is stale")
+            current_requirements = tuple(self.get(
+                processor_id, revision=current, include_source=False,
+            )["requirements"])
             directory = self._processor(processor_id); directory.joinpath("revisions").mkdir(exist_ok=True, mode=0o700); _private(directory / "revisions", directory=True)
         source_path = directory / "revisions" / f"{revision}.py"; revision_meta = directory / "revisions" / f"{revision}.json"
         revision_entries = _bounded_children(directory / "revisions", REVISIONS_MAX_COUNT * 2, "processor revisions")
@@ -1267,6 +1272,19 @@ class ProcessorStore:
                 raise IntegrityError("immutable revision content was changed")
         if not revision_meta.exists(): _atomic_json(revision_meta, {"revision": revision, "requirements": list(req), "contract": self.contract, "source_bytes": len(raw)})
         metadata = {"id": processor_id, "name": name, "active_revision": revision, "trusted": None, "updated": time.time()}
+        if (req and current_meta is not None and current_requirements == req and
+                current_meta.get("installed_revision") == current and
+                current_meta.get("installed_environment") is not None and
+                current_meta.get("installed_tree_digest") is not None and
+                current_meta.get("lock_hash") is not None):
+            # A source-only edit changes what must be trusted, not the exact
+            # interpreter/lock/tree environment already associated with it.
+            metadata.update({
+                "installed_revision": revision,
+                "installed_environment": current_meta["installed_environment"],
+                "installed_tree_digest": current_meta["installed_tree_digest"],
+                "lock_hash": current_meta["lock_hash"],
+            })
         _atomic_json(directory / "metadata.json", metadata)
         return self.get(processor_id)
 

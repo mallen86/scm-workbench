@@ -243,7 +243,7 @@ def install(manifest_path: Path) -> None:
     target.mkdir(mode=0o700, exist_ok=False)
     wheelhouse.mkdir(mode=0o700, exist_ok=False)
 
-    common = [sys.executable, "-m", "pip"]
+    common = [sys.executable, "-B", "-m", "pip"]
     _run(common + [
         "install", "--dry-run", "--ignore-installed", "--isolated",
         "--disable-pip-version-check", "--no-input", "--no-cache-dir",
