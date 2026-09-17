@@ -9,6 +9,7 @@ import json
 import contextlib
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -325,6 +326,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
         self.assertIn("actions: write", workflow)
+        self.assertEqual(workflow.count("python scripts/check_ui_history.py"), 2)
         release_upload = next(line for line in workflow.splitlines()
                               if 'gh release upload "$GITHUB_REF_NAME"' in line)
         self.assertIn("scm-workbench-macos.dmg", release_upload)
@@ -333,7 +335,85 @@ class ExtractionTests(unittest.TestCase):
         upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
         cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
         self.assertGreater(cleanup_at, upload_at)
+        upload_step = workflow[workflow.rfind("- name: Attach the built artifacts", 0, upload_at):cleanup_at]
+        self.assertIn("timeout-minutes: 5", upload_step)
+        self.assertIn("for attempt in 1 2 3", upload_step)
+        self.assertIn("timeout --signal=TERM --kill-after=5s 75s", upload_step)
+        self.assertIn("status=${PIPESTATUS[0]}", upload_step)
+        self.assertIn("HTTP[^0-9]*5[0-9]{2}", upload_step)
+        self.assertIn("if (( attempt == 3 ))", upload_step)
+        self.assertIn("Actions artifacts were retained for manual recovery", upload_step)
         self.assertIn('gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"', workflow)
+
+    @unittest.skipUnless(shutil.which("bash"), "release upload retry uses the workflow's Bash shell")
+    def test_release_upload_retries_only_bounded_transient_failures(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_lines = (root / ".github/workflows/package.yml").read_text(
+            encoding="utf-8").splitlines()
+        attach_at = next(index for index, line in enumerate(workflow_lines)
+                         if "- name: Attach the built artifacts" in line)
+        run_at = next(index for index in range(attach_at, len(workflow_lines))
+                      if workflow_lines[index].strip() == "run: |")
+        script_lines = []
+        for line in workflow_lines[run_at + 1:]:
+            if line.startswith("      - "):
+                break
+            script_lines.append(line[10:] if line.startswith("          ") else line)
+        attach_script = "\n".join(script_lines)
+
+        cases = (
+            ("http500-then-ok", 0, 2, True),
+            ("timeout-then-ok", 0, 2, True),
+            ("forbidden", 1, 1, False),
+        )
+        for mode, expected_status, expected_attempts, retried in cases:
+            with self.subTest(mode=mode):
+                tools = self.root / f"upload-tools-{mode}"
+                tools.mkdir()
+                counter = tools / "attempts"
+                counter.write_text("0", encoding="utf-8")
+                gh = tools / "gh"
+                gh.write_text(f'''#!/usr/bin/env bash
+if [[ "$1 $2" == "release view" ]]; then
+  [[ " $* " == *" --json "* ]] && echo false
+  exit 0
+fi
+if [[ "$1 $2" == "release upload" ]]; then
+  n=$(( $(cat {json.dumps(str(counter))}) + 1 ))
+  echo "$n" > {json.dumps(str(counter))}
+  case {json.dumps(mode)} in
+    http500-then-ok) (( n == 1 )) && {{ echo "HTTP 500: Error saving asset" >&2; exit 1; }} ;;
+    timeout-then-ok) (( n == 1 )) && exit 124 ;;
+    forbidden) echo "HTTP 403: Forbidden" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+exit 2
+''', encoding="utf-8")
+                timeout_tool = tools / "timeout"
+                timeout_tool.write_text(
+                    '#!/usr/bin/env bash\n'
+                    'while [[ "$1" == --* || "$1" =~ ^[0-9]+s$ ]]; do shift; done\n'
+                    '"$@"\n', encoding="utf-8")
+                sleep_tool = tools / "sleep"
+                sleep_tool.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                for tool in (gh, timeout_tool, sleep_tool):
+                    tool.chmod(0o755)
+                env = os.environ.copy()
+                env.update({
+                    "PATH": f"{tools}{os.pathsep}{env['PATH']}",
+                    "GITHUB_REF_NAME": "v0.8.2",
+                    "GITHUB_REPOSITORY": "owner/repo",
+                    "RUNNER_TEMP": str(tools),
+                })
+                result = subprocess.run(
+                    [shutil.which("bash"), "-e", "-o", "pipefail", "-c", attach_script],
+                    cwd=self.root, env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
+                self.assertEqual(int(counter.read_text(encoding="utf-8")), expected_attempts)
+                output = result.stdout + result.stderr
+                self.assertEqual("Release upload retry" in output, retried)
 
     def test_other_top_level_shapes_are_rejected_without_publish(self):
         bad_shapes = [

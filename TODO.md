@@ -1,4 +1,7 @@
 # Bugs
+- [x] Bound release-asset uploads to five minutes, retry transient server failures, and retain Actions artifacts when attachment fails.
+- [x] Replace the blank Job History startup flash with an honest loading state and remove the duplicate UI bootstrap that repeated every startup request.
+- [x] Keep Create PDF and MTG Fetch Card Art options available when a slow Windows machine exceeds the bounded help probe by safely reading literal Click options from source.
 - [x] Keep the beta-update opt-in control exclusive to Advanced mode while preserving the selected channel across Simple/Advanced mode changes.
 - [x] Show real managed-repository update stages instead of “setup did not finish” while an update is progressing normally.
 - [x] Keep managed-repository checks, track changes, and update starts responsive on Windows, with immediate progress feedback and no accidental Advanced controls in Simple mode.

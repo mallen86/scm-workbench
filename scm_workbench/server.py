@@ -1081,6 +1081,10 @@ def build_manifest(info: dict) -> dict:
         "script": {
             "repo": "scm", "path": "create_pdf.py", "help_args": ["--help"],
             "required_flags": ["--output_path", "--card_size", "--paper_size", "--ppi"],
+            # A cold packaged Python can spend the entire bounded probe window in
+            # Windows process startup and dependency imports. Its Click decorators
+            # remain a safe source-only fallback when ordinary --help times out.
+            "timeout_fallback": "static_click",
         },
         # Simple mode keeps the size selectors compact, then groups its
         # everyday toggles under the same kind of subtitles used by the full
@@ -1422,11 +1426,15 @@ def build_manifest(info: dict) -> dict:
             "job_title": f"Fetch Card Art ({meta['title']})",
             "page": "fetch", "needs": ["scm"], "cwd": "scm", "slug": slug,
             # MTG has Workbench-controlled CLI preferences, so inspect its full
-            # help. Other fetchers have no gated options: recognizing their
-            # parser statically avoids starting dozens of dependency-heavy
-            # Python processes during app boot.
-            "script": {"repo": "scm", "path": f"plugins/{slug}/fetch.py",
-                       "probe": "help" if slug == "mtg" else "parser", "help_args": ["--help"]},
+            # help and use the same source-only fallback as Create PDF if cold
+            # dependency imports exceed the bounded probe. Other fetchers have
+            # no gated options: recognizing their parser statically avoids
+            # starting dozens of dependency-heavy Python processes during boot.
+            "script": {
+                "repo": "scm", "path": f"plugins/{slug}/fetch.py",
+                "probe": "help" if slug == "mtg" else "parser", "help_args": ["--help"],
+                **({"timeout_fallback": "static_click"} if slug == "mtg" else {}),
+            },
             "description": f"Downloads {meta['title']} card images from a decklist into the game folders.",
             # Simple mode lays the form out as one flat row per group — the
             # standard 3-per-row rhythm the PDF page uses (create_pdf's
@@ -5351,6 +5359,86 @@ def _script_has_cli_help_parser(payload: bytes) -> bool:
     return False
 
 
+def _ast_callable_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Call):
+        node = node.func
+    return node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else ""
+
+
+def _static_click_help(payload: bytes) -> Optional[dict]:
+    """Enumerate literal Click decorators without importing a slow script."""
+    try:
+        tree = ast.parse(payload.decode("utf-8"))
+    except (SyntaxError, UnicodeError, ValueError):
+        return None
+
+    discovered = set()
+    declarations: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorators = [decorator for decorator in node.decorator_list
+                      if isinstance(decorator, ast.Call)]
+        if not any(_ast_callable_name(decorator) in {"command", "group"}
+                   for decorator in decorators):
+            continue
+        discovered.add("--help")
+        declarations.setdefault("--help", "--help")
+        for decorator in decorators:
+            name = _ast_callable_name(decorator)
+            if name == "version_option":
+                discovered.add("--version")
+                declarations.setdefault("--version", "--version")
+                continue
+            if name != "option":
+                continue
+            option_flags = []
+            for argument in decorator.args:
+                if (isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                        and _SCRIPT_FLAG_RE.fullmatch(argument.value)):
+                    option_flags.append(argument.value)
+            if not option_flags:
+                continue
+            keywords = {keyword.arg: keyword.value for keyword in decorator.keywords
+                        if keyword.arg}
+            is_flag_node = keywords.get("is_flag")
+            is_flag = isinstance(is_flag_node, ast.Constant) and is_flag_node.value is True
+            metavar = ""
+            explicit_metavar = keywords.get("metavar")
+            if isinstance(explicit_metavar, ast.Constant) and isinstance(explicit_metavar.value, str):
+                metavar = explicit_metavar.value[:64]
+            elif not is_flag:
+                type_name = _ast_callable_name(keywords.get("type", ast.Constant(value=None)))
+                if type_name == "IntRange":
+                    metavar = "INTEGER RANGE"
+                elif type_name in {"int", "IntParamType"}:
+                    metavar = "INTEGER"
+                elif type_name == "FloatRange":
+                    metavar = "FLOAT RANGE"
+                elif type_name in {"float", "FloatParamType"}:
+                    metavar = "FLOAT"
+                else:
+                    metavar = "TEXT"
+            declaration = ", ".join(option_flags)
+            if metavar:
+                declaration += f" {metavar}"
+            declaration = declaration[:SCRIPT_CAPABILITY_DECLARATION_MAX_CHARS]
+            for flag in option_flags:
+                discovered.add(flag)
+                declarations.setdefault(flag, declaration)
+            if len(discovered) > SCRIPT_CAPABILITY_FLAG_MAX:
+                return {"status": "too_many_options", "flags": [], "usage": ""}
+    if not discovered:
+        return None
+    return {
+        "status": "ok",
+        "flags": sorted(discovered),
+        "usage": "",
+        "declarations": dict(sorted(declarations.items())),
+        "discovery": "static_click",
+    }
+
+
 def _capability_probe_env() -> dict:
     env = _utf8_env()
     # Discovery is observational: do not leave import bytecode in a connected
@@ -5522,6 +5610,9 @@ def _probe_script_capability(config: dict, roots: dict, settings: dict) -> dict:
         str(Path(root)), relative, fingerprint, str(python), py_fingerprint,
         tuple(str(value) for value in config.get("help_args", ["--help"])),
         str(config.get("usage_command") or ""),
+        str(config.get("timeout_fallback") or ""),
+        tuple(sorted(str(value) for value in config.get("required_flags", []))),
+        tuple(sorted(str(value) for value in config.get("required_any_flags", []))),
     )
     cached = _script_capability_cache_get(key)
     if cached is not None:
@@ -5535,6 +5626,16 @@ def _probe_script_capability(config: dict, roots: dict, settings: dict) -> dict:
 
     argv = [str(python), str(path), *[str(value) for value in config.get("help_args", ["--help"])]]
     result = _run_script_help(argv, Path(root), _capability_probe_env())
+    if (result.get("status") == "timeout"
+            and config.get("timeout_fallback") == "static_click"
+            and not config.get("usage_command")):
+        static_result = _static_click_help(payload)
+        if static_result is not None:
+            static_flags = set(static_result.get("flags") or [])
+            required = set(config.get("required_flags") or [])
+            required_any = set(config.get("required_any_flags") or [])
+            if required.issubset(static_flags) and (not required_any or required_any & static_flags):
+                result = static_result
     try:
         _after_path, _after_payload, after_fingerprint = _script_capability_source(root, relative)
         if after_fingerprint != fingerprint:

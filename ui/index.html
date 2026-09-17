@@ -56,7 +56,7 @@
     <!-- ============ main ============ -->
     <main class="main">
       <header class="topbar">
-        <div class="topbar-title" id="topbar-title">Job history</div>
+        <div class="topbar-title" id="topbar-title">Starting SCM Workbench</div>
         <div class="topbar-right">
           <button class="btn btn-ghost" id="btn-console" title="Job console">
             <span data-ico="terminal"></span>
@@ -67,7 +67,15 @@
       </header>
 
       <div class="page-scroll">
-        <div class="page" id="page"></div>
+        <div class="page" id="page">
+          <div class="boot-state" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <div>
+              <strong>Starting SCM Workbench</strong>
+              <span>Loading your settings, repositories, and tools…</span>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   </div>
