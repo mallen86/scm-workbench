@@ -73,7 +73,7 @@ Your choices and job history stay the same when you switch modes.
 
 ## Updates and your files
 
-Workbench checks for stable app updates automatically. You can also check from **Settings > App updates**, where you may opt in to GitHub prereleases. Beta users receive the highest available version across stable and beta releases; everyone else receives stable releases only. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
+Workbench checks for stable app updates automatically. In Advanced mode, **Settings > App updates** also offers an explicit opt-in to GitHub prereleases. The beta preference is inactive while using Simple mode, so Simple users always receive stable releases; Advanced users who opt in receive the highest available version across stable and beta releases. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
 
 Use **Settings > Open data folder** if you want to view or back up your Workbench files.
 

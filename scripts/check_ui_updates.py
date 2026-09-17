@@ -48,10 +48,19 @@ def main():
                    'setBtn("Updating…", null, true)', "uBtn.disabled = true;",
                    'setBtn("Check for updates", doCheck)',
                    'id: "set-beta-updates"', '"Include beta releases"',
+                   'if (!simple) betaI.onchange = changeUpdateChannel;',
+                   '"Checks GitHub for the newest stable app release',
                    'setSettings({ update_channel: channel })',
                    'st.prerelease ? "A newer beta version is available: "'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
+    beta_input = page.find('const betaI = el("input"')
+    advanced_guard = page.find("if (!simple) {", beta_input)
+    beta_label = page.find('"Include beta releases"', beta_input)
+    update_row = page.find('const uRow = el("div"', beta_input)
+    if min(beta_input, advanced_guard, beta_label, update_row) < 0 or not (
+            beta_input < advanced_guard < beta_label < update_row):
+        return fail("the beta opt-in is not confined to Advanced Settings")
     if "startUpdateRequest" in page or "startUpdateStrip(job.id)" in page:
         return fail("settings bypasses the shared update-install controller")
     if "checkUpdates(!fresh)" in page:
@@ -76,6 +85,8 @@ def main():
                    '"aria-label": "Dismiss the update notice"',
                    "S.updateNoticeDismissed = tag;",
                    "!tag || S.updateNoticeDismissed === tag",
+                   'S.info?.settings?.ui_mode !== "advanced"',
+                   'state.channel === "beta" || state.prerelease === true',
                    "startUpdateStrip(result.job?.id);",
                    "if (_updStrip && _updStrip.isConnected) return;",
                    'beta ? "Beta update available" : "Update available"'):
@@ -224,7 +235,8 @@ globalThis.__updateJobs = {
   list: async () => ({ jobs: [listedJob] }),
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
-const updaterCore = dataUrl(`export const S = {}; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
+globalThis.__updateSharedState = { info: { settings: { ui_mode: "advanced" } } };
+const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
 globalThis.__updateState = { state: {} };
 globalThis.__automaticChecks = [];
@@ -286,7 +298,12 @@ if (updaterUi.updateInstallActive()) fail("a failed update left install actions 
 // A successful Settings-style start removes the standing notice immediately,
 // rejects a concurrent second click, and stays active until terminal failure.
 updaterUi.stopUpdateStrip();
-globalThis.__updateState = { state: { status: "update-available", latest: "v5", prerelease: true, published: "2026-01-02T00:00:00Z" } };
+globalThis.__updateState = { state: { status: "update-available", latest: "v5", channel: "beta", prerelease: true, published: "2026-01-02T00:00:00Z" } };
+globalThis.__updateSharedState.info.settings.ui_mode = "simple";
+await updaterUi.refreshUpdateNotice();
+if (globalThis.__updateNodes.get("#updatenotice")?.isConnected)
+  fail("Simple mode rendered a beta update notice");
+globalThis.__updateSharedState.info.settings.ui_mode = "advanced";
 await updaterUi.refreshUpdateNotice();
 const standingNotice = globalThis.__updateNodes.get("#updatenotice");
 if (!standingNotice?.isConnected || !elementText(standingNotice).includes("Beta update available"))

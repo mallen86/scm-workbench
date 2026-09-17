@@ -1670,8 +1670,10 @@ def update_settings(changes: Any) -> dict:
         if encoded_size > SETTINGS_CHANGES_MAX_BYTES:
             return {"ok": False, "errors": ["merged settings exceed 64 KiB when encoded"]}
         save_settings(settings)
-        if ("update_channel" in changes and
-                _selected_update_channel(settings) != previous_update_channel):
+        # Beta releases are an Advanced-mode feature. A mode change can alter
+        # the effective channel even when the stored beta preference stays in
+        # place for a later return to Advanced mode.
+        if _selected_update_channel(settings) != previous_update_channel:
             _invalidate_update_check_cache()
         if {"scm_dir", "extras_dir", "python"}.intersection(changes):
             invalidate_manifest_cache()
@@ -1714,7 +1716,8 @@ _UPDATE_QUIESCING_JOB = None
 
 def _selected_update_channel(settings: Optional[dict] = None) -> str:
     settings = load_settings() if settings is None else settings
-    return "beta" if settings.get("update_channel") == "beta" else "stable"
+    return "beta" if (settings.get("ui_mode") == "advanced" and
+                      settings.get("update_channel") == "beta") else "stable"
 
 
 def _invalidate_update_check_cache() -> None:

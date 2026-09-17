@@ -199,6 +199,12 @@ export async function setUiMode(mode) {
   }
   S.info.settings.ui_mode = mode;
   syncUiMode();
+  // The effective update channel follows interface mode: Simple is always
+  // stable. Refresh the sidebar notice so a beta offer from Advanced mode
+  // cannot remain actionable after this switch.
+  import("./updater-ui.js")
+    .then(({ refreshUpdateNotice }) => refreshUpdateNotice())
+    .catch(() => {});
   const page = S.page || "history";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");

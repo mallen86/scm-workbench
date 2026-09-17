@@ -779,6 +779,18 @@ class UpdateStateTests(unittest.TestCase):
         self.assertIsNone(state["asset"])
         pick.assert_not_called()
 
+    def test_simple_mode_uses_stable_despite_saved_beta_preference(self):
+        self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+        self.assertEqual(server.load_settings()["update_channel"], "beta")
+        self.assertEqual(server._selected_update_channel(), "stable")
+
+        with patch.object(updater, "latest_release",
+                          side_effect=updater.UpdateError("offline")) as lookup:
+            state = server.run_update_check()
+
+        lookup.assert_called_once_with(include_prereleases=False)
+        self.assertEqual(state["channel"], "stable")
+
     def test_beta_setting_binds_lookup_and_persisted_state(self):
         tag = "v2.0.0-beta.2"
         asset = self.installable_asset(tag)
@@ -787,7 +799,9 @@ class UpdateStateTests(unittest.TestCase):
             "url": f"https://github.com/owner/workbench/releases/tag/{tag}",
             "assets": [asset], "prerelease": True,
         }
-        self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+        self.assertTrue(server.update_settings({
+            "ui_mode": "advanced", "update_channel": "beta",
+        })["ok"])
         with patch.object(updater, "latest_release", return_value=release) as lookup:
             state = server.run_update_check()
 
@@ -803,7 +817,9 @@ class UpdateStateTests(unittest.TestCase):
             checked_at=time.time(), asset=self.installable_asset("v2.0.0"),
         )
         server.save_update_state(stable)
-        self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+        self.assertTrue(server.update_settings({
+            "ui_mode": "advanced", "update_channel": "beta",
+        })["ok"])
 
         view = server.updates_view()["state"]
         self.assertEqual((view["status"], view["channel"]), ("never", "beta"))
@@ -989,7 +1005,9 @@ class UpdateStateTests(unittest.TestCase):
             )
             worker.start()
             self.assertTrue(started.wait(2))
-            self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+            self.assertTrue(server.update_settings({
+                "ui_mode": "advanced", "update_channel": "beta",
+            })["ok"])
             finish.set()
             worker.join(2)
 
@@ -1088,7 +1106,7 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_beta_notes_use_the_channel_bound_release_list(self):
         tag = "v2.1.0-beta.1"
-        server.update_settings({"update_channel": "beta"})
+        server.update_settings({"ui_mode": "advanced", "update_channel": "beta"})
         state = server._default_update_state("beta")
         state.update(
             status="up-to-date", latest=tag, prerelease=True, checked_at=10.0,

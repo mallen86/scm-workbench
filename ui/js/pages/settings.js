@@ -451,15 +451,19 @@ PAGES.settings = (root) => {
     el("div", { class: "card-ico" }, ico("arrow")),
     el("div", { class: "grow" }, el("h2", {}, "App updates"),
       el("p", {}, packaged
-        ? "Checks GitHub for the newest app release allowed by your update channel at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
+        ? (simple
+          ? "Checks GitHub for the newest stable app release at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
+          : "Checks GitHub for the newest app release allowed by your update channel at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched.")
         : "Running from a source checkout. Pull the Workbench repo to update it."))));
   if (packaged) {
     const betaI = el("input", { type: "checkbox", id: "set-beta-updates", checked: s.update_channel === "beta" });
-    const betaSwitch = el("span", { class: "switch" }, betaI, el("span", { class: "track" }), el("span", { class: "knob" }));
-    const betaLabel = el("label", {}, "Include beta releases");
-    betaLabel.setAttribute("for", "set-beta-updates");
-    uc.append(el("div", { class: "field", style: "margin-bottom:14px" }, betaLabel, betaSwitch,
-      el("span", { class: "small faint" }, "Beta releases may be unstable. When enabled, Workbench chooses the highest version across stable and GitHub prerelease releases.")));
+    if (!simple) {
+      const betaSwitch = el("span", { class: "switch" }, betaI, el("span", { class: "track" }), el("span", { class: "knob" }));
+      const betaLabel = el("label", {}, "Include beta releases");
+      betaLabel.setAttribute("for", "set-beta-updates");
+      uc.append(el("div", { class: "field", style: "margin-bottom:14px" }, betaLabel, betaSwitch,
+        el("span", { class: "small faint" }, "Beta releases may be unstable. When enabled, Workbench chooses the highest version across stable and GitHub prerelease releases.")));
+    }
     const uRow = el("div", { class: "frow", style: "align-items:center; gap:14px" });
     const uBtn = el("button", { class: "btn primary" });
     const uLast = el("span", { class: "small faint" });
@@ -662,7 +666,7 @@ PAGES.settings = (root) => {
       await render();
     };
 
-    betaI.onchange = changeUpdateChannel;
+    if (!simple) betaI.onchange = changeUpdateChannel;
     uBtn.onclick = null;   // render() owns the button from here
     render();               // first paint; while the card is up it stays current on its own
     clearInterval(S.timers?.appUpdates);   // a re-render must never stack polls
