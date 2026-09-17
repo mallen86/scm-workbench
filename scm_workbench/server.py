@@ -86,6 +86,9 @@ POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS = 15 * 60
 POSTPROCESS_INSTALL_TIMEOUT_SECONDS = 15 * 60
 POSTPROCESS_INSTALL_IDLE_TIMEOUT_SECONDS = 5 * 60
 POSTPROCESS_ENV_MAX_FILES = 20_000
+# Pip briefly keeps unpacked wheel contents alongside the target tree. The
+# published environment still receives the stricter limit above.
+POSTPROCESS_INSTALL_STAGE_MAX_ENTRIES = POSTPROCESS_ENV_MAX_FILES * 2 + 512
 POSTPROCESS_ENV_MAX_DEPTH = 64
 POSTPROCESS_ENV_MAX_PATH_BYTES = 4096
 POSTPROCESS_ENV_MAX_COMPONENT_BYTES = 255
@@ -7609,18 +7612,29 @@ def _postprocess_stage_monitor(job: dict, proc: subprocess.Popen) -> None:
                     for entry in scan:
                         observed = entry.stat(follow_symlinks=False)
                         count += 1
-                        if count > max_entries or _is_reparse_or_symlink(observed):
-                            exceeded = True; break
+                        if count > max_entries:
+                            exceeded = True
+                            limit_reason = f"entry-count ({count:,} > {max_entries:,})"
+                            break
+                        if _is_reparse_or_symlink(observed):
+                            exceeded = True
+                            limit_reason = "link safety"
+                            break
                         if stat.S_ISDIR(observed.st_mode):
                             pending.append(Path(entry.path))
                         elif stat.S_ISREG(observed.st_mode):
                             total += observed.st_size
                             if total > max_bytes:
-                                exceeded = True; break
+                                exceeded = True
+                                limit_reason = f"byte-size ({total:,} > {max_bytes:,})"
+                                break
                         else:
-                            exceeded = True; break
+                            exceeded = True
+                            limit_reason = "special-file safety"
+                            break
         except OSError:
             exceeded = True
+            limit_reason = "filesystem-scan safety"
         if not exceeded:
             continue
         proc_lock = job.setdefault("proc_lock", threading.Lock())
@@ -8060,7 +8074,7 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 job["stage_monitor_stop"] = threading.Event()
                 if kind == "postprocess_dependencies":
                     job["stage_max_bytes"] = POSTPROCESS_ENV_MAX_BYTES + 2 * 1024 * 1024 * 1024
-                    job["stage_max_entries"] = POSTPROCESS_ENV_MAX_FILES + 512
+                    job["stage_max_entries"] = POSTPROCESS_INSTALL_STAGE_MAX_ENTRIES
                 stage_monitor = threading.Thread(
                     target=_postprocess_stage_monitor, args=(job, proc), daemon=True,
                     name=f"postprocess-quota-{job_id}",

@@ -313,6 +313,10 @@ class PostprocessJobTests(unittest.TestCase):
             "requirements": "",
         })
         self.assertEqual(errors, [])
+        self.assertEqual(
+            job["stage_max_entries"], server.POSTPROCESS_INSTALL_STAGE_MAX_ENTRIES,
+        )
+        self.assertGreater(job["stage_max_entries"], server.POSTPROCESS_ENV_MAX_FILES)
         self.wait(job)
         self.assertEqual(job["status"], "ok", job["log_lines"])
         status = self.store.status(item["id"], interpreter=server.job_python(self.settings))
