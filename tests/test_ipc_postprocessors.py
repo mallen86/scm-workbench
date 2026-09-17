@@ -1,12 +1,13 @@
 """Native registry contract for Advanced image post-processors."""
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from scm_workbench import ipc, server
+from scm_workbench import ipc, postprocessing, server
 
 
 SOURCE = "def process_image(image_path, context):\n    return None\n"
@@ -91,6 +92,40 @@ class IpcPostprocessorTests(unittest.TestCase):
         })
         self.assertTrue(deleted["ok"])
         self.assertEqual(self.call("postprocessors.list")["processors"], [])
+
+    def test_stale_runtime_environment_does_not_hide_or_block_source_edits(self):
+        saved = self.call("postprocessors.save", {
+            "name": "Libraries", "source": SOURCE, "requirements": "demo==1.0",
+            "processor_id": None, "expected_revision": None,
+        })["processor"]
+        store = postprocessing.ProcessorStore(self.data, self.repo)
+        metadata_path = store._processor(saved["id"]) / "metadata.json"
+        metadata = store._metadata(saved["id"])
+        metadata.update({
+            "trusted": saved["revision"], "environment": "a" * 64,
+            "trusted_tree_digest": "b" * 64,
+            "installed_revision": saved["revision"],
+            "installed_environment": "a" * 64,
+            "installed_tree_digest": "b" * 64,
+            "lock_hash": "c" * 64,
+        })
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value="d" * 64):
+            detail = self.call("postprocessors.get", {"processor_id": saved["id"]})
+            listed = self.call("postprocessors.list")["processors"][0]
+            edited = self.call("postprocessors.save", {
+                "name": "Libraries", "source": SOURCE + "\n# still editable\n",
+                "requirements": "demo==1.0", "processor_id": saved["id"],
+                "expected_revision": saved["revision"],
+            })["processor"]
+
+        self.assertEqual(detail["source"], SOURCE)
+        self.assertEqual(detail["environment"]["status"], "stale")
+        self.assertFalse(detail["environment_ready"])
+        self.assertFalse(detail["trusted"])
+        self.assertEqual(listed["environment_status"], "stale")
+        self.assertNotEqual(edited["revision"], saved["revision"])
 
     def test_private_import_is_bounded_and_simple_mode_denies_mutation(self):
         source = self.root / "chosen.py"

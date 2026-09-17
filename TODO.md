@@ -98,5 +98,6 @@
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
 - [x] Add the Advanced-only managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.
+- [x] Treat processor libraries bound to a replaced Python runtime as stale and reinstallable without blocking access to the saved processor source.
 - [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
 - [ ] Add Linux support. Initial implementation would be for debian to verify linux functionality and then quickly follow on with arch support.

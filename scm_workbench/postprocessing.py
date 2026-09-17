@@ -1468,14 +1468,23 @@ class ProcessorStore:
         metadata = self._metadata(processor_id)
         lock_hash = (metadata.get("lock_hash") or "") if metadata.get("installed_revision") == item["revision"] else ""
         environment = self.environment_metadata(item["requirements"], lock_hash, interpreter=interpreter)
-        if (metadata.get("installed_environment") not in (None, environment["fingerprint"]) or
-                metadata.get("installed_tree_digest") not in (None, environment.get("tree_digest"))):
+        installed_environment = metadata.get("installed_environment")
+        stale = installed_environment is not None and installed_environment != environment["fingerprint"]
+        if stale:
+            # A different Python compatibility fingerprint is expected after a
+            # real runtime change. Never use or trust the old tree, but keep the
+            # processor source editable and present an actionable reinstall
+            # state instead of misreporting ordinary staleness as corruption.
+            environment = {**environment, "ready": False, "status": "stale", "stale": True}
+        elif metadata.get("installed_tree_digest") not in (None, environment.get("tree_digest")):
             raise IntegrityError("processor environment metadata is inconsistent")
-        trusted = (item.get("trusted") and metadata.get("environment") == environment["fingerprint"] and
+        trusted = (not stale and item.get("trusted") and
+                   metadata.get("environment") == environment["fingerprint"] and
                    metadata.get("trusted_tree_digest") == environment.get("tree_digest"))
         processor = {**item, "trusted": bool(trusted),
                      "environment_fingerprint": environment["fingerprint"],
-                     "environment_ready": environment["ready"]}
+                     "environment_ready": environment["ready"],
+                     "environment_status": environment["status"]}
         return {"processor": processor, "environment": environment}
 
     def cleanup(self, *, max_age: float = 24 * 3600, prune_environments: bool = False) -> None:

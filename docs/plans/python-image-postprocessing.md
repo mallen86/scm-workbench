@@ -294,7 +294,7 @@ Start with explicit, testable limits and tune them with real packages before rel
 - bounded on-disk job log and bounded individual output records;
 - minimum free-space reserve before and during installation.
 
-A failed/cancelled install deletes staging and never changes the prior ready environment. An app or interpreter update marks incompatible environments stale rather than trying to copy or repair them in place.
+A failed/cancelled install deletes staging and never changes the prior ready environment. An app or interpreter update marks incompatible environments stale rather than trying to copy or repair them in place; processor source remains available to review and edit while the user reinstalls libraries for the selected runtime.
 
 ## Backend execution pipeline
 

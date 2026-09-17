@@ -273,6 +273,39 @@ class PostprocessorTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b"external")
             self.assertTrue(tx.journal.exists())
 
+    def test_stale_interpreter_environment_remains_editable_and_requires_reinstall(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProcessorStore(temp)
+            item = store.save("Libraries", SOURCE, "demo==1.0")
+            metadata_path = store._processor(item["id"]) / "metadata.json"
+            metadata = store._metadata(item["id"])
+            metadata.update({
+                "trusted": item["revision"], "environment": "a" * 64,
+                "trusted_tree_digest": "b" * 64,
+                "installed_revision": item["revision"],
+                "installed_environment": "a" * 64,
+                "installed_tree_digest": "b" * 64,
+                "lock_hash": "c" * 64,
+            })
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            current = "d" * 64
+            with mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value=current):
+                status = store.status(item["id"], interpreter="replacement-python")
+            self.assertEqual(status["environment"]["status"], "stale")
+            self.assertTrue(status["environment"]["stale"])
+            self.assertFalse(status["environment"]["ready"])
+            self.assertFalse(status["processor"]["trusted"])
+            self.assertEqual(status["processor"]["environment_status"], "stale")
+            self.assertEqual(store.get(item["id"])["source"], SOURCE)
+
+            # A tree mismatch at the selected fingerprint remains corruption,
+            # not ordinary interpreter staleness.
+            metadata["installed_environment"] = current
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value=current):
+                with self.assertRaisesRegex(IntegrityError, "metadata is inconsistent"):
+                    store.status(item["id"], interpreter="replacement-python")
+
     def test_interpreter_probe_disables_bytecode_writes(self):
         calls = []
 

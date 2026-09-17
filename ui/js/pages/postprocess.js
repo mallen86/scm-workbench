@@ -14,6 +14,7 @@ const first = value => Array.isArray(value) ? value[0] : value;
 const revision = p => p?.revision_hash || p?.revision || p?.active_revision || "";
 const normalizeList = result => Array.isArray(result) ? result : (result?.processors || []);
 const isReady = p => p && (p.environment_ready === true || p.dependencies === "ready" || p.environment?.status === "ready");
+const isStale = p => p?.environment_status === "stale" || p?.environment?.status === "stale";
 const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === revision(p));
 const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
 
@@ -24,6 +25,10 @@ function updateLockSummary() {
   box.replaceChildren();
   if (state.dirty) {
     box.append(el("span", { class: "small faint" }, "Save this revision, then install libraries to resolve its exact dependency lock."));
+    return;
+  }
+  if (isStale(state.loaded)) {
+    box.append(el("span", { class: "small warn" }, "The selected Python runtime changed. Reinstall libraries for this processor, then review and trust it again."));
     return;
   }
   const wheels = state.loaded?.environment?.wheels || [];
@@ -63,7 +68,7 @@ function updateEditorState() {
   const trust = document.querySelector(".pp-trust");
   if (trust) {
     trust.disabled = state.loadError || !state.loaded || state.dirty || !isReady(state.loaded);
-    trust.title = !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
+    trust.title = !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : isStale(state.loaded) ? "Reinstall its libraries for this Python first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
   }
   const install = document.querySelector(".pp-install");
   if (install) install.disabled = state.loadError || !state.loaded || state.dirty || state.installing;
@@ -157,7 +162,7 @@ function repaintLibrary() {
       await loadProcessor(p.id); repaintLibrary(); patchRunForm();
     } },
       el("div", { class: "pp-processor-main" }, el("strong", {}, p.name || "Unnamed processor"), el("span", { class: "small faint mono" }, revision(p).slice(0, 12) || "no revision")),
-      el("div", { class: "pp-processor-meta" }, el("span", { class: `chip ${trust ? "ok" : "warn"}` }, trust ? "Trusted" : "Untrusted"), el("span", { class: `chip ${ready ? "ok" : "warn"}` }, ready ? "Libraries ready" : (p.environment_status || "Libraries not ready"))),
+      el("div", { class: "pp-processor-meta" }, el("span", { class: `chip ${trust ? "ok" : "warn"}` }, trust ? "Trusted" : "Untrusted"), el("span", { class: `chip ${ready ? "ok" : "warn"}` }, ready ? "Libraries ready" : isStale(p) ? "Libraries need reinstall" : (p.environment_status || "Libraries not ready"))),
       el("div", { class: "pp-actions" },
         el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"),
         el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); deleteProcessor(p); } }, "Delete"),
@@ -255,7 +260,7 @@ function paintRunGate() {
   const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
   const p = selectedProcessor();
   const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
-  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : !isTrusted(p) ? "Trust this exact revision first" : !isReady(p) ? "Install or update libraries first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : !isReady(p) ? (isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
   const run = document.querySelector(".pp-run");
   if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
   const note = document.querySelector(".pp-run-note");

@@ -10899,7 +10899,7 @@ def postprocessors_list() -> dict:
         python = job_python(load_settings())
         rows = []
         summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes",
-                        "environment_fingerprint", "environment_ready"}
+                        "environment_fingerprint", "environment_ready", "environment_status"}
         for item in store.list():
             try:
                 item = {**item, **store.status(item["id"], interpreter=python)["processor"]}
