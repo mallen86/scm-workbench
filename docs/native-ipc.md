@@ -642,12 +642,11 @@ fallback remains allowed, and native failure never retries over HTTP.
 response-only `state.checking` boolean reports queued/running checks and is
 never persisted or accepted by the strict state-file schema. Persisted state
 binds each result to `channel` (`stable` or `beta`) and records whether the
-selected release is a `prerelease`. Beta is effective only when
-`settings.ui_mode` is `advanced` and `settings.update_channel` is `beta`;
-Simple mode always selects stable. Changing either setting in a way that
-changes the effective channel immediately makes the other channel's cached
-result ineligible, while the saved beta preference can resume after returning
-to Advanced mode. The `updates.check` start method takes exactly
+selected release is a `prerelease`. The beta opt-in control is rendered only
+in Advanced mode, but `settings.update_channel` remains authoritative in both
+interface modes. Changing that channel immediately makes the other channel's
+cached result ineligible; changing only `settings.ui_mode` leaves the selected
+channel and its cache intact. The `updates.check` start method takes exactly
 `{"force":true|false}` and
 `updates.notes` takes exactly `{"tag":"..."}` (a non-empty tag of at most 128
 UTF-8 bytes). Both return immediately with the common operation acknowledgement;

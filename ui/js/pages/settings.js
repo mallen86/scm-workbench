@@ -452,7 +452,7 @@ PAGES.settings = (root) => {
     el("div", { class: "grow" }, el("h2", {}, "App updates"),
       el("p", {}, packaged
         ? (simple
-          ? "Checks GitHub for the newest stable app release at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
+          ? "Checks GitHub for the newest app release allowed by your saved update preference at startup and once daily while open. Switch to Advanced mode to change whether beta releases are included. Installing a version replaces only the app folder. Your data folder is untouched."
           : "Checks GitHub for the newest app release allowed by your update channel at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched.")
         : "Running from a source checkout. Pull the Workbench repo to update it."))));
   if (packaged) {

@@ -49,7 +49,7 @@ def main():
                    'setBtn("Check for updates", doCheck)',
                    'id: "set-beta-updates"', '"Include beta releases"',
                    'if (!simple) betaI.onchange = changeUpdateChannel;',
-                   '"Checks GitHub for the newest stable app release',
+                   'Switch to Advanced mode to change whether beta releases are included.',
                    'setSettings({ update_channel: channel })',
                    'st.prerelease ? "A newer beta version is available: "'):
         if marker not in page:
@@ -85,8 +85,6 @@ def main():
                    '"aria-label": "Dismiss the update notice"',
                    "S.updateNoticeDismissed = tag;",
                    "!tag || S.updateNoticeDismissed === tag",
-                   'S.info?.settings?.ui_mode !== "advanced"',
-                   'state.channel === "beta" || state.prerelease === true',
                    "startUpdateStrip(result.job?.id);",
                    "if (_updStrip && _updStrip.isConnected) return;",
                    'beta ? "Beta update available" : "Update available"'):
@@ -301,13 +299,9 @@ updaterUi.stopUpdateStrip();
 globalThis.__updateState = { state: { status: "update-available", latest: "v5", channel: "beta", prerelease: true, published: "2026-01-02T00:00:00Z" } };
 globalThis.__updateSharedState.info.settings.ui_mode = "simple";
 await updaterUi.refreshUpdateNotice();
-if (globalThis.__updateNodes.get("#updatenotice")?.isConnected)
-  fail("Simple mode rendered a beta update notice");
-globalThis.__updateSharedState.info.settings.ui_mode = "advanced";
-await updaterUi.refreshUpdateNotice();
 const standingNotice = globalThis.__updateNodes.get("#updatenotice");
 if (!standingNotice?.isConnected || !elementText(standingNotice).includes("Beta update available"))
-  fail("the beta update notice fixture was not rendered or labelled");
+  fail("a saved beta preference did not remain visible in Simple mode");
 let resolveStart, startCalls = 0;
 globalThis.__startUpdateRequest = () => {
   startCalls++;

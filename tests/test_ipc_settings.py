@@ -146,8 +146,7 @@ class SettingsIpcTests(unittest.TestCase):
         with server._SCRIPT_CAPABILITY_CACHE_LOCK:
             self.assertIn("old", server._SCRIPT_CAPABILITY_CACHE)
 
-    def test_update_channel_and_mode_changes_invalidate_cached_release_result(self):
-        self.assertTrue(self.native({"ui_mode": "advanced"})["result"]["ok"])
+    def test_update_channel_change_invalidates_cache_but_mode_changes_do_not(self):
         with server._UPDATE_CHECK_CONDITION:
             generation = server._UPDATE_CHECK_GENERATION
             server._UPDATE_CHECK_RESULT = server._default_update_state("stable")
@@ -165,26 +164,19 @@ class SettingsIpcTests(unittest.TestCase):
             generation = server._UPDATE_CHECK_GENERATION
 
         same = self.native({"update_channel": "beta"})
-
         self.assertTrue(same["result"]["ok"])
-        with server._UPDATE_CHECK_CONDITION:
-            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation)
-            self.assertEqual(server._UPDATE_CHECK_RESULT, cached)
-
-        simple = self.native({"ui_mode": "simple"})
-        self.assertTrue(simple["result"]["ok"])
-        self.assertEqual(simple["result"]["settings"]["update_channel"], "beta")
-        self.assertEqual(server._selected_update_channel(), "stable")
-        with server._UPDATE_CHECK_CONDITION:
-            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation + 1)
-            self.assertIsNone(server._UPDATE_CHECK_RESULT)
-            generation = server._UPDATE_CHECK_GENERATION
 
         advanced = self.native({"ui_mode": "advanced"})
         self.assertTrue(advanced["result"]["ok"])
         self.assertEqual(server._selected_update_channel(), "beta")
+
+        simple = self.native({"ui_mode": "simple"})
+        self.assertTrue(simple["result"]["ok"])
+        self.assertEqual(simple["result"]["settings"]["update_channel"], "beta")
+        self.assertEqual(server._selected_update_channel(), "beta")
         with server._UPDATE_CHECK_CONDITION:
-            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation + 1)
+            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation)
+            self.assertEqual(server._UPDATE_CHECK_RESULT, cached)
 
     def test_repo_paths_and_python_apply_to_the_next_command_without_restart(self):
         scm = self.data / "new-scm"

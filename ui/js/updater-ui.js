@@ -234,13 +234,6 @@ export async function refreshUpdateNotice() {
   try {
     state = (await getUpdates())?.state || {};
   } catch { return; }   // an unreachable check simply leaves the notice alone
-  // A beta response already in flight when Advanced mode is switched off
-  // must not repaint its install action after Simple mode takes over.
-  if (S.info?.settings?.ui_mode !== "advanced" &&
-      (state.channel === "beta" || state.prerelease === true)) {
-    removeUpdateNotice();
-    return;
-  }
   const tag = state.status === "update-available" ? String(state.latest || "") : "";
   if (!tag || S.updateNoticeDismissed === tag) { removeUpdateNotice(); return; }
   renderUpdateNotice(tag, state);

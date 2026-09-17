@@ -167,7 +167,7 @@ an OV certificate as part of this work.
 
 **The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG and the portable Windows x64 ZIP to the GitHub release.
 
-Stable tags use `vMAJOR.MINOR.PATCH`. Beta tags use a SemVer prerelease suffix such as `v0.9.0-beta.1`, and their GitHub release must be marked as a prerelease. The packaging workflow verifies that the GitHub prerelease flag agrees with the tag and creates a correctly marked fallback release when needed. Simple mode always uses the stable channel. Advanced users who opt in under **Settings > App updates** receive the highest version across stable and prerelease releases; a saved beta preference becomes inactive when the interface switches to Simple mode and resumes only after returning to Advanced mode.
+Stable tags use `vMAJOR.MINOR.PATCH`. Beta tags use a SemVer prerelease suffix such as `v0.9.0-beta.1`, and their GitHub release must be marked as a prerelease. The packaging workflow verifies that the GitHub prerelease flag agrees with the tag and creates a correctly marked fallback release when needed. The prerelease opt-in control is exposed only in Advanced mode under **Settings > App updates**, but the selected channel remains active across later Simple/Advanced mode changes. Opted-in users receive the highest version across stable and prerelease releases; everyone else receives stable releases only.
 
 ```bash
 # 1. the tag is the version; push it and CI builds both packages

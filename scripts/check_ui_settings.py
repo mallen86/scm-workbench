@@ -62,8 +62,6 @@ def main() -> int:
             return fail(f"{path.relative_to(ROOT)} does not import the settings facade")
     for source, marker in (
         (nav, 'await setSettings({ ui_mode: mode });'),
-        (nav, 'import("./updater-ui.js")'),
-        (nav, '({ refreshUpdateNotice }) => refreshUpdateNotice()'),
         (nav, 'then(() => setSettings({ theme }))'),
         (settings, 'setSettings({ defaults:'),
         (settings, 'setSettings({ scm_dir:'),

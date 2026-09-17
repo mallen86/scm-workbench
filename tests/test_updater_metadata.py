@@ -779,17 +779,17 @@ class UpdateStateTests(unittest.TestCase):
         self.assertIsNone(state["asset"])
         pick.assert_not_called()
 
-    def test_simple_mode_uses_stable_despite_saved_beta_preference(self):
+    def test_saved_beta_preference_remains_active_in_simple_mode(self):
         self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
-        self.assertEqual(server.load_settings()["update_channel"], "beta")
-        self.assertEqual(server._selected_update_channel(), "stable")
+        self.assertEqual(server.load_settings()["ui_mode"], "simple")
+        self.assertEqual(server._selected_update_channel(), "beta")
 
         with patch.object(updater, "latest_release",
                           side_effect=updater.UpdateError("offline")) as lookup:
             state = server.run_update_check()
 
-        lookup.assert_called_once_with(include_prereleases=False)
-        self.assertEqual(state["channel"], "stable")
+        lookup.assert_called_once_with(include_prereleases=True)
+        self.assertEqual(state["channel"], "beta")
 
     def test_beta_setting_binds_lookup_and_persisted_state(self):
         tag = "v2.0.0-beta.2"
