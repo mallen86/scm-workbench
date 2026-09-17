@@ -1,4 +1,5 @@
 # Bugs
+- [x] Show real managed-repository update stages instead of “setup did not finish” while an update is progressing normally.
 - [x] Keep managed-repository checks, track changes, and update starts responsive on Windows, with immediate progress feedback and no accidental Advanced controls in Simple mode.
 - [x] Prevent first-launch repository completion from exposing an empty Create PDF manifest before the managed checkout is indexed.
 - [x] Make Simple/Advanced switching immediate and reduce initial app startup work without weakening live script-capability checks.

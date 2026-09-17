@@ -3229,6 +3229,11 @@ def _cmd_update_locked(key, force_full=False, log=print):
     started = time.time()
     staging = tx["root"] / "staging"
     try:
+        # Publish a real stage before cloning/comparing. Update downloads used
+        # to create their first progress row with only ``done``/``total``, so
+        # the sidebar interpreted a healthy running job as “setup did not
+        # finish” until some later stage happened to arrive.
+        set_progress(key, stage="update", done=0, total=0, label="preparing update")
         _clone_tree(repo, tx["candidate"])
         mode = "full" if force_full else "diff"
         if mode == "diff":
@@ -3265,12 +3270,18 @@ def _cmd_update_locked(key, force_full=False, log=print):
                         deletes.append(item["path"])
                 else:
                     ops[item["path"]] = item.get("previous")
+            set_progress(key, stage="update", done=0, total=len(ops),
+                         unit="files", label="changed files")
             result = apply_changes(key, man, target, ops, deletes, pristine_for, log, repo_root=tx["candidate"])
+            set_progress(key, stage="apply", done=0, total=0)
         else:
             archive = tx["root"] / "archive.tar.gz"
+            set_progress(key, stage="download", done=0, total=0, label="full snapshot")
             gh_download_to(f"{API}/repos/{REPOS[key]['owner']}/{REPOS[key]['repo']}/tarball/{target['sha']}", archive,
                            timeout=1800, progress_cb=lambda d, t: set_progress(key, done=d, total=t), max_bytes=TARBALL_CAP)
+            set_progress(key, stage="extract", done=0, total=0)
             extract_tarball(archive, staging, log)
+            set_progress(key, stage="apply", done=0, total=0)
             upstream = {p: staging / p for p in tracked_paths(staging)}
             ops = {p: None for p in upstream}
             deletes = [p for p in man["files"] if p not in upstream and not _is_authorized_user_path(p)]

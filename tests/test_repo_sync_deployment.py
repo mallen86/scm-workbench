@@ -189,9 +189,17 @@ class DeploymentTests(unittest.TestCase):
             repo_sync._secure_write_bytes(dest, changed[path])
             return len(changed[path])
 
+        progress = []
+        real_set_progress = repo_sync.set_progress
+
+        def capture_progress(key, **values):
+            real_set_progress(key, **values)
+            progress.append(dict(repo_sync.load_progress()[key]))
+
         with patch.object(repo_sync, "resolve_target", return_value=target), \
                 patch.object(repo_sync, "compare", return_value=compare), \
-                patch.object(repo_sync, "download_to", side_effect=fetch):
+                patch.object(repo_sync, "download_to", side_effect=fetch), \
+                patch.object(repo_sync, "set_progress", side_effect=capture_progress):
             result = repo_sync.cmd_update("scm", log=lambda *_: None)
         self.assertEqual(result["applied"], 3)
         self.assertEqual(result["deleted"], 1)
@@ -204,6 +212,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual((repo / "edited.txt").read_bytes(), b"local edit")
         self.assertEqual((repo / "data/user.bin").read_bytes(), b"user bytes")
         self.assertEqual((repo / "untracked.bin").read_bytes(), b"untracked bytes")
+        self.assertTrue(progress)
+        self.assertEqual(progress[0]["stage"], "update")
+        self.assertTrue(all(row.get("stage") for row in progress))
+        self.assertTrue(any(row.get("stage") == "update" and row.get("total") == 4
+                            and row.get("unit") == "files" for row in progress))
+        self.assertIn("apply", [row["stage"] for row in progress])
         self.assert_no_transaction_artifacts()
 
     def test_full_update_keeps_authorized_and_untracked_files(self):
@@ -218,9 +232,21 @@ class DeploymentTests(unittest.TestCase):
                        "data/README.md": b"placeholder"}
         target = self.target(SHA2)
         archive = self.tar_path(replacement, "replacement.tar.gz")
+        progress = []
+        real_set_progress = repo_sync.set_progress
+
+        def capture_progress(key, **values):
+            real_set_progress(key, **values)
+            progress.append(dict(repo_sync.load_progress()[key]))
+
+        def download(_url, dest, **values):
+            size = Path(dest).write_bytes(archive.read_bytes())
+            values["progress_cb"](size, size)
+            return size
+
         with patch.object(repo_sync, "resolve_target", return_value=target), \
-                patch.object(repo_sync, "gh_download_to",
-                             side_effect=lambda url, dest, **kw: (Path(dest).write_bytes(archive.read_bytes()) or archive.stat().st_size)):
+                patch.object(repo_sync, "gh_download_to", side_effect=download), \
+                patch.object(repo_sync, "set_progress", side_effect=capture_progress):
             result = repo_sync.cmd_update("scm", force_full=True, log=lambda *_: None)
         self.assertEqual(result["applied"], 2)
         self.assertEqual((repo / "tracked.txt").read_bytes(), b"new")
@@ -228,6 +254,11 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual((repo / "data/deck.json").read_bytes(), b"deck")
         self.assertEqual((repo / "game/front/user.svg").read_bytes(), b"art")
         self.assertEqual((repo / "random.local").read_bytes(), b"do not discard")
+        self.assertTrue(all(row.get("stage") for row in progress))
+        stages = [row["stage"] for row in progress]
+        self.assertEqual(stages[0], "update")
+        for stage in ("download", "extract", "apply"):
+            self.assertIn(stage, stages)
         self.assert_no_transaction_artifacts()
 
     def update_failure_fixture(self):

@@ -59,6 +59,7 @@ def main() -> int:
         'native?.dataset.prepAll === "true"',
         'ready ? "ready"',
         'ready ? "Downloaded and ready"',
+        'r.progress ? (r.deployed ? "starting update" : "starting download")',
         "const indeterminate = !det && !ready",
         'bar.classList.toggle("indet", indeterminate)',
         'fill.style.width = indeterminate ? "" : pct + "%"',
