@@ -46,7 +46,10 @@ def main():
                    "let checkPending = false", "checkPending = true", "checkPending = false",
                    "if (checkPending || st.checking)", "if (updateInstallActive())",
                    'setBtn("Updating…", null, true)', "uBtn.disabled = true;",
-                   'setBtn("Check for updates", doCheck)'):
+                   'setBtn("Check for updates", doCheck)',
+                   'id: "set-beta-updates"', '"Include beta releases"',
+                   'setSettings({ update_channel: channel })',
+                   'st.prerelease ? "A newer beta version is available: "'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
     if "startUpdateRequest" in page or "startUpdateStrip(job.id)" in page:
@@ -74,7 +77,8 @@ def main():
                    "S.updateNoticeDismissed = tag;",
                    "!tag || S.updateNoticeDismissed === tag",
                    "startUpdateStrip(result.job?.id);",
-                   "if (_updStrip && _updStrip.isConnected) return;"):
+                   "if (_updStrip && _updStrip.isConnected) return;",
+                   'beta ? "Beta update available" : "Update available"'):
         if marker not in updater_ui:
             return fail(f"the sidebar update notice is missing {marker}")
     # Only a genuinely newer release may raise the notice.
@@ -106,6 +110,15 @@ def main():
     if workflow.count("SCM_WORKBENCH_NO_UPDATE_CHECK=1") != 2 or \
             workflow.count('SCM_WORKBENCH_NO_UPDATE_CHECK = "1"') != 2:
         return fail("packaging lifecycle smokes do not disable release-network checks")
+    if workflow.count("python scripts/check_ui_update_security.py") != 2:
+        return fail("both package targets must run the updater security contract")
+    for marker in ("expected_prerelease=false",
+                   'version_without_build=${GITHUB_REF_NAME%%+*}',
+                   '[[ "$version_without_build" == *-* ]]',
+                   "prerelease_args+=(--prerelease)", "--json isPrerelease",
+                   '"$actual_prerelease" != "$expected_prerelease"'):
+        if marker not in workflow:
+            return fail(f"packaging prerelease contract is missing {marker}")
     for path in UI.rglob("*.js"):
         text = path.read_text(encoding="utf-8")
         if path != FACADE and any(route in text for route in ("/api/updates", "/api/release-notes")):
@@ -273,10 +286,11 @@ if (updaterUi.updateInstallActive()) fail("a failed update left install actions 
 // A successful Settings-style start removes the standing notice immediately,
 // rejects a concurrent second click, and stays active until terminal failure.
 updaterUi.stopUpdateStrip();
-globalThis.__updateState = { state: { status: "update-available", latest: "v5", published: "2026-01-02T00:00:00Z" } };
+globalThis.__updateState = { state: { status: "update-available", latest: "v5", prerelease: true, published: "2026-01-02T00:00:00Z" } };
 await updaterUi.refreshUpdateNotice();
 const standingNotice = globalThis.__updateNodes.get("#updatenotice");
-if (!standingNotice?.isConnected) fail("the update notice fixture was not rendered");
+if (!standingNotice?.isConnected || !elementText(standingNotice).includes("Beta update available"))
+  fail("the beta update notice fixture was not rendered or labelled");
 let resolveStart, startCalls = 0;
 globalThis.__startUpdateRequest = () => {
   startCalls++;

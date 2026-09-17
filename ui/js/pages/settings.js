@@ -418,9 +418,15 @@ PAGES.settings = (root) => {
     el("div", { class: "card-ico" }, ico("arrow")),
     el("div", { class: "grow" }, el("h2", {}, "App updates"),
       el("p", {}, packaged
-        ? "Checks GitHub for the newest app release at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
+        ? "Checks GitHub for the newest app release allowed by your update channel at startup and once daily while open. Installing a version replaces only the app folder. Your data folder is untouched."
         : "Running from a source checkout. Pull the Workbench repo to update it."))));
   if (packaged) {
+    const betaI = el("input", { type: "checkbox", id: "set-beta-updates", checked: s.update_channel === "beta" });
+    const betaSwitch = el("span", { class: "switch" }, betaI, el("span", { class: "track" }), el("span", { class: "knob" }));
+    const betaLabel = el("label", {}, "Include beta releases");
+    betaLabel.setAttribute("for", "set-beta-updates");
+    uc.append(el("div", { class: "field", style: "margin-bottom:14px" }, betaLabel, betaSwitch,
+      el("span", { class: "small faint" }, "Beta releases may be unstable. When enabled, Workbench chooses the highest version across stable and GitHub prerelease releases.")));
     const uRow = el("div", { class: "frow", style: "align-items:center; gap:14px" });
     const uBtn = el("button", { class: "btn primary" });
     const uLast = el("span", { class: "small faint" });
@@ -451,12 +457,15 @@ PAGES.settings = (root) => {
         uBtn.textContent = checkPending ? "Checking…" : "Update check unavailable";
         uBtn.disabled = true;
         uBtn.onclick = null;
+        betaI.disabled = busy || checkPending || updateInstallActive();
         uStatus.textContent = checkPending
-          ? "Asking GitHub for the newest release…"
+          ? "Asking GitHub for the newest allowed release…"
           : "The update service is unavailable: " + (error?.message || "try again later");
         return;
       }
       const st = r.state || {};
+      betaI.checked = st.channel === "beta";
+      betaI.disabled = busy || checkPending || st.checking || updateInstallActive();
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
       const setBtn = (label, onClick, disabled = false, title = "") => {
         uBtn.textContent = "";
@@ -468,7 +477,7 @@ PAGES.settings = (root) => {
       // if (st.checking) is represented by this combined server/local guard.
       if (checkPending || st.checking) {   // a check is in flight (the daily daemon or another click)
         setBtn("Checking…", null, true);
-        uStatus.textContent = "Asking GitHub for the newest release…";
+        uStatus.textContent = "Asking GitHub for the newest allowed release…";
         return;
       }
       if (updateInstallActive()) {
@@ -493,7 +502,7 @@ PAGES.settings = (root) => {
           const latest = vv(st.latest || r.current);
           setBtn("Check for updates", doCheck);
           uStatus.replaceChildren("You are on the latest version. ", el("b", {}, latest),
-            " is the newest release. Press to check GitHub again.");
+            ` is the newest ${st.channel === "beta" ? "stable or beta" : "stable"} release. Press to check GitHub again.`);
           break;
         }
         case "update-available": {
@@ -503,7 +512,7 @@ PAGES.settings = (root) => {
           const released = st.published ? ` (released ${new Date(st.published).toLocaleDateString()})` : "";
           const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
           uStatus.replaceChildren(
-            "A newer version is available: ", el("b", {}, latest), released,
+            st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest), released,
             ". The install replaces the app folder and reopens it. Your decklists, images, and settings stay put.",
             whatsNew ? " " : "", whatsNew,
           );
@@ -527,7 +536,7 @@ PAGES.settings = (root) => {
       busy = true;
       checkPending = true;
       uBtn.disabled = true;
-      uStatus.textContent = "Asking GitHub for the newest release…";
+      uStatus.textContent = "Asking GitHub for the newest allowed release…";
       let r;
       try {
         // A button click is an explicit refresh, not the scheduled daily
@@ -545,6 +554,44 @@ PAGES.settings = (root) => {
       if (r?.state?.status === "up-to-date") toast("ok", `No update. ${vv(r.state.latest)} is the newest.`);
       else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)}. Press the button above to install it.`);
       else if (r?.state?.status === "auth-required") toast("warn", "The release repo is private. This check will work once it is public.");
+    }
+
+    async function changeUpdateChannel() {
+      if (busy || updateInstallActive()) {
+        betaI.checked = s.update_channel === "beta";
+        return;
+      }
+      const previous = s.update_channel === "beta" ? "beta" : "stable";
+      const channel = betaI.checked ? "beta" : "stable";
+      if (channel === previous) return;
+      busy = true;
+      checkPending = true;
+      betaI.disabled = true;
+      uBtn.disabled = true;
+      uStatus.textContent = `Saving the ${channel} update channel…`;
+      try {
+        await setSettings({ update_channel: channel });
+        s.update_channel = channel;
+      } catch (error) {
+        betaI.checked = previous === "beta";
+        busy = false;
+        checkPending = false;
+        toast("err", error?.message || "The update channel could not be saved.");
+        await render();
+        return;
+      }
+      let checkFailed = false;
+      try { await checkUpdates(true); }
+      catch { checkFailed = true; }
+      finally {
+        busy = false;
+        checkPending = false;
+      }
+      await render();
+      refreshUpdateNotice();
+      toast(checkFailed ? "warn" : "ok", checkFailed
+        ? `${channel === "beta" ? "Beta releases are included" : "Stable releases only"}, but the fresh update check did not get through.`
+        : `${channel === "beta" ? "Beta releases are now included" : "Only stable releases will be offered"}.`);
     }
 
     const startUpdate = async () => {
@@ -582,6 +629,7 @@ PAGES.settings = (root) => {
       await render();
     };
 
+    betaI.onchange = changeUpdateChannel;
     uBtn.onclick = null;   // render() owns the button from here
     render();               // first paint; while the card is up it stays current on its own
     clearInterval(S.timers?.appUpdates);   // a re-render must never stack polls

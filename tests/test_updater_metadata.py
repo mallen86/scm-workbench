@@ -60,13 +60,15 @@ class UpdaterMetadataTests(unittest.TestCase):
         self.api.stop()
 
     @staticmethod
-    def release_raw(tag="v2.0.0", *, body="notes", assets=None, **extra):
+    def release_raw(tag="v2.0.0", *, body="notes", assets=None,
+                    prerelease=None, **extra):
         asset_name = "scm-workbench-macos.dmg"
+        prerelease = updater.is_prerelease(tag) if prerelease is None else prerelease
         assets = assets if assets is not None else [{
             "id": 7,
             "name": asset_name,
             "browser_download_url":
-                "https://github.com/owner/workbench/releases/download/v2.0.0/"
+                f"https://github.com/owner/workbench/releases/download/{tag}/"
                 + asset_name,
             "size": 123,
             "digest": "sha256:" + "a" * 64,
@@ -77,6 +79,8 @@ class UpdaterMetadataTests(unittest.TestCase):
             "body": body,
             "published_at": "2026-09-06T12:30:00Z",
             "html_url": "https://github.com/owner/workbench/releases/tag/" + tag,
+            "draft": False,
+            "prerelease": prerelease,
             "assets": assets,
         }
         raw.update(extra)
@@ -181,7 +185,8 @@ class UpdaterMetadataTests(unittest.TestCase):
         request.assert_called_once_with("/repos/owner/workbench/releases/latest", timeout=25)
         self.assertEqual(result["assets"][0]["id"], 7)
         self.assertEqual(result["assets"][0]["digest"], "sha256:" + "a" * 64)
-        self.assertEqual(set(result), {"tag", "name", "body", "published", "url", "assets"})
+        self.assertEqual(set(result), {"tag", "name", "body", "published", "url", "assets", "prerelease"})
+        self.assertFalse(result["prerelease"])
 
         invalid = [
             ("tag", {"tag_name": "../escape"}),
@@ -213,6 +218,71 @@ class UpdaterMetadataTests(unittest.TestCase):
                 with self.mock_metadata(self.release_raw(assets=[bad])):
                     with self.assertRaises(updater.UpdateError):
                         updater.latest_release()
+
+    def test_semver_prerelease_ordering_is_numeric_and_stable_aware(self):
+        ordered = [
+            "v0.9.0-alpha", "v0.9.0-alpha.1", "v0.9.0-alpha.beta",
+            "v0.9.0-beta", "v0.9.0-beta.2", "v0.9.0-beta.10",
+            "v0.9.0-rc.1", "v0.9.0",
+        ]
+        for older, newer in zip(ordered, ordered[1:]):
+            with self.subTest(older=older, newer=newer):
+                self.assertTrue(updater.is_newer(newer, older))
+                self.assertFalse(updater.is_newer(older, newer))
+        self.assertEqual(updater.canonical_version("v1.2"), "1.2.0")
+        self.assertEqual(updater.canonical_version("v1.2.3-beta.1+build.07"),
+                         "1.2.3-beta.1+build.07")
+        self.assertEqual(updater.parse_version("v1.2.3+one"),
+                         updater.parse_version("v1.2.3+two"))
+        self.assertTrue(updater.is_prerelease("v1.2.3-beta.1+build"))
+        self.assertFalse(updater.is_prerelease("v1.2.3+build"))
+        for invalid in ("v01.2.3", "v1.2.3-beta..1", "v1.2.3-beta.01",
+                        "v1.2.3+", " v1.2.3", "v1.2.3 ", "nightly"):
+            self.assertIsNone(updater.canonical_version(invalid))
+        with self.mock_metadata(self.release_raw("v1.2.3+build.7")):
+            self.assertEqual(updater.latest_release()["tag"], "v1.2.3+build.7")
+
+    def test_stable_channel_rejects_prerelease_metadata(self):
+        with self.mock_metadata(self.release_raw("v0.9.0-beta.1")):
+            with self.assertRaisesRegex(updater.UpdateError, "stable channel"):
+                updater.latest_release()
+
+    def test_beta_channel_selects_highest_published_semver(self):
+        releases = [
+            self.release_raw("v0.8.1"),
+            self.release_raw("v0.9.0-beta.1"),
+            self.release_raw("v0.9.0-beta.10"),
+            self.release_raw("v99.0.0", draft=True),
+            {"tag_name": "nightly", "draft": False, "prerelease": False},
+        ]
+        with self.mock_metadata(releases) as request:
+            result = updater.latest_release(include_prereleases=True)
+        request.assert_called_once_with(
+            f"/repos/owner/workbench/releases?per_page={updater.RELEASE_LIST_MAX}", timeout=25,
+        )
+        self.assertEqual(result["tag"], "v0.9.0-beta.10")
+        self.assertTrue(result["prerelease"])
+
+        releases = [self.release_raw("v1.0.0"), self.release_raw("v0.9.0-rc.1")]
+        with self.mock_metadata(releases):
+            self.assertEqual(
+                updater.latest_release(include_prereleases=True)["tag"], "v1.0.0",
+            )
+
+    def test_beta_release_list_is_bounded_and_unambiguous(self):
+        invalid = (
+            {},
+            [self.release_raw()] * (updater.RELEASE_LIST_MAX + 1),
+            [self.release_raw("v2.0.0-beta.1", prerelease=False)],
+            [self.release_raw("v2.0.0"), self.release_raw("2.0.0")],
+            [self.release_raw("v2.0.0+one"), self.release_raw("v2.0.0+two")],
+            [{"tag_name": "nightly", "draft": False, "prerelease": False}],
+        )
+        for document in invalid:
+            with self.subTest(shape=type(document).__name__, size=len(document)):
+                with self.mock_metadata(document):
+                    with self.assertRaises(updater.UpdateError):
+                        updater.latest_release(include_prereleases=True)
 
     def test_latest_release_accepts_multiline_body_but_rejects_forbidden_controls(self):
         body = "first line\nsecond line\r\nindented\tline"
@@ -533,16 +603,42 @@ class UpdaterJobTests(unittest.TestCase):
         stale = self.asset("v1.0.0")
         release = {"tag": "v2.0.0", "assets": [current]}
         job = self.job()
-        with patch.object(updater, "latest_release", return_value=release), \
+        with patch.object(updater, "latest_release", return_value=release) as lookup, \
                 patch.object(updater, "download",
                               side_effect=updater.UpdateError("stop after selection")) as download:
             updater.run_job(job, self.plan(stale), io.StringIO())
+        lookup.assert_called_once_with(include_prereleases=False)
         download.assert_called_once()
         args, kwargs = download.call_args
         self.assertEqual(args[0], current["url"])
         self.assertIs(kwargs["expected_asset"], current)
         self.assertNotEqual(kwargs["expected_asset"], stale)
         self.assertEqual(job["status"], "fail")
+
+    def test_run_job_reverifies_the_checked_beta_channel(self):
+        current = self.asset("v2.0.0-beta.2")
+        release = {"tag": "v2.0.0-beta.2", "assets": [current]}
+        plan = self.plan(self.asset("v1.0.0"))
+        plan["channel"] = "beta"
+        job = self.job()
+        with patch.object(updater, "latest_release", return_value=release) as lookup, \
+                patch.object(updater, "download",
+                              side_effect=updater.UpdateError("stop after selection")):
+            updater.run_job(job, plan, io.StringIO())
+        lookup.assert_called_once_with(include_prereleases=True)
+        self.assertEqual(job["status"], "fail")
+
+    def test_run_job_stable_channel_rejects_a_prerelease_before_download(self):
+        prerelease = self.asset("v2.0.0-beta.1")
+        release = {"tag": "v2.0.0-beta.1", "prerelease": True,
+                   "assets": [prerelease]}
+        job = self.job()
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "download") as download:
+            updater.run_job(job, self.plan(self.asset("v1.0.0")), io.StringIO())
+        download.assert_not_called()
+        self.assertEqual(job["status"], "fail")
+        self.assertIn("stable channel returned a prerelease", "".join(job["log_lines"]))
 
     def test_run_job_rejects_reverified_asset_bound_to_wrong_tag_before_download(self):
         mismatched = self.asset("v1.0.0")
@@ -561,26 +657,35 @@ class UpdateStateTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-state-")
         self.old = {
             "DATA_DIR": server.DATA_DIR,
+            "SETTINGS_FILE": server.SETTINGS_FILE,
             "UPDATE_STATE_FILE": server.UPDATE_STATE_FILE,
             "SERVER_VERSION": server.SERVER_VERSION,
         }
         server.DATA_DIR = Path(self.temp.name)
+        server.SETTINGS_FILE = Path(self.temp.name) / "settings.json"
         server.UPDATE_STATE_FILE = Path(self.temp.name) / "update-state.json"
         server.SERVER_VERSION = "1.0.0"
+        server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.repo = patch.object(updater, "UPDATE_REPO", "owner/workbench")
         self.repo.start()
         server._RELEASE_NOTES_CACHE.clear()
         with server._UPDATE_CHECK_CONDITION:
+            self.old_update_check = (
+                server._UPDATE_CHECKING, server._UPDATE_CHECK_GENERATION,
+                server._UPDATE_CHECK_RESULT,
+            )
             server._UPDATE_CHECKING = False
             server._UPDATE_CHECK_GENERATION = 0
             server._UPDATE_CHECK_RESULT = None
 
     def tearDown(self):
         with server._UPDATE_CHECK_CONDITION:
-            server._UPDATE_CHECKING = False
+            (server._UPDATE_CHECKING, server._UPDATE_CHECK_GENERATION,
+             server._UPDATE_CHECK_RESULT) = self.old_update_check
             server._UPDATE_CHECK_CONDITION.notify_all()
         server._RELEASE_NOTES_CACHE.clear()
         server.DATA_DIR = self.old["DATA_DIR"]
+        server.SETTINGS_FILE = self.old["SETTINGS_FILE"]
         server.UPDATE_STATE_FILE = self.old["UPDATE_STATE_FILE"]
         server.SERVER_VERSION = self.old["SERVER_VERSION"]
         self.repo.stop()
@@ -595,8 +700,9 @@ class UpdateStateTests(unittest.TestCase):
                 "url": f"https://github.com/{owner}/{repo}/releases/download/{tag}/{name}"}
 
     def valid_state(self, **changes):
-        state = server._default_update_state()
-        state.update(status="up-to-date", latest="v2.0.0", checked_at=10.0)
+        state = server._default_update_state("stable")
+        state.update(status="up-to-date", latest="v2.0.0", prerelease=False,
+                     checked_at=10.0)
         state.update(changes)
         return state
 
@@ -617,6 +723,20 @@ class UpdateStateTests(unittest.TestCase):
         path.write_bytes(b"x" * (server._UPDATE_STATE_MAX_BYTES + 1))
         self.assertEqual(server.load_update_state()["status"], "error")
         self.assertEqual(path.read_bytes(), b"x" * (server._UPDATE_STATE_MAX_BYTES + 1))
+
+    def test_legacy_stable_state_is_projected_without_rewriting_it(self):
+        state = self.valid_state()
+        state.pop("channel")
+        state.pop("prerelease")
+        server.UPDATE_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        before = server.UPDATE_STATE_FILE.read_bytes()
+
+        loaded = server.load_update_state()
+
+        self.assertEqual(loaded["channel"], "stable")
+        self.assertFalse(loaded["prerelease"])
+        self.assertTrue(server._valid_update_state(loaded))
+        self.assertEqual(server.UPDATE_STATE_FILE.read_bytes(), before)
 
     def test_symlink_state_is_rejected_without_touching_target(self):
         target = Path(self.temp.name) / "target.json"
@@ -658,6 +778,46 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(state["latest"], "v1.0.0")
         self.assertIsNone(state["asset"])
         pick.assert_not_called()
+
+    def test_beta_setting_binds_lookup_and_persisted_state(self):
+        tag = "v2.0.0-beta.2"
+        asset = self.installable_asset(tag)
+        release = {
+            "tag": tag, "name": "beta", "body": "", "published": "",
+            "url": f"https://github.com/owner/workbench/releases/tag/{tag}",
+            "assets": [asset], "prerelease": True,
+        }
+        self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+        with patch.object(updater, "latest_release", return_value=release) as lookup:
+            state = server.run_update_check()
+
+        lookup.assert_called_once_with(include_prereleases=True)
+        self.assertEqual(state["status"], "update-available")
+        self.assertEqual(state["channel"], "beta")
+        self.assertTrue(state["prerelease"])
+        self.assertEqual(server.load_update_state(), state)
+
+    def test_channel_switch_hides_cache_and_blocks_stale_install(self):
+        stable = self.valid_state(
+            status="update-available", latest="v2.0.0", prerelease=False,
+            checked_at=time.time(), asset=self.installable_asset("v2.0.0"),
+        )
+        server.save_update_state(stable)
+        self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+
+        view = server.updates_view()["state"]
+        self.assertEqual((view["status"], view["channel"]), ("never", "beta"))
+        job, errors = server.start_update_job()
+        self.assertIsNone(job)
+        self.assertIn("No newer update", errors[0])
+
+        checked = server._default_update_state("beta")
+        checked.update(status="up-to-date", latest="v2.0.0-beta.1",
+                       prerelease=True, checked_at=time.time())
+        with patch.object(server, "run_update_check", return_value=checked) as run:
+            result = server._update_check_result(False)
+        run.assert_called_once_with("beta")
+        self.assertEqual(result["state"]["channel"], "beta")
 
     def test_a_state_promising_the_running_version_is_not_an_update(self):
         """A successful update leaves behind the state that asked for it.
@@ -718,7 +878,7 @@ class UpdateStateTests(unittest.TestCase):
             forced = server._update_check_result(True)
         self.assertTrue(cached["state"]["cached"])
         self.assertEqual(forced, {"ok": True, "state": checked})
-        run.assert_called_once_with()
+        run.assert_called_once_with("stable")
 
     def test_ordinary_startup_does_not_wait_for_an_update_result(self):
         with patch.dict(os.environ, {"SCM_WORKBENCH_UPDATE_TOKEN": ""}), \
@@ -782,8 +942,8 @@ class UpdateStateTests(unittest.TestCase):
         release_gate = threading.Event()
         calls = []
 
-        def lookup():
-            calls.append(threading.get_ident())
+        def lookup(**kwargs):
+            calls.append((threading.get_ident(), kwargs))
             started.set()
             self.assertTrue(release_gate.wait(2))
             return release
@@ -797,6 +957,7 @@ class UpdateStateTests(unittest.TestCase):
             second.start()
             time.sleep(0.03)
             self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], {"include_prereleases": False})
             release_gate.set()
             first.join(2)
             second.join(2)
@@ -805,6 +966,40 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(results[0], results[1])
         self.assertEqual(server.load_update_state(), results[0])
+
+    def test_channel_switch_discards_an_inflight_stable_result(self):
+        asset = self.installable_asset("v2.0.0")
+        release = {
+            "tag": "v2.0.0", "name": "stable", "body": "", "published": "",
+            "url": "https://github.com/owner/workbench/releases/tag/v2.0.0",
+            "assets": [asset], "prerelease": False,
+        }
+        started = threading.Event()
+        finish = threading.Event()
+        results = []
+
+        def lookup(**_kwargs):
+            started.set()
+            self.assertTrue(finish.wait(2))
+            return release
+
+        with patch.object(updater, "latest_release", side_effect=lookup):
+            worker = threading.Thread(
+                target=lambda: results.append(server.run_update_check("stable")),
+            )
+            worker.start()
+            self.assertTrue(started.wait(2))
+            self.assertTrue(server.update_settings({"update_channel": "beta"})["ok"])
+            finish.set()
+            worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((results[0]["channel"], results[0]["status"]),
+                         ("stable", "never"))
+        self.assertFalse(server.UPDATE_STATE_FILE.exists())
+        with server._UPDATE_CHECK_CONDITION:
+            self.assertFalse(server._UPDATE_CHECKING)
+            self.assertIsNone(server._UPDATE_CHECK_RESULT)
 
     def test_update_check_generation_order_publishes_newer_result(self):
         def release(tag, name):
@@ -832,21 +1027,24 @@ class UpdateStateTests(unittest.TestCase):
 class ReleaseNotesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-notes-")
-        self.old = (server.DATA_DIR, server.UPDATE_STATE_FILE)
+        self.old = (server.DATA_DIR, server.SETTINGS_FILE, server.UPDATE_STATE_FILE)
         server.DATA_DIR = Path(self.temp.name)
+        server.SETTINGS_FILE = Path(self.temp.name) / "settings.json"
         server.UPDATE_STATE_FILE = Path(self.temp.name) / "update-state.json"
+        server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.repo = patch.object(updater, "UPDATE_REPO", "owner/workbench")
         self.repo.start()
         server._RELEASE_NOTES_CACHE.clear()
-        self.state = server._default_update_state()
-        self.state.update(status="up-to-date", latest="v2.0.0", checked_at=10.0,
+        self.state = server._default_update_state("stable")
+        self.state.update(status="up-to-date", latest="v2.0.0", prerelease=False,
+                          checked_at=10.0,
                           release_url="https://github.com/owner/workbench/releases/tag/v2.0.0",
                           published="2026-09-06T12:30:00Z")
         server.save_update_state(self.state)
 
     def tearDown(self):
         server._RELEASE_NOTES_CACHE.clear()
-        server.DATA_DIR, server.UPDATE_STATE_FILE = self.old
+        server.DATA_DIR, server.SETTINGS_FILE, server.UPDATE_STATE_FILE = self.old
         self.repo.stop()
         self.temp.cleanup()
 
@@ -865,16 +1063,16 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_release_notes_cache_ttl_and_bounded_count(self):
         calls = []
-        with patch.object(updater, "latest_release", side_effect=lambda timeout=15: (calls.append(1) or self.release("v2.0.0"))):
+        with patch.object(updater, "latest_release", side_effect=lambda timeout=15, **kwargs: (calls.append(kwargs) or self.release("v2.0.0"))):
             first = server.release_notes_view()
             second = server.release_notes_view()
         self.assertEqual(first, second)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [{"include_prereleases": False}])
 
         server._RELEASE_NOTES_CACHE["v2.0.0"] = (time.monotonic() - server._RELEASE_NOTES_CACHE_TTL - 1, first)
         with patch.object(updater, "latest_release", return_value=self.release("v2.0.0")) as latest:
             server.release_notes_view()
-        latest.assert_called_once()
+        latest.assert_called_once_with(timeout=15, include_prereleases=False)
 
         for i in range(server._RELEASE_NOTES_CACHE_MAX + 2):
             tag = "v%d.0.0" % (10 + i)
@@ -887,6 +1085,21 @@ class ReleaseNotesTests(unittest.TestCase):
                 server.release_notes_view()
         self.assertLessEqual(len(server._RELEASE_NOTES_CACHE), server._RELEASE_NOTES_CACHE_MAX)
         self.assertNotIn("v2.0.0", server._RELEASE_NOTES_CACHE)
+
+    def test_beta_notes_use_the_channel_bound_release_list(self):
+        tag = "v2.1.0-beta.1"
+        server.update_settings({"update_channel": "beta"})
+        state = server._default_update_state("beta")
+        state.update(
+            status="up-to-date", latest=tag, prerelease=True, checked_at=10.0,
+            release_url=f"https://github.com/owner/workbench/releases/tag/{tag}",
+            published="2026-09-06T12:30:00Z",
+        )
+        server.save_update_state(state)
+        with patch.object(updater, "latest_release", return_value=self.release(tag)) as latest:
+            result = server.release_notes_view(expected_tag=tag)
+        self.assertTrue(result["ok"])
+        latest.assert_called_once_with(timeout=15, include_prereleases=True)
 
     def test_notes_fall_back_to_safe_state_metadata_when_network_fails(self):
         with patch.object(updater, "latest_release", side_effect=updater.UpdateError("offline")):

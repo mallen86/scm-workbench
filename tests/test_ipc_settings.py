@@ -32,6 +32,13 @@ class SettingsIpcTests(unittest.TestCase):
         server._INFO_SNAP.clear()
         server._REPOS_MTIME.clear()
         server._invalidate_script_capability_cache()
+        with server._UPDATE_CHECK_CONDITION:
+            self.saved_update_check = (
+                server._UPDATE_CHECKING, server._UPDATE_CHECK_GENERATION,
+                server._UPDATE_CHECK_RESULT,
+            )
+            server._UPDATE_CHECKING = False
+            server._UPDATE_CHECK_RESULT = None
         server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.httpd = server.start_http("127.0.0.1", 0)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -44,6 +51,10 @@ class SettingsIpcTests(unittest.TestCase):
         self.thread.join(timeout=3)
         for name, value in self.saved.items():
             setattr(server, name, value)
+        with server._UPDATE_CHECK_CONDITION:
+            (server._UPDATE_CHECKING, server._UPDATE_CHECK_GENERATION,
+             server._UPDATE_CHECK_RESULT) = self.saved_update_check
+            server._UPDATE_CHECK_CONDITION.notify_all()
         server._invalidate_script_capability_cache()
         self.temp.cleanup()
 
@@ -70,6 +81,7 @@ class SettingsIpcTests(unittest.TestCase):
             "port": 65535,
             "theme": "light",
             "ui_mode": "advanced",
+            "update_channel": "beta",
             "auto_open_browser": False,
             "onboarded": True,
             "defaults": {"card_size": "custom", "paper_size": "a4", "ppi": 0, "quality": 42.5},
@@ -92,7 +104,8 @@ class SettingsIpcTests(unittest.TestCase):
         before = server.SETTINGS_FILE.read_bytes()
         invalid = [
             {}, {"repos": {}}, {"unknown": 1}, {"port": True}, {"port": 1023},
-            {"theme": "blue"}, {"ui_mode": "simple "}, {"onboarded": 1},
+            {"theme": "blue"}, {"ui_mode": "simple "}, {"update_channel": "nightly"},
+            {"update_channel": True}, {"onboarded": 1},
             {"scm_dir": "a\x00b"}, {"python": "\ud800"},
             {"defaults": {}}, {"defaults": {"card_size": ""}},
             {"defaults": {"ppi": True}}, {"defaults": {"ppi": 10001}},
@@ -132,6 +145,29 @@ class SettingsIpcTests(unittest.TestCase):
         self.assertEqual(server._REPOS_MTIME, {"t": 1})
         with server._SCRIPT_CAPABILITY_CACHE_LOCK:
             self.assertIn("old", server._SCRIPT_CAPABILITY_CACHE)
+
+    def test_update_channel_change_invalidates_cached_release_result(self):
+        with server._UPDATE_CHECK_CONDITION:
+            generation = server._UPDATE_CHECK_GENERATION
+            server._UPDATE_CHECK_RESULT = server._default_update_state("stable")
+
+        response = self.native({"update_channel": "beta"})
+
+        self.assertTrue(response["result"]["ok"])
+        self.assertEqual(response["result"]["settings"]["update_channel"], "beta")
+        with server._UPDATE_CHECK_CONDITION:
+            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation + 1)
+            self.assertIsNone(server._UPDATE_CHECK_RESULT)
+            cached = server._default_update_state("beta")
+            server._UPDATE_CHECK_RESULT = cached
+            generation = server._UPDATE_CHECK_GENERATION
+
+        same = self.native({"update_channel": "beta"})
+
+        self.assertTrue(same["result"]["ok"])
+        with server._UPDATE_CHECK_CONDITION:
+            self.assertEqual(server._UPDATE_CHECK_GENERATION, generation)
+            self.assertEqual(server._UPDATE_CHECK_RESULT, cached)
 
     def test_repo_paths_and_python_apply_to_the_next_command_without_restart(self):
         scm = self.data / "new-scm"

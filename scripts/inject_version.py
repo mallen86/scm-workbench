@@ -45,15 +45,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# digits.digits[.digits], optional -rc1 / +local suffixes, optional v prefix
-_VERSION_RE = re.compile(r"^v?(\d+)(\.\d+){0,2}([.\-+][0-9A-Za-z.\-]+)?$")
+# A canonical MAJOR.MINOR.PATCH, optional SemVer prerelease/build identifiers,
+# and an optional v prefix. Numeric prerelease identifiers may not contain
+# leading zeroes.
+_VERSION_RE = re.compile(
+    r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
 
 
 def normalize(value: str) -> str:
     v = (value or "").strip()
     if not v:
         return ""
-    if not _VERSION_RE.match(v):
+    match = _VERSION_RE.fullmatch(v)
+    if not match:
+        return ""
+    prerelease = match.group(4)
+    if prerelease and any(part.isdigit() and len(part) > 1 and part.startswith("0")
+                          for part in prerelease.split(".")):
         return ""
     return v[1:] if v.startswith("v") and v[1].isdigit() else v
 

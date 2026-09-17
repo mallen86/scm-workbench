@@ -89,3 +89,5 @@
     - [x] Remove the text "Select Only fronts in the form when a back is not needed." from the step 4 (or step 5 if you've already added the new step above). Only fronts will remove any double-sided cards which are independent of the backs
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
+- [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
+- [ ] Add Linux support. Initial implementation would be for debian to verify linux functionality and then quickly follow on with arch support.

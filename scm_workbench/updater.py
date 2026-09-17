@@ -6,9 +6,10 @@ The app is packaged as a Tauri bundle and shipped as GitHub release assets
 (macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP). This module
 talks to the releases of the Workbench's own repository:
 
-  * fetch the newest release (the release repo is private, so the check
-    can't see it until the repo is made public - no credentials anywhere
-    in the meantime),
+  * fetch the newest stable release by default, or the highest published
+    stable/prerelease SemVer after an explicit beta opt-in (the release repo
+    is private, so checks cannot see it until it is public; no credentials are
+    stored in the app),
   * compare it with the running version,
   * on "update available" an in-process job downloads the exact platform
     asset. macOS DMGs are mounted read-only and copied into a validated app
@@ -48,6 +49,7 @@ from pathlib import Path
 
 USER_AGENT = "scm-workbench-updater/0.1"
 METADATA_MAX_BYTES = 2 * 1024 * 1024
+RELEASE_LIST_MAX = 100
 TOTAL_DEADLINE_SECONDS = 30
 DOWNLOAD_DEADLINE_SECONDS = 60
 ASSET_MAX_BYTES = 1 << 30
@@ -159,7 +161,7 @@ def _github_release_url(url: str, owner: str, repo: str, tag: str) -> str:
     value = _text(url, "html_url", 2048, required=True)
     try:
         parsed = urllib.parse.urlsplit(value)
-        expected = f"/{owner}/{repo}/releases/tag/{urllib.parse.quote(tag, safe='') }"
+        expected = f"/{owner}/{repo}/releases/tag/{tag}"
         if (parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com" or
                 parsed.port is not None or parsed.username is not None or parsed.password is not None or
                 parsed.query or parsed.fragment or urllib.parse.unquote(parsed.path) != expected):
@@ -182,7 +184,7 @@ def _asset_url(value, owner: str, repo: str, tag: str, name: str) -> str:
     value = _text(value, "asset.browser_download_url", 2048, required=True)
     try:
         parsed = urllib.parse.urlsplit(value)
-        expected = f"/{owner}/{repo}/releases/download/{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name, safe='') }"
+        expected = f"/{owner}/{repo}/releases/download/{tag}/{name}"
         if (parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com" or
                 parsed.port is not None or parsed.username is not None or parsed.password is not None or
                 parsed.query or parsed.fragment or urllib.parse.unquote(parsed.path) != expected):
@@ -205,29 +207,58 @@ class AuthRequiredError(UpdateError):
 # Versions
 # ----------------------------------------------------------------------------
 
-_VER_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.\-]+))?$")
+_VER_RE = re.compile(
+    r"^v?(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
+
+
+def _version_parts(value) -> tuple | None:
+    match = _VER_RE.fullmatch(str(value or ""))
+    if not match:
+        return None
+    numbers = tuple(int(match.group(index) or 0) for index in (1, 2, 3))
+    suffix = match.group(4)
+    build = match.group(5)
+    if suffix is None:
+        return numbers, None, numbers + (1, ()), build
+    identifiers = suffix.split(".")
+    if any(part.isdigit() and len(part) > 1 and part.startswith("0")
+           for part in identifiers):
+        return None
+    prerelease_key = tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in identifiers
+    )
+    return numbers, suffix, numbers + (0, prerelease_key), build
 
 
 def canonical_version(s: str) -> str | None:
-    """Return the release version in the package's canonical spelling."""
-    match = _VER_RE.fullmatch(str(s or "").strip())
-    if not match:
+    """Return a version in the package's canonical SemVer spelling."""
+    parsed = _version_parts(s)
+    if parsed is None:
         return None
-    major, minor, patch = (int(match.group(i) or 0) for i in (1, 2, 3))
-    suffix = f"-{match.group(4)}" if match.group(4) else ""
-    return f"{major}.{minor}.{patch}{suffix}"
+    numbers, suffix, _key, build = parsed
+    return (".".join(str(value) for value in numbers) +
+            (f"-{suffix}" if suffix else "") +
+            (f"+{build}" if build else ""))
 
 
-def parse_version(s) -> tuple:
-    """'v0.1.0' / '1.2' / '2.0.0-rc1' -> a comparable tuple (None if unparseable).
+def parse_version(s) -> tuple | None:
+    """Return a SemVer-compatible comparison key, or ``None``.
 
-    A prerelease suffix sorts *before* its final release, so 0.2.0-rc1 is
-    offered for 0.1.0 but 0.2.0-rc1 is not an update over 0.2.0."""
-    m = _VER_RE.match(str(s or "").strip())
-    if not m:
-        return None
-    nums = tuple(int(m.group(i) or 0) for i in (1, 2, 3))
-    return nums + ((-1 if m.group(4) else 0),)
+    Numeric prerelease identifiers compare numerically and before text
+    identifiers. A prerelease sorts before its final release, so beta.2 is
+    newer than beta.1 while 0.9.0 remains newer than 0.9.0-rc.1.
+    """
+    parsed = _version_parts(s)
+    return parsed[2] if parsed is not None else None
+
+
+def is_prerelease(value) -> bool:
+    parsed = _version_parts(value)
+    return bool(parsed is not None and parsed[1] is not None)
 
 
 def is_newer(latest, current) -> bool:
@@ -405,34 +436,91 @@ def _validated_asset(raw: dict, owner: str, repo: str, tag: str) -> dict:
             "size": size, "digest": digest}
 
 
-def latest_release(timeout: int = 25) -> dict:
-    """Fetch and strictly validate the newest release metadata."""
+def _release_flags(raw: dict) -> tuple[bool, bool]:
+    if not isinstance(raw, dict):
+        raise UpdateError("GitHub returned invalid release metadata")
+    draft = raw.get("draft", False)
+    prerelease = raw.get("prerelease", False)
+    if not isinstance(draft, bool) or not isinstance(prerelease, bool):
+        raise UpdateError("GitHub release flags are invalid")
+    return draft, prerelease
+
+
+def _validated_release(raw: dict, owner: str, repo: str) -> dict:
+    draft, prerelease = _release_flags(raw)
+    if draft:
+        raise UpdateError("GitHub returned a draft as an installable release")
+    tag = _tag(raw.get("tag_name"))
+    if canonical_version(tag) is None:
+        raise UpdateError("GitHub release tag is not a valid version")
+    if prerelease != is_prerelease(tag):
+        raise UpdateError("GitHub release prerelease status does not match its tag")
+    # GitHub currently calls these target_commitish; accepting the aliases
+    # makes the schema explicit for compatible API fixtures.
+    for field in ("version", "ref", "target_commitish"):
+        if field in raw and raw[field] is not None:
+            _text(raw[field], field, 256, required=True)
+    name = _text(raw.get("name"), "name", 512) or tag
+    body_text = _text(raw.get("body"), "body", 256 * 1024,
+                      allowed_controls="\n\r\t")
+    published = _text(raw.get("published_at"), "published_at", 64)
+    url = _github_release_url(raw.get("html_url"), owner, repo, tag)
+    raw_assets = raw.get("assets")
+    if not isinstance(raw_assets, list) or len(raw_assets) > 100:
+        raise UpdateError("GitHub release assets are invalid")
+    assets = [_validated_asset(asset, owner, repo, tag) for asset in raw_assets]
+    return {"tag": tag, "name": name, "body": body_text,
+            "published": published, "url": url, "assets": assets,
+            "prerelease": prerelease}
+
+
+def latest_release(timeout: int = 25, *, include_prereleases: bool = False) -> dict:
+    """Fetch the newest stable release or highest published version.
+
+    GitHub's ``latest`` endpoint intentionally excludes prereleases. Beta
+    opt-in uses the bounded release list and selects the highest SemVer across
+    stable and prerelease entries instead of trusting API creation order.
+    """
+    if not isinstance(include_prereleases, bool):
+        raise UpdateError("the release channel is invalid")
     owner, repo = _repo_parts()
-    status, headers, body = gh_request(f"/repos/{owner}/{repo}/releases/latest", timeout=timeout)
+    endpoint = (f"/repos/{owner}/{repo}/releases?per_page={RELEASE_LIST_MAX}"
+                if include_prereleases else
+                f"/repos/{owner}/{repo}/releases/latest")
+    status, _headers, body = gh_request(endpoint, timeout=timeout)
     if status == 200:
         try:
-            rel = json.loads(body.decode("utf-8"))
+            document = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
             raise UpdateError("GitHub returned invalid release metadata")
-        if not isinstance(rel, dict):
+        if include_prereleases:
+            if not isinstance(document, list) or len(document) > RELEASE_LIST_MAX:
+                raise UpdateError("GitHub returned an invalid release list")
+            ranked = []
+            for raw in document:
+                draft, prerelease = _release_flags(raw)
+                if draft:
+                    continue
+                tag = _tag(raw.get("tag_name"))
+                key = parse_version(tag)
+                if key is None:
+                    continue
+                if prerelease != is_prerelease(tag):
+                    raise UpdateError("GitHub release prerelease status does not match its tag")
+                ranked.append((key, raw))
+            if not ranked:
+                raise UpdateError("GitHub returned no versioned published releases")
+            best = max(key for key, _raw in ranked)
+            winners = [raw for key, raw in ranked if key == best]
+            if len(winners) != 1:
+                raise UpdateError("GitHub returned ambiguous newest release versions")
+            document = winners[0]
+        if not isinstance(document, dict):
             raise UpdateError("GitHub returned invalid release metadata")
-        tag = _tag(rel.get("tag_name"))
-        # GitHub currently calls these target_commitish; accepting the
-        # aliases makes the schema explicit for compatible API fixtures.
-        for field in ("version", "ref", "target_commitish"):
-            if field in rel and rel[field] is not None:
-                _text(rel[field], field, 256, required=True)
-        name = _text(rel.get("name"), "name", 512) or tag
-        body_text = _text(rel.get("body"), "body", 256 * 1024,
-                           allowed_controls="\n\r\t")
-        published = _text(rel.get("published_at"), "published_at", 64)
-        url = _github_release_url(rel.get("html_url"), owner, repo, tag)
-        raw_assets = rel.get("assets")
-        if not isinstance(raw_assets, list) or len(raw_assets) > 100:
-            raise UpdateError("GitHub release assets are invalid")
-        assets = [_validated_asset(a, owner, repo, tag) for a in raw_assets]
-        return {"tag": tag, "name": name, "body": body_text,
-                "published": published, "url": url, "assets": assets}
+        release = _validated_release(document, owner, repo)
+        if not include_prereleases and release["prerelease"]:
+            raise UpdateError("GitHub returned a prerelease on the stable channel")
+        return release
     if status == 404:
         raise AuthRequiredError(
             "the release repo can't be seen — it is still private; "
@@ -1866,7 +1954,15 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         job["progress"] = {"stage": "fetch", "done": 0, "total": 0}
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
         # 1) re-verify (the state that started the job can be a few minutes old)
-        rel = latest_release()
+        channel = plan.get("channel", "stable")
+        if channel not in ("stable", "beta"):
+            raise UpdateError("the checked release channel is invalid")
+        rel = latest_release(include_prereleases=channel == "beta")
+        release_prerelease = is_prerelease(rel.get("tag"))
+        if rel.get("prerelease", release_prerelease) != release_prerelease:
+            raise UpdateError("the release prerelease status changed during re-verification")
+        if channel == "stable" and release_prerelease:
+            raise UpdateError("the stable channel returned a prerelease during re-verification")
         same_release = (rel["tag"].lstrip("v") == plan.get("current"))
         if same_release or not is_newer(rel["tag"], plan.get("current")):
             if same_release:

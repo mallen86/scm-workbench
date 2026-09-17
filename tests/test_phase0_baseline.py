@@ -242,9 +242,10 @@ class HttpContractTests(unittest.TestCase):
         persisted = json.loads(server.SETTINGS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(
             {"scm_dir", "extras_dir", "python", "port", "theme", "ui_mode",
-             "auto_open_browser", "onboarded", "defaults", "repos"},
+             "update_channel", "auto_open_browser", "onboarded", "defaults", "repos"},
             set(persisted),
         )
+        self.assertEqual(persisted["update_channel"], "stable")
         status, loaded = self.request("GET", "/api/settings")
         self.assertEqual(status, 200)
         self.assertEqual(loaded, result["settings"])

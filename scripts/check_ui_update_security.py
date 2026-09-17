@@ -62,7 +62,7 @@ def main() -> int:
         return fail("checking state does not disable the update button")
     for marker in (
         'uStatus.replaceChildren("You are on the latest version. ", el("b", {}, latest)',
-        'uStatus.replaceChildren(\n            "A newer version is available: ", el("b", {}, latest)',
+        'st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest)',
     ):
         if marker not in source:
             return fail(f"remote release metadata is not rendered as text nodes: {marker}")
@@ -124,12 +124,13 @@ const showWhatsNew = () => {};
 const uLast = fakeNode("span");
 const uBtn = fakeNode("button");
 const uStatus = fakeNode("div");
+const betaI = fakeNode("input");
 let state;
 const getUpdates = async () => ({ state, current: state.current });
 const render = new Function(
-  "getUpdates", "checkPending", "uLast", "uBtn", "uStatus", "humanize", "vv", "serverReleaseUrl", "el", "ico", "$$", "doCheck", "startUpdate", "showWhatsNew",
+  "getUpdates", "checkPending", "uLast", "uBtn", "uStatus", "humanize", "vv", "serverReleaseUrl", "el", "ico", "$$", "doCheck", "startUpdate", "showWhatsNew", "betaI", "busy", "updateInstallActive",
   `${source.slice(renderStart, renderEnd)}; return render;`
-)(getUpdates, false, uLast, uBtn, uStatus, humanize, vv, serverReleaseUrl, el, ico, $$, () => {}, () => {}, showWhatsNew);
+)(getUpdates, false, uLast, uBtn, uStatus, humanize, vv, serverReleaseUrl, el, ico, $$, () => {}, () => {}, showWhatsNew, betaI, false, () => false);
 
 // A daily/background check must not hit the pre-declaration TDZ path.
 state = { checking: true, status: "never", checked_at: null, current: "0.1.0" };
@@ -147,10 +148,13 @@ if (uStatus._html || uStatus.children.some(child => child?.tag === "img") || !uS
   fail("hostile up-to-date tag reached HTML or disappeared from text output");
 state = { checking: false, status: "update-available", checked_at: Date.now() / 1000,
   latest: hostile, current: "0.1.0", published: "2026-09-06T00:00:00Z",
+  prerelease: true, channel: "beta",
   release_url: "https://github.com/owner/repo/releases/tag/v1" };
 await render();
-if (uStatus._html || uStatus.children.some(child => child?.tag === "img") || !uStatus.textContent.includes(hostile) || !uBtn.textContent.includes(hostile))
-  fail("hostile update-available tag reached HTML or disappeared from text output");
+if (uStatus._html || uStatus.children.some(child => child?.tag === "img") ||
+    !uStatus.textContent.includes(hostile) || !uStatus.textContent.includes("beta") ||
+    !uBtn.textContent.includes(hostile))
+  fail("hostile beta update tag reached HTML, lost its label, or disappeared from text output");
 console.log("ok: checking state, hostile release tags, text-only metadata rendering, and server-bound release URLs pass");
 '''.strip()
     result = subprocess.run(

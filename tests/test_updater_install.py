@@ -551,13 +551,16 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-admission-")
         self.root = Path(self.temp.name)
         self.saved = {name: getattr(server, name) for name in (
-            "DATA_DIR", "UPDATE_STATE_FILE", "LOGS_DIR", "JOBS_FILE", "SERVER_VERSION", "JOBS")}
+            "DATA_DIR", "SETTINGS_FILE", "UPDATE_STATE_FILE", "LOGS_DIR", "JOBS_FILE",
+            "SERVER_VERSION", "JOBS")}
         server.DATA_DIR = self.root / "data"
+        server.SETTINGS_FILE = server.DATA_DIR / "settings.json"
         server.UPDATE_STATE_FILE = server.DATA_DIR / "update-state.json"
         server.LOGS_DIR = server.DATA_DIR / "logs"
         server.JOBS_FILE = server.DATA_DIR / "jobs.json"
         server.SERVER_VERSION = "1.0.0"
         server.JOBS = {}
+        server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.old_repo = updater.UPDATE_REPO
         updater.UPDATE_REPO = "owner/workbench"
         self.asset = {
@@ -575,9 +578,9 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.temp.cleanup()
 
     def state(self, **changes):
-        state = server._default_update_state()
+        state = server._default_update_state("stable")
         state.update(status="update-available", current="1.0.0", latest="v2.0.0",
-                     asset=dict(self.asset), checked_at=1.0)
+                     prerelease=False, asset=dict(self.asset), checked_at=1.0)
         state.update(changes)
         return state
 
@@ -608,6 +611,7 @@ class UpdateStartAdmissionTests(unittest.TestCase):
             started[0][0]()
         self.assertEqual(observed["latest"], "v2.0.0")
         self.assertEqual(observed["asset"], canonical["asset"])
+        self.assertEqual(observed["channel"], "stable")
 
     def test_stale_mismatched_asset_and_downgrade_or_same_release_are_rejected(self):
         cases = [

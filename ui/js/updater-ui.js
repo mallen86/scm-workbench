@@ -190,14 +190,15 @@ function renderUpdateNotice(tag, state) {
   const foot = $(".sidebar-foot");
   if (!foot) return;
   const released = state.published ? new Date(state.published) : null;
-  const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, "Update available"));
+  const beta = state.prerelease === true;
+  const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, beta ? "Beta update available" : "Update available"));
   const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss until the app restarts",
     "aria-label": "Dismiss the update notice" }, ico("x"));
   close.onclick = () => { S.updateNoticeDismissed = tag; removeUpdateNotice(); };
   head.append(close);
   const meta = el("div", { class: "rp-meta" }, released && !Number.isNaN(released.getTime())
-    ? `Released ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
-    : "The app closes and reopens as the new version.");
+    ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
+    : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`);
   const row = el("div", { class: "rp-row" },
     el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to install.`), meta);
   const actions = el("div", { class: "rp-actions" });

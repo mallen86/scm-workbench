@@ -1470,6 +1470,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "port": DEFAULT_PORT,
     "theme": "dark",
     "ui_mode": "simple",
+    "update_channel": "stable",
     "auto_open_browser": True,
     "onboarded": False,
     "defaults": {
@@ -1544,7 +1545,7 @@ SETTINGS_CHANGES_MAX_BYTES = 64 * 1024
 _SETTINGS_PATH_FIELDS = frozenset(("scm_dir", "extras_dir", "python"))
 _SETTINGS_FIELDS = frozenset((
     "scm_dir", "extras_dir", "python", "port", "theme", "ui_mode",
-    "auto_open_browser", "onboarded", "defaults",
+    "update_channel", "auto_open_browser", "onboarded", "defaults",
 ))
 _DEFAULT_FIELDS = frozenset(("card_size", "paper_size", "ppi", "quality"))
 
@@ -1603,6 +1604,9 @@ def validate_settings_changes(changes: Any) -> List[str]:
         elif key == "ui_mode":
             if value not in ("simple", "advanced") or not isinstance(value, str):
                 errors.append("ui_mode must be simple or advanced")
+        elif key == "update_channel":
+            if value not in ("stable", "beta") or not isinstance(value, str):
+                errors.append("update_channel must be stable or beta")
         elif key in ("auto_open_browser", "onboarded"):
             if not isinstance(value, bool):
                 errors.append(f"{key} must be boolean")
@@ -1651,6 +1655,7 @@ def update_settings(changes: Any) -> dict:
         if errors:
             return {"ok": False, "errors": errors}
         settings = load_settings()
+        previous_update_channel = _selected_update_channel(settings)
         for key, value in changes.items():
             if key == "defaults":
                 settings.setdefault("defaults", {}).update(value)
@@ -1665,12 +1670,15 @@ def update_settings(changes: Any) -> dict:
         if encoded_size > SETTINGS_CHANGES_MAX_BYTES:
             return {"ok": False, "errors": ["merged settings exceed 64 KiB when encoded"]}
         save_settings(settings)
+        if ("update_channel" in changes and
+                _selected_update_channel(settings) != previous_update_channel):
+            _invalidate_update_check_cache()
         if {"scm_dir", "extras_dir", "python"}.intersection(changes):
             invalidate_manifest_cache()
             _invalidate_script_capability_cache()
         else:
-            # Theme, mode, defaults, onboarding, and launch preferences are
-            # returned through /api/info but cannot change script support.
+            # Theme, mode, update channel, defaults, onboarding, and launch
+            # preferences are returned through /api/info but cannot change script support.
             # Preserve the manifest and capability caches so a mode toggle is
             # a settings write plus a local rerender, not dozens of --help runs.
             with MANIFEST_LOCK:
@@ -1681,9 +1689,11 @@ def update_settings(changes: Any) -> dict:
 # App updates (see updater.py)
 # ============================================================================
 
-# One in-flight release check at a time.  The condition and generation are
-# deliberately coupled: waiters receive the exact result of the check they
-# waited for, and an older worker cannot publish over a newer generation.
+# One in-flight release check at a time. The condition and generation are
+# deliberately coupled: same-channel waiters receive one network result, a
+# channel switch invalidates an in-flight publication, and an older worker
+# cannot overwrite the new channel's state.
+_UPDATE_CHANNELS = frozenset(("stable", "beta"))
 _UPDATE_CHECK_CONDITION = threading.Condition()
 _UPDATE_CHECKING = False
 _UPDATE_CHECK_GENERATION = 0
@@ -1702,26 +1712,36 @@ _UPDATE_QUIESCING = False
 _UPDATE_QUIESCING_JOB = None
 
 
-def _default_update_state() -> dict:
+def _selected_update_channel(settings: Optional[dict] = None) -> str:
+    settings = load_settings() if settings is None else settings
+    return "beta" if settings.get("update_channel") == "beta" else "stable"
+
+
+def _invalidate_update_check_cache() -> None:
+    global _UPDATE_CHECK_GENERATION, _UPDATE_CHECK_RESULT
+    with _UPDATE_CHECK_CONDITION:
+        _UPDATE_CHECK_GENERATION += 1
+        _UPDATE_CHECK_RESULT = None
+        _UPDATE_CHECK_CONDITION.notify_all()
+
+
+def _default_update_state(channel: Optional[str] = None) -> dict:
+    channel = channel if channel in _UPDATE_CHANNELS else _selected_update_channel()
     return {"status": "never", "current": SERVER_VERSION, "checked_at": None,
             "latest": None, "asset": None, "reason": None, "release_url": None,
-            "published": None}
+            "published": None, "channel": channel, "prerelease": None}
 
 
-def current_update_state(raw: dict) -> dict:
-    """The stored state, corrected against the version actually running.
+def current_update_state(raw: dict, channel: Optional[str] = None) -> dict:
+    """Correct stored state against the selected channel and running version.
 
-    A check records "a newer release is waiting" about the version that was
-    running when it looked. An update never rewrites that snapshot: the app
-    relaunches carrying the very state that asked for the install, so straight
-    after a successful update the record still promises exactly the version
-    that is now installed. Readers cannot take that at face value, or the
-    Settings card and the sidebar notice both offer the release the user
-    already has.
-
-    Only the status changes, so the result keeps the exact field set the
-    stored-state validator requires.
+    A channel switch immediately hides a cached result from the other channel.
+    A successful update also leaves behind the snapshot that requested it, so
+    a release equal to the running version is projected as up to date.
     """
+    channel = channel if channel in _UPDATE_CHANNELS else _selected_update_channel()
+    if raw.get("channel") != channel:
+        return _default_update_state(channel)
     if raw.get("status") == "update-available" and not updater.is_newer(raw.get("latest"), SERVER_VERSION):
         state = copy.deepcopy(raw)
         state["status"] = "up-to-date"
@@ -1733,7 +1753,7 @@ def _valid_update_state(st: Any) -> bool:
     if not isinstance(st, dict):
         return False
     fields = {"status", "current", "checked_at", "latest", "asset", "reason",
-              "release_url", "published"}
+              "release_url", "published", "channel", "prerelease"}
     if set(st) != fields or st.get("status") not in {
             "never", "up-to-date", "update-available", "auth-required", "error"}:
         return False
@@ -1748,6 +1768,10 @@ def _valid_update_state(st: Any) -> bool:
                     return False
         if not isinstance(st["current"], str) or not st["current"]:
             return False
+        if st["channel"] not in _UPDATE_CHANNELS or not isinstance(st["channel"], str):
+            return False
+        if st["prerelease"] is not None and not isinstance(st["prerelease"], bool):
+            return False
         if st["checked_at"] is not None and (
                 isinstance(st["checked_at"], bool) or
                 not isinstance(st["checked_at"], (int, float)) or
@@ -1759,6 +1783,13 @@ def _valid_update_state(st: Any) -> bool:
             if not isinstance(latest, str) or len(latest.encode("utf-8")) > 128:
                 return False
             updater._tag(latest, "latest")
+            if (updater.canonical_version(latest) is None or
+                    st["prerelease"] != updater.is_prerelease(latest)):
+                return False
+        elif st["prerelease"] is not None:
+            return False
+        if st["channel"] == "stable" and st["prerelease"]:
+            return False
         asset = st["asset"]
         if asset is not None:
             if not isinstance(asset, dict) or set(asset) != {"id", "tag", "name", "url", "size", "digest"}:
@@ -1835,7 +1866,7 @@ def _own_bundle() -> Optional[str]:
 
 
 def load_update_state() -> dict:
-    """Read only a complete, bounded state document; never repair it in place."""
+    """Read one bounded state document without rewriting it in place."""
     try:
         if UPDATE_STATE_FILE.is_symlink() or not UPDATE_STATE_FILE.is_file():
             return _default_update_state()
@@ -1843,6 +1874,15 @@ def load_update_state() -> dict:
             return _invalid_update_state()
         with open(UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
             st = json.load(f)
+        legacy_fields = {"status", "current", "checked_at", "latest", "asset",
+                         "reason", "release_url", "published"}
+        if isinstance(st, dict) and set(st) == legacy_fields:
+            # v0.8.0 and earlier only queried GitHub's stable-only endpoint.
+            # Project that trusted schema into the stable channel in memory;
+            # the next check publishes the new exact schema atomically.
+            st = copy.deepcopy(st)
+            st["channel"] = "stable"
+            st["prerelease"] = False if st.get("latest") else None
         return st if _valid_update_state(st) else _invalid_update_state()
     except Exception:
         return _invalid_update_state()
@@ -1879,61 +1919,70 @@ def save_update_state(st: dict) -> None:
                 pass
 
 
-def run_update_check() -> dict:
-    """Run one lookup; concurrent callers share one network result."""
+def run_update_check(channel: Optional[str] = None) -> dict:
+    """Run one channel-bound lookup; same-channel callers share its result."""
     global _UPDATE_CHECKING, _UPDATE_CHECK_GENERATION, _UPDATE_CHECK_RESULT
+    channel = channel if channel in _UPDATE_CHANNELS else _selected_update_channel()
     with _UPDATE_CHECK_CONDITION:
-        if _UPDATE_CHECKING:
-            generation = _UPDATE_CHECK_GENERATION
-            while _UPDATE_CHECKING and generation == _UPDATE_CHECK_GENERATION:
-                _UPDATE_CHECK_CONDITION.wait()
-            if _UPDATE_CHECK_RESULT is not None:
-                return copy.deepcopy(_UPDATE_CHECK_RESULT)
+        waited = False
+        while _UPDATE_CHECKING:
+            waited = True
+            _UPDATE_CHECK_CONDITION.wait()
+        if (waited and _UPDATE_CHECK_RESULT is not None and
+                _UPDATE_CHECK_RESULT.get("channel") == channel):
+            return copy.deepcopy(_UPDATE_CHECK_RESULT)
         _UPDATE_CHECKING = True
         generation = _UPDATE_CHECK_GENERATION
 
-    st = _default_update_state()
+    st = _default_update_state(channel)
     try:
         try:
-            rel = updater.latest_release()
+            rel = updater.latest_release(include_prereleases=channel == "beta")
         except updater.AuthRequiredError as e:
             st.update(status="auth-required", reason=str(e), checked_at=time.time())
         except updater.UpdateError as e:
             st.update(status="error", reason=str(e), checked_at=time.time())
         else:
-            if rel.get("tag") and updater.is_newer(rel["tag"], SERVER_VERSION):
+            release_tag = rel.get("tag")
+            if updater.canonical_version(release_tag) is None:
+                raise updater.UpdateError("release lookup returned an invalid version tag")
+            release_prerelease = updater.is_prerelease(release_tag)
+            if rel.get("prerelease", release_prerelease) != release_prerelease:
+                raise updater.UpdateError("release prerelease status changed during the check")
+            if channel == "stable" and release_prerelease:
+                raise updater.UpdateError("the stable channel returned a prerelease")
+            if updater.is_newer(release_tag, SERVER_VERSION):
                 try:
                     asset = updater.pick_asset(rel)
                 except updater.UpdateError as e:
                     st.update(status="error", checked_at=time.time(),
                               reason=f"{rel['tag']} is out, but: {e}")
                 else:
-                    st.update(status="update-available", latest=rel["tag"], asset=asset,
+                    st.update(status="update-available", latest=release_tag, asset=asset,
                               release_url=rel.get("url"), published=rel.get("published"),
-                              checked_at=time.time())
+                              prerelease=release_prerelease, checked_at=time.time())
             else:
-                st.update(status="up-to-date", latest=rel.get("tag") or None,
-                          checked_at=time.time())
+                st.update(status="up-to-date", latest=release_tag,
+                          prerelease=release_prerelease, checked_at=time.time())
     except Exception as exc:
-        st = _default_update_state()
+        st = _default_update_state(channel)
         st.update(status="error", reason=f"release lookup failed: {exc}",
                   checked_at=time.time())
     with _UPDATE_CHECK_CONDITION:
         # Publish only if this worker still owns the generation it started.
-        # Keeping the compare-and-set next to the atomic file replacement also
-        # prevents a future overlapping implementation from clobbering newer
-        # state with a slow, older lookup.
+        # A settings write increments the generation before a new-channel
+        # check, so an older response can never replace that channel's state.
         if generation == _UPDATE_CHECK_GENERATION:
             try:
                 save_update_state(st)
             except Exception as exc:
-                st = _default_update_state()
+                st = _default_update_state(channel)
                 st.update(status="error", reason=f"could not save update state: {exc}",
                           checked_at=time.time())
             _UPDATE_CHECK_GENERATION += 1
             _UPDATE_CHECK_RESULT = copy.deepcopy(st)
         else:
-            st = copy.deepcopy(_UPDATE_CHECK_RESULT or st)
+            st = copy.deepcopy(_UPDATE_CHECK_RESULT or _default_update_state(channel))
         _UPDATE_CHECKING = False
         _UPDATE_CHECK_CONDITION.notify_all()
         return copy.deepcopy(st)
@@ -1979,10 +2028,11 @@ def _update_daemon() -> None:
     while True:
         try:
             reconcile_update_result()
-            st = load_update_state()
+            channel = _selected_update_channel()
+            st = current_update_state(load_update_state(), channel)
             age = None if st.get("checked_at") is None else time.time() - float(st["checked_at"])
             if st.get("status") == "never" or age is None or age > UPDATE_CHECK_INTERVAL:
-                out = run_update_check()
+                out = run_update_check(channel)
                 tag = out.get("latest") or ""
                 _diag(f"[updater] release check: {out.get('status')}" + (f" → {tag}" if tag else ""))
         except Exception as e:
@@ -2010,9 +2060,10 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             _UPDATE_ADMISSION_JOB = None
         if _UPDATE_ADMISSION or _UPDATE_QUIESCING:
             return None, ["an update is already running; try again later"]
-        st = load_update_state()
+        channel = _selected_update_channel()
+        st = current_update_state(load_update_state(), channel)
         if (not _valid_update_state(st) or st.get("status") != "update-available" or
-                st.get("current") != SERVER_VERSION or
+                st.get("channel") != channel or st.get("current") != SERVER_VERSION or
                 not updater.is_newer(st.get("latest"), SERVER_VERSION) or
                 not isinstance(st.get("asset"), dict) or
                 st["asset"].get("tag") != st.get("latest")):
@@ -2065,6 +2116,7 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             "current": SERVER_VERSION,
             "latest": st["latest"],
             "asset": copy.deepcopy(st["asset"]),
+            "channel": channel,
             "bundle": _own_bundle(),
             "work": DATA_DIR / "update",
         }
@@ -3151,7 +3203,8 @@ def _render_release_notes(src: str) -> str:
 
 def release_notes_view(expected_tag: Optional[str] = None) -> dict:
     """Return safe notes for the tag recorded by the completed update check."""
-    st = load_update_state()
+    channel = _selected_update_channel()
+    st = current_update_state(load_update_state(), channel)
     bound_tag = st.get("latest")
     if expected_tag is not None and expected_tag != bound_tag:
         return {"ok": False, "error": "release tag is not the checked release"}
@@ -3169,7 +3222,7 @@ def release_notes_view(expected_tag: Optional[str] = None) -> dict:
     body, url = "", st.get("release_url") or ""
     published, name = st.get("published") or "", bound_tag
     try:
-        rel = updater.latest_release(timeout=15)
+        rel = updater.latest_release(timeout=15, include_prereleases=channel == "beta")
         if rel.get("tag") != bound_tag:
             raise updater.UpdateError("release changed while loading notes")
         body = rel.get("body") or ""
@@ -3226,7 +3279,8 @@ def updates_view() -> dict:
         checking = any(op.get("kind") == "check" and
                        op.get("status") in ("running", "queued")
                        for op in _UPDATE_OPS.values())
-    state = copy.deepcopy(current_update_state(load_update_state()))
+    channel = _selected_update_channel()
+    state = copy.deepcopy(current_update_state(load_update_state(), channel))
     state["checking"] = checking
     return {"current": SERVER_VERSION, "repo": updater.UPDATE_REPO,
             "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
@@ -3236,28 +3290,31 @@ def updates_view() -> dict:
 
 def _update_check_result(force: bool) -> dict:
     """Return the browser-compatible final body for an update check."""
+    channel = _selected_update_channel()
     if os.environ.get("SCM_WORKBENCH_NO_UPDATE_CHECK") == "1":
-        cached = copy.deepcopy(current_update_state(load_update_state()))
+        cached = copy.deepcopy(current_update_state(load_update_state(), channel))
         cached["cached"] = True
         return {"ok": True, "state": cached}
     if not force:
-        st = load_update_state()
+        st = current_update_state(load_update_state(), channel)
         if st.get("status") in ("up-to-date", "update-available") and st.get("checked_at") is not None:
             try:
                 age = time.time() - float(st["checked_at"])
             except Exception:
                 age = None
             if age is not None and age < UPDATE_CHECK_INTERVAL:
-                cached = copy.deepcopy(current_update_state(st))
+                cached = copy.deepcopy(st)
                 cached["cached"] = True
                 return {"ok": True, "state": cached}
-    return {"ok": True, "state": run_update_check()}
+    return {"ok": True, "state": run_update_check(channel)}
 
 
 def _checked_update_tag(tag: str) -> bool:
-    st = load_update_state()
-    return bool(_valid_update_state(st) and st.get("status") in ("up-to-date", "update-available")
-                and st.get("checked_at") is not None and st.get("latest") == tag)
+    channel = _selected_update_channel()
+    st = current_update_state(load_update_state(), channel)
+    return bool(_valid_update_state(st) and st.get("channel") == channel and
+                st.get("status") in ("up-to-date", "update-available") and
+                st.get("checked_at") is not None and st.get("latest") == tag)
 
 
 def _update_notes_result(tag: str) -> dict:
@@ -3697,9 +3754,14 @@ def reconcile_update_result() -> bool:
             job["duration"] = round(max(0.0, now - float(job.get("started", now))), 2)
             job["result_message"] = result["message"]
         if result["success"]:
-            state = _default_update_state()
+            result_prerelease = updater.is_prerelease(result["expected_version"])
+            # A beta result remains structurally valid even if the preference
+            # changed while the helper was replacing the app. Stable-mode
+            # readers hide this beta-bound snapshot immediately.
+            state = _default_update_state("beta" if result_prerelease else None)
             state.update(status="up-to-date", current=SERVER_VERSION,
-                         latest=result["expected_version"], checked_at=now)
+                         latest=result["expected_version"],
+                         prerelease=result_prerelease, checked_at=now)
         else:
             state = _default_update_state()
             state.update(status="error", current=SERVER_VERSION, checked_at=now,

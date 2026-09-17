@@ -47,13 +47,14 @@ jobs:
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
+          python scripts/check_ui_update_security.py
           python scripts/check_ui_fs_delete.py
           python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
-        # The tag (vX.Y.Z) becomes the app's reported version and the
-        # bundle's metadata (Info.plist, exe FileVersion) in one stroke;
+        # The tag (vX.Y.Z or vX.Y.Z-beta.N) becomes the app's reported
+        # version and bundle metadata (Info.plist, exe FileVersion) in one stroke;
         # dispatch/test runs keep the declared [project] version.
         run: python scripts/inject_version.py
       - uses: dtolnay/rust-toolchain@stable
@@ -407,6 +408,7 @@ jobs:
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
+          python scripts/check_ui_update_security.py
           python scripts/check_ui_fs_delete.py
           python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
@@ -605,14 +607,30 @@ jobs:
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
         # the tag push, or from the GitHub UI. This job adds the macOS
         # DMG installer/updater payload and the portable Windows package. If
-        # no release exists for the tag, a bare one
-        # is created as a fallback so the artifacts are never lost.
+        # no release exists for the tag, create one with prerelease status
+        # derived from the SemVer suffix. An existing release must agree so a
+        # beta tag can never leak into the stable updater channel.
         # (--repo on every call: this job has no checkout for gh to infer
         #  the owner/repo from.)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
+          expected_prerelease=false
+          prerelease_args=()
+          version_without_build=${GITHUB_REF_NAME%%+*}
+          if [[ "$version_without_build" == *-* ]]; then
+            expected_prerelease=true
+            prerelease_args+=(--prerelease)
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            actual_prerelease=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)
+            if [[ "$actual_prerelease" != "$expected_prerelease" ]]; then
+              echo "Release prerelease status does not match tag $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag "${prerelease_args[@]}"
+          fi
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip --clobber
       - name: Delete Actions artifacts after release attachment
         env:
