@@ -195,6 +195,12 @@
           "markdownDescription": "Enables the wb_pick_repo_directory command without any pre-configured scope."
         },
         {
+          "description": "Enables the wb_postprocessor_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-postprocessor-import",
+          "markdownDescription": "Enables the wb_postprocessor_import command without any pre-configured scope."
+        },
+        {
           "description": "Enables the wb_restart command without any pre-configured scope.",
           "type": "string",
           "const": "allow-wb-restart",
@@ -229,6 +235,12 @@
           "type": "string",
           "const": "deny-wb-pick-repo-directory",
           "markdownDescription": "Denies the wb_pick_repo_directory command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_postprocessor_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-postprocessor-import",
+          "markdownDescription": "Denies the wb_postprocessor_import command without any pre-configured scope."
         },
         {
           "description": "Denies the wb_restart command without any pre-configured scope.",

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed on 2026-09-16. This document is an implementation plan, not an implemented feature.
+Proposed and implemented on 2026-09-16. This document now serves as the design, trust-boundary, and verification record for the implemented feature. Final packaged-app smoke testing is tracked separately from the implementation status.
 
 The workflow is intentionally Advanced-only. It lets a user save or import a Python image processor, install optional Python packages into Workbench-owned storage, and run the processor against fetched front and double-sided card images before Create PDF.
 
@@ -94,9 +94,8 @@ A bounded list shows saved processors with:
 - name;
 - active revision abbreviation;
 - trusted/untrusted state;
-- dependencies ready, stale, installing, failed, or absent;
-- last successful run;
-- Edit, Duplicate, Delete, and Run actions.
+- dependencies ready or not ready;
+- selection plus Duplicate and Delete actions; the selected item is edited, trusted, installed, or run in the adjacent panels.
 
 Deletion needs confirmation and is refused while that processor revision or environment is in use. Deleting a processor removes its saved source after no active job references it; job history retains only bounded name/hash metadata, not source code.
 
@@ -113,7 +112,7 @@ Fields and actions:
 - Import `.py`;
 - Revert unsaved changes;
 - Trust this revision;
-- Install/Rebuild libraries;
+- Install/Update libraries;
 - Delete processor.
 
 A new processor starts from a small no-op template and explanatory comments. Saving performs structural validation but never imports or executes the script. Navigating away with unsaved edits requires confirmation.
@@ -260,7 +259,7 @@ The UI does not accept an arbitrary pip command. Initially accept only these for
 
 Normalize names and reject duplicate/conflicting requests. Reject URLs, local paths, VCS references, requirement-file includes, editable installs, environment markers, hashes supplied as command syntax, index options, control characters, and every line beginning with `-`. Initial limits are 32 direct requests, 256 UTF-8 bytes per line, and 8 KiB total.
 
-A bare name means "resolve the current compatible release now". After resolution, Workbench stores exact transitive versions and SHA-256 hashes. Rebuild uses that lock; fetching newer compatible releases requires an explicit `Update libraries` action and creates a new untrusted processor/environment tuple.
+A bare name means "resolve the current compatible release now". After resolution, Workbench stores exact transitive versions and SHA-256 hashes. Choosing the explicit `Install / update libraries` action again re-resolves the current compatible wheel set and creates a new untrusted processor/environment tuple if the lock changes.
 
 ### Install pipeline
 
@@ -287,9 +286,9 @@ The package warning remains necessary: a wheel's Python/native code executes whe
 
 Start with explicit, testable limits and tune them with real packages before release:
 
-- 15-minute install timeout, with a hard maximum of 60 minutes;
+- 15-minute install wall-clock timeout and 5-minute idle/progress watchdog;
 - 1 GiB total downloaded wheels per install;
-- 4 GiB unpacked size per environment;
+- 2 GiB unpacked size per environment;
 - 12 GiB aggregate environment cache before explicit or safe LRU cleanup;
 - bounded file count, path depth, component length, and install-report size;
 - bounded on-disk job log and bounded individual output records;
@@ -372,7 +371,7 @@ Requirements:
 - the immutable dependency target inserted only inside the child;
 - no SCM checkout path in argv, cwd, environment, or callback context;
 - wall-clock deadline and idle/progress watchdog;
-- POSIX hard resource limits set by the trusted runner before importing user code, including CPU, address space where effective, file size, open files, and child processes;
+- POSIX hard resource limits set by the trusted runner before importing user code, including CPU, address space where effective, file size, and open files; callback descendants remain in the job's process group and are terminated before validation;
 - a per-job Windows Job Object with kill-on-close plus tested memory/process-count limits, nested safely under the shell's existing worker Job Object;
 - continuous private-run size/free-space monitoring on both platforms.
 

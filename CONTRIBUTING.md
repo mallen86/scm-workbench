@@ -134,6 +134,7 @@ python scripts/check_ui_history.py
 python scripts/check_ui_native_actions.py
 python scripts/check_ui_save.py
 python scripts/check_ui_settings.py
+python scripts/check_ui_postprocessing.py
 python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
 python scripts/check_ui_fs_delete.py

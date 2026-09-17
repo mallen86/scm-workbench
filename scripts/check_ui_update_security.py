@@ -127,9 +127,9 @@ const uStatus = fakeNode("div");
 let state;
 const getUpdates = async () => ({ state, current: state.current });
 const render = new Function(
-  "getUpdates", "checkPending", "uLast", "uBtn", "uStatus", "humanize", "vv", "serverReleaseUrl", "el", "ico", "$$", "doCheck", "startUpdate", "showWhatsNew",
+  "getUpdates", "checkPending", "uLast", "uBtn", "uStatus", "humanize", "vv", "serverReleaseUrl", "el", "ico", "$$", "doCheck", "startUpdate", "showWhatsNew", "updateInstallActive",
   `${source.slice(renderStart, renderEnd)}; return render;`
-)(getUpdates, false, uLast, uBtn, uStatus, humanize, vv, serverReleaseUrl, el, ico, $$, () => {}, () => {}, showWhatsNew);
+)(getUpdates, false, uLast, uBtn, uStatus, humanize, vv, serverReleaseUrl, el, ico, $$, () => {}, () => {}, showWhatsNew, () => false);
 
 // A daily/background check must not hit the pre-declaration TDZ path.
 state = { checking: true, status: "never", checked_at: null, current: "0.1.0" };

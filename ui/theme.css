@@ -1634,6 +1634,7 @@ cursor: pointer;
 .pp-editor label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .pp-editor textarea { font-family: var(--mono); font-size: 12px; line-height: 1.5; tab-size: 4; }
 .pp-editor .pp-source { min-height: 260px; }
+.pp-lock { display: grid; gap: 4px; padding: 9px 11px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); overflow-wrap: anywhere; }
 .pp-editor-actions { flex-wrap: wrap; }
 .pp-editor-actions .rb-note { min-width: 180px; }
 .pp-run-card .form-card { border: 0; padding: 0; box-shadow: none; background: transparent; }

@@ -42,7 +42,7 @@ opencv-python==4.12.0.88
 
 Workbench accepts compatible wheel packages only and installs them into a private, interpreter-specific environment below Workbench data. It never installs them into the app bundle or system Python. URLs, local paths, VCS packages, custom indexes, pip options, and source builds are not accepted.
 
-Save the revision before choosing **Install / rebuild libraries**. Review and confirm the package list, wait for the dependency job to finish, then trust the resulting exact revision/environment.
+Save the revision before choosing **Install / update libraries**. Review and confirm the package list, wait for the dependency job to finish, then trust the resulting exact revision/environment. Choosing this action again resolves the currently compatible wheel set and requires trust again if it changes.
 
 The packaged runtime already includes Pillow, so Pillow-only processors normally need no additional requirement.
 
@@ -97,8 +97,8 @@ Run it as follows:
 3. Open **Image post-processing** and choose **New processor**.
 4. Name it `Scryfall 4x upscale`, paste the code, and leave requirements blank.
 5. Save the revision and review the exact source.
-6. Trust the revision. If Workbench asks to prepare the empty environment, use **Install / rebuild libraries** and then trust it.
-7. Select **Front and double-sided**, then run the processor.
+6. Because requirements are blank, the private environment is already ready; trust the exact revision. If the UI does not show **Libraries ready**, choose **Install / update libraries**, wait for that job, and then trust it.
+7. Select **Front and double-sided**, confirm the reported image count, then run the processor.
 8. Wait for validation and transactional publication to finish.
 9. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
 

@@ -303,8 +303,68 @@ impl WorkerRpc {
             if !valid_errors {
                 return Err("malformed postprocessor import response".to_string());
             }
-        } else if object.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err("malformed postprocessor import response".to_string());
+        } else {
+            let valid_processor = object.len() == 2
+                && object.get("ok").and_then(Value::as_bool) == Some(true)
+                && object
+                    .get("processor")
+                    .and_then(Value::as_object)
+                    .is_some_and(|processor| {
+                        let id_valid =
+                            processor
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| {
+                                    id.len() == 32
+                                        && id
+                                            .chars()
+                                            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+                                });
+                        let revision = processor.get("revision").and_then(Value::as_str);
+                        let revision_valid = revision.is_some_and(|revision| {
+                            revision.len() == 64
+                                && revision
+                                    .chars()
+                                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+                                && processor.get("active_revision").and_then(Value::as_str)
+                                    == Some(revision)
+                        });
+                        let source = processor.get("source").and_then(Value::as_str);
+                        let source_valid = source.is_some_and(|source| {
+                            !source.is_empty()
+                                && source.len() <= 256 * 1024
+                                && processor.get("source_bytes").and_then(Value::as_u64)
+                                    == Some(source.len() as u64)
+                        });
+                        let requirements_valid = processor
+                            .get("requirements")
+                            .and_then(Value::as_array)
+                            .is_some_and(|requirements| {
+                                requirements.len() <= 32
+                                    && requirements.iter().all(|item| {
+                                        item.as_str().is_some_and(|text| text.len() <= 256)
+                                    })
+                                    && requirements
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::len)
+                                        .sum::<usize>()
+                                        <= 8 * 1024
+                            });
+                        processor.len() == 8
+                            && id_valid
+                            && revision_valid
+                            && source_valid
+                            && requirements_valid
+                            && processor
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty() && name.len() <= 128)
+                            && processor.get("trusted").and_then(Value::as_bool) == Some(false)
+                    });
+            if !valid_processor {
+                return Err("malformed postprocessor import response".to_string());
+            }
         }
         Ok(value)
     }
@@ -475,13 +535,44 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
 
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
-        "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
-        | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll"
-        | "fs.delete_images" | "preview" | "pdf_preview.start" | "pdf_preview.poll"
-        | "pdf_preview.cancel" | "template.resolve" | "template.delete" | "file.list"
-        | "file.open" | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set"
-        | "repos.check" | "repos.poll" | "updates.get" | "updates.check" | "updates.notes"
-        | "updates.poll" | "updates.start" => Ok(()),
+        "info"
+        | "manifest"
+        | "settings.get"
+        | "settings.set"
+        | "offset.set"
+        | "offset.delete"
+        | "jobs.list"
+        | "jobs.start"
+        | "jobs.log"
+        | "jobs.kill"
+        | "jobs.poll"
+        | "fs.delete_images"
+        | "preview"
+        | "pdf_preview.start"
+        | "pdf_preview.poll"
+        | "pdf_preview.cancel"
+        | "template.resolve"
+        | "template.delete"
+        | "file.list"
+        | "file.open"
+        | "file.reveal"
+        | "url.open"
+        | "repos.refs"
+        | "repos.source.set"
+        | "repos.check"
+        | "repos.poll"
+        | "updates.get"
+        | "updates.check"
+        | "updates.notes"
+        | "updates.poll"
+        | "updates.start"
+        | "postprocessors.list"
+        | "postprocessors.get"
+        | "postprocessors.save"
+        | "postprocessors.duplicate"
+        | "postprocessors.trust"
+        | "postprocessors.delete"
+        | "postprocessors.status" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -746,6 +837,13 @@ mod tests {
             "updates.notes",
             "updates.poll",
             "updates.start",
+            "postprocessors.list",
+            "postprocessors.get",
+            "postprocessors.save",
+            "postprocessors.duplicate",
+            "postprocessors.trust",
+            "postprocessors.delete",
+            "postprocessors.status",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -793,6 +891,11 @@ mod tests {
             "repos.source.set.extra",
             "repos.source.set/",
             "repos.source.set ",
+            "postprocessors",
+            "postprocessors.import_selected",
+            "postprocessors.list.extra",
+            "postprocessors.get/",
+            "postprocessors.save ",
             "repos.check.extra",
             "repos.check/",
             "repos.check ",

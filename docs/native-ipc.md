@@ -53,8 +53,9 @@ worker flushes after every response. The input frame is limited to 1 MiB and
 the complete response frame is limited to 8 MiB on the Tauri reader (the Python
 worker keeps ordinary responses below 7 MiB). An oversized result becomes a
 bounded error response rather than a truncated JSON frame. `preview` has a
-stricter 512 KiB encoded result budget, `pdf_preview.*` has a 1 MiB result
-budget, and `jobs.poll` has a stricter 6 MiB result budget.
+stricter 512 KiB encoded result budget, `postprocessors.*` has a 512 KiB
+result budget, `pdf_preview.*` has a 1 MiB result budget, and `jobs.poll` has
+a stricter 6 MiB result budget.
 
 A request has this exact shape:
 
@@ -68,13 +69,15 @@ with `{}` parameters and an exact
 `{"ready":true,"process_group":true}` result; the worker emits that result
 only after POSIX process-group containment is established (Windows relies on
 the retained kill-on-close job object). It is not exposed through public
-`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-one methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-eight methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `pdf_preview.start`, `pdf_preview.poll`,
 `pdf_preview.cancel`, `template.resolve`, `template.delete`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
-`updates.poll`, `updates.start`, and the virtual Rust facade
+`updates.poll`, `updates.start`, `postprocessors.list`, `postprocessors.get`,
+`postprocessors.save`, `postprocessors.duplicate`, `postprocessors.trust`,
+`postprocessors.delete`, `postprocessors.status`, and the virtual Rust facade
 `fs.delete_images`. That facade is validated publicly but translates into
 private worker `fs.delete_images_start`/`fs.delete_images_poll` frames; the
 worker rejects a direct public-name frame. The bootstrap read methods take `{}`;
@@ -87,6 +90,13 @@ parameter contracts below.
 | `GET /api/manifest` | `manifest` | `server.get_manifest()` |
 | `GET /api/settings` | `settings.get` | `server.load_settings()` |
 | `POST /api/settings` | `settings.set` | `server.update_settings()` |
+| `GET /api/postprocessors` | `postprocessors.list` | `server.postprocessors_list()` |
+| `GET /api/postprocessors/<id>` | `postprocessors.get` | `server.postprocessor_get()` |
+| `POST /api/postprocessors` | `postprocessors.save` | `server.postprocessor_save()` |
+| `POST /api/postprocessors/<id>/duplicate` | `postprocessors.duplicate` | `server.postprocessor_duplicate()` |
+| `POST /api/postprocessors/<id>/trust` | `postprocessors.trust` | `server.postprocessor_trust()` |
+| `DELETE /api/postprocessors/<id>` | `postprocessors.delete` | `server.postprocessor_delete()` |
+| `GET /api/postprocessors/<id>/status` | `postprocessors.status` | `server.postprocessor_status()` |
 | `POST /api/offset` (global/per-size) | `offset.set` | `server.offset_set()` |
 | `POST /api/offset` (per-size delete) | `offset.delete` | `server.offset_delete()` |
 | `GET /api/jobs` | `jobs.list` | `server.list_jobs()` |

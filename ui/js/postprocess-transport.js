@@ -25,18 +25,25 @@ function jsonOptions(method, body) {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
+async function checked(value) {
+  const result = await value;
+  if (result?.ok === false)
+    throw new Error((result.errors || ["Post-processor operation failed."])[0]);
+  return result;
+}
+
 function idPath(id, suffix = "") {
   return `/api/postprocessors/${encodeURIComponent(id)}${suffix}`;
 }
 
 export function list() {
   const native = nativeCall("postprocessors.list");
-  return native.native ? native.value : httpJson("/api/postprocessors");
+  return checked(native.native ? native.value : httpJson("/api/postprocessors"));
 }
 
 export function get(id) {
   const native = nativeCall("postprocessors.get", { processor_id: id });
-  return native.native ? native.value : httpJson(idPath(id));
+  return checked(native.native ? native.value : httpJson(idPath(id)));
 }
 
 export function save(payload) {
@@ -44,32 +51,36 @@ export function save(payload) {
   const requirements = String(payload?.requirements ?? "");
   if (new TextEncoder().encode(source).length > MAX_SOURCE_BYTES) return Promise.reject(new Error("Processor source is too large."));
   if (new TextEncoder().encode(requirements).length > MAX_REQUIREMENTS_BYTES) return Promise.reject(new Error("Requirements are too large."));
-  const params = { ...payload, source, requirements };
+  const params = {
+    processor_id: payload?.processor_id ?? null,
+    name: String(payload?.name ?? ""), source, requirements,
+    expected_revision: payload?.expected_revision ?? null,
+  };
   const native = nativeCall("postprocessors.save", params);
-  return native.native ? native.value : httpJson("/api/postprocessors", jsonOptions("POST", params));
+  return checked(native.native ? native.value : httpJson("/api/postprocessors", jsonOptions("POST", params)));
 }
 
 export function duplicate(processorId, name, expectedRevision = null) {
   const params = { processor_id: processorId, name, expected_revision: expectedRevision };
   const native = nativeCall("postprocessors.duplicate", params);
-  return native.native ? native.value : httpJson(idPath(processorId, "/duplicate"), jsonOptions("POST", params));
+  return checked(native.native ? native.value : httpJson(idPath(processorId, "/duplicate"), jsonOptions("POST", params)));
 }
 
 export function trust(processorId, revisionHash, environmentFingerprint = null) {
   const params = { processor_id: processorId, revision_hash: revisionHash, environment_fingerprint: environmentFingerprint };
   const native = nativeCall("postprocessors.trust", params);
-  return native.native ? native.value : httpJson(idPath(processorId, "/trust"), jsonOptions("POST", params));
+  return checked(native.native ? native.value : httpJson(idPath(processorId, "/trust"), jsonOptions("POST", params)));
 }
 
 export function remove(processorId, expectedRevision = null) {
   const params = { processor_id: processorId, expected_revision: expectedRevision };
   const native = nativeCall("postprocessors.delete", params);
-  return native.native ? native.value : httpJson(idPath(processorId), jsonOptions("DELETE", params));
+  return checked(native.native ? native.value : httpJson(idPath(processorId), jsonOptions("DELETE", params)));
 }
 
 export function status(processorId) {
   const native = nativeCall("postprocessors.status", { processor_id: processorId });
-  return native.native ? native.value : httpJson(idPath(processorId, "/status"));
+  return checked(native.native ? native.value : httpJson(idPath(processorId, "/status")));
 }
 
 export function canImport() {
@@ -81,9 +92,9 @@ export function canImport() {
 export async function importSource({ saveDraft } = {}) {
   const invoke = getTauriInvoke();
   if (invoke) {
-    return invoke("wb_postprocessor_import", {});
+    return checked(invoke("wb_postprocessor_import", {}));
   }
-  if (typeof document === "undefined" || typeof FileReader !== "function")
+  if (typeof document === "undefined")
     throw new Error("Processor import requires a file picker.");
   const input = document.createElement("input");
   input.type = "file";

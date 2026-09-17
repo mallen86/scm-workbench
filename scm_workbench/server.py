@@ -46,6 +46,7 @@ import copy
 import errno
 import html
 import contextlib
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -75,10 +76,25 @@ _IPC_MODE = False
 _IPC_PROCESS_GROUP_READY = False
 
 # Native job responses and SSE frames share these conservative wire limits.
-# Log files remain complete on disk; only transmitted lines are clipped.
+# Ordinary logs remain complete on disk; trusted-processor logs also have a
+# separate retained-byte cap so arbitrary local code cannot fill the volume.
 JOB_LINE_MAX_BYTES = 64 * 1024
 JOB_LOG_MAX_LINES = 4096
 SSE_QUEUE_SIZE = 128
+POSTPROCESS_RUN_TIMEOUT_SECONDS = 60 * 60
+POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS = 15 * 60
+POSTPROCESS_INSTALL_TIMEOUT_SECONDS = 15 * 60
+POSTPROCESS_INSTALL_IDLE_TIMEOUT_SECONDS = 5 * 60
+POSTPROCESS_ENV_MAX_FILES = 20_000
+POSTPROCESS_ENV_MAX_DEPTH = 64
+POSTPROCESS_ENV_MAX_PATH_BYTES = 4096
+POSTPROCESS_ENV_MAX_COMPONENT_BYTES = 255
+POSTPROCESS_ENV_MAX_BYTES = 2 * 1024 * 1024 * 1024
+POSTPROCESS_ENV_CACHE_MAX_BYTES = 12 * 1024 * 1024 * 1024
+POSTPROCESS_FREE_SPACE_RESERVE_BYTES = postprocessing.FREE_SPACE_RESERVE_BYTES
+POSTPROCESS_REPORT_MAX_BYTES = 2 * 1024 * 1024
+POSTPROCESS_LINE_MAX_BYTES = 4096
+POSTPROCESS_LOG_MAX_BYTES = 16 * 1024 * 1024
 
 
 class _WakeQueue(queue.Queue):
@@ -1477,7 +1493,8 @@ def build_manifest(info: dict) -> dict:
         "advanced_only": True, "cwd": "scm",
         "description": "Apply one trusted processor to fetched front and double-sided images.",
         "groups": [{"title": "Image scope", "options": [
-            _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default=""),
+            _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default="", hidden=True),
+            _opt("revision_hash", "Revision", "text", default="", hidden=True),
             _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"]], default="both"),
         ]}],
     }
@@ -3555,17 +3572,58 @@ def _record_fetch_image_warning(job: dict, text: str) -> None:
 def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
     """Append a complete line and wake subscribers without ever blocking."""
     text = str(line)
+    wire_text, _clipped = _line_wire(text)
     if log_f is not None:
-        log_f.write(text + "\n")
-        log_f.flush()
+        if str(job.get("kind") or "").startswith("postprocess"):
+            line_bytes = len((wire_text + "\n").encode("utf-8", "replace"))
+            used = int(job.get("log_bytes", 0) or 0)
+            if used + line_bytes <= POSTPROCESS_LOG_MAX_BYTES:
+                log_f.write(wire_text + "\n")
+                log_f.flush()
+                job["log_bytes"] = used + line_bytes
+            elif not job.get("log_limit_reported"):
+                marker = "(further processor output omitted: log limit reached)"
+                log_f.write(marker + "\n")
+                log_f.flush()
+                job["log_limit_reported"] = True
+        else:
+            log_f.write(text + "\n")
+            log_f.flush()
     with JOBS_LOCK:
         _record_fetch_image_warning(job, text)
+        if text.startswith("WB_POSTPROCESS_PROGRESS "):
+            try:
+                progress = json.loads(text.removeprefix("WB_POSTPROCESS_PROGRESS "))
+                raw_index = progress.get("index") if isinstance(progress, dict) else None
+                raw_total = progress.get("total") if isinstance(progress, dict) else None
+                expected_total = int(job.get("image_total") or 0)
+                previous = int((job.get("progress") or {}).get("current") or 0)
+                entries = job.get("postprocess_entries") or []
+                expected_entry = entries[raw_index - 1] if (
+                    isinstance(raw_index, int) and not isinstance(raw_index, bool) and
+                    1 <= raw_index <= len(entries)
+                ) else None
+                if (isinstance(raw_total, int) and not isinstance(raw_total, bool) and
+                        set(progress) == {"index", "total", "name", "role"} and
+                        expected_total > 0 and raw_total == expected_total and
+                        raw_index == previous + 1 and raw_index <= raw_total and
+                        expected_entry is not None and
+                        progress.get("name") == expected_entry.get("name") and
+                        progress.get("role") == expected_entry.get("role")):
+                    job["progress"] = {"current": raw_index, "total": raw_total,
+                                       "label": progress["name"][:255]}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         lines = job.setdefault("log_lines", [])
         first = int(job.get("first_seq", 0) or 0)
         seq = first + len(lines)
-        lines.append(text)
+        lines.append(wire_text)
+        if len(lines) > JOB_LOG_MAX_LINES:
+            overflow = len(lines) - JOB_LOG_MAX_LINES
+            del lines[:overflow]
+            job["first_seq"] = first + overflow
         subscribers = list(job.get("subs", []))
-    _notify_subscribers(job, subscribers, ("line", seq, text))
+    _notify_subscribers(job, subscribers, ("line", seq, wire_text))
     return seq
 
 
@@ -3604,7 +3662,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3780,6 +3838,8 @@ def list_jobs() -> dict:
     for j in live:
         row = {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
                "status": j["status"], "exit_code": j.get("exit_code"), "cmd": j["cmd"]}
+        if j.get("postprocess_outcome"):
+            row["postprocess_outcome"] = j["postprocess_outcome"]
         if j.get("progress"):
             row["progress"] = j["progress"]
         # The job history page rebuilds a job's settings from the exact args it
@@ -4681,6 +4741,34 @@ def _utf8_env() -> dict:
     return env
 
 
+def _postprocess_env(work_dir: Path, *, installing: bool = False) -> dict:
+    """Minimal environment for trusted processor and dependency children.
+
+    This is defense in depth, not a sandbox: approved Python still runs with
+    the user's account permissions.  Avoid handing it unrelated application
+    secrets through inherited environment variables.
+    """
+    keep = ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL")
+    env = {name: os.environ[name] for name in keep if name in os.environ}
+    private_home = work_dir / "home"
+    private_tmp = work_dir / "tmp"
+    private_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    postprocessing._private(private_home, directory=True)
+    postprocessing._private(private_tmp, directory=True)
+    env.update({
+        "HOME": str(private_home), "USERPROFILE": str(private_home),
+        "TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp),
+        "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1",
+        "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    if installing:
+        env.update({"PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                    "PIP_NO_INPUT": "1", "PIP_REQUIRE_VIRTUALENV": "0",
+                    "PIP_KEYRING_PROVIDER": "disabled"})
+    return env
+
+
 def _proc_kwargs() -> dict:
     if os.name == "nt":
         CREATE_NO_WINDOW = 0x08000000
@@ -4736,7 +4824,7 @@ def job_python(settings: dict, warnings: Optional[List[str]] = None) -> Path:
     if configured:
         candidate = Path(str(configured))
         candidate = candidate if candidate.is_absolute() else Path(__file__).resolve().parent / candidate
-        if candidate.exists():
+        if candidate.is_file():
             python = candidate
         elif warnings is not None:
             warnings.append(f"Configured python not found ({candidate}); using {python.name}.")
@@ -5153,21 +5241,23 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             status = store.status(processor_id, interpreter=python)
             meta = status["environment"]
             trusted = status["processor"].get("trusted")
-            if item.get("revision") != item.get("active_revision"):
+            if (item.get("revision") != item.get("active_revision") or
+                    str(args.get("revision_hash") or "") != item.get("revision")):
                 errors.append("processor revision is stale")
             if not trusted:
                 errors.append("processor revision is not trusted for its dependency environment")
             if not meta.get("ready"):
                 errors.append("processor libraries are not ready")
-            records = postprocessing.discover_images(cwd, scope)
-            if not records:
+            image_count = postprocessing.count_images(cwd, scope)
+            env["SCM_WORKBENCH_IMAGE_COUNT"] = str(image_count)
+            if not image_count:
                 errors.append("no recognized images were found in the selected scope")
         except postprocessing.PostProcessingError as exc:
             errors.append(str(exc))
-            records = ()
+            image_count = 0
         except Exception as exc:
             errors.append(f"could not prepare image processor: {exc}")
-            records = ()
+            image_count = 0
         if errors:
             return argv, cwd, env, title, warnings, errors
         # The actual private manifest is created in start_job, after the job
@@ -5186,10 +5276,14 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             item = store.get(str(args.get("processor_id") or ""), include_source=False)
             if str(args.get("revision_hash") or "") != item.get("revision"):
                 errors.append("processor revision is stale")
-            postprocessing.normalize_requirements(args.get("requirements") or "")
+            submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
+            if tuple(item.get("requirements") or ()) != submitted:
+                errors.append("processor requirements are stale")
         except Exception as exc:
             errors.append(str(exc))
-        argv += [str(python), "-m", "pip", "install", "--isolated", "--no-input", "--only-binary=:all:", "--target", "<private-environment>"]
+            item = {"requirements": []}
+        argv = [str(python), "-I", "-u", str(_HERE / "postprocess_installer.py"),
+                "--manifest", "<private-installer-manifest>"]
     elif kind.startswith("fetch:"):
         if not require_repo("SCM", scm):
             return argv, None, env, title, warnings, errors
@@ -6013,18 +6107,23 @@ def build_preview(kind: str, raw_args: dict) -> dict:
             # to run
             tip = "" if str(settings.get("ui_mode", "advanced")) == "simple" else " or point the form at a folder that has images."
             warnings.append(f"No images in the front directory ({front}). Use the fetch card art workflow first{tip or '.'}")
-    return {
+    result = {
         # Always show the command that was built: validation problems are
         # already visible in the notes below, and a (partial or
         # default-substituted) command is the most useful thing on screen.
         "cmd": _fmt_argv(argv),
-        "cwd": str(cwd) if cwd else None,
+        "cwd": ("<managed SCM checkout>" if kind == "postprocess_images" and cwd else
+                str(cwd) if cwd else None),
         "env": {k: v for k, v in env.items()
-                if k.startswith("SCM_") or k in ("PYTHONIOENCODING", "PYTHONUTF8")},
+                if (k.startswith("SCM_") and k != "SCM_WORKBENCH_IMAGE_COUNT") or
+                k in ("PYTHONIOENCODING", "PYTHONUTF8")},
         "warnings": warnings + norm_warns,
         "errors": errors + [error for error in errs if error not in errors],
         "no_front_images": no_front,
     }
+    if kind == "postprocess_images" and env.get("SCM_WORKBENCH_IMAGE_COUNT", "").isdigit():
+        result["image_count"] = int(env["SCM_WORKBENCH_IMAGE_COUNT"])
+    return result
 
 
 # A visual PDF preview is a separate, bounded operation. It runs the unchanged
@@ -7134,6 +7233,540 @@ def _offset_save_intended(args: dict, prior: Optional[dict]) -> Optional[dict]:
     return _offset_row(values)
 
 
+def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[str], Path, dict]:
+    """Build one private, wheel-only dependency installation staging area."""
+    processor_id = str(args.get("processor_id") or "")
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        item = store.get(processor_id, include_source=False)
+        if str(args.get("revision_hash") or "") != item.get("revision"):
+            raise postprocessing.ConflictError("processor revision is stale")
+        submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
+        requirements = tuple(item.get("requirements") or ())
+        if submitted != requirements:
+            raise postprocessing.ConflictError("processor requirements are stale")
+        metadata = store.environment_metadata(requirements, interpreter=python)
+    environments = store.root / "environments"
+    if shutil.disk_usage(environments).free < POSTPROCESS_FREE_SPACE_RESERVE_BYTES:
+        raise postprocessing.ValidationError("not enough free space to install processor libraries safely")
+    if _declared_dependency_cache_bytes(environments) >= POSTPROCESS_ENV_CACHE_MAX_BYTES:
+        raise postprocessing.ValidationError("processor dependency cache has reached its 12 GiB limit")
+    stage = environments / f".install-{job['id']}"
+    if os.path.lexists(stage):
+        raise postprocessing.IntegrityError("dependency staging path already exists")
+    stage.mkdir(mode=0o700)
+    target = stage / "site-packages"
+    report = stage / "resolve-report.json"
+    lock_file = stage / "requirements.lock"
+    wheelhouse = stage / "wheels"
+    if requirements:
+        installer_manifest = stage / "installer-manifest.json"
+        installer_payload = {
+            "stage": str(stage), "target": str(target),
+            "requirements": list(requirements), "resolve_report": str(report),
+            "lock_file": str(lock_file), "wheelhouse": str(wheelhouse),
+        }
+        with installer_manifest.open("x", encoding="utf-8") as stream:
+            postprocessing._private(installer_manifest)
+            json.dump(installer_payload, stream, separators=(",", ":"))
+            stream.flush(); os.fsync(stream.fileno())
+        argv = [str(python), "-I", "-u", str(_HERE / "postprocess_installer.py"),
+                "--manifest", str(installer_manifest)]
+    else:
+        target.mkdir(mode=0o700)
+        argv = [str(python), "-I", "-X", "utf8", "-c",
+                "print('No third-party libraries are required.')"]
+    job.update({
+        "dependency_stage": str(stage),
+        "dependency_target": str(target),
+        "dependency_report": str(report),
+        "dependency_lock": str(lock_file),
+        "dependency_environment": metadata["path"] if not requirements else None,
+        "dependency_fingerprint": metadata["fingerprint"] if not requirements else None,
+        "dependency_requirements": list(requirements),
+        "dependency_processor_id": processor_id,
+        "dependency_revision": item["revision"],
+        "dependency_python": str(python),
+    })
+    return argv, stage, _postprocess_env(stage, installing=True)
+
+
+def _validate_dependency_tree(root: Path) -> Tuple[int, int, str]:
+    """Reject links/special files and hash one bounded installed tree."""
+    count = total = scanned = 0
+    digest = hashlib.sha256()
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        remaining = POSTPROCESS_ENV_MAX_FILES - scanned
+        if remaining < 0:
+            raise postprocessing.ValidationError("dependency environment exceeds its storage limit")
+        children = postprocessing._bounded_children(current, remaining, "dependency environment")
+        scanned += len(children)
+        directories = []
+        files = []
+        for path in children:
+            try:
+                relative = path.relative_to(root)
+                relative_parts = relative.parts
+                if (len(relative_parts) > POSTPROCESS_ENV_MAX_DEPTH or
+                        len(relative.as_posix().encode("utf-8")) > POSTPROCESS_ENV_MAX_PATH_BYTES or
+                        any(not part or len(part.encode("utf-8")) > POSTPROCESS_ENV_MAX_COMPONENT_BYTES or
+                            any(unicodedata.category(character).startswith("C") for character in part)
+                            for part in relative_parts)):
+                    raise postprocessing.IntegrityError("dependency environment path exceeds its limit")
+            except (UnicodeEncodeError, ValueError) as exc:
+                raise postprocessing.IntegrityError("dependency environment path is invalid") from exc
+            observed = os.lstat(path)
+            if _is_reparse_or_symlink(observed):
+                raise postprocessing.IntegrityError("dependency environment contains a link")
+            if stat.S_ISDIR(observed.st_mode): directories.append(path)
+            elif stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1: files.append((path, observed))
+            else: raise postprocessing.IntegrityError("dependency environment contains a special file")
+        pending.extend(reversed(sorted(directories, key=lambda path: path.name)))
+        for path, observed in sorted(files, key=lambda value: value[0].name):
+            if os.name == "nt":
+                fd, opened = _open_windows_regular_file(path)
+            else:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                             getattr(os, "O_CLOEXEC", 0))
+                opened = os.fstat(fd)
+            identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                        getattr(opened, "st_nlink", 1))
+            try:
+                if os.name != "nt" and identity != (
+                        observed.st_dev, observed.st_ino, observed.st_size, observed.st_mtime_ns,
+                        getattr(observed, "st_nlink", 1)):
+                    raise postprocessing.IntegrityError("dependency file changed while opening")
+                count += 1; total += opened.st_size
+                if total > POSTPROCESS_ENV_MAX_BYTES:
+                    raise postprocessing.ValidationError("dependency environment exceeds its storage limit")
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                digest.update(len(relative).to_bytes(4, "big")); digest.update(relative)
+                digest.update(opened.st_size.to_bytes(8, "big"))
+                while True:
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk: break
+                    digest.update(chunk)
+                after_read = os.fstat(fd)
+            finally:
+                os.close(fd)
+            try:
+                after = os.stat(path, follow_symlinks=False)
+            except OSError as exc:
+                raise postprocessing.IntegrityError("dependency file changed while reading") from exc
+            if ((after_read.st_dev, after_read.st_ino, after_read.st_size, after_read.st_mtime_ns,
+                 getattr(after_read, "st_nlink", 1)) != identity or
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                     getattr(after, "st_nlink", 1)) != identity):
+                raise postprocessing.IntegrityError("dependency file changed while reading")
+    return count, total, digest.hexdigest()
+
+
+def _verify_dependency_environment(environment: dict) -> None:
+    requirements = environment.get("requirements") or []
+    if not requirements:
+        return
+    root = Path(str(environment.get("path") or "")) / "site-packages"
+    postprocessing._no_links(root)
+    if not root.is_dir():
+        raise postprocessing.IntegrityError("processor dependency directory is missing")
+    files, size, tree_digest = _validate_dependency_tree(root)
+    if (files != environment.get("files") or size != environment.get("bytes") or
+            tree_digest != environment.get("tree_digest")):
+        raise postprocessing.IntegrityError("processor dependency environment changed after installation")
+
+
+def _declared_dependency_cache_bytes(root: Path, *, exclude: Path | None = None) -> int:
+    """Conservatively bound immutable ready environments before publication."""
+    total = 0
+    entries = postprocessing._bounded_children(
+        root, postprocessing.PROCESSOR_MAX_COUNT * postprocessing.REVISIONS_MAX_COUNT * 2,
+        "processor environments",
+    )
+    excluded = exclude.resolve(strict=False) if exclude is not None else None
+    for child in entries:
+        if not re.fullmatch(r"[0-9a-f]{64}", child.name) or child.resolve(strict=False) == excluded:
+            continue
+        if child.is_symlink() or not child.is_dir():
+            total += POSTPROCESS_ENV_MAX_BYTES
+        else:
+            marker = postprocessing._read_json(child / "ready.json", "environment marker", missing=None)
+            declared = marker.get("bytes") if isinstance(marker, dict) else None
+            total += declared if isinstance(declared, int) and 0 <= declared <= POSTPROCESS_ENV_MAX_BYTES else POSTPROCESS_ENV_MAX_BYTES
+        if total > POSTPROCESS_ENV_CACHE_MAX_BYTES:
+            break
+    return total
+
+
+def _finalize_dependency_job(job: dict) -> None:
+    stage = Path(job["dependency_stage"])
+    target = Path(job["dependency_target"])
+    report_path = Path(job["dependency_report"])
+    requirements = list(job.get("dependency_requirements") or [])
+    lock_hash = ""
+    if requirements:
+        report_stat = os.lstat(report_path)
+        if (_is_reparse_or_symlink(report_stat) or not stat.S_ISREG(report_stat.st_mode) or
+                report_stat.st_size > POSTPROCESS_REPORT_MAX_BYTES):
+            raise postprocessing.ValidationError("pip resolution report is invalid or too large")
+        report = postprocessing._read_json(
+            report_path, "pip resolution report", max_bytes=POSTPROCESS_REPORT_MAX_BYTES,
+        )
+        wheels = postprocessing.validate_wheel_report(report)
+        lock_path = Path(job["dependency_lock"])
+        lock_stat = os.lstat(lock_path)
+        if (_is_reparse_or_symlink(lock_stat) or not stat.S_ISREG(lock_stat.st_mode) or
+                lock_stat.st_size > 128 * 1024):
+            raise postprocessing.ValidationError("dependency lock is invalid")
+        expected_lock = postprocessing.wheel_lock_text(wheels).encode("utf-8")
+        expected_lock_hash = hashlib.sha256(expected_lock).hexdigest()
+        if (lock_stat.st_size != len(expected_lock) or
+                postprocessing._digest_file(lock_path) != expected_lock_hash):
+            raise postprocessing.IntegrityError("dependency lock does not match the resolver report")
+        lock_hash = expected_lock_hash
+        with _POSTPROCESS_REGISTRY_LOCK:
+            store = _postprocessor_store()
+            environment = store.environment_metadata(
+                requirements, lock_hash, interpreter=Path(job["dependency_python"]),
+            )
+        final = Path(environment["path"])
+        fingerprint = environment["fingerprint"]
+    else:
+        wheels = ()
+        final = Path(job["dependency_environment"])
+        fingerprint = str(job["dependency_fingerprint"])
+    files, size, tree_digest = _validate_dependency_tree(target)
+    # Transient resolver state and wheel archives are not part of the reusable
+    # import target.  Publication contains only site-packages and ready.json.
+    for transient in ("home", "tmp", "wheels"):
+        transient_path = stage / transient
+        try:
+            shutil.rmtree(transient_path)
+        except FileNotFoundError:
+            pass
+        if os.path.lexists(transient_path):
+            raise postprocessing.IntegrityError("dependency staging cleanup was incomplete")
+    for transient in ("installer-manifest.json", "resolve-report.json",
+                      "requirements.lock", "install-report.json"):
+        transient_path = stage / transient
+        try:
+            transient_path.unlink()
+        except FileNotFoundError:
+            pass
+        if os.path.lexists(transient_path):
+            raise postprocessing.IntegrityError("dependency staging cleanup was incomplete")
+    postprocessing._atomic_json(stage / "ready.json", {
+        "version": 1, "fingerprint": fingerprint,
+        "requirements": requirements, "lock_hash": lock_hash,
+        "wheels": list(wheels), "files": files, "bytes": size,
+        "tree_digest": tree_digest, "created": time.time(),
+    })
+    stage_children = postprocessing._bounded_children(stage, 2, "dependency publication")
+    if {child.name for child in stage_children} != {"site-packages", "ready.json"}:
+        raise postprocessing.IntegrityError("dependency staging contains unexpected files")
+    backup = final.parent / f".old-{job['id']}"
+    if os.path.lexists(backup):
+        raise postprocessing.IntegrityError("dependency backup path already exists")
+    moved_old = False
+    published = False
+    # Hold admission while inspecting and publishing the immutable fingerprint
+    # path. Otherwise a processor can acquire its lease after the running-state
+    # snapshot and begin importing an environment that this job then replaces.
+    with _IMAGE_JOB_STATE_LOCK:
+        processor_running = bool(_POSTPROCESS_USERS)
+        with _POSTPROCESS_REGISTRY_LOCK:
+            store = _postprocessor_store()
+            current = store.get(job["dependency_processor_id"], include_source=False)
+            if current["revision"] != job["dependency_revision"]:
+                raise postprocessing.ConflictError("processor revision changed during installation")
+            existing_ready = False
+            if os.path.lexists(final):
+                existing = store.environment_metadata(requirements, lock_hash, interpreter=Path(job["dependency_python"]))
+                if existing.get("ready"):
+                    _verify_dependency_environment(existing)
+                    existing_ready = True
+            if existing_ready:
+                # Fingerprint environments are immutable and shareable. Never
+                # replace an identical ready tree that a live runner may import.
+                shutil.rmtree(stage, ignore_errors=True)
+                if requirements:
+                    store.record_environment(
+                        job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                        interpreter=Path(job["dependency_python"]),
+                    )
+                else:
+                    store.invalidate_trust(job["dependency_processor_id"],
+                                           expected_revision=job["dependency_revision"])
+                invalidate_manifest_cache()
+                return
+            if processor_running and os.path.lexists(final):
+                raise postprocessing.ConflictError("the dependency environment is in use by a processor run")
+            cache_bytes = _declared_dependency_cache_bytes(final.parent, exclude=final)
+            if cache_bytes + size > POSTPROCESS_ENV_CACHE_MAX_BYTES:
+                raise postprocessing.ValidationError("processor dependency cache exceeds its 12 GiB limit")
+            try:
+                if os.path.lexists(final):
+                    if final.is_symlink() or not final.is_dir():
+                        raise postprocessing.IntegrityError("dependency environment is not a regular directory")
+                    os.replace(final, backup)
+                    moved_old = True
+                os.replace(stage, final)
+                published = True
+                if requirements:
+                    store.record_environment(
+                        job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                        interpreter=Path(job["dependency_python"]),
+                    )
+                else:
+                    store.invalidate_trust(job["dependency_processor_id"],
+                                           expected_revision=job["dependency_revision"])
+                invalidate_manifest_cache()
+            except Exception:
+                if published and os.path.lexists(final):
+                    shutil.rmtree(final, ignore_errors=True)
+                if moved_old and os.path.lexists(backup):
+                    os.replace(backup, final)
+                raise
+    if moved_old:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Path, dict]:
+    """Snapshot one approved processor and stage its bounded image batch."""
+    python = job_python(load_settings())
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        item = store.get(args["processor_id"])
+        status_now = store.status(item["id"], interpreter=python)
+        if str(args.get("revision_hash") or "") != item.get("revision"):
+            raise postprocessing.ConflictError("processor revision is stale")
+        if not status_now["processor"].get("trusted"):
+            raise postprocessing.ConflictError("processor revision is no longer trusted")
+        if not status_now["environment"].get("ready"):
+            raise postprocessing.ConflictError("processor libraries are not ready")
+        _verify_dependency_environment(status_now["environment"])
+        job["postprocess_environment"] = dict(status_now["environment"])
+    scm_cwd = Path(job["scm_path"])
+    cancelled = job["cancel_event"].is_set
+    records = postprocessing.discover_images(scm_cwd, args.get("scope", "both"), cancelled=cancelled)
+    if not records:
+        raise postprocessing.ValidationError("no recognized images were found in the selected scope")
+    run_dir = Path(job["postprocess_run"])
+    required_free = sum(record.size for record in records) + POSTPROCESS_FREE_SPACE_RESERVE_BYTES
+    if shutil.disk_usage(run_dir.parent).free < required_free:
+        raise postprocessing.ValidationError("not enough free space to stage the image batch safely")
+    entries = postprocessing.stage_images(records, run_dir, cancelled=cancelled)
+    source_path = run_dir / "processor.py"
+    with source_path.open("x", encoding="utf-8") as source_stream:
+        postprocessing._private(source_path)
+        source_stream.write(item["source"])
+        source_stream.flush(); os.fsync(source_stream.fileno())
+    private_manifest = Path(job["postprocess_manifest"])
+    environment = status_now["environment"]
+    site_packages = ""
+    if item.get("requirements"):
+        site_path = Path(environment["path"]) / "site-packages"
+        postprocessing._no_links(site_path)
+        if not site_path.is_dir():
+            raise postprocessing.IntegrityError("processor dependency directory is missing")
+        site_packages = str(site_path)
+    runner_entries = [{key: entry[key] for key in
+                       ("role", "relative_path", "name", "staged", "index", "total")}
+                      for entry in entries]
+    payload = json.dumps({
+        "source_path": str(source_path), "run_root": str(run_dir),
+        "entries": runner_entries, "environment": site_packages,
+        "environment_root": str(store.root / "environments"),
+        "revision": item["revision"], "requirements": item["requirements"],
+        "contract": store.contract,
+        "limits": {"cpu_seconds": 900, "address_space": 4 * 1024 * 1024 * 1024,
+                   "file_size": 512 * 1024 * 1024, "open_files": 128,
+                   "processes": 8},
+    }, separators=(",", ":"))
+    with private_manifest.open("x", encoding="utf-8") as manifest_stream:
+        postprocessing._private(private_manifest)
+        manifest_stream.write(payload)
+        manifest_stream.flush(); os.fsync(manifest_stream.fileno())
+    job["postprocess_entries"] = list(entries)
+    job["image_total"] = len(entries)
+    argv = [str(python), "-I", "-u", str(_HERE / "postprocess_runner.py"),
+            "--manifest", str(private_manifest)]
+    return argv, run_dir, _postprocess_env(run_dir)
+
+
+def _postprocess_stage_monitor(job: dict, proc: subprocess.Popen) -> None:
+    stop = job["stage_monitor_stop"]
+    root = Path(job.get("postprocess_run") or job["dependency_stage"])
+    max_bytes = int(job.get("stage_max_bytes") or postprocessing.RUN_MAX_BYTES)
+    max_entries = int(job.get("stage_max_entries") or postprocessing.SCAN_MAX_ENTRIES)
+    while not stop.wait(0.25):
+        total = count = 0
+        exceeded = False
+        limit_reason = "file, size, or link"
+        try:
+            if shutil.disk_usage(root).free < POSTPROCESS_FREE_SPACE_RESERVE_BYTES:
+                exceeded = True
+                limit_reason = "free-space reserve"
+            pending = [root]
+            while pending and not exceeded:
+                current = pending.pop()
+                with os.scandir(current) as scan:
+                    for entry in scan:
+                        observed = entry.stat(follow_symlinks=False)
+                        count += 1
+                        if count > max_entries or _is_reparse_or_symlink(observed):
+                            exceeded = True; break
+                        if stat.S_ISDIR(observed.st_mode):
+                            pending.append(Path(entry.path))
+                        elif stat.S_ISREG(observed.st_mode):
+                            total += observed.st_size
+                            if total > max_bytes:
+                                exceeded = True; break
+                        else:
+                            exceeded = True; break
+        except OSError:
+            exceeded = True
+        if not exceeded:
+            continue
+        proc_lock = job.setdefault("proc_lock", threading.Lock())
+        with proc_lock:
+            if job.get("proc_reaped"):
+                return
+            observed_exit = False
+            if os.name != "nt":
+                observed_exit = _posix_process_exited_without_reaping(proc)
+                if observed_exit is None:
+                    return
+            elif proc.poll() is not None:
+                job["proc_reaped"] = True
+                return
+            with JOBS_LOCK:
+                if job.get("status") != "running" or job.get("proc") is not proc:
+                    return
+                job["resource_exceeded"] = True
+                job["stage_limit_reason"] = limit_reason
+            try:
+                _kill_process_group(proc)
+            except Exception:
+                pass
+            if observed_exit is True:
+                try: proc.wait(timeout=1)
+                except Exception: pass
+                job["proc_reaped"] = True
+        return
+
+
+def _job_timeout(job: dict, proc: subprocess.Popen) -> None:
+    proc_lock = job.setdefault("proc_lock", threading.Lock())
+    with proc_lock:
+        if job.get("proc_reaped"):
+            return
+        if os.name != "nt":
+            observed_exit = _posix_process_exited_without_reaping(proc)
+            if observed_exit is True:
+                try: _kill_process_group(proc)
+                except Exception: pass
+                try: proc.wait(timeout=1)
+                except Exception: pass
+                job["proc_reaped"] = True
+                return
+            if observed_exit is None:
+                return
+        elif proc.poll() is not None:
+            job["proc_reaped"] = True
+            return
+        with JOBS_LOCK:
+            if job.get("status") != "running" or job.get("proc") is not proc:
+                return
+            job["timed_out"] = True
+        try:
+            _kill_process_group(proc)
+        except Exception:
+            pass
+
+
+def _postprocess_deadline(job: dict) -> None:
+    with JOBS_LOCK:
+        if job.get("status") != "running":
+            return
+        proc = job.get("proc")
+        if proc is None and job.get("preparing"):
+            job["timed_out"] = True
+            job["cancel_event"].set()
+            return
+    if proc is not None:
+        _job_timeout(job, proc)
+
+
+def _finish_unspawned_postprocess(job: dict, log_f, exc: Exception) -> None:
+    timed_out = bool(job.get("timed_out"))
+    killed = bool(job.get("kill_requested")) or isinstance(exc, postprocessing.CancelledError)
+    status = "fail" if timed_out or not killed else "killed"
+    if timed_out:
+        message = "job exceeded its wall-clock time limit during image staging"
+    elif killed:
+        message = "post-processing cancelled before the processor started; originals were not changed"
+    else:
+        message = f"post-processing failed before execution; originals were not changed: {exc}"
+    try: _append_job_line(job, message, log_f=log_f)
+    except Exception: pass
+    now = time.time()
+    with JOBS_LOCK:
+        job.update({"status": status, "exit_code": 130 if killed else 1,
+                    "ended": now, "duration": max(0.0, now - job.get("started", now)),
+                    "preparing": False, "postprocess_outcome": "unchanged"})
+        subscribers = list(job.get("subs", []))
+    try: log_f.close()
+    except Exception: pass
+    timer = job.get("timeout_timer")
+    if timer is not None: timer.cancel()
+    _notify_subscribers(job, subscribers, ("done", status, job["exit_code"]), terminal=True)
+    if job.get("postprocess_lease"):
+        job["postprocess_lease"] = False
+        try: _release_postprocess_lease()
+        except RuntimeError: pass
+    if job.get("postprocess_run"):
+        shutil.rmtree(job["postprocess_run"], ignore_errors=True)
+    _persist_jobs()
+
+
+def _prepare_and_spawn_image_job(job: dict, args: dict, log_f) -> None:
+    proc = None
+    try:
+        _append_job_line(job, "(post-processing: discovering and staging images)", log_f=log_f)
+        argv, cwd, env = _prepare_image_postprocess_job(job, args)
+        if job["cancel_event"].is_set():
+            raise postprocessing.CancelledError("post-processing was cancelled")
+        with JOBS_LOCK:
+            if _UPDATE_QUIESCING:
+                raise RuntimeError("the app update is being handed off; try again after it restarts")
+            if job.get("kill_requested") or job["cancel_event"].is_set():
+                raise postprocessing.CancelledError("post-processing was cancelled")
+            proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    **_proc_kwargs())
+            job["proc"] = proc
+            job["preparing"] = False
+            pump_thread = threading.Thread(
+                target=_pump, args=(job, proc, log_f), daemon=True,
+                name=f"job-pump-{job['id']}",
+            )
+            job["pump_thread"] = pump_thread
+            job["stage_monitor_stop"] = threading.Event()
+            stage_monitor = threading.Thread(
+                target=_postprocess_stage_monitor, args=(job, proc), daemon=True,
+                name=f"postprocess-quota-{job['id']}",
+            )
+            job["stage_monitor_thread"] = stage_monitor
+        stage_monitor.start()
+        pump_thread.start()
+    except Exception as exc:
+        if proc is not None:
+            _terminate_and_reap(proc, job.get("proc_lock"))
+        _finish_unspawned_postprocess(job, log_f, exc)
+
+
 def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     with JOBS_LOCK:
         if _UPDATE_QUIESCING:
@@ -7248,8 +7881,37 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         "pump_thread": None,
         "scm_path": str(cwd) if cwd else None,
         "offset_lease": offset_lease,
+        "image_lease": False,
         "postprocess_lease": False,
+        "package_install_lease": False,
+        "cancel_event": threading.Event(),
+        "preparing": False,
     }
+    if kind == "postprocess_images":
+        job["postprocess_outcome"] = "pending"
+    try:
+        if kind == "postprocess_images":
+            run_dir = (DATA_DIR / "postprocessing" / "runs" / job_id).resolve(strict=False)
+            private_manifest = run_dir / "manifest.json"
+            argv = [str(job_python(load_settings())), "-I", "-u",
+                    str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
+            display_argv = [*argv[:-1], "<private-manifest>"]
+            job.update({"cmd": _fmt_argv(display_argv), "postprocess_run": str(run_dir),
+                        "postprocess_manifest": str(private_manifest),
+                        "display_cwd": "<private post-processing run>",
+                        "deadline_seconds": POSTPROCESS_RUN_TIMEOUT_SECONDS})
+        elif kind == "postprocess_dependencies":
+            argv, cwd, env = _prepare_dependency_job(job, args, job_python(load_settings()))
+            display_argv = [*argv[:-1], "<private-installer-manifest>"] if "--manifest" in argv else argv
+            job.update({"cmd": _fmt_argv(display_argv),
+                        "display_cwd": "<private dependency staging>",
+                        "deadline_seconds": POSTPROCESS_INSTALL_TIMEOUT_SECONDS})
+    except Exception as exc:
+        if offset_lease:
+            OFFSET_LEASE.release()
+        if job.get("dependency_stage"):
+            shutil.rmtree(job["dependency_stage"], ignore_errors=True)
+        return None, [f"could not prepare post-processing job: {exc}"]
     if kind.startswith("fetch:"):
         # What the second stage will walk, for the progress bar. Absent (0)
         # whenever the decklist does not declare it, so the bar falls back to
@@ -7290,8 +7952,10 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
     except Exception as exc:
         if offset_lease:
             OFFSET_LEASE.release()
+        if job.get("dependency_stage"):
+            shutil.rmtree(job["dependency_stage"], ignore_errors=True)
         return None, _offset_errors([f"could not create job log: {exc}"])
-    header = [f"$ {job['cmd']}", f"(cwd: {cwd})",
+    header = [f"$ {job['cmd']}", f"(cwd: {job.get('display_cwd', cwd)})",
               f"(started {time.strftime('%Y-%m-%d %H:%M:%S')})"]
     if staged:
         header.append(f"(offset: staged “{staged['size']}” — x {staged['x']}, y {staged['y']}, {staged['angle']}° → data/offset_data.json)")
@@ -7304,6 +7968,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
         except Exception: pass
         if offset_lease:
             OFFSET_LEASE.release()
+        if job.get("dependency_stage"):
+            shutil.rmtree(job["dependency_stage"], ignore_errors=True)
         return None, _offset_errors([f"could not write job log: {exc}"])
     postprocess_lease = False
     if kind == "postprocess_images":
@@ -7315,51 +7981,67 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
             except OSError: pass
             return None, ["another image operation is using the SCM checkout; try again when it finishes"]
         postprocess_lease = True
-    elif not _acquire_image_job_lease():
-        # A real job takes precedence over an automatically generated visual
-        # preview. Stop that disposable work and retry the lease once; an
-        # active deletion or another real job still returns the ordinary busy
-        # result without waiting indefinitely.
-        stop_all_pdf_previews(timeout=1.0)
-        acquired_after_preview = _acquire_image_job_lease()
-        if not acquired_after_preview:
-            try:
-                log_f.close()
-            except Exception:
-                pass
-            if offset_lease:
-                OFFSET_LEASE.release()
-            try:
-                Path(job["log_file"]).unlink()
-            except OSError:
-                pass
-            return None, ["another image operation is using the SCM checkout; try again when it finishes"]
-    job["image_lease"] = True
+        job["postprocess_lease"] = True
+    elif kind == "postprocess_dependencies":
+        if not _acquire_package_install_lease():
+            try: log_f.close()
+            except Exception: pass
+            shutil.rmtree(job.get("dependency_stage", ""), ignore_errors=True)
+            try: Path(job["log_file"]).unlink()
+            except OSError: pass
+            return None, ["another processor library installation is already running"]
+        job["package_install_lease"] = True
+    else:
+        if not _acquire_image_job_lease():
+            # A real job takes precedence over an automatically generated visual
+            # preview. Stop that disposable work and retry the lease once; an
+            # active deletion or another real job still returns the ordinary busy
+            # result without waiting indefinitely.
+            stop_all_pdf_previews(timeout=1.0)
+            acquired_after_preview = _acquire_image_job_lease()
+            if not acquired_after_preview:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
+                if offset_lease:
+                    OFFSET_LEASE.release()
+                try:
+                    Path(job["log_file"]).unlink()
+                except OSError:
+                    pass
+                return None, ["another image operation is using the SCM checkout; try again when it finishes"]
+        job["image_lease"] = True
 
     proc = None
     try:
+        # Image discovery and stable-copy staging may cover a large deck. Run
+        # that preparation in the registered job thread so cancellation,
+        # shutdown, and the wall-clock deadline apply before user code starts.
+        if kind == "postprocess_images":
+            with JOBS_LOCK:
+                if _UPDATE_QUIESCING:
+                    raise RuntimeError("the app update is being handed off; try again after it restarts")
+                job["preparing"] = True
+                prep_thread = threading.Thread(
+                    target=_prepare_and_spawn_image_job, args=(job, args, log_f), daemon=True,
+                    name=f"postprocess-prepare-{job_id}",
+                )
+                job["preparation_thread"] = prep_thread
+                timeout_timer = threading.Timer(float(job["deadline_seconds"]),
+                                                _postprocess_deadline, args=(job,))
+                timeout_timer.daemon = True
+                job["timeout_timer"] = timeout_timer
+                JOBS[job_id] = job
+            prep_thread.start()
+            timeout_timer.start()
+            return job, []
         # Keep the final admission check and publication under the same lock as
-        # update handoff.  An update can therefore never quiesce after this
-        # job passed the check but before it entered JOBS.
+        # update handoff. An update can therefore never quiesce after this job
+        # passed the check but before it entered JOBS.
         with JOBS_LOCK:
             if _UPDATE_QUIESCING:
                 raise RuntimeError("the app update is being handed off; try again after it restarts")
-            if kind == "postprocess_images":
-                store = _postprocessor_store()
-                item = store.get(args["processor_id"])
-                records = postprocessing.discover_images(cwd, args.get("scope", "both"))
-                run_dir = DATA_DIR / "postprocessing" / "runs" / job_id
-                entries = postprocessing.stage_images(records, run_dir)
-                source_path = store._processor(item["id"]) / "revisions" / f"{item['revision']}.py"
-                private_manifest = run_dir / "manifest.json"
-                private_manifest.write_text(json.dumps({"source_path": str(source_path), "run_root": str(run_dir), "entries": list(entries)}, separators=(",", ":")), encoding="utf-8")
-                job["postprocess_entries"] = list(entries)
-                job["postprocess_run"] = str(run_dir)
-                job["image_total"] = len(entries)
-                argv = [str(job_python(load_settings())), "-I", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
-                job["cmd"] = _fmt_argv(argv)
-                env = _utf8_env()
-                cwd = run_dir
             # Child scripts must never inherit the worker's JSON-lines stdin.
             # Some upstream paths prompt interactively (for example, multiple
             # card backs); EOF makes that job fail instead of consuming native
@@ -7373,8 +8055,29 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 name=f"job-pump-{job_id}",
             )
             job["pump_thread"] = pump_thread
+            timeout_timer = None
+            if job.get("deadline_seconds"):
+                timeout_timer = threading.Timer(float(job["deadline_seconds"]),
+                                                _job_timeout, args=(job, proc))
+                timeout_timer.daemon = True
+                job["timeout_timer"] = timeout_timer
+            stage_monitor = None
+            if kind in ("postprocess_images", "postprocess_dependencies"):
+                job["stage_monitor_stop"] = threading.Event()
+                if kind == "postprocess_dependencies":
+                    job["stage_max_bytes"] = POSTPROCESS_ENV_MAX_BYTES + 2 * 1024 * 1024 * 1024
+                    job["stage_max_entries"] = POSTPROCESS_ENV_MAX_FILES + 512
+                stage_monitor = threading.Thread(
+                    target=_postprocess_stage_monitor, args=(job, proc), daemon=True,
+                    name=f"postprocess-quota-{job_id}",
+                )
+                job["stage_monitor_thread"] = stage_monitor
             JOBS[job_id] = job
+        if stage_monitor is not None:
+            stage_monitor.start()
         pump_thread.start()
+        if timeout_timer is not None:
+            timeout_timer.start()
     except Exception as e:
         if isinstance(e, RuntimeError) and str(e).startswith("the app update is being handed off"):
             try:
@@ -7392,6 +8095,20 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                     _release_image_job_lease()
                 except RuntimeError:
                     pass
+            if job.get("postprocess_lease"):
+                job["postprocess_lease"] = False
+                try:
+                    _release_postprocess_lease()
+                except RuntimeError:
+                    pass
+            if job.get("package_install_lease"):
+                job["package_install_lease"] = False
+                try:
+                    _release_package_install_lease()
+                except RuntimeError:
+                    pass
+            if job.get("dependency_stage"):
+                shutil.rmtree(job["dependency_stage"], ignore_errors=True)
             try:
                 Path(job["log_file"]).unlink()
             except OSError:
@@ -7422,6 +8139,17 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 pass
         if postprocess_lease:
             _release_postprocess_lease(); postprocess_lease = False
+            job["postprocess_lease"] = False
+        if job.get("package_install_lease"):
+            job["package_install_lease"] = False
+            try:
+                _release_package_install_lease()
+            except RuntimeError:
+                pass
+        if job.get("dependency_stage"):
+            shutil.rmtree(job["dependency_stage"], ignore_errors=True)
+        if job.get("postprocess_run"):
+            shutil.rmtree(job["postprocess_run"], ignore_errors=True)
         with JOBS_LOCK:
             JOBS[job_id] = job
     return job, []
@@ -7508,42 +8236,209 @@ def _wait_job_process(job: dict, proc: subprocess.Popen) -> int:
         time.sleep(0.02)
 
 
+def _bounded_process_lines(stream, *, max_bytes: int = JOB_LINE_MAX_BYTES):
+    """Drain a byte stream while bounding even a line that never terminates."""
+    current = bytearray()
+    clipped = False
+    read = getattr(stream, "read1", stream.read)
+    while True:
+        chunk = read(8192)
+        if not chunk:
+            break
+        for value in chunk:
+            if value == 10:  # newline
+                if current.endswith(b"\r"):
+                    current.pop()
+                text = current.decode("utf-8", "replace")
+                if clipped:
+                    text += "… [line truncated]"
+                yield text
+                current.clear()
+                clipped = False
+            elif len(current) < max_bytes:
+                current.append(value)
+            else:
+                clipped = True
+    if current or clipped:
+        text = current.decode("utf-8", "replace")
+        if clipped:
+            text += "… [line truncated]"
+        yield text
+
+
+def _posix_process_exited_without_reaping(proc: subprocess.Popen) -> Optional[bool]:
+    """Observe a child exit while retaining its PID/process-group identity.
+
+    ``None`` means another waiter already consumed that identity, so callers
+    must not signal the numeric PID/PGID.
+    """
+    if os.name == "nt" or not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
+        return None
+    try:
+        observed = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except (ChildProcessError, OSError):
+        return None
+    return observed is not None
+
+
+def _drain_postprocess_process(job: dict, proc: subprocess.Popen, log_f) -> int:
+    """Drain output while also noticing a leader that leaves descendants alive."""
+    output: queue.Queue = queue.Queue(maxsize=128)
+    sentinel = object()
+    read_errors = []
+
+    def read_output() -> None:
+        try:
+            for line in _bounded_process_lines(proc.stdout, max_bytes=POSTPROCESS_LINE_MAX_BYTES):
+                output.put(line)
+        except Exception as exc:
+            read_errors.append(exc)
+        finally:
+            output.put(sentinel)
+
+    reader = threading.Thread(target=read_output, daemon=True,
+                              name=f"postprocess-output-{job['id']}")
+    reader.start()
+    rc = None
+    tree_stopped = False
+    output_closed = False
+    last_activity = time.monotonic()
+    idle_limit = (POSTPROCESS_INSTALL_IDLE_TIMEOUT_SECONDS
+                  if job.get("kind") == "postprocess_dependencies"
+                  else POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS)
+    while True:
+        if rc is None:
+            with job.setdefault("proc_lock", threading.Lock()):
+                observed_exit = (_posix_process_exited_without_reaping(proc)
+                                 if os.name != "nt" else False)
+                if observed_exit is True:
+                    # Kill the process group while the exited leader remains
+                    # unreaped, so its PID/PGID cannot be reused for an
+                    # unrelated process between observation and signalling.
+                    _kill_process_group(proc)
+                    tree_stopped = True
+                    rc = proc.wait()
+                    job["proc_reaped"] = True
+                elif os.name != "nt" and observed_exit is False:
+                    # Do not call Popen.poll here: it could reap an exit that
+                    # races the waitid observation and release the PGID before
+                    # descendant cleanup.
+                    rc = None
+                else:
+                    rc = proc.poll()
+                    if os.name != "nt" and observed_exit is None and rc is not None:
+                        # Identity was already consumed elsewhere. Never send
+                        # a broad signal to a potentially reused numeric PGID.
+                        tree_stopped = True
+                if rc is None and time.monotonic() - last_activity >= idle_limit:
+                    job["timed_out"] = True
+                    job["idle_timed_out"] = True
+                    _kill_process_group(proc)
+                elif rc is not None:
+                    job["proc_reaped"] = True
+        if output_closed and rc is not None:
+            break
+        try:
+            line = output.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if line is sentinel:
+            output_closed = True
+            continue
+        last_activity = time.monotonic()
+        _append_job_line(job, line, log_f=log_f)
+    if rc is None:
+        rc = _wait_job_process(job, proc)
+    if os.name != "nt" and not tree_stopped:
+        with job.setdefault("proc_lock", threading.Lock()):
+            _kill_process_group(proc)
+    reader.join(timeout=0.5)
+    if read_errors:
+        raise read_errors[0]
+    return int(rc)
+
+
 def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
     rc = 1
     status = "fail"
     try:
-        for line in iter(proc.stdout.readline, b""):
-            s = line.decode("utf-8", "replace").rstrip("\r\n")
-            _append_job_line(job, s, log_f=log_f)
-        rc = _wait_job_process(job, proc)
+        if str(job.get("kind") or "").startswith("postprocess"):
+            rc = _drain_postprocess_process(job, proc, log_f)
+        else:
+            output_lines = (line.decode("utf-8", "replace").rstrip("\r\n")
+                            for line in iter(proc.stdout.readline, b""))
+            for line in output_lines:
+                _append_job_line(job, line, log_f=log_f)
+            rc = _wait_job_process(job, proc)
         with JOBS_LOCK:
             kill_requested = bool(job.get("kill_requested"))
+            timed_out = bool(job.get("timed_out"))
+            resource_exceeded = bool(job.get("resource_exceeded"))
             pump_lines = list(job.get("log_lines") or [])
-        if kill_requested:
+        if resource_exceeded:
+            status = "fail"
+            reason = str(job.get("stage_limit_reason") or "file, size, or link")
+            _append_job_line(job, f"processor staging exceeded its {reason} limit", log_f=log_f)
+        elif timed_out:
+            status = "fail"
+            timeout_kind = "idle/progress" if job.get("idle_timed_out") else "wall-clock"
+            _append_job_line(job, f"job exceeded its {timeout_kind} time limit", log_f=log_f)
+        elif kill_requested:
             status = "killed"
         elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in pump_lines):
             status = "fail"
         elif rc == 0:
             status = "ok"
 
-        if job.get("kind") == "postprocess_images" and rc == 0 and not kill_requested:
+        if job.get("kind") == "postprocess_images" and status != "ok":
+            job["postprocess_outcome"] = "unchanged"
+
+        if job.get("kind") == "postprocess_images" and status == "ok":
             try:
                 entries = job.get("postprocess_entries") or []
+                progress = job.get("progress") or {}
+                if (progress.get("current") != len(entries) or
+                        progress.get("total") != len(entries)):
+                    raise postprocessing.IntegrityError("processor runner did not complete every callback")
+                _verify_dependency_environment(job.get("postprocess_environment") or {})
                 postprocessing.validate_staged_results(entries, run_dir=job["postprocess_run"])
                 replacements = []
                 expected = {}
+                expected_digests = {}
                 for entry in entries:
                     source = Path(entry["source"]); staged = Path(entry["staged"])
                     if postprocessing._digest_file(staged) != entry["digest"]:
                         replacements.append((source, staged))
                         if entry.get("identity"): expected[str(source)] = entry["identity"]
+                        expected_digests[str(source)] = entry["digest"]
                 if replacements:
                     tx = postprocessing.PublicationTransaction(Path(job["postprocess_run"]).parent.parent / "transactions", job["id"])
-                    tx.publish(replacements, expected=expected)
+                    tx.publish(replacements, expected=expected, expected_digests=expected_digests)
+                    job["postprocess_outcome"] = "committed"
+                else:
+                    job["postprocess_outcome"] = "unchanged"
                 _append_job_line(job, "(post-processing: validated and committed)", log_f=log_f)
             except Exception as exc:
+                if isinstance(exc, postprocessing.TransactionError) and exc.committed:
+                    status = "ok"
+                    job["postprocess_outcome"] = "committed"
+                    _append_job_line(job, f"post-processing committed every image; transaction cleanup was recovered or deferred safely: {exc}", log_f=log_f)
+                else:
+                    status = "fail"
+                    rollback_safe = not isinstance(exc, postprocessing.TransactionError) or exc.rollback_safe
+                    job["postprocess_outcome"] = "unchanged" if rollback_safe else "needs_attention"
+                    message = ("originals were not changed" if rollback_safe else
+                               "rollback could not be verified; inspect the image folders before continuing")
+                    _append_job_line(job, f"post-processing failed; {message}: {exc}", log_f=log_f)
+
+        if job.get("kind") == "postprocess_dependencies" and status == "ok":
+            try:
+                _finalize_dependency_job(job)
+                status = "ok"
+                _append_job_line(job, "(processor libraries: validated and installed; trust approval was reset)", log_f=log_f)
+            except Exception as exc:
                 status = "fail"
-                _append_job_line(job, f"post-processing failed; originals were not changed: {exc}", log_f=log_f)
+                _append_job_line(job, f"processor library installation was not published: {exc}", log_f=log_f)
 
         # SCM writes its shared file before rendering.  A nonzero render exit
         # therefore does not discard a valid -s result; only malformed data is
@@ -7602,6 +8497,8 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         except Exception:
             pass
         with JOBS_LOCK:
+            if job.get("kind") == "postprocess_images" and job.get("postprocess_outcome") == "pending":
+                job["postprocess_outcome"] = "unchanged"
             job["status"] = "fail"
             job["exit_code"] = rc
             job["ended"] = time.time()
@@ -7609,6 +8506,20 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             job.pop("artifact_snapshots", None)
         status = "fail"
     finally:
+        timer = job.get("timeout_timer")
+        if timer is not None:
+            timer.cancel()
+        monitor_stop = job.get("stage_monitor_stop")
+        if monitor_stop is not None:
+            monitor_stop.set()
+        monitor = job.get("stage_monitor_thread")
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=0.5)
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:
+            pass
         try:
             log_f.close()
         except Exception:
@@ -7634,24 +8545,49 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             job["postprocess_lease"] = False
             try: _release_postprocess_lease()
             except RuntimeError: pass
+        if job.get("package_install_lease"):
+            job["package_install_lease"] = False
+            try: _release_package_install_lease()
+            except RuntimeError: pass
         if job.get("postprocess_run"):
             shutil.rmtree(job["postprocess_run"], ignore_errors=True)
+        if job.get("dependency_stage"):
+            shutil.rmtree(job["dependency_stage"], ignore_errors=True)
         _persist_jobs()
 
 
 def kill_job(job_id: str) -> bool:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if not job or job.get("status") != "running" or job.get("proc") is None:
+        if not job or job.get("status") != "running":
+            return False
+        if job.get("proc") is None and job.get("preparing"):
+            job["kill_requested"] = True
+            job["cancel_event"].set()
+            return True
+        if job.get("proc") is None:
             return False
         proc = job["proc"]
         proc_lock = job.setdefault("proc_lock", threading.Lock())
 
-    # The pump uses this same lock for its only poll/reap operation. Therefore
-    # a PID/PGID cannot become reusable between this liveness check and the
-    # exact managed-tree signal below.
+    # The pump uses this same lock for its only poll/reap operation. On POSIX,
+    # waitid keeps an exited leader unreaped until descendant cleanup, so a
+    # numeric PID/PGID cannot be reused before the managed-tree signal.
     with proc_lock:
-        if job.get("proc_reaped") or proc.poll() is not None:
+        if job.get("proc_reaped"):
+            return False
+        if os.name != "nt":
+            observed_exit = _posix_process_exited_without_reaping(proc)
+            if observed_exit is True:
+                try: _kill_process_group(proc)
+                except Exception: pass
+                try: proc.wait(timeout=1)
+                except Exception: pass
+                job["proc_reaped"] = True
+                return False
+            if observed_exit is None:
+                return False
+        elif proc.poll() is not None:
             job["proc_reaped"] = True
             return False
         with JOBS_LOCK:
@@ -7687,6 +8623,15 @@ def stop_all_jobs(timeout: float = 2.0) -> None:
             kill_job(job.get("id", ""))
 
     deadline = time.monotonic() + max(0.0, timeout)
+    for job in active:
+        preparation = job.get("preparation_thread")
+        if (preparation is None or preparation is threading.current_thread() or
+                not hasattr(preparation, "join")):
+            continue
+        try:
+            preparation.join(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
     for job in active:
         proc = job.get("proc")
         if proc is None or not hasattr(proc, "wait"):
@@ -7965,6 +8910,7 @@ _IMAGE_JOB_USERS = 0
 _IMAGE_PREVIEW_USERS = 0
 _REPO_MUTATION_USERS = 0
 _POSTPROCESS_USERS = 0
+_PACKAGE_INSTALL_USERS = 0
 
 
 def _acquire_image_job_lease() -> bool:
@@ -7975,6 +8921,23 @@ def _acquire_image_job_lease() -> bool:
             return False
         _IMAGE_JOB_USERS += 1
         return True
+
+
+def _acquire_package_install_lease() -> bool:
+    global _PACKAGE_INSTALL_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if _PACKAGE_INSTALL_USERS:
+            return False
+        _PACKAGE_INSTALL_USERS = 1
+        return True
+
+
+def _release_package_install_lease() -> None:
+    global _PACKAGE_INSTALL_USERS
+    with _IMAGE_JOB_STATE_LOCK:
+        if not _PACKAGE_INSTALL_USERS:
+            raise RuntimeError("package-install lease is not held")
+        _PACKAGE_INSTALL_USERS = 0
 
 
 def _acquire_postprocess_lease() -> bool:
@@ -9720,11 +10683,14 @@ def delete_template(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, in
 
 POSTPROCESS_SOURCE_MAX_BYTES = postprocessing.SOURCE_MAX_BYTES
 POSTPROCESS_RESPONSE_MAX_BYTES = 512 * 1024
+_POSTPROCESS_REGISTRY_LOCK = threading.RLock()
 
 
 def _postprocessor_store() -> postprocessing.ProcessorStore:
     scm, _ = effective_dirs(load_settings())
-    return postprocessing.ProcessorStore(DATA_DIR, scm)
+    store = postprocessing.ProcessorStore(DATA_DIR, scm)
+    store.cleanup()
+    return store
 
 
 def _postprocessor_error(exc: Exception) -> dict:
@@ -9732,70 +10698,99 @@ def _postprocessor_error(exc: Exception) -> dict:
 
 
 def postprocessors_list() -> dict:
-    store = _postprocessor_store()
-    rows = []
-    for item in store.list():
-        try:
-            rows.append({**item, **store.status(item["id"])["processor"]})
-        except postprocessing.PostProcessingError:
-            rows.append(item)
-    return {"processors": rows}
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        python = job_python(load_settings())
+        rows = []
+        summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes",
+                        "environment_fingerprint", "environment_ready"}
+        for item in store.list():
+            try:
+                item = {**item, **store.status(item["id"], interpreter=python)["processor"]}
+            except postprocessing.PostProcessingError:
+                pass
+            rows.append({key: value for key, value in item.items() if key in summary_keys})
+        return {"ok": True, "processors": rows}
 
 
 def postprocessor_get(processor_id: str) -> dict:
-    store = _postprocessor_store()
-    item = store.get(processor_id)
-    status = store.status(processor_id)
-    return {**item, "environment": status["environment"], "environment_fingerprint": status["environment"]["fingerprint"]}
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        item = store.get(processor_id)
+        status = store.status(processor_id, interpreter=job_python(load_settings()))
+        return {**item, **status["processor"], "environment": status["environment"]}
 
 
 def postprocessor_save(params: dict) -> dict:
     if str(load_settings().get("ui_mode", "advanced")) == "simple":
         return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
     allowed = {"processor_id", "name", "source", "requirements", "expected_revision"}
-    if set(params) - allowed or not isinstance(params.get("name"), str) or not isinstance(params.get("source"), str):
-        return _postprocessor_error(postprocessing.ValidationError("save requires name and source"))
+    if (set(params) != allowed or not isinstance(params.get("name"), str) or
+            not isinstance(params.get("source"), str) or not isinstance(params.get("requirements"), str) or
+            (params.get("processor_id") is not None and not isinstance(params.get("processor_id"), str)) or
+            (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str))):
+        return _postprocessor_error(postprocessing.ValidationError("save requires exactly processor_id, name, source, requirements, and expected_revision"))
     if len(params["source"].encode("utf-8")) > POSTPROCESS_SOURCE_MAX_BYTES:
         return _postprocessor_error(postprocessing.ValidationError("source is too large"))
-    store = _postprocessor_store()
-    item = store.save(params["name"], params["source"], params.get("requirements", ""), processor_id=params.get("processor_id"), expected_revision=params.get("expected_revision"))
-    invalidate_manifest_cache()
-    return {"ok": True, "processor": item, **item}
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        item = store.save(params["name"], params["source"], params.get("requirements", ""), processor_id=params.get("processor_id"), expected_revision=params.get("expected_revision"))
+        invalidate_manifest_cache()
+    return {"ok": True, "processor": item}
 
 
 def postprocessor_duplicate(processor_id: str, params: dict) -> dict:
     if str(load_settings().get("ui_mode", "advanced")) == "simple":
         return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
     allowed = {"processor_id", "name", "expected_revision"}
-    if set(params) - allowed or params.get("processor_id") != processor_id or not isinstance(params.get("name"), str):
-        return _postprocessor_error(postprocessing.ValidationError("duplicate requires processor_id and name"))
-    item = _postprocessor_store().duplicate(processor_id, name=params["name"], expected_revision=params.get("expected_revision"))
-    invalidate_manifest_cache()
-    return {"ok": True, "processor": item, **item}
+    if (set(params) != allowed or params.get("processor_id") != processor_id or
+            not isinstance(params.get("name"), str) or
+            (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str))):
+        return _postprocessor_error(postprocessing.ValidationError("duplicate requires exactly processor_id, name, and expected_revision"))
+    with _POSTPROCESS_REGISTRY_LOCK:
+        item = _postprocessor_store().duplicate(processor_id, name=params["name"], expected_revision=params.get("expected_revision"))
+        invalidate_manifest_cache()
+    return {"ok": True, "processor": item}
 
 
 def postprocessor_trust(processor_id: str, params: dict) -> dict:
     if str(load_settings().get("ui_mode", "advanced")) == "simple":
         return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
-    if set(params) != {"processor_id", "revision_hash", "environment_fingerprint"} or params.get("processor_id") != processor_id:
+    if (set(params) != {"processor_id", "revision_hash", "environment_fingerprint"} or
+            params.get("processor_id") != processor_id or not isinstance(params.get("revision_hash"), str) or
+            (params.get("environment_fingerprint") is not None and not isinstance(params.get("environment_fingerprint"), str))):
         return _postprocessor_error(postprocessing.ValidationError("trust requires processor_id, revision_hash, and environment_fingerprint"))
-    item = _postprocessor_store().trust(processor_id, params["revision_hash"], params.get("environment_fingerprint"))
-    invalidate_manifest_cache()
-    return {"ok": True, "processor": item, **item}
+    with _POSTPROCESS_REGISTRY_LOCK:
+        store = _postprocessor_store()
+        python = job_python(load_settings())
+        current = store.status(processor_id, interpreter=python)
+        _verify_dependency_environment(current["environment"])
+        item = store.trust(
+            processor_id, params["revision_hash"], params.get("environment_fingerprint"),
+            interpreter=python,
+        )
+        invalidate_manifest_cache()
+    return {"ok": True, "processor": item}
 
 
 def postprocessor_delete(processor_id: str, params: dict) -> dict:
     if str(load_settings().get("ui_mode", "advanced")) == "simple":
         return _postprocessor_error(postprocessing.ValidationError("post-processing mutations require Advanced mode"))
-    if set(params) != {"processor_id", "expected_revision"} or params.get("processor_id") != processor_id:
+    if (set(params) != {"processor_id", "expected_revision"} or params.get("processor_id") != processor_id or
+            (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str))):
         return _postprocessor_error(postprocessing.ValidationError("delete requires processor_id and expected_revision"))
-    _postprocessor_store().delete(processor_id, expected_revision=params.get("expected_revision"))
-    invalidate_manifest_cache()
+    with _IMAGE_JOB_STATE_LOCK:
+        if _POSTPROCESS_USERS or _PACKAGE_INSTALL_USERS:
+            return _postprocessor_error(postprocessing.ConflictError("a processor run or library installation is still using the registry"))
+    with _POSTPROCESS_REGISTRY_LOCK:
+        _postprocessor_store().delete(processor_id, expected_revision=params.get("expected_revision"))
+        invalidate_manifest_cache()
     return {"ok": True, "processor_id": processor_id}
 
 
 def postprocessor_status(processor_id: str) -> dict:
-    return _postprocessor_store().status(processor_id)
+    with _POSTPROCESS_REGISTRY_LOCK:
+        return _postprocessor_store().status(processor_id, interpreter=job_python(load_settings()))
 
 
 def postprocessor_import_selected(source_path: str) -> dict:
@@ -9804,9 +10799,10 @@ def postprocessor_import_selected(source_path: str) -> dict:
     try:
         if len(source_path.encode("utf-8")) > ACTION_PATH_MAX_BYTES or has_forbidden_action_controls(source_path):
             raise postprocessing.ValidationError("selected processor path is invalid")
-        item = _postprocessor_store().import_selected(source_path)
-        invalidate_manifest_cache()
-        return {"ok": True, "processor": item, **item}
+        with _POSTPROCESS_REGISTRY_LOCK:
+            item = _postprocessor_store().import_selected(source_path)
+            invalidate_manifest_cache()
+        return {"ok": True, "processor": item}
     except Exception as exc:
         return _postprocessor_error(exc)
 
@@ -9833,8 +10829,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj: Any, code: int = 200):
         self._send(code, json.dumps(obj, default=str).encode("utf-8"))
 
-    def _body(self, *, strict: bool = False):
-        n = int(self.headers.get("Content-Length") or 0)
+    def _body(self, *, strict: bool = False, max_bytes: Optional[int] = None):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return None if strict else {}
+        if n < 0 or (max_bytes is not None and n > max_bytes):
+            self.close_connection = True
+            return None if strict else {}
         if not n:
             return None if strict else {}
         try:
@@ -9962,14 +10964,14 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         try:
             if path == "/api/postprocessors":
-                body = self._body(strict=True)
-                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+                body = self._body(strict=True, max_bytes=POSTPROCESS_SOURCE_MAX_BYTES + postprocessing.REQUIREMENTS_MAX_BYTES + 16 * 1024)
+                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)
                 try: return self._json(postprocessor_save(body), 200)
                 except Exception as exc: return self._json(_postprocessor_error(exc), 400)
             m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})/(duplicate|trust)", path)
             if m:
-                body = self._body(strict=True)
-                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+                body = self._body(strict=True, max_bytes=16 * 1024)
+                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)
                 try:
                     result = postprocessor_duplicate(m.group(1), body) if m.group(2) == "duplicate" else postprocessor_trust(m.group(1), body)
                     return self._json(result, 200)
@@ -10233,8 +11235,8 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self._json({"error": f"no such route: {url.path}"}, 404)
         try:
-            body = self._body(strict=True)
-            if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be an object")), 400)
+            body = self._body(strict=True, max_bytes=16 * 1024)
+            if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)
             return self._json(postprocessor_delete(m.group(1), body), 200)
         except Exception as exc:
             return self._json(_postprocessor_error(exc), 400)

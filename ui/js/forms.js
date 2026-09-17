@@ -16,6 +16,7 @@ export function kindHasSimple(spec) {
 
 
 export function optVisible(o, spec) {
+  if (o.hidden) return false;
   if (uiMode() !== "simple" || !kindHasSimple(spec)) return true;
   return !!o.simple;
 }
@@ -484,7 +485,7 @@ export function formCard(kind, opts = {}) {
   }
 
   const appendCollapsibleGroup = g => {
-    const os = (g.options || []).filter(o => !o.simple_only);
+    const os = (g.options || []).filter(o => !o.simple_only && !o.hidden);
     if (!os.some(o => o.show ? o.show(args) : true)) return;
     const adv = el("div", { class: "adv" });
     adv.append(
@@ -511,7 +512,7 @@ export function formCard(kind, opts = {}) {
       // simple-mode visibility: create_pdf's flat section shows only its
       // `simple`-flagged options; the fetch form is fully flat, so every
       // option is visible there.
-      const visible = kind === "create_pdf" ? o => optVisible(o, spec) : () => true;
+      const visible = kind === "create_pdf" ? o => optVisible(o, spec) : o => !o.hidden;
       const draw = (o, k, target) => {
         const node = renderOption(o, args, kind);
         if (node) target.append(node);
@@ -573,7 +574,7 @@ export function formCard(kind, opts = {}) {
     }
   } else {
     for (const g of spec.groups || []) {
-      const os = (g.options || []).filter(o => !o.simple_only);   // simple-only options never appear in the advanced form
+      const os = (g.options || []).filter(o => !o.simple_only && !o.hidden);   // internal/simple-only options never appear in the advanced form
       if (g.collapsible) appendCollapsibleGroup(g);
       else card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(os, kind, args));
     }

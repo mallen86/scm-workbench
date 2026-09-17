@@ -215,7 +215,10 @@ def dispatch(request: dict) -> dict:
                 result = server.postprocessor_get(params["processor_id"])
             elif method == "postprocessors.save":
                 required = {"name", "source", "requirements", "processor_id", "expected_revision"}
-                if set(params) - required or not isinstance(params.get("name"), str) or not isinstance(params.get("source"), str) or not isinstance(params.get("requirements"), str):
+                if (set(params) != required or not isinstance(params.get("name"), str) or
+                        not isinstance(params.get("source"), str) or not isinstance(params.get("requirements"), str) or
+                        (params.get("processor_id") is not None and not isinstance(params.get("processor_id"), str)) or
+                        (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str))):
                     return _bad_params(request_id, "postprocessors.save has invalid parameters")
                 try:
                     if len(params["source"].encode("utf-8")) > server.POSTPROCESS_SOURCE_MAX_BYTES or len(params["requirements"].encode("utf-8")) > server.postprocessing.REQUIREMENTS_MAX_BYTES:
@@ -511,11 +514,20 @@ def dispatch(request: dict) -> dict:
                     return _bad_params(request_id, "each poll cursor requires job_id and nonnegative after")
                 clean.append({"job_id": cursor["job_id"], "after": cursor["after"]})
             result = server.poll_jobs(clean, max_events)
+    except server.postprocessing.PostProcessingError as exc:
+        result = server._postprocessor_error(exc)
     except Exception:
         # Keep exception details out of the wire contract.  The traceback is
         # useful to the supervising shell and belongs on stderr, not stdout.
         traceback.print_exc(file=sys.stderr)
         return _error(request_id, "internal", "request handler failed")
+    if method.startswith("postprocessors."):
+        try:
+            result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > server.POSTPROCESS_RESPONSE_MAX_BYTES:
+            return _error(request_id, "result_too_large", "post-processor result exceeds 512 KiB")
     if method == "back_images.import_selected":
         try:
             result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

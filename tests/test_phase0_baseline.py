@@ -214,8 +214,11 @@ class HttpContractTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
-            raw = error.read().decode("utf-8")
-            return error.code, json.loads(raw) if raw else {}
+            try:
+                raw = error.read().decode("utf-8")
+                return error.code, json.loads(raw) if raw else {}
+            finally:
+                error.close()
 
     def test_standalone_browser_serves_root_relative_embedded_assets(self):
         expected_types = {
@@ -229,6 +232,41 @@ class HttpContractTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertTrue(response.read())
                     self.assertEqual(response.headers.get_content_type(), expected_type)
+
+    def test_postprocessor_http_round_trip_and_body_bound(self):
+        status, _settings = self.request("POST", "/api/settings", {"ui_mode": "advanced"})
+        self.assertEqual(status, 200)
+        source = "def process_image(image_path, context):\n    return None\n"
+        status, saved = self.request("POST", "/api/postprocessors", {
+            "processor_id": None, "name": "HTTP processor", "source": source,
+            "requirements": "", "expected_revision": None,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(saved["ok"])
+        processor = saved["processor"]
+        status, listed = self.request("GET", "/api/postprocessors")
+        self.assertEqual(status, 200)
+        self.assertNotIn("source", next(row for row in listed["processors"] if row["id"] == processor["id"]))
+        status, detail = self.request("GET", f"/api/postprocessors/{processor['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["source"], source)
+        status, trusted = self.request("POST", f"/api/postprocessors/{processor['id']}/trust", {
+            "processor_id": processor["id"], "revision_hash": processor["revision"],
+            "environment_fingerprint": detail["environment_fingerprint"],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(trusted["processor"]["trusted"])
+        status, deleted = self.request("DELETE", f"/api/postprocessors/{processor['id']}", {
+            "processor_id": processor["id"], "expected_revision": processor["revision"],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(deleted["ok"])
+        status, rejected = self.request("POST", "/api/postprocessors", {
+            "processor_id": None, "name": "Too large", "source": "x" * (server.POSTPROCESS_SOURCE_MAX_BYTES + 32 * 1024),
+            "requirements": "", "expected_revision": None,
+        })
+        self.assertEqual(status, 400)
+        self.assertFalse(rejected["ok"])
 
     def test_settings_persistence_shape_and_nested_merge(self):
         status, result = self.request("POST", "/api/settings", {
@@ -339,7 +377,7 @@ class HttpContractTests(unittest.TestCase):
         expected = {
             "create_pdf", "offset_pdf", "calibration", "dxf_single", "dxf_batch",
             "dxf_list", "clean_up", "repo_update", "repo_init", "extras_generate",
-            "extras_tables",
+            "extras_tables", "postprocess_images", "postprocess_dependencies",
         }
         expected.update("fetch:" + slug for slug in server.PLUGINS)
         self.assertEqual(set(manifest), expected)

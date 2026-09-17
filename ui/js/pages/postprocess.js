@@ -1,13 +1,14 @@
 /* Advanced-only image processor library and run workflow. */
-import { PAGES, S, $, $$, confirmModal, el, ico, pageHead, toast } from "../core.js";
-import { doRun, formArgs, formCard } from "../forms.js";
+import { PAGES, S, $, confirmModal, el, ico, pageHead, toast } from "../core.js";
+import { afterFormChange, COMMAND_PREVIEW_EVENT, doRun, formArgs, formCard } from "../forms.js";
 import { jobs } from "../jobs.js";
 import { go, uiMode } from "../nav.js";
 import { postprocessors } from "../postprocess-transport.js";
+import { watchJobDone } from "./utilities.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
-const state = { processors: [], selected: null, draft: null, loaded: null, dirty: false, job: null, sub: null, timer: null };
+const state = { processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
 const first = value => Array.isArray(value) ? value[0] : value;
 const revision = p => p?.revision_hash || p?.revision || p?.active_revision || "";
 const normalizeList = result => Array.isArray(result) ? result : (result?.processors || []);
@@ -16,12 +17,41 @@ const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === 
 const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
 
 function sourceBytes(value) { return new TextEncoder().encode(String(value || "")).length; }
-function markDirty() { state.dirty = true; updateEditorState(); }
+function updateLockSummary() {
+  const box = document.querySelector(".pp-lock");
+  if (!box) return;
+  box.replaceChildren();
+  if (state.dirty) {
+    box.append(el("span", { class: "small faint" }, "Save this revision, then install libraries to resolve its exact dependency lock."));
+    return;
+  }
+  const wheels = state.loaded?.environment?.wheels || [];
+  if (!wheels.length) {
+    box.append(el("span", { class: "small faint" }, state.loaded?.requirements?.length ? "No resolved dependency lock is installed." : "No third-party wheels are required."));
+    return;
+  }
+  box.append(el("strong", {}, "Resolved library lock"));
+  for (const wheel of wheels) box.append(el("div", { class: "small mono" }, `${wheel.name}==${wheel.version}  sha256:${wheel.sha256.slice(0, 16)}…`));
+}
+function updateCursor(source = document.querySelector(".pp-source")) {
+  const status = document.querySelector(".pp-cursor");
+  if (!source || !status) return;
+  const before = source.value.slice(0, source.selectionStart ?? 0).split("\n");
+  status.textContent = `Line ${before.length}, column ${before.at(-1).length + 1}`;
+}
+function markDirty() { state.dirty = true; updateEditorState(); updateLockSummary(); }
 function updateEditorState() {
   const status = document.querySelector(".pp-dirty");
   if (status) { status.textContent = state.dirty ? "Unsaved changes" : "Saved revision"; status.className = `pp-dirty ${state.dirty ? "warn" : "ok"}`; }
   const save = document.querySelector(".pp-save");
-  if (save) save.disabled = !state.draft?.name?.trim() || !state.draft?.source;
+  if (save) save.disabled = state.loadError || !state.draft?.name?.trim() || !state.draft?.source;
+  const trust = document.querySelector(".pp-trust");
+  if (trust) {
+    trust.disabled = state.loadError || !state.loaded || state.dirty || !isReady(state.loaded);
+    trust.title = !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
+  }
+  const install = document.querySelector(".pp-install");
+  if (install) install.disabled = state.loadError || !state.loaded || state.dirty || state.installing;
 }
 function setEditorValue(value) {
   const d = state.draft || (state.draft = { name: "New processor", source: TEMPLATE, requirements: "" });
@@ -35,28 +65,51 @@ function setEditorValue(value) {
   if (name) name.value = d.name;
   if (source) source.value = d.source;
   if (req) req.value = d.requirements;
+  updateCursor(source);
   state.dirty = false;
   updateEditorState();
+  updateLockSummary();
 }
 
-async function refreshProcessors(selectId = state.selected) {
+async function refreshProcessors(selectId = state.selected, { preserveDirty = true } = {}) {
   let result;
   try { result = await postprocessors.list(); }
   catch (error) {
     state.processors = [];
+    state.loadError = true;
+    updateEditorState();
+    updateLockSummary();
     repaintLibrary();
+    patchRunForm();
     const box = document.querySelector(".pp-library-list");
     if (box) box.replaceChildren(el("div", { class: "empty" }, error.message || "Post-processing is not available yet."));
     return;
   }
   state.processors = normalizeList(result);
+  state.loadError = false;
+  const keepDraft = preserveDirty && state.dirty;
   const requested = selectId || S.postprocessPrefill?.processor_id;
-  state.selected = state.processors.some(p => p.id === requested) ? requested : state.processors[0]?.id || null;
-  if (state.selected) await loadProcessor(state.selected);
-  else {
+  if (keepDraft) {
+    // A refresh must never turn an unsaved new draft into an edit of the
+    // first saved processor, or silently move an existing draft to a peer.
+    state.selected = state.processors.some(p => p.id === state.selected) ? state.selected : null;
+  } else {
+    state.selected = state.processors.some(p => p.id === requested) ? requested : state.processors[0]?.id || null;
+  }
+  if (state.selected && keepDraft) {
+    const summary = selectedProcessor();
+    state.loaded = state.loaded ? { ...state.loaded, ...summary } : summary;
+    state.loadError = false;
+  } else if (state.selected) await loadProcessor(state.selected);
+  else if (keepDraft) {
     state.loaded = null;
+  } else {
+    state.loaded = null;
+    state.loadError = false;
     setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
   }
+  updateEditorState();
+  updateLockSummary();
   repaintLibrary();
   patchRunForm();
 }
@@ -68,8 +121,9 @@ async function loadProcessor(id) {
   try {
     const detail = await postprocessors.get(id);
     state.loaded = { ...summary, ...detail };
+    state.loadError = false;
     setEditorValue({ name: state.loaded.name || "Processor", source: state.loaded.source || "", requirements: state.loaded.requirements || "" });
-  } catch (error) { toast("err", error.message || "Could not load processor."); }
+  } catch (error) { state.loaded = null; state.loadError = true; updateEditorState(); updateLockSummary(); toast("err", error.message || "Could not load processor."); }
 }
 
 function repaintLibrary() {
@@ -98,6 +152,7 @@ async function newProcessor() {
   if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
   state.selected = null;
   state.loaded = null;
+  state.loadError = false;
   state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
   setEditorValue(state.draft);
   repaintLibrary();
@@ -110,8 +165,16 @@ async function duplicateProcessor(p) {
 }
 async function deleteProcessor(p) {
   if (!await confirmModal({ title: "Delete processor?", text: `Delete “${p.name || "processor"}” and its saved revisions?`, okLabel: "Delete processor", danger: true })) return;
-  try { await postprocessors.delete(p.id, revision(p)); state.selected = null; state.loaded = null; await refreshProcessors(); toast("ok", "Processor deleted."); }
-  catch (error) { toast("err", error.message || "Could not delete processor."); }
+  try {
+    await postprocessors.delete(p.id, revision(p));
+    if (p.id === state.selected) {
+      state.selected = null; state.loaded = null; state.dirty = false;
+      await refreshProcessors(null, { preserveDirty: false });
+    } else {
+      await refreshProcessors(state.selected, { preserveDirty: true });
+    }
+    toast("ok", "Processor deleted.");
+  } catch (error) { toast("err", error.message || "Could not delete processor."); }
 }
 
 async function saveRevision() {
@@ -120,7 +183,7 @@ async function saveRevision() {
   if (sourceBytes(d.source) > 256 * 1024) return toast("err", "Processor source is too large.");
   try {
     const result = await postprocessors.save({ processor_id: state.selected, name: d.name.trim(), source: d.source, requirements: d.requirements, expected_revision: revision(state.loaded) || null });
-    await refreshProcessors(result?.processor?.id || result?.id || state.selected);
+    await refreshProcessors(result?.processor?.id || result?.id || state.selected, { preserveDirty: false });
     toast("ok", "Saved an untrusted revision. Trust it before running.");
   } catch (error) { toast("err", error.message || "Could not save the processor."); }
 }
@@ -131,7 +194,7 @@ async function importSource() {
     if (result === null) return;
     if (result?.ok === false) throw new Error((result.errors || ["Import failed."])[0]);
     const id = result?.processor?.id || result?.id;
-    if (id) await refreshProcessors(id); else setEditorValue(result);
+    if (id) await refreshProcessors(id, { preserveDirty: false }); else setEditorValue(result);
     state.dirty = false;
     toast("ok", "Imported an untrusted revision. Trust it before running.");
   } catch (error) { toast("err", error.message || "Could not import the processor."); }
@@ -163,8 +226,22 @@ async function installLibraries() {
     okLabel: "Install libraries",
   });
   if (!approved) return;
-  try { await doRun("postprocess_dependencies", null, { args: { processor_id: p.id, revision_hash: revision(p), requirements } }); }
-  catch (error) { toast("err", error.message || "Could not start library installation."); }
+  try {
+    const job = await doRun("postprocess_dependencies", null, { args: { processor_id: p.id, revision_hash: revision(p), requirements } });
+    if (job?.id) { state.installing = true; updateEditorState(); watchJobDone(job.id, () => refreshProcessors(p.id)); }
+  } catch (error) { toast("err", error.message || "Could not start library installation."); }
+}
+
+function paintRunGate() {
+  const scope = first(formArgs("postprocess_images")?.scope) || "both";
+  const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
+  const p = selectedProcessor();
+  const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : !isTrusted(p) ? "Trust this exact revision first" : !isReady(p) ? "Install or update libraries first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const run = document.querySelector(".pp-run");
+  if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
+  const note = document.querySelector(".pp-run-note");
+  if (note) note.textContent = countKnown && state.imageCount > 0 ? `${gate} · ${state.imageCount} recognized image${state.imageCount === 1 ? "" : "s"}` : gate;
 }
 
 function patchRunForm() {
@@ -173,18 +250,13 @@ function patchRunForm() {
   if (!card) return;
   const args = formArgs(kind);
   if (S.postprocessPrefill?.scope && args.scope !== undefined) args.scope = S.postprocessPrefill.scope;
-  const procField = $$(".field", card).find(f => f.dataset.key === "processor_id");
-  const select = procField && $("select", procField);
-  if (select) {
-    select.replaceChildren(...state.processors.map(p => el("option", { value: p.id, selected: p.id === state.selected }, p.name || p.id)));
-    args.processor_id = state.selected || "";
-  }
-  const run = document.querySelector(".pp-run");
-  const p = selectedProcessor();
-  const gate = !p ? "Choose a processor" : !isTrusted(p) ? "Trust this exact revision first" : !isReady(p) ? "Install or rebuild libraries first" : "Ready to run";
-  if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
-  const note = document.querySelector(".pp-run-note");
-  if (note) note.textContent = gate;
+  S.postprocessPrefill = null;
+  args.processor_id = state.selected || "";
+  args.revision_hash = revision(selectedProcessor());
+  const scope = first(args.scope) || "both";
+  if (state.imageScope !== scope) state.imageCount = null;
+  afterFormChange(kind, args);
+  paintRunGate();
 }
 
 function attachRunStatus(root) {
@@ -193,23 +265,38 @@ function attachRunStatus(root) {
   const paint = () => {
     const running = state.job && (S.jobs || []).find(j => j.id === state.job.id);
     if (!running) return;
-    status.replaceChildren(el("div", { class: `pp-status ${running.status}` }, running.status === "running" ? "Processing images…" : running.status === "ok" ? "Processing complete. Original images were replaced after validation." : "Processing failed or was cancelled. Original images were not changed."));
+    const outcome = running.postprocess_outcome;
+    const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
+    status.replaceChildren(el("div", { class: `pp-status ${running.status}` }, message));
     if (running.status === "running") {
       const done = Number(running.progress?.current || 0), total = Number(running.progress?.total || running.image_total || 0);
       status.append(el("progress", { max: total || 1, value: Math.min(done, total || 1) }), el("span", { class: "small faint" }, total ? `${done} / ${total}` : "Preparing image set…"));
     } else if (running.status === "ok") status.append(el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF"));
   };
+  const previewListener = event => {
+    const detail = event.detail || {};
+    if (detail.kind !== "postprocess_images") return;
+    state.imageScope = first(detail.args?.scope) || "both";
+    state.imageCount = Number.isInteger(detail.result?.image_count) ? detail.result.image_count : null;
+    paintRunGate();
+  };
+  document.addEventListener(COMMAND_PREVIEW_EVENT, previewListener);
   let lastDependencyStatus = "";
   const tick = async () => { try {
     const result = await jobs.list();
     S.jobs = result.jobs || S.jobs;
+    const processing = (S.jobs || []).find(j => j.kind === "postprocess_images" && j.status === "running");
+    if (processing) state.job = processing;
     const dependency = (S.jobs || []).find(j => j.kind === "postprocess_dependencies" && j.status === "running");
+    state.installing = !!dependency;
+    updateEditorState();
     if (!dependency && lastDependencyStatus === "running") await refreshProcessors(state.selected);
     lastDependencyStatus = dependency ? "running" : "idle";
     paint();
+    paintRunGate();
   } catch {} };
   state.timer = setInterval(tick, 700); tick();
-  root.__dispose = () => { clearInterval(state.timer); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
+  root.__dispose = () => { clearInterval(state.timer); document.removeEventListener(COMMAND_PREVIEW_EVENT, previewListener); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
 }
 
 PAGES.postprocess = root => {
@@ -223,19 +310,29 @@ PAGES.postprocess = root => {
     el("label", {}, "Processor name", el("input", { class: "input pp-name", spellcheck: "false" })),
     el("label", {}, "Python source", el("textarea", { class: "input pp-source", rows: 16, spellcheck: "false" })),
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
-    el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost", type: "button", onclick: installLibraries }, "Install / rebuild libraries"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
+    el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
+    el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
+    el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
   wrap.append(editor);
-  const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); } }, ico("play"), "Run processor")));
+  const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
   wrap.append(run);
   wrap.__patch = async () => {
+    if (!state.draft) state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
     const source = $(".pp-source", wrap), req = $(".pp-requirements", wrap), name = $(".pp-name", wrap);
-    source.oninput = () => { state.draft.source = source.value; markDirty(); };
+    source.oninput = () => { state.draft.source = source.value; markDirty(); updateCursor(source); };
+    for (const event of ["click", "keyup", "select"]) source.addEventListener(event, () => updateCursor(source));
     req.oninput = () => { state.draft.requirements = req.value; markDirty(); };
     name.oninput = () => { state.draft.name = name.value; markDirty(); };
     $(".pp-source", wrap).addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); } });
-    await refreshProcessors(); repaintLibrary(); patchRunForm(); attachRunStatus(wrap);
+    $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
+    await refreshProcessors(state.selected, { preserveDirty: false }); repaintLibrary(); patchRunForm(); attachRunStatus(wrap);
   };
-  wrap.__guard = async () => !state.dirty || await confirmModal({ title: "Unsaved processor changes", text: "Leave this page and discard your edits?", okLabel: "Leave page", danger: true });
+  wrap.__guard = async () => {
+    if (!state.dirty) return true;
+    const leave = await confirmModal({ title: "Unsaved processor changes", text: "Leave this page and discard your edits?", okLabel: "Leave page", danger: true });
+    if (leave) state.dirty = false;
+    return leave;
+  };
   S.pageGuard = wrap.__guard;
   return wrap;
 };
