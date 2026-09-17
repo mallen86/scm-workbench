@@ -3,6 +3,7 @@ import { PAGES, S, $, confirmModal, el, ico, pageHead, toast } from "../core.js"
 import { afterFormChange, COMMAND_PREVIEW_EVENT, doRun, formArgs, formCard } from "../forms.js";
 import { jobs } from "../jobs.js";
 import { go, uiMode } from "../nav.js";
+import { renderPythonHighlight } from "../python-highlight.js";
 import { postprocessors } from "../postprocess-transport.js";
 import { watchJobDone } from "./utilities.js";
 
@@ -39,6 +40,20 @@ function updateCursor(source = document.querySelector(".pp-source")) {
   const before = source.value.slice(0, source.selectionStart ?? 0).split("\n");
   status.textContent = `Line ${before.length}, column ${before.at(-1).length + 1}`;
 }
+function syncSourceHighlightScroll(source = document.querySelector(".pp-source")) {
+  const highlight = source?.closest(".pp-source-wrap")?.querySelector(".pp-source-highlight");
+  if (!source || !highlight) return;
+  highlight.scrollTop = source.scrollTop;
+  highlight.scrollLeft = source.scrollLeft;
+}
+function paintSourceHighlight(source = document.querySelector(".pp-source")) {
+  const wrap = source?.closest(".pp-source-wrap");
+  const code = wrap?.querySelector(".pp-source-code");
+  if (!source || !wrap || !code) return;
+  renderPythonHighlight(code, source.value);
+  wrap.classList.add("highlight-ready");
+  syncSourceHighlightScroll(source);
+}
 function markDirty() { state.dirty = true; updateEditorState(); updateLockSummary(); }
 function updateEditorState() {
   const status = document.querySelector(".pp-dirty");
@@ -63,7 +78,10 @@ function setEditorValue(value) {
   const source = document.querySelector(".pp-source");
   const req = document.querySelector(".pp-requirements");
   if (name) name.value = d.name;
-  if (source) source.value = d.source;
+  if (source) {
+    source.value = d.source;
+    paintSourceHighlight(source);
+  }
   if (req) req.value = d.requirements;
   updateCursor(source);
   state.dirty = false;
@@ -309,9 +327,12 @@ PAGES.postprocess = root => {
   wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
   const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor")), el("div", { class: "pp-library-list" }));
   wrap.append(library);
+  const sourceEditor = el("div", { class: "pp-source-wrap" },
+    el("pre", { class: "pp-source-highlight", "aria-hidden": "true" }, el("code", { class: "pp-source-code" })),
+    el("textarea", { class: "input pp-source", rows: 16, wrap: "off", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-label": "Python source" }));
   const editor = el("section", { class: "card pp-editor" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("file")), el("div", { class: "grow" }, el("h2", {}, "Processor editor"), el("p", {}, "Saving creates an immutable, untrusted revision.")), el("span", { class: "pp-dirty" }, "Saved revision")),
     el("label", {}, "Processor name", el("input", { class: "input pp-name", spellcheck: "false" })),
-    el("label", {}, "Python source", el("textarea", { class: "input pp-source", rows: 16, spellcheck: "false" })),
+    el("label", {}, "Python source", sourceEditor),
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
@@ -322,11 +343,12 @@ PAGES.postprocess = root => {
   wrap.__patch = async () => {
     if (!state.draft) state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
     const source = $(".pp-source", wrap), req = $(".pp-requirements", wrap), name = $(".pp-name", wrap);
-    source.oninput = () => { state.draft.source = source.value; markDirty(); updateCursor(source); };
+    source.oninput = () => { state.draft.source = source.value; markDirty(); updateCursor(source); paintSourceHighlight(source); };
     for (const event of ["click", "keyup", "select"]) source.addEventListener(event, () => updateCursor(source));
+    source.addEventListener("scroll", () => syncSourceHighlightScroll(source));
     req.oninput = () => { state.draft.requirements = req.value; markDirty(); };
     name.oninput = () => { state.draft.name = name.value; markDirty(); };
-    $(".pp-source", wrap).addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); } });
+    source.addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); updateCursor(source); paintSourceHighlight(source); } });
     $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
     await refreshProcessors(state.selected, { preserveDirty: false }); repaintLibrary(); patchRunForm(); attachRunStatus(wrap);
   };

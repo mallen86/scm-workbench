@@ -9,6 +9,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "ui" / "js"
 FACADE = UI / "postprocess-transport.js"
+HIGHLIGHT = UI / "python-highlight.js"
 PAGE = UI / "pages" / "postprocess.js"
 
 
@@ -18,9 +19,10 @@ def fail(message: str) -> int:
 
 
 def main() -> int:
-    if not FACADE.is_file() or not PAGE.is_file():
-        return fail("post-processing transport or page module is missing")
+    if not FACADE.is_file() or not HIGHLIGHT.is_file() or not PAGE.is_file():
+        return fail("post-processing transport, highlighter, or page module is missing")
     facade = FACADE.read_text(encoding="utf-8")
+    highlighter = HIGHLIGHT.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
     nav = (UI / "nav.js").read_text(encoding="utf-8")
     app = (UI / "app.js").read_text(encoding="utf-8")
@@ -52,6 +54,7 @@ def main() -> int:
     for required in (
         'PAGES.postprocess = root =>',
         'if (uiMode() === "simple")',
+        'import { renderPythonHighlight } from "../python-highlight.js";',
         'source.value = d.source',
         'state.dirty',
         'preserveDirty',
@@ -59,6 +62,9 @@ def main() -> int:
         '? state.selected : null',
         'p.id === state.selected',
         'pp-cursor',
+        'pp-source-highlight',
+        'paintSourceHighlight(source)',
+        'syncSourceHighlightScroll(source)',
         'Resolved library lock',
         'Trust this Python revision?',
         'cannot safely sandbox arbitrary Python',
@@ -75,15 +81,18 @@ def main() -> int:
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
-    if ".innerHTML = d.source" in page or "innerHTML: d.source" in page:
-        return fail("processor source is inserted as HTML")
+    if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
+        return fail("processor source highlighting uses unsafe HTML insertion")
+    for required in ("pythonHighlightTokens", "renderPythonHighlight", "createTextNode", "textContent"):
+        if required not in highlighter:
+            return fail(f"Python source highlighter is missing {required}")
     if ('import "./pages/postprocess.js";' not in app or 'postprocess: "Image post-processing"' not in nav or
             'data-page="postprocess"' not in index or 'data-page="postprocess" data-section="workflow" data-simple-hide' not in index):
         return fail("post-processing route or Advanced-only navigation item is missing")
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
     if not simple_pages or "postprocess" in simple_pages.group(1):
         return fail("post-processing was added to Simple-mode routes")
-    for marker in (".pp-editor", ".pp-source", ".pp-run-status", ".pp-progress", ".pp-lock", "@media (max-width: 760px)"):
+    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
     if ('go("postprocess", { scope: "both" })' not in fetch or "postprocessPrefill" not in nav or
@@ -103,7 +112,23 @@ const source = fs.readFileSync(process.argv[1], "utf8");
 const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
 const transport = dataUrl(`export function getTauriInvoke() { return globalThis.nativeInvoke ? globalThis.nativeInvoke.bind(globalThis) : null; }`);
 const facade = await import(dataUrl(source.replace('from "./transport.js"', `from "${transport}"`)));
+const highlighter = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
 const fail = message => { throw new Error(message); };
+
+const pythonSample = '@cached\nasync def resize(value: int = 0x10):\n    """Docstring"""\n    # note\n    return str(value) + f"{value}"\n';
+const pythonTokens = highlighter.pythonHighlightTokens(pythonSample);
+if (pythonTokens.map(token => token.text).join("") !== pythonSample)
+  fail("Python highlighting changed source text");
+const tokenTypes = new Set(pythonTokens.map(token => token.type));
+for (const expected of ["decorator", "keyword", "definition", "builtin", "number", "string", "comment", "operator"])
+  if (!tokenTypes.has(expected)) fail(`Python highlighting missed ${expected}`);
+const markupSource = '<script>alert("x")</script>';
+if (highlighter.pythonHighlightTokens(markupSource).map(token => token.text).join("") !== markupSource)
+  fail("Python highlighting did not preserve markup-like source as text");
+const oversized = "x".repeat(highlighter.PYTHON_HIGHLIGHT_MAX_CHARS + 1);
+const oversizedTokens = highlighter.pythonHighlightTokens(oversized);
+if (oversizedTokens.length !== 1 || oversizedTokens[0].type !== "plain" || oversizedTokens[0].text !== oversized)
+  fail("oversized Python highlighting did not fall back to plain text");
 let fetchCalls = [];
 globalThis.fetch = async (url, options) => {
   fetchCalls.push({ url, options });
@@ -188,7 +213,7 @@ if (!rejected || fetchCalls.length !== requestsBeforePickerFailure)
   fail("native import rejection retried over HTTP");
 '''
     result = subprocess.run(
-        [node, "--input-type=module", "-e", script, str(FACADE)],
+        [node, "--input-type=module", "-e", script, str(FACADE), str(HIGHLIGHT)],
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:

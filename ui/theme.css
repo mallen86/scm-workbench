@@ -1633,7 +1633,33 @@ cursor: pointer;
 .pp-dirty.ok { color: var(--ok); }
 .pp-editor label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .pp-editor textarea { font-family: var(--mono); font-size: 12px; line-height: 1.5; tab-size: 4; }
-.pp-editor .pp-source { min-height: 260px; }
+.pp-source-wrap { position: relative; min-width: 0; }
+.pp-source-highlight, .pp-editor .pp-source {
+  min-height: 260px; font-family: var(--mono); font-size: 12px; font-weight: 400; line-height: 1.5;
+  tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal;
+}
+.pp-source-highlight {
+  position: absolute; inset: 0; overflow: hidden; margin: 0; padding: 8px 12px;
+  border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--surface-2);
+  color: var(--text); pointer-events: none; visibility: hidden;
+}
+.pp-source-highlight code { display: block; min-width: max-content; font: inherit; white-space: inherit; }
+.pp-source-wrap.highlight-ready .pp-source-highlight { visibility: visible; }
+.pp-source-wrap.highlight-ready .pp-source {
+  position: relative; z-index: 1; color: transparent; -webkit-text-fill-color: transparent;
+  caret-color: var(--text); background: transparent; overflow: auto;
+}
+.pp-source-wrap.highlight-ready .pp-source:focus { background: transparent; }
+.pp-source-wrap.highlight-ready:focus-within .pp-source-highlight { background: var(--surface-3); }
+.pp-source-wrap.highlight-ready .pp-source::selection { background: color-mix(in srgb, var(--info) 34%, transparent); }
+.py-keyword { color: var(--accent-2); font-weight: 650; }
+.py-definition { color: var(--info); font-weight: 650; }
+.py-builtin { color: var(--info); }
+.py-string { color: var(--ok); }
+.py-comment { color: var(--muted); font-style: italic; }
+.py-number { color: var(--warn); }
+.py-decorator { color: var(--accent); }
+.py-operator { color: var(--muted); }
 .pp-lock { display: grid; gap: 4px; padding: 9px 11px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); overflow-wrap: anywhere; }
 .pp-editor-actions { flex-wrap: wrap; }
 .pp-editor-actions .rb-note { min-width: 180px; }
