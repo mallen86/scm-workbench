@@ -102,4 +102,4 @@ Run it as follows:
 8. Wait for validation and transactional publication to finish.
 9. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
 
-[Scryfall's highest-quality PNG](https://scryfall.com/docs/api/images) is normally 744 × 1040 pixels; a four-times resize becomes 2976 × 4160 pixels, close to the roughly 3000 × 4200 pixels needed for a 2.5 × 3.5 inch card at 1200 PPI.
+[Scryfall's image documentation](https://scryfall.com/docs/api/images) lists PNGs as 744 × 1040 pixels, while individual files currently returned by the API can be 745 × 1040. The processor scales the actual file dimensions: those examples become 2976 × 4160 or 2980 × 4160 pixels, respectively, close to the 3000 × 4200 pixels needed for a 2.5 × 3.5 inch card at 1200 PPI.
