@@ -1323,18 +1323,31 @@ class ProcessorStore:
         return self.get(processor_id, revision=revision, include_source=False)
 
     def record_environment(self, processor_id: str, revision: str, lock_hash: str, *, interpreter: str | Path = sys.executable) -> dict:
-        if not isinstance(lock_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", lock_hash):
-            raise ValidationError("invalid dependency lock hash")
         item = self.get(processor_id, include_source=False)
+        requirements = tuple(item["requirements"])
+        if (not isinstance(lock_hash, str) or
+                (requirements and not re.fullmatch(r"[0-9a-f]{64}", lock_hash)) or
+                (not requirements and lock_hash != "")):
+            raise ValidationError("invalid dependency lock hash")
         if revision != item.get("active_revision"):
             raise ConflictError("processor revision is stale")
-        environment = self.environment_metadata(item["requirements"], lock_hash, interpreter=interpreter)
+        environment = self.environment_metadata(requirements, lock_hash, interpreter=interpreter)
         if not environment["ready"]:
             raise IntegrityError("installed dependency environment is not ready")
         metadata = self._metadata(processor_id)
-        metadata.update({"trusted": None, "environment": None, "trusted_tree_digest": None,
-                         "installed_revision": revision, "installed_environment": environment["fingerprint"],
-                         "installed_tree_digest": environment.get("tree_digest"), "lock_hash": lock_hash})
+        trust_still_valid = (
+            metadata.get("trusted") == revision and
+            metadata.get("environment") == environment["fingerprint"] and
+            metadata.get("trusted_tree_digest") == environment.get("tree_digest")
+        )
+        metadata.update({
+            "installed_revision": revision,
+            "installed_environment": environment["fingerprint"],
+            "installed_tree_digest": environment.get("tree_digest"),
+            "lock_hash": lock_hash or None,
+        })
+        if not trust_still_valid:
+            metadata.update({"trusted": None, "environment": None, "trusted_tree_digest": None})
         _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
         return self.status(processor_id, interpreter=interpreter)
 

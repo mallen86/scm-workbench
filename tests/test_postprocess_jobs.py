@@ -252,7 +252,7 @@ class PostprocessJobTests(unittest.TestCase):
             "dependency_processor_id": item["id"], "dependency_revision": item["revision"],
             "dependency_python": str(server.job_python(self.settings)),
         }
-        server._finalize_dependency_job(job)
+        self.assertFalse(server._finalize_dependency_job(job))
         status = self.store.status(item["id"], interpreter=server.job_python(self.settings))
         self.assertTrue(status["environment"]["ready"])
         self.assertEqual(
@@ -270,13 +270,40 @@ class PostprocessJobTests(unittest.TestCase):
             item["id"], interpreter=server.job_python(self.settings),
         )
         self.assertTrue(trusted_status["processor"]["trusted"])
+
+        repeat_stage = self.data / "postprocessing" / "environments" / ".install-fixture-repeat"
+        repeat_target = repeat_stage / "site-packages"
+        repeat_target.mkdir(parents=True)
+        (repeat_target / "demo.py").write_text("VALUE = 99\n", encoding="utf-8")
+        repeat_report = repeat_stage / "resolve-report.json"
+        repeat_report.write_text(json.dumps(report), encoding="utf-8")
+        repeat_lock = repeat_stage / "requirements.lock"
+        repeat_lock.write_text(lock_text, encoding="utf-8")
+        repeat_job = {
+            **job,
+            "id": "fixture-repeat",
+            "dependency_stage": str(repeat_stage),
+            "dependency_target": str(repeat_target),
+            "dependency_report": str(repeat_report),
+            "dependency_lock": str(repeat_lock),
+        }
+        self.assertTrue(server._finalize_dependency_job(repeat_job))
+        trusted_status = self.store.status(
+            item["id"], interpreter=server.job_python(self.settings),
+        )
+        self.assertTrue(trusted_status["processor"]["trusted"])
+        self.assertEqual(
+            (Path(trusted_status["environment"]["path"]) / "site-packages" / "demo.py").read_text(encoding="utf-8"),
+            "VALUE = 1\n",
+        )
+
         (Path(trusted_status["environment"]["path"]) / "site-packages" / "demo.py").write_text(
             "VALUE = 2\n", encoding="utf-8",
         )
         with self.assertRaisesRegex(Exception, "changed after installation"):
             server._verify_dependency_environment(trusted_status["environment"])
 
-    def test_dependency_job_publishes_ready_marker_and_resets_trust(self):
+    def test_dependency_job_preserves_trust_for_unchanged_environment(self):
         item = self.save_and_trust(
             "def process_image(image_path, context):\n    return None\n"
         )
@@ -290,7 +317,8 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(job["status"], "ok", job["log_lines"])
         status = self.store.status(item["id"], interpreter=server.job_python(self.settings))
         self.assertTrue(status["environment"]["ready"])
-        self.assertFalse(status["processor"]["trusted"])
+        self.assertTrue(status["processor"]["trusted"])
+        self.assertTrue(any("existing trust remains valid" in line for line in job["log_lines"]))
         self.assertFalse(Path(job["dependency_stage"]).exists())
         self.assertEqual(server._PACKAGE_INSTALL_USERS, 0)
 

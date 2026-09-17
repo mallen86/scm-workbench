@@ -7399,7 +7399,7 @@ def _declared_dependency_cache_bytes(root: Path, *, exclude: Path | None = None)
     return total
 
 
-def _finalize_dependency_job(job: dict) -> None:
+def _finalize_dependency_job(job: dict) -> bool:
     stage = Path(job["dependency_stage"])
     target = Path(job["dependency_target"])
     report_path = Path(job["dependency_report"])
@@ -7490,16 +7490,12 @@ def _finalize_dependency_job(job: dict) -> None:
                 # Fingerprint environments are immutable and shareable. Never
                 # replace an identical ready tree that a live runner may import.
                 shutil.rmtree(stage, ignore_errors=True)
-                if requirements:
-                    store.record_environment(
-                        job["dependency_processor_id"], job["dependency_revision"], lock_hash,
-                        interpreter=Path(job["dependency_python"]),
-                    )
-                else:
-                    store.invalidate_trust(job["dependency_processor_id"],
-                                           expected_revision=job["dependency_revision"])
+                recorded = store.record_environment(
+                    job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                    interpreter=Path(job["dependency_python"]),
+                )
                 invalidate_manifest_cache()
-                return
+                return bool(recorded["processor"].get("trusted"))
             if processor_running and os.path.lexists(final):
                 raise postprocessing.ConflictError("the dependency environment is in use by a processor run")
             cache_bytes = _declared_dependency_cache_bytes(final.parent, exclude=final)
@@ -7513,14 +7509,11 @@ def _finalize_dependency_job(job: dict) -> None:
                     moved_old = True
                 os.replace(stage, final)
                 published = True
-                if requirements:
-                    store.record_environment(
-                        job["dependency_processor_id"], job["dependency_revision"], lock_hash,
-                        interpreter=Path(job["dependency_python"]),
-                    )
-                else:
-                    store.invalidate_trust(job["dependency_processor_id"],
-                                           expected_revision=job["dependency_revision"])
+                recorded = store.record_environment(
+                    job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                    interpreter=Path(job["dependency_python"]),
+                )
+                trust_preserved = bool(recorded["processor"].get("trusted"))
                 invalidate_manifest_cache()
             except Exception:
                 if published and os.path.lexists(final):
@@ -7530,6 +7523,7 @@ def _finalize_dependency_job(job: dict) -> None:
                 raise
     if moved_old:
         shutil.rmtree(backup, ignore_errors=True)
+    return trust_preserved
 
 
 def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Path, dict]:
@@ -8433,9 +8427,13 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
 
         if job.get("kind") == "postprocess_dependencies" and status == "ok":
             try:
-                _finalize_dependency_job(job)
+                trust_preserved = _finalize_dependency_job(job)
                 status = "ok"
-                _append_job_line(job, "(processor libraries: validated and installed; trust approval was reset)", log_f=log_f)
+                trust_result = ("existing trust remains valid" if trust_preserved else
+                                "trust approval was reset")
+                _append_job_line(
+                    job, f"(processor libraries: validated and installed; {trust_result})", log_f=log_f,
+                )
             except Exception as exc:
                 status = "fail"
                 _append_job_line(job, f"processor library installation was not published: {exc}", log_f=log_f)

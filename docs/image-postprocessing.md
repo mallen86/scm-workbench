@@ -42,7 +42,7 @@ opencv-python==4.12.0.88
 
 Workbench accepts compatible wheel packages only and installs them into a private, interpreter-specific environment below Workbench data. It never installs them into the app bundle or system Python. URLs, local paths, VCS packages, custom indexes, pip options, and source builds are not accepted.
 
-Save the revision before choosing **Install / update libraries**. Review and confirm the package list, wait for the dependency job to finish, then trust the resulting exact revision/environment. Choosing this action again resolves the currently compatible wheel set and requires trust again if it changes.
+Save the revision before choosing **Install / update libraries**. Review and confirm the package list, wait for the dependency job to finish, then trust the resulting exact revision/environment. Choosing this action again resolves the currently compatible wheel set. Existing trust is preserved only when the verified dependency fingerprint and installed tree are unchanged; otherwise you must trust the new environment.
 
 The packaged runtime already includes Pillow, so Pillow-only processors normally need no additional requirement.
 

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -65,6 +66,50 @@ class PostprocessorTests(unittest.TestCase):
             self.assertEqual(len(store.list()), 1)
             self.assertEqual(store.duplicate(first["id"])["name"], "Example copy")
             store.delete(first["id"], expected_revision=second["revision"])
+
+    def test_recording_an_unchanged_environment_preserves_trust(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProcessorStore(temp)
+            item = store.save("Libraries", SOURCE, "demo==1.0")
+
+            def publish_environment(artifact_hash):
+                wheels = [{
+                    "canonical_name": "demo", "name": "demo", "version": "1.0",
+                    "sha256": artifact_hash,
+                }]
+                lock_hash = hashlib.sha256(
+                    f"demo==1.0 --hash=sha256:{artifact_hash}\n".encode("utf-8")
+                ).hexdigest()
+                environment = store.environment_metadata(item["requirements"], lock_hash)
+                path = Path(environment["path"])
+                (path / "site-packages").mkdir(parents=True)
+                (path / "ready.json").write_text(json.dumps({
+                    "fingerprint": environment["fingerprint"],
+                    "requirements": item["requirements"],
+                    "lock_hash": lock_hash,
+                    "wheels": wheels,
+                    "files": 1,
+                    "bytes": 1,
+                    "tree_digest": artifact_hash,
+                }), encoding="utf-8")
+                return lock_hash, environment["fingerprint"]
+
+            first_lock, first_fingerprint = publish_environment("a" * 64)
+            installed = store.record_environment(item["id"], item["revision"], first_lock)
+            self.assertFalse(installed["processor"]["trusted"])
+            store.trust(item["id"], item["revision"], first_fingerprint)
+            unchanged = store.record_environment(item["id"], item["revision"], first_lock)
+            self.assertTrue(unchanged["processor"]["trusted"])
+
+            second_lock, _ = publish_environment("b" * 64)
+            changed = store.record_environment(item["id"], item["revision"], second_lock)
+            self.assertFalse(changed["processor"]["trusted"])
+
+            plain = store.save("No libraries", SOURCE, "")
+            plain_fingerprint = store.environment_metadata([])["fingerprint"]
+            store.trust(plain["id"], plain["revision"], plain_fingerprint)
+            unchanged_plain = store.record_environment(plain["id"], plain["revision"], "")
+            self.assertTrue(unchanged_plain["processor"]["trusted"])
 
     def test_saved_revision_tampering_is_detected_before_trust_or_run(self):
         with tempfile.TemporaryDirectory() as temp:
