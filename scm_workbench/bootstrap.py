@@ -84,14 +84,17 @@ def _write_flag(data: Path, pending: List[str], done: List[str], phase: str,
         pass
 
 
-def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> None:
+def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None,
+                   on_repo_ready: Optional[Callable[[str], None]] = None) -> None:
     """The whole first-boot sequence, run by the app itself (packaged mode).
 
     Call this from a daemon thread once the UI is up: it writes the
     bootstrap flag the UI polls, fetches the managed repo copies *in
     parallel* (one thread per repo — each clone is independent, and the
     state file is mutex-locked per read-modify-write), with the transcript
-    feeding the banner's live phase, then clears the flag.
+    feeding the banner's live phase, then clears the flag. ``on_repo_ready``
+    publishes each successful checkout to in-process readers before the flag
+    tells the UI that repository is done.
     """
     if log is None:
         log = print
@@ -114,6 +117,16 @@ def run_first_boot(data: Path, log: Optional[Callable[[str], None]] = None) -> N
 
     def worker(key: str) -> None:
         success = _bootstrap_one(repo_sync, key, blog)
+        # A poll may arrive as soon as the completion flag names this repo.
+        # Publish the new checkout first so that poll cannot reuse an empty
+        # startup manifest (notably Create PDF's card/paper choices).
+        if success and on_repo_ready is not None:
+            try:
+                on_repo_ready(key)
+            except Exception as exc:
+                # Cache publication is advisory and must never turn a valid,
+                # fully deployed repository into a failed first boot.
+                log(f"[bootstrap] could not refresh {key} views yet ({exc}).")
         with _flag_lock:
             results[key] = success
             pending = [item for item in keys if item not in results]

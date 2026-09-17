@@ -60,13 +60,20 @@ def main() -> int:
         "const warnings = Array.isArray(r.warnings)",
         'for (const warning of warnings) toast("warn", warning, 5200);',
         'toast("ok", `Tracking “${r.target ? r.target.ref : v}” for ${row.name}.`);',
+        "if (Array.isArray(result?.repos)) S.info.repos = result.repos;",
+        'showRowBusy("Changing track…")',
+        'checkBtn.replaceChildren(el("span", { class: "spinner" }), " Checking…")',
+        'doRun("repo_update", upBtn,',
+        'upBtn.replaceChildren(el("span", { class: "spinner" }), " Updating…")',
     ):
         if marker not in page:
-            return fail(f"repository source warning handling is missing {marker}")
-    refresh_at = page.find("await refreshInfo({ keepForms: true })", page.find("const pickSource"))
-    warning_at = page.find("const warnings = Array.isArray(r.warnings)", refresh_at)
-    if refresh_at < 0 or warning_at < 0 or warning_at < refresh_at:
-        return fail("source warnings are shown before canonical state refresh")
+            return fail(f"repository source/progress handling is missing {marker}")
+    publish_at = page.find("replaceRow(await freshRepoFrom(r))", page.find("const pickSource"))
+    warning_at = page.find("const warnings = Array.isArray(r.warnings)", publish_at)
+    if publish_at < 0 or warning_at < 0 or warning_at < publish_at:
+        return fail("source warnings are shown before canonical result rows")
+    if "repoCopyRow(fresh, container)" in page or "repoCopyRow(fresh, container, simple)" not in page:
+        return fail("repository row refresh loses Simple-mode presentation")
 
     node = shutil.which("node")
     if not node:

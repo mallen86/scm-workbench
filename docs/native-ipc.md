@@ -297,10 +297,11 @@ request.
 operation resolves the fixed remote target first, then commits the canonical
 state under the repository locks and mirrors the source into settings. If the
 mirror fails, the operation still succeeds with `canonical:true` and a bounded
-`warnings` list: state remains authoritative and the refreshed UI reports the
-repair warning without claiming the source change failed. A failed resolution
-leaves canonical state unchanged. Ref listing is read-only; a check updates
-only its repository's check metadata. Neither method changes the managed tree.
+`warnings` list: state remains authoritative and the terminal result rows let
+the UI report the repair warning without claiming the source change failed. A
+failed resolution leaves canonical state unchanged. Ref listing is read-only; a
+check updates only its repository's check metadata. Neither method changes the
+managed tree, so neither discards or rebuilds the script-capability manifest.
 `repo_init` and `repo_update` remain ordinary `jobs.start` kinds because they
 copy/deploy large trees and stream progress; this IPC slice does not turn them
 into metadata operations. These metadata starts also inherit the prior

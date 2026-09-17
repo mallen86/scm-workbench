@@ -2360,10 +2360,11 @@ def run_repo_check(key: str, force: bool = False) -> dict:
 
 
 def _invalidate_repo_views() -> None:
+    # invalidate_manifest_cache owns all three view caches under their shared
+    # lock. Clearing either snapshot again afterward would race a rebuild that
+    # started as soon as that lock was released.
     invalidate_manifest_cache()
     _invalidate_script_capability_cache()
-    _INFO_SNAP.clear()
-    _REPOS_MTIME.clear()
 
 
 def repo_check_result(key: str, force: bool = False) -> dict:
@@ -2377,7 +2378,8 @@ def repo_check_result(key: str, force: bool = False) -> dict:
         res = run_repo_check(key, force=force)
         if res.get("ok"):
             res["last_check"] = repo_sync.load_state().get(key, {}).get("last_check")
-            _invalidate_repo_views()
+            # Check metadata is returned below and does not alter the deployed
+            # tree, so the option/capability manifest remains valid.
         body = {"ok": bool(res.get("ok")), **(
             res if res.get("ok") else {"errors": _bounded_errors(res.get("error", "check failed"))}
         ), "repos": repos_view(load_settings())}
@@ -2427,7 +2429,8 @@ def repo_source_result(key: str, source: str) -> dict:
                 with repo_sync._settings_source_lock():
                     target = repo_sync.resolve_target(key, source)
                     repo_sync._record_source_and_check_locked(key, source, target)
-            _invalidate_repo_views()
+            # Tracking metadata is returned below; no deployed file changed,
+            # so keep the expensive script-capability manifest warm.
             try:
                 _repo_source_settings_mirror(key, source)
             except Exception as exc:
@@ -3490,9 +3493,13 @@ def get_info() -> dict:
 
 def _repos_signal_mtime() -> float:
     now = 0.0
-    for p in (repo_sync.state_file(), DATA_DIR / "repos-manifest-scm.json"):
+    # Source selection and update checks rewrite repos-state.json but never
+    # change files that feed the job manifest. Watching that metadata file
+    # forced every Settings click to rerun all bounded --help probes. The two
+    # deployment manifests are the durable tree-publication signals instead.
+    for key in repo_sync.REPOS:
         try:
-            now = max(now, p.stat().st_mtime)
+            now = max(now, (DATA_DIR / f"repos-manifest-{key}.json").stat().st_mtime)
         except OSError:
             pass
     try:
@@ -5692,27 +5699,8 @@ _REPOS_MTIME: Dict[str, float] = {}
 
 def _repos_changed() -> bool:
     """True when a repo update touched files the manifest reads (layouts.json etc.)."""
-    now = None
-    for p in (repo_sync.state_file(), DATA_DIR / "repos-manifest-scm.json"):
-        try:
-            now = max(now or 0, p.stat().st_mtime)
-        except OSError:
-            pass
-    # the decklist folder feeds the deck_file choices — a file added or removed
-    # there (Finder, paste-save, import) must invalidate the cached manifest
-    try:
-        scm, _ = effective_dirs(load_settings())
-        if scm:
-            dl = scm / "game" / "decklist"
-            try:
-                now = max(now or 0, dl.stat().st_mtime)
-            except OSError:
-                pass
-    except Exception:
-        pass
-    if now is None:
-        return False
-    return now > _REPOS_MTIME.get("t", 0)
+    now = _repos_signal_mtime()
+    return bool(now and now > _REPOS_MTIME.get("t", 0))
 
 
 # The manifest and the preview share ONE repo snapshot: boot pays for the one
@@ -5757,13 +5745,10 @@ def get_info_cached() -> dict:
 
 def get_manifest() -> dict:
     with MANIFEST_LOCK:
-        # The mtime signal alone can never fire again once the first build
-        # happens after the last state write (exactly what a first boot looks
-        # like: the cache is built empty at startup, the bootstrap then writes
-        # state, and no file ever changes again) — so the cache also carries
-        # the same 30 s TTL as the shared repo snapshot. Worst case a stale
-        # manifest is visible for half a minute; rebuilding is cheap because it
-        # rides on the snapshot.
+        # Deployment-manifest mtimes invalidate real managed-tree changes;
+        # the TTL remains a fallback for external checkouts edited outside the
+        # Workbench. First boot and managed deployment jobs also invalidate
+        # explicitly before publishing completion to the UI.
         now = time.time()
         if (not MANIFEST_CACHE or now - _REPOS_MTIME.get("t", 0) > 30 or _repos_changed()):
             snapshot = _get_info_locked()
@@ -5772,7 +5757,10 @@ def get_manifest() -> dict:
             MANIFEST_CACHE.clear()
             MANIFEST_CACHE.update(manifest)
             _REPOS_MTIME["t"] = now
-    return MANIFEST_CACHE
+        # Bootstrap and repo-job threads may invalidate immediately after this
+        # lock is released. Never hand serialization or a command builder the
+        # mutable cache object that those threads clear in place.
+        return copy.deepcopy(MANIFEST_CACHE)
 
 
 def invalidate_manifest_cache() -> None:
@@ -7541,9 +7529,15 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             pass
         with JOBS_LOCK:
             subscribers = list(job.get("subs", []))
-        _notify_subscribers(job, subscribers, ("done", status, rc), terminal=True)
-        if job.get("kind", "").startswith("fetch:"):
+        kind = job.get("kind", "")
+        # Publish changed repository data before terminal subscribers refresh
+        # the page. Metadata-only checks/source changes deliberately skip this
+        # path; repo_init/repo_update are the operations that replace trees.
+        if kind in ("repo_init", "repo_update"):
+            _invalidate_repo_views()
+        elif kind.startswith("fetch:"):
             invalidate_manifest_cache()
+        _notify_subscribers(job, subscribers, ("done", status, rc), terminal=True)
         if job.get("offset_lease"):
             job["offset_lease"] = False
             try:
@@ -10348,8 +10342,12 @@ def main():
                 _first_boot.run_first_boot(
                     DATA_DIR,
                     log=lambda message="": _diag(message),
+                    # Invalidate before each completion flag is published, so
+                    # the prep poll that observes "done" cannot pair fresh
+                    # repo info with the empty startup manifest.
+                    on_repo_ready=lambda _key: _invalidate_repo_views(),
                 )
-                invalidate_manifest_cache()
+                _invalidate_repo_views()
 
             threading.Thread(
                 target=_first_boot_then, daemon=True, name="first-boot",

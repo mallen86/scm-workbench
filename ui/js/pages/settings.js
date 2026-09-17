@@ -95,16 +95,35 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   let repoInitPending = false;
+  let sourcePending = false;
   const modeOf = src => ["main", "latest-release"].includes(src) ? src : "pinned";
+  const freshRepoFrom = async (result) => {
+    // Metadata operations already return the canonical repository rows. Use
+    // them directly instead of reloading info + the expensive capability
+    // manifest after a source choice or update check.
+    if (Array.isArray(result?.repos)) S.info.repos = result.repos;
+    else await refreshInfo({ keepForms: true });
+    return (S.info.repos || []).find(x => x.key === row.key) || row;
+  };
+  const replaceRow = (fresh) => {
+    if (container) container.replaceChildren(repoCopyRow(fresh, container, simple));
+    else rerender();
+  };
+  const showRowBusy = (message) => {
+    box.setAttribute("aria-busy", "true");
+    box.querySelectorAll("button, select, input").forEach(control => { control.disabled = true; });
+    box.append(el("div", { class: "small faint rc-busy", role: "status" }, el("span", { class: "spinner" }), ` ${message}`));
+  };
   const pickSource = async (v) => {
-    if (!v) return;
+    if (!v || sourcePending) return;
+    sourcePending = true;
+    showRowBusy("Changing track…");
+    let replaced = false;
     try {
       const r = await setRepoSource(row.key, v);
       if (!r.ok) return toast("err", (r.errors || ["could not save the source"]).join("; "));
-      await refreshInfo({ keepForms: true });
-      const fresh = (S.info.repos || []).find(x => x.key === row.key) || row;
-      if (container) container.replaceChildren(repoCopyRow(fresh, container));
-      else rerender();
+      replaceRow(await freshRepoFrom(r));
+      replaced = true;
       const warnings = Array.isArray(r.warnings) ? r.warnings.filter(Boolean) : (r.warnings ? [r.warnings] : []);
       if (warnings.length) {
         for (const warning of warnings) toast("warn", warning, 5200);
@@ -113,9 +132,13 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       }
     } catch (e) {
       toast("err", e.message || "could not save the source");
+    } finally {
+      sourcePending = false;
+      if (!replaced) rerender();
     }
   };
   const render = async () => {
+    box.removeAttribute("aria-busy");
     box.innerHTML = "";
     const src = row.source || "main";
     const mode = modeOf(src);
@@ -187,28 +210,38 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
       const checkBtn = el("button", { class: "btn sm" }, ico("search"), "Check for updates");
       checkBtn.onclick = async () => {
         checkBtn.disabled = true;
+        checkBtn.replaceChildren(el("span", { class: "spinner" }), " Checking…");
+        let replaced = false;
         try {
           const r = await checkRepo(row.key, true);
-          if (r.ok) { row.last_check = r.last_check; await refreshInfo({ keepForms: true }); const fresh = (S.info.repos || []).find(x => x.key === row.key); if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container)); else rerender(); }
-          else toast("err", (r.errors || ["check failed"]).join("; "));
+          if (r.ok) {
+            replaceRow(await freshRepoFrom(r));
+            replaced = true;
+          } else toast("err", (r.errors || ["check failed"]).join("; "));
         } catch (error) {
           toast("err", error?.message || "check failed");
         } finally {
-          checkBtn.disabled = false;
+          if (!replaced) {
+            checkBtn.disabled = false;
+            checkBtn.replaceChildren(ico("search"), "Check for updates");
+          }
         }
       };
       const hasUpdate = lc && lc.ok && !lc.up_to_date;
-      const upBtn = el("button", { class: `btn sm ${hasUpdate ? "primary" : ""}` }, ico("refresh"), hasUpdate ? "Update now" : "Update");
+      const updateLabel = hasUpdate ? "Update now" : "Update";
+      const upBtn = el("button", { class: `btn sm ${hasUpdate ? "primary" : ""}`, "data-label": updateLabel }, ico("refresh"), updateLabel);
       upBtn.onclick = async () => {
-        const job = await doRun("repo_update", null, { args: { repo: row.key, force_full: false }, confirm: {
+        const job = await doRun("repo_update", upBtn, { args: { repo: row.key, force_full: false }, confirm: {
         title: `Update ${row.name}`,
         text: `Moves the managed copy to “${mode === "main" ? "the latest main" : mode === "latest-release" ? "the latest release" : src}”. Forward moves fetch changed files only. Rollbacks and large jumps use a full snapshot. Images, decklists, and local edits are preserved. If upstream changed an edited file too, your version is kept and flagged.`,
         okLabel: "Update", icon: "refresh" } });
         if (!job) return;
+        upBtn.disabled = true;
+        upBtn.replaceChildren(el("span", { class: "spinner" }), " Updating…");
         watchJobDone(job.id, async () => {
           await refreshInfo({ keepForms: true });
           const fresh = (S.info.repos || []).find(x => x.key === row.key);
-          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+          if (fresh) replaceRow(fresh);
         });
       };
       acts.append(checkBtn, upBtn);
@@ -233,7 +266,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
           repoInitPending = false; S.repoInitPending = false;
           await refreshInfo({ keepForms: true });
           const fresh = (S.info.repos || []).find(x => x.key === row.key);
-          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+          if (fresh) replaceRow(fresh);
         });
       };
       acts.append(dlBtn, el("span", { class: "small faint" }, "Your clone stays unchanged. Workbench updates the managed copy."));
@@ -256,7 +289,7 @@ import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "..
           repoInitPending = false; S.repoInitPending = false;
           await refreshInfo({ keepForms: true });
           const fresh = (S.info.repos || []).find(x => x.key === row.key);
-          if (fresh && container) container.replaceChildren(repoCopyRow(fresh, container));
+          if (fresh) replaceRow(fresh);
         });
       };
       acts.append(dlBtn, el("span", { class: "small faint" }, "Afterward, updates are one click and incremental."));
