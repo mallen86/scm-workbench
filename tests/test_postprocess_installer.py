@@ -53,6 +53,7 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("--require-hashes", calls[1][0])
             self.assertIn("--no-deps", calls[1][0])
             self.assertIn("--no-index", calls[2][0])
+            self.assertIn("--no-compile", calls[2][0])
             self.assertIn("--require-hashes", calls[2][0])
             self.assertEqual(
                 lock.read_text(encoding="utf-8"),

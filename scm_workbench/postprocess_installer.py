@@ -273,7 +273,7 @@ def install(manifest_path: Path) -> None:
     _run(common + [
         "install", "--isolated", "--disable-pip-version-check", "--no-input",
         "--no-cache-dir", "--no-index", "--find-links", str(wheelhouse),
-        "--only-binary=:all:", "--no-deps", "--require-hashes",
+        "--only-binary=:all:", "--no-deps", "--no-compile", "--require-hashes",
         "--target", str(target), "--report", str(install_report),
         "-r", str(lock_file),
     ], "Installing the verified wheels offline")
