@@ -68,6 +68,9 @@ def main() -> int:
         'COMMAND_PREVIEW_EVENT',
         'image_count',
         'recognized image',
+        'const host = $(".pp-run-card", root) || root',
+        'host.append(status)',
+        'class: "pp-progress"',
         'Go to Create PDF',
     ):
         if required not in page:
@@ -80,7 +83,7 @@ def main() -> int:
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
     if not simple_pages or "postprocess" in simple_pages.group(1):
         return fail("post-processing was added to Simple-mode routes")
-    for marker in (".pp-editor", ".pp-source", ".pp-run-status", ".pp-lock", "@media (max-width: 760px)"):
+    for marker in (".pp-editor", ".pp-source", ".pp-run-status", ".pp-progress", ".pp-lock", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
     if ('go("postprocess", { scope: "both" })' not in fetch or "postprocessPrefill" not in nav or

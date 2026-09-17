@@ -260,17 +260,20 @@ function patchRunForm() {
 }
 
 function attachRunStatus(root) {
-  const status = el("div", { class: "pp-run-status", "aria-live": "polite" });
-  root.append(status);
+  const status = el("div", { class: "pp-run-status", "aria-live": "polite", hidden: true });
+  const host = $(".pp-run-card", root) || root;
+  host.append(status);
   const paint = () => {
     const running = state.job && (S.jobs || []).find(j => j.id === state.job.id);
-    if (!running) return;
+    if (!running) { status.hidden = true; status.replaceChildren(); return; }
+    status.hidden = false;
     const outcome = running.postprocess_outcome;
     const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
-    status.replaceChildren(el("div", { class: `pp-status ${running.status}` }, message));
+    const panel = el("div", { class: `pp-status ${running.status}` }, el("div", {}, message));
+    status.replaceChildren(panel);
     if (running.status === "running") {
       const done = Number(running.progress?.current || 0), total = Number(running.progress?.total || running.image_total || 0);
-      status.append(el("progress", { max: total || 1, value: Math.min(done, total || 1) }), el("span", { class: "small faint" }, total ? `${done} / ${total}` : "Preparing image set…"));
+      panel.append(el("div", { class: "pp-progress" }, el("progress", { max: total || 1, value: Math.min(done, total || 1) }), el("span", { class: "small faint" }, total ? `${done} / ${total}` : "Preparing image set…")));
     } else if (running.status === "ok") status.append(el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF"));
   };
   const previewListener = event => {
