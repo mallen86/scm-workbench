@@ -100,7 +100,7 @@ export function iconize(root) {
 export const S = {
   info: null,
   manifest: {},
-  page: "history",
+  page: null,          // no route owns the shell until startup data is ready
   forms: {},          // kind -> {key: value}
   plugin: "mtg",
   activeJobId: null,

@@ -17,15 +17,18 @@ class UpdateIpcTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-workbench-update-ipc-")
         self.old = {name: getattr(server, name) for name in
-                    ("DATA_DIR", "UPDATE_STATE_FILE", "_UPDATE_OPS",
+                    ("DATA_DIR", "SETTINGS_FILE", "UPDATE_STATE_FILE", "_UPDATE_OPS",
                      "_UPDATE_OP_QUEUE", "_UPDATE_OP_WORKERS_STARTED")}
         server.DATA_DIR = Path(self.temp.name)
+        server.SETTINGS_FILE = server.DATA_DIR / "settings.json"
         server.UPDATE_STATE_FILE = server.DATA_DIR / "update-state.json"
+        server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         server._UPDATE_OPS = {}
         server._UPDATE_OP_QUEUE = queue.Queue(maxsize=16)
         server._UPDATE_OP_WORKERS_STARTED = False
-        state = server._default_update_state()
-        state.update(status="up-to-date", latest="v2.0.0", checked_at=time.time())
+        state = server._default_update_state("stable")
+        state.update(status="up-to-date", latest="v2.0.0", prerelease=False,
+                     checked_at=time.time())
         server.save_update_state(state)
 
     def tearDown(self):
@@ -80,7 +83,7 @@ class UpdateIpcTests(unittest.TestCase):
     def test_check_start_is_immediate_and_reader_does_not_wait_for_network(self):
         entered, release = threading.Event(), threading.Event()
 
-        def blocked():
+        def blocked(_channel):
             entered.set()
             self.assertTrue(release.wait(2))
             return server.load_update_state()

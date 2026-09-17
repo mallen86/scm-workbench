@@ -35,6 +35,32 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(any("preparation incomplete" in line for line in logs))
         self.assertFalse(any("preparation finished" in line for line in logs))
 
+    def test_success_is_published_before_completion_flag(self):
+        repos = {
+            "scm": {"name": "silhouette-card-maker", "owner": "owner", "repo": "scm"},
+            "extras": {"name": "scm-extras", "owner": "owner", "repo": "extras"},
+        }
+        ready = []
+        violations = []
+        writes = []
+
+        def write_flag(_data, pending, done, phase, failed=None):
+            writes.append((list(pending), list(done), phase, list(failed or [])))
+            violations.extend(key for key in done if key not in ready)
+
+        with tempfile.TemporaryDirectory(prefix="workbench-bootstrap-") as temp, \
+                mock.patch.object(repo_sync, "REPOS", repos), \
+                mock.patch.object(bootstrap, "_bootstrap_one", return_value=True), \
+                mock.patch.object(bootstrap, "_write_flag", side_effect=write_flag):
+            bootstrap.run_first_boot(
+                Path(temp), log=lambda *_: None, on_repo_ready=ready.append,
+            )
+
+        self.assertEqual(set(ready), set(repos))
+        self.assertEqual(violations, [])
+        self.assertEqual(set(writes[-1][1]), set(repos))
+        self.assertEqual(writes[-1][0], [])
+
     def test_sequential_bootstrap_returns_results_by_repository(self):
         fake = mock.Mock()
         fake.REPOS = {

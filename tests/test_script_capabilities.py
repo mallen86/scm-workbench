@@ -74,6 +74,55 @@ class ScriptCapabilityTests(unittest.TestCase):
         missing, _repo = self._probe("print('not a CLI parser')\n", config={"probe": "parser"})
         self.assertEqual(missing["status"], "no_safe_help")
 
+    def test_slow_click_help_timeout_uses_static_decorators(self):
+        source = (
+            "import click\n"
+            "@click.command()\n"
+            "@click.option('--output_path')\n"
+            "@click.option('-i', '--ignore_set_and_collector_number', is_flag=True)\n"
+            "@click.option('--card_size', type=click.Choice(['standard']))\n"
+            "@click.option('--paper_size', type=click.Choice(['letter']))\n"
+            "@click.option('--extend_corners')\n"
+            "@click.option('--borderless', is_flag=True)\n"
+            "@click.option('--ppi', type=click.IntRange(min=0))\n"
+            "@click.version_option('3.0.0')\n"
+            "def cli(**_kwargs): pass\n"
+        )
+        config = {
+            "timeout_fallback": "static_click",
+            "required_flags": ["--output_path", "--card_size", "--paper_size", "--ppi"],
+        }
+        with mock.patch.object(
+                server, "_run_script_help",
+                return_value={"status": "timeout", "flags": [], "usage": ""}) as run:
+            result, _repo = self._probe(source, config=config)
+
+        run.assert_called_once()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["discovery"], "static_click")
+        self.assertTrue({
+            "--output_path", "-i", "--ignore_set_and_collector_number", "--card_size",
+            "--paper_size", "--extend_corners", "--borderless", "--ppi", "--version", "--help",
+        }.issubset(result["flags"]))
+        self.assertIn("TEXT", result["declarations"]["--extend_corners"])
+        self.assertIn("INTEGER RANGE", result["declarations"]["--ppi"])
+        self.assertNotIn("TEXT", result["declarations"]["--borderless"])
+
+    def test_static_click_timeout_fallback_requires_baseline_flags(self):
+        source = (
+            "import click\n"
+            "@click.command()\n"
+            "@click.option('--output_path')\n"
+            "def cli(**_kwargs): pass\n"
+        )
+        with mock.patch.object(server, "_run_script_help", return_value={
+                "status": "timeout", "flags": [], "usage": ""}):
+            result, _repo = self._probe(source, config={
+                "timeout_fallback": "static_click",
+                "required_flags": ["--output_path", "--paper_size"],
+            })
+        self.assertEqual(result["status"], "timeout")
+
     def test_script_change_during_probe_is_rejected(self):
         repo = self.root / "race"
         script = self._write(
@@ -240,6 +289,8 @@ class ScriptCapabilityTests(unittest.TestCase):
         server._apply_script_capabilities(manifest, settings, info)
 
         create = manifest["create_pdf"]
+        self.assertEqual(create["script"]["timeout_fallback"], "static_click")
+        self.assertEqual(manifest["fetch:mtg"]["script"]["timeout_fallback"], "static_click")
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(create["available"])
         self.assertFalse(options["borderless"]["available"])

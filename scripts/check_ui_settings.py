@@ -69,6 +69,7 @@ def main() -> int:
         (settings, 'repoPathControl(exI, "scm-extras")'),
         (settings, 'const selected = await pickRepoDirectory();'),
         (settings, 'setSettings({ python:'),
+        (settings, 'setSettings({ update_channel: channel })'),
         (onboarding, 'setSettings({ onboarded: true })'),
         (repo_setup, 'setSettings({ scm_dir:'),
     ):

@@ -387,6 +387,72 @@ class RepoIpcTests(unittest.TestCase):
                 self.assertEqual(http_status, status)
                 self.assertEqual(native_result, http_result)
 
+    def test_repo_job_publishes_views_before_terminal_notification(self):
+        class FinishedProcess:
+            stdout = io.BytesIO(b"")
+
+            @staticmethod
+            def poll():
+                return 0
+
+        events = []
+        job = {
+            "id": "repo-job", "kind": "repo_update", "started": time.time(),
+            "subs": [], "log_lines": [],
+        }
+        with mock.patch.object(server, "_invalidate_repo_views",
+                               side_effect=lambda: events.append("invalidate")), \
+                mock.patch.object(server, "_notify_subscribers",
+                                  side_effect=lambda *_args, **_kwargs: events.append("notify")), \
+                mock.patch.object(server, "_persist_jobs"):
+            server._pump(job, FinishedProcess(), io.StringIO())
+
+        self.assertEqual(job["status"], "ok")
+        self.assertEqual(events, ["invalidate", "notify"])
+
+    def test_manifest_reader_keeps_snapshot_across_concurrent_invalidation(self):
+        server.MANIFEST_CACHE["cached"] = {"value": True}
+        server._REPOS_MTIME["t"] = time.time() + 60
+
+        snapshot = server.get_manifest()
+        server.invalidate_manifest_cache()
+
+        self.assertEqual(snapshot, {"cached": {"value": True}})
+        self.assertEqual(server.MANIFEST_CACHE, {})
+
+    def test_metadata_changes_keep_manifest_cache_warm(self):
+        stamp = time.time() + 60
+        server.MANIFEST_CACHE["cached"] = {"value": True}
+        server._INFO_SNAP.update(t=stamp, v={"cached": True})
+        server._REPOS_MTIME["t"] = stamp
+
+        with mock.patch.object(server, "run_repo_check", return_value={
+                "repo": "scm", "ok": True, "cached": False,
+                "target": TARGET, "deployed": None, "source": "main",
+                "up_to_date": False}):
+            checked = server.repo_check_result("scm", force=True)
+        self.assertTrue(checked["ok"])
+
+        with mock.patch.object(repo_sync, "resolve_target", return_value=TARGET):
+            selected = server.repo_source_result("scm", "main")
+        self.assertTrue(selected["ok"])
+        self.assertEqual(server.MANIFEST_CACHE, {"cached": {"value": True}})
+        self.assertEqual(server._INFO_SNAP, {"t": stamp, "v": {"cached": True}})
+        self.assertEqual(server._REPOS_MTIME, {"t": stamp})
+        with mock.patch.object(server, "build_manifest",
+                               side_effect=AssertionError("metadata caused a rebuild")):
+            self.assertEqual(server.get_manifest(), {"cached": {"value": True}})
+
+    def test_only_deployed_tree_metadata_triggers_repo_manifest_refresh(self):
+        # Check/source metadata lives in repos-state.json and does not alter
+        # form choices. A deployment manifest, including extras, does.
+        server._REPOS_MTIME["t"] = 0
+        repo_sync.save_state({"scm": {"source": "main", "last_check": TARGET}})
+        with mock.patch.object(server, "effective_dirs", return_value=(None, None)):
+            self.assertFalse(server._repos_changed())
+            (self.data / "repos-manifest-extras.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(server._repos_changed())
+
     def test_source_state_is_canonical_mirror_preserves_unrelated_data_and_reports_mirror_failure(self):
         settings = json.loads(json.dumps(server.DEFAULT_SETTINGS))
         settings.update({"theme": "light", "scm_dir": "/kept/path"})

@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 import sys
@@ -18,11 +19,9 @@ def runner_entries(entries):
 
 
 def png():
-    from io import BytesIO
-    from PIL import Image
-    output = BytesIO()
-    Image.new("RGB", (1, 1), "white").save(output, format="PNG")
-    return output.getvalue()
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg=="
+    )
 
 
 class RunnerTests(unittest.TestCase):

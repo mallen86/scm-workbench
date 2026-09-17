@@ -1,4 +1,11 @@
 # Bugs
+- [x] Bound release-asset uploads to five minutes, retry transient server failures, and retain Actions artifacts when attachment fails.
+- [x] Replace the blank Job History startup flash with an honest loading state and remove the duplicate UI bootstrap that repeated every startup request.
+- [x] Keep Create PDF and MTG Fetch Card Art options available when a slow Windows machine exceeds the bounded help probe by safely reading literal Click options from source.
+- [x] Keep the beta-update opt-in control exclusive to Advanced mode while preserving the selected channel across Simple/Advanced mode changes.
+- [x] Show real managed-repository update stages instead of “setup did not finish” while an update is progressing normally.
+- [x] Keep managed-repository checks, track changes, and update starts responsive on Windows, with immediate progress feedback and no accidental Advanced controls in Simple mode.
+- [x] Prevent first-launch repository completion from exposing an empty Create PDF manifest before the managed checkout is indexed.
 - [x] Make Simple/Advanced switching immediate and reduce initial app startup work without weakening live script-capability checks.
 - [x] Keep self-update status and terminal failures visible in Simple mode after download progress ends.
 - [x] Ensure the manually-invoked update check always performs a fresh release check regardless of the scheduled-check cache.
@@ -91,3 +98,5 @@
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
 - [x] Add the Advanced-only managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.
+- [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
+- [ ] Add Linux support. Initial implementation would be for debian to verify linux functionality and then quickly follow on with arch support.

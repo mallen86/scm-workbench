@@ -176,12 +176,12 @@ state/projection transaction described below:
   must be valid JSON, non-empty, and at most **64 KiB (65,536 bytes)** when
   encoded as compact UTF-8 JSON. Only these top-level keys are accepted:
   `scm_dir`, `extras_dir`, `python`, `port`, `theme`, `ui_mode`,
-  `auto_open_browser`, `onboarded`, and `defaults`. Unknown keys,
-  `repos`, and offset state are rejected. String paths/interpreters may be
-  empty but are at most 4096 UTF-8 bytes and contain no C0 or DEL controls.
+  `update_channel`, `auto_open_browser`, `onboarded`, and `defaults`. Unknown
+  keys, `repos`, and offset state are rejected. String paths/interpreters may
+  be empty but are at most 4096 UTF-8 bytes and contain no C0 or DEL controls.
   `port` is a non-boolean integer in `1024..65535`; `theme` is `dark` or
-  `light`; `ui_mode` is `simple` or `advanced`; and the two remaining scalar
-  values are strict booleans. `defaults` must be a non-empty partial object
+  `light`; `ui_mode` is `simple` or `advanced`; `update_channel` is `stable`
+  or `beta`; and `auto_open_browser` and `onboarded` are strict booleans. `defaults` must be a non-empty partial object
   containing only `card_size`, `paper_size`, `ppi`, and `quality`. Card and
   paper names are non-empty, at most 128 UTF-8 bytes, and contain no C0 or
   DEL controls; `ppi` is a non-boolean finite number in `0..10000`, and
@@ -335,10 +335,11 @@ request.
 operation resolves the fixed remote target first, then commits the canonical
 state under the repository locks and mirrors the source into settings. If the
 mirror fails, the operation still succeeds with `canonical:true` and a bounded
-`warnings` list: state remains authoritative and the refreshed UI reports the
-repair warning without claiming the source change failed. A failed resolution
-leaves canonical state unchanged. Ref listing is read-only; a check updates
-only its repository's check metadata. Neither method changes the managed tree.
+`warnings` list: state remains authoritative and the terminal result rows let
+the UI report the repair warning without claiming the source change failed. A
+failed resolution leaves canonical state unchanged. Ref listing is read-only; a
+check updates only its repository's check metadata. Neither method changes the
+managed tree, so neither discards or rebuilds the script-capability manifest.
 `repo_init` and `repo_update` remain ordinary `jobs.start` kinds because they
 copy/deploy large trees and stream progress; this IPC slice does not turn them
 into metadata operations. These metadata starts also inherit the prior
@@ -677,8 +678,14 @@ fallback remains allowed, and native failure never retries over HTTP.
 `updates.get` is synchronous and returns exactly the existing `GET
 /api/updates` body: `current`, `repo`, `packaged`, `bundle`, and `state`. Its
 response-only `state.checking` boolean reports queued/running checks and is
-never persisted or accepted by the strict state-file schema. The
-`updates.check` start method takes exactly `{"force":true|false}` and
+never persisted or accepted by the strict state-file schema. Persisted state
+binds each result to `channel` (`stable` or `beta`) and records whether the
+selected release is a `prerelease`. The beta opt-in control is rendered only
+in Advanced mode, but `settings.update_channel` remains authoritative in both
+interface modes. Changing that channel immediately makes the other channel's
+cached result ineligible; changing only `settings.ui_mode` leaves the selected
+channel and its cache intact. The `updates.check` start method takes exactly
+`{"force":true|false}` and
 `updates.notes` takes exactly `{"tag":"..."}` (a non-empty tag of at most 128
 UTF-8 bytes). Both return immediately with the common operation acknowledgement;
 `updates.poll` takes exactly `{"id":"..."}` with an ID of at most 64
@@ -692,7 +699,9 @@ also have status `running` for the public operation contract. It has two daemon
 workers, queue 16, at most 16 active and 32 retained records, a 1 MiB result
 cap, 256-character bounded errors, random 32-hex IDs, monotonic timestamps,
 and 300-second terminal retention. Checks still share `run_update_check`'s
-single-flight backend. `updates.start` is synchronous and uses the existing
+channel-bound single-flight backend. Stable checks use GitHub's latest-release
+endpoint, while beta checks select the highest SemVer from a bounded release
+list containing both stable and prerelease entries. `updates.start` is synchronous and uses the existing
 transactional admission fence, returning the exact `/api/updates/start` body.
 Native errors never retry through HTTP. Browser routes remain compatibility
 endpoints and support an optional encoded `tag` query parameter; omitting it

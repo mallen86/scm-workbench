@@ -42,18 +42,20 @@ jobs:
           python scripts/check_ui_preview.py
           python scripts/check_ui_pdf_preview.py
           python scripts/check_ui_artifacts.py
+          python scripts/check_ui_history.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_save.py
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
+          python scripts/check_ui_update_security.py
           python scripts/check_ui_fs_delete.py
           python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
         run: find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Pin the version from the release tag
-        # The tag (vX.Y.Z) becomes the app's reported version and the
-        # bundle's metadata (Info.plist, exe FileVersion) in one stroke;
+        # The tag (vX.Y.Z or vX.Y.Z-beta.N) becomes the app's reported
+        # version and bundle metadata (Info.plist, exe FileVersion) in one stroke;
         # dispatch/test runs keep the declared [project] version.
         run: python scripts/inject_version.py
       - uses: dtolnay/rust-toolchain@stable
@@ -402,11 +404,13 @@ jobs:
           python scripts/check_ui_preview.py
           python scripts/check_ui_pdf_preview.py
           python scripts/check_ui_artifacts.py
+          python scripts/check_ui_history.py
           python scripts/check_ui_native_actions.py
           python scripts/check_ui_save.py
           python scripts/check_ui_settings.py
           python scripts/check_ui_offsets.py
           python scripts/check_ui_updates.py
+          python scripts/check_ui_update_security.py
           python scripts/check_ui_fs_delete.py
           python scripts/check_tauri_embedded.py
       - name: Node syntax check — every UI module
@@ -601,19 +605,71 @@ jobs:
         with:
           merge-multiple: true
       - name: Attach the built artifacts to the release
+        timeout-minutes: 5
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
         # the tag push, or from the GitHub UI. This job adds the macOS
         # DMG installer/updater payload and the portable Windows package. If
-        # no release exists for the tag, a bare one
-        # is created as a fallback so the artifacts are never lost.
+        # no release exists for the tag, create one with prerelease status
+        # derived from the SemVer suffix. An existing release must agree so a
+        # beta tag can never leak into the stable updater channel.
         # (--repo on every call: this job has no checkout for gh to infer
         #  the owner/repo from.)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip --clobber
+          expected_prerelease=false
+          prerelease_args=()
+          version_without_build=${GITHUB_REF_NAME%%+*}
+          if [[ "$version_without_build" == *-* ]]; then
+            expected_prerelease=true
+            prerelease_args+=(--prerelease)
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            actual_prerelease=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)
+            if [[ "$actual_prerelease" != "$expected_prerelease" ]]; then
+              echo "Release prerelease status does not match tag $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag "${prerelease_args[@]}"
+          fi
+          upload_release_assets() {
+            local attempt status delay
+            local upload_log="$RUNNER_TEMP/release-upload.log"
+            for attempt in 1 2 3; do
+              echo "Uploading release assets (attempt $attempt of 3)"
+              set +e
+              timeout --signal=TERM --kill-after=5s 75s \
+                gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip --clobber \
+                2>&1 | tee "$upload_log"
+              status=${PIPESTATUS[0]}
+              set -e
+              if (( status == 0 )); then
+                return 0
+              fi
+
+              # uploads.github.com has previously returned HTTP 500 and left
+              # gh waiting indefinitely. Retry only timeouts, server failures,
+              # and short-lived transport errors; fail permission and input
+              # errors immediately instead of hiding them behind retries.
+              if (( status == 124 || status == 137 )) || \
+                  grep -Eiq 'HTTP[^0-9]*5[0-9]{2}|Internal Server Error|Error saving asset|Error creating asset temp dir|connection reset|timed? out|unexpected EOF' "$upload_log"; then
+                if (( attempt == 3 )); then
+                  echo "::error title=Release upload failed::Release asset upload still failed after 3 bounded attempts. Actions artifacts were retained for manual recovery."
+                  return 1
+                fi
+                delay=$((attempt * 10))
+                echo "::warning title=Release upload retry::Attempt $attempt failed with a transient server or transport error; retrying in ${delay}s."
+                sleep "$delay"
+                continue
+              fi
+
+              echo "::error title=Release upload failed::Release asset upload failed with a non-retryable error (exit $status)."
+              return "$status"
+            done
+          }
+          upload_release_assets
       - name: Delete Actions artifacts after release attachment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

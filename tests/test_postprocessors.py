@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -26,12 +27,10 @@ from scm_workbench.postprocessing import (
 )
 
 
-def png(width=2, height=3):
-    from io import BytesIO
-    from PIL import Image
-    output = BytesIO()
-    Image.new("RGB", (width, height), "white").save(output, format="PNG")
-    return output.getvalue()
+def png():
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg=="
+    )
 
 
 SOURCE = "def process_image(image_path, context):\n    return None\n"

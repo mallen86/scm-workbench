@@ -453,14 +453,12 @@ console.log("ok: job history keeps its own section header in simple and advanced
         return fail(f"Node sidebar contract failed: {detail}")
     print(nav_result.stdout.strip())
 
-    # One implementation owns the separator visibility; the early boot path in
-    # app.js/console.js must call it rather than scan siblings again.
-    for path in (app_path, console_path):
-        source = path.read_text(encoding="utf-8")
-        if "applySimpleNav(" not in source:
-            return fail(f"{path.relative_to(ROOT)} does not use the shared sidebar layout")
-        if "nextElementSibling" in source:
-            return fail(f"{path.relative_to(ROOT)} duplicates the separator scan")
+    # One implementation owns separator visibility. app.js owns the only boot
+    # path and calls it rather than scanning sidebar siblings itself.
+    if "applySimpleNav(" not in app:
+        return fail("ui/js/app.js does not use the shared sidebar layout")
+    if "nextElementSibling" in app:
+        return fail("ui/js/app.js duplicates the separator scan")
     for path in sorted(JS.rglob("*.js")):
         if path == nav_path:
             continue

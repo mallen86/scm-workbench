@@ -1,7 +1,7 @@
 /* console — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, api, el, fmtTs, ico, iconize, toast } from "./core.js";import { openFile, revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { publishJobsUpdated } from "./job-events.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { refreshInfo, showBootFailure } from "./info.js";import { applySimpleNav, bindNav, bootPage, uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
+import { $, $$, S, el, fmtTs, ico, toast } from "./core.js";import { openFile, revealPath, saveArtifact } from "./native-actions.js";import { displayCmd, repoRowForKind } from "./forms.js";import { renderJobHistory } from "./job-history.js";import { publishJobsUpdated } from "./job-events.js";import { syncJobNotices } from "./job-notices.js";import { jobs } from "./jobs.js";import { uiMode } from "./nav.js";import { _prepTimer, prepActive, startPrepWatcher } from "./prep.js";
 let _streamSerial = 0;
 function closeStream() {
   _streamSerial++;
@@ -444,34 +444,3 @@ export function bindConsole() {
 export function startJobsPoll() {
   setInterval(() => { if (S.jobs.some(j => j.status === "running")) refreshJobs(); }, 4000);
 }
-
-document.addEventListener("DOMContentLoaded", async () => {
-  bindNav();
-  bindConsole();
-  iconize(document);
-  // initial theme before info loads (avoid flash) — and the simple-mode nav
-  // collapse, from the same early settings read, so the first paint is already
-  // in the right shape
-  try {
-    const s = await api("/api/settings");
-    document.documentElement.dataset.theme = s.theme || "dark";
-    // the same one implementation the mode switch uses, so the first paint can
-    // never disagree with a later syncUiMode()
-    applySimpleNav((s.ui_mode || "advanced") === "simple");
-  } catch { }
-  $$("#theme-switch .ts-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === (document.documentElement.dataset.theme || "dark")));
-  // the first API call can fail transiently (server still starting up, or
-  // WSL2's per-connection localhost proxy hiccuping) — retry a few times
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt) await new Promise(r => setTimeout(r, 800 + 700 * attempt));
-    try {
-      await refreshInfo();
-      bootPage();
-      startJobsPoll();
-      startPrepWatcher();
-      return;
-    } catch (e) {
-      if (attempt === 3) showBootFailure(e);
-    }
-  }
-});

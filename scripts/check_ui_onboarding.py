@@ -18,10 +18,12 @@ def fail(message: str) -> int:
 def main() -> int:
     forms = (JS / "forms.js").read_text(encoding="utf-8")
     app = (JS / "app.js").read_text(encoding="utf-8")
+    console_js = (JS / "console.js").read_text(encoding="utf-8")
     core = (JS / "core.js").read_text(encoding="utf-8")
     nav = (JS / "nav.js").read_text(encoding="utf-8")
     prep = (JS / "prep.js").read_text(encoding="utf-8")
     page = (JS / "pages" / "preparing.js").read_text(encoding="utf-8")
+    index = (UI / "index.html").read_text(encoding="utf-8")
     css = (UI / "theme.css").read_text(encoding="utf-8")
 
     # Calling visible() without its option caused optVisible(undefined, spec)
@@ -41,6 +43,23 @@ def main() -> int:
         if marker not in forms:
             return fail(f"simple PDF does not follow its titled cross-group plan: {marker}")
 
+    if app.count('document.addEventListener("DOMContentLoaded", async () => {') != 1:
+        return fail("app.js must own exactly one startup bootstrap")
+    if 'document.addEventListener("DOMContentLoaded"' in console_js:
+        return fail("console.js still duplicates the application startup bootstrap")
+    if "page: null" not in core:
+        return fail("shared state claims Job history owns the shell before startup finishes")
+    for marker in (
+        '<div class="topbar-title" id="topbar-title">Starting SCM Workbench</div>',
+        'class="boot-state" role="status" aria-live="polite"',
+        "Loading your settings, repositories, and tools…",
+    ):
+        if marker not in index:
+            return fail(f"the initial shell has no honest startup state: {marker}")
+    for marker in (".boot-state {", ".boot-state > .spinner {"):
+        if marker not in css:
+            return fail(f"the startup state is not visibly styled: {marker}")
+
     for marker in (
         'import "./pages/preparing.js";',
         'if (firstBootPageNeeded()) go("preparing", null, { push: false });',
@@ -59,6 +78,7 @@ def main() -> int:
         'native?.dataset.prepAll === "true"',
         'ready ? "ready"',
         'ready ? "Downloaded and ready"',
+        'r.progress ? (r.deployed ? "starting update" : "starting download")',
         "const indeterminate = !det && !ready",
         'bar.classList.toggle("indet", indeterminate)',
         'fill.style.width = indeterminate ? "" : pct + "%"',
@@ -94,7 +114,6 @@ def main() -> int:
     # from the notice), so the job-list refresh is where that start is observed;
     # without it the box only appeared after some later info refresh or a
     # navigation happened to start the watcher.
-    console_js = (JS / "console.js").read_text(encoding="utf-8")
     for marker in ("_prepTimer, prepActive, startPrepWatcher",
                    "if (prepActive() && !_prepTimer) startPrepWatcher();"):
         if marker not in console_js:

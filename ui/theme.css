@@ -237,6 +237,30 @@ body:not(.mode-simple).console-open .main { padding-bottom: 330px; }
   margin: 0 auto;
   padding: 26px 28px 140px;
 }
+.boot-state {
+  min-height: clamp(240px, calc(100vh - 220px), 560px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--muted);
+}
+.boot-state > .spinner {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.boot-state strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 14px;
+}
+.boot-state div > span { display: block; font-size: 12.5px; }
 
 .page-head { margin-bottom: 22px; }
 .page-head h1 { font-size: 25px; font-weight: 800; letter-spacing: -0.02em; }

@@ -199,6 +199,49 @@ class HandoffRecordTests(unittest.TestCase):
                 for name, value in old.items():
                     setattr(server, name, value)
 
+    def test_beta_handoff_reconciles_after_switching_back_to_stable(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = {name: getattr(server, name) for name in (
+                "DATA_DIR", "SETTINGS_FILE", "JOBS_FILE", "LOGS_DIR",
+                "UPDATE_STATE_FILE", "SERVER_VERSION", "JOBS",
+                "_UPDATE_QUIESCING", "_UPDATE_QUIESCING_JOB")}
+            try:
+                server.DATA_DIR = root / "data"
+                server.SETTINGS_FILE = server.DATA_DIR / "settings.json"
+                server.JOBS_FILE = server.DATA_DIR / "jobs.json"
+                server.LOGS_DIR = server.DATA_DIR / "logs"
+                server.UPDATE_STATE_FILE = server.DATA_DIR / "update-state.json"
+                server.SERVER_VERSION = "0.9.0-beta.1"
+                server.JOBS = {}
+                server._UPDATE_QUIESCING = True
+                server._UPDATE_QUIESCING_JOB = "handoff"
+                server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
+                token = "c" * 64
+                handoff = {
+                    "id": "handoff", "ts": time.time(), "kind": "update",
+                    "title": "Update", "cmd": "update", "args": {},
+                    "status": "handoff", "exit_code": None, "log_file": "x",
+                    "duration": None, "update_token": token,
+                    "expected_version": "0.9.0-beta.1",
+                }
+                server.JOBS_FILE.write_text(json.dumps([handoff]))
+                (server.DATA_DIR / ".update-result.json").write_text(json.dumps({
+                    "version": 1, "token": token, "success": True,
+                    "expected_version": "0.9.0-beta.1", "message": "updated",
+                }))
+
+                self.assertTrue(server.reconcile_update_result())
+
+                state = server.load_update_state()
+                self.assertEqual((state["channel"], state["prerelease"]), ("beta", True))
+                projected = server.current_update_state(state, "stable")
+                self.assertEqual((projected["channel"], projected["status"]),
+                                 ("stable", "never"))
+            finally:
+                for name, value in old.items():
+                    setattr(server, name, value)
+
     def test_dev_checkout_is_not_an_install_bundle(self):
         with tempfile.TemporaryDirectory() as td:
             with patch.dict(os.environ, {"SCM_WORKBENCH_PACKAGED": "1", "SCM_WORKBENCH_BUNDLE": ""}, clear=False), \

@@ -290,8 +290,9 @@ export function updatePrepRows() {
     const det = ready || p.total > 0;
     const pct = ready ? 100 : (p.total > 0
       ? Math.min(100, Math.round(100 * (p.done || 0) / p.total)) : 0);
+    const starting = r.progress ? (r.deployed ? "starting update" : "starting download") : "";
     const stage = ready ? "ready" : waiting ? "waiting to start" :
-      (STAGE_NAMES[p.stage] || p.stage || "setup did not finish");
+      (STAGE_NAMES[p.stage] || p.stage || starting || "setup did not finish");
     row.children[0].textContent = r.name + "  |  " + stage;
     row.children[1].textContent = ready ? "Downloaded and ready" : prepMeta(r);
     const bar = row.children[2], fill = bar.firstElementChild;
