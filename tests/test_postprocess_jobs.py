@@ -101,6 +101,29 @@ class PostprocessJobTests(unittest.TestCase):
         }))
         self.assertEqual(job["progress"], {"current": 1, "total": 1, "label": "card.png"})
 
+    def test_stage_quota_tolerates_disappearing_installer_directories(self):
+        root = self.root / "mutable-stage"
+        vanished = root / "pip-unpack"
+        vanished.mkdir(parents=True)
+        real_scandir = server.os.scandir
+
+        def racing_scandir(path):
+            if Path(path) == vanished:
+                vanished.rmdir()
+                raise FileNotFoundError(path)
+            return real_scandir(path)
+
+        enough_space = mock.Mock(free=server.POSTPROCESS_FREE_SPACE_RESERVE_BYTES + 1)
+        with mock.patch.object(server.shutil, "disk_usage", return_value=enough_space):
+            with mock.patch.object(server.os, "scandir", side_effect=racing_scandir):
+                self.assertIsNone(server._postprocess_stage_limit_reason(root, 1024, 10))
+            for name in ("one", "two", "three"):
+                (root / name).write_bytes(b"x")
+            self.assertEqual(
+                server._postprocess_stage_limit_reason(root, 1024, 2),
+                "entry-count (3 > 2)",
+            )
+
     def test_preview_reports_the_bounded_selected_image_count(self):
         (self.repo / "game" / "front" / "card 1.png").write_bytes(PNG)
         (self.repo / "game" / "front" / "card 2.png").write_bytes(PNG)

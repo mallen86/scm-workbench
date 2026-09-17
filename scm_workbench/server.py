@@ -7592,50 +7592,62 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     return argv, run_dir, _postprocess_env(run_dir)
 
 
+def _postprocess_stage_limit_reason(root: Path, max_bytes: int, max_entries: int) -> str | None:
+    """Return a quota violation while tolerating expected installer rename races."""
+    try:
+        if shutil.disk_usage(root).free < POSTPROCESS_FREE_SPACE_RESERVE_BYTES:
+            return "free-space reserve"
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return "filesystem-scan safety"
+    total = count = 0
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            scan = os.scandir(current)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return "filesystem-scan safety"
+        try:
+            with scan:
+                for entry in scan:
+                    try:
+                        observed = entry.stat(follow_symlinks=False)
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue
+                    except OSError:
+                        return "filesystem-scan safety"
+                    count += 1
+                    if count > max_entries:
+                        return f"entry-count ({count:,} > {max_entries:,})"
+                    if _is_reparse_or_symlink(observed):
+                        return "link safety"
+                    if stat.S_ISDIR(observed.st_mode):
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(observed.st_mode):
+                        total += observed.st_size
+                        if total > max_bytes:
+                            return f"byte-size ({total:,} > {max_bytes:,})"
+                    else:
+                        return "special-file safety"
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return "filesystem-scan safety"
+    return None
+
+
 def _postprocess_stage_monitor(job: dict, proc: subprocess.Popen) -> None:
     stop = job["stage_monitor_stop"]
     root = Path(job.get("postprocess_run") or job["dependency_stage"])
     max_bytes = int(job.get("stage_max_bytes") or postprocessing.RUN_MAX_BYTES)
     max_entries = int(job.get("stage_max_entries") or postprocessing.SCAN_MAX_ENTRIES)
     while not stop.wait(0.25):
-        total = count = 0
-        exceeded = False
-        limit_reason = "file, size, or link"
-        try:
-            if shutil.disk_usage(root).free < POSTPROCESS_FREE_SPACE_RESERVE_BYTES:
-                exceeded = True
-                limit_reason = "free-space reserve"
-            pending = [root]
-            while pending and not exceeded:
-                current = pending.pop()
-                with os.scandir(current) as scan:
-                    for entry in scan:
-                        observed = entry.stat(follow_symlinks=False)
-                        count += 1
-                        if count > max_entries:
-                            exceeded = True
-                            limit_reason = f"entry-count ({count:,} > {max_entries:,})"
-                            break
-                        if _is_reparse_or_symlink(observed):
-                            exceeded = True
-                            limit_reason = "link safety"
-                            break
-                        if stat.S_ISDIR(observed.st_mode):
-                            pending.append(Path(entry.path))
-                        elif stat.S_ISREG(observed.st_mode):
-                            total += observed.st_size
-                            if total > max_bytes:
-                                exceeded = True
-                                limit_reason = f"byte-size ({total:,} > {max_bytes:,})"
-                                break
-                        else:
-                            exceeded = True
-                            limit_reason = "special-file safety"
-                            break
-        except OSError:
-            exceeded = True
-            limit_reason = "filesystem-scan safety"
-        if not exceeded:
+        limit_reason = _postprocess_stage_limit_reason(root, max_bytes, max_entries)
+        if limit_reason is None:
             continue
         proc_lock = job.setdefault("proc_lock", threading.Lock())
         with proc_lock:
