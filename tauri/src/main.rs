@@ -747,6 +747,7 @@ fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
 /// Resolve the Linux data location according to the XDG base-directory
 /// contract. Relative XDG/HOME values are ignored so packaged state can never
 /// land relative to an arbitrary launch directory.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn linux_data_dir_from(
     xdg_data_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
@@ -1349,6 +1350,7 @@ mod restart_notice_tests {
         assert!(elapsed < Duration::from_secs(1));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_data_directory_honors_absolute_xdg_then_home() {
         assert_eq!(
@@ -1364,6 +1366,7 @@ mod restart_notice_tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_data_directory_ignores_relative_base_paths() {
         assert_eq!(
