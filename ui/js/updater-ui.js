@@ -205,15 +205,21 @@ function renderUpdateNotice(tag, state) {
   const released = state.published ? new Date(state.published) : null;
   const beta = state.prerelease === true;
   const manual = state.install_mode === "manual";
+  const manualPackage = state.package_format === "arch" ? "Arch package"
+    : state.package_format === "deb" ? "Debian package" : null;
+  const manualInstruction = state.package_format === "arch" ? "Install the Arch package with pacman."
+    : state.package_format === "deb" ? "Install the Debian package with your software manager." : null;
   const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, beta ? "Beta update available" : "Update available"));
   const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss until the app restarts",
     "aria-label": "Dismiss the update notice" }, ico("x"));
   close.onclick = () => { S.updateNoticeDismissed = tag; removeUpdateNotice(); };
   head.append(close);
   const meta = el("div", { class: "rp-meta" }, manual
-    ? (released && !Number.isNaN(released.getTime())
-      ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. Install the Debian package with your software manager.`
-      : `${beta ? "This is a beta release. " : ""}Install the Debian package with your software manager.`)
+    ? (manualInstruction
+      ? (released && !Number.isNaN(released.getTime())
+        ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. ${manualInstruction}`
+        : `${beta ? "This is a beta release. " : ""}${manualInstruction}`)
+      : "This Linux distribution does not have a supported update package.")
     : (released && !Number.isNaN(released.getTime())
       ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
       : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`));
@@ -223,8 +229,8 @@ function renderUpdateNotice(tag, state) {
   let install;
   if (manual) {
     const releaseUrl = releasePageUrl(state.release_url);
-    install = el("button", { type: "button", class: "btn sm primary", disabled: !releaseUrl }, ico("external"), "View download");
-    install.onclick = releaseUrl ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null;
+    install = el("button", { type: "button", class: "btn sm primary", disabled: !releaseUrl || !manualPackage }, ico("external"), "View download");
+    install.onclick = releaseUrl && manualPackage ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null;
   } else {
     install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), "Update now");
     install.onclick = async () => {
@@ -260,6 +266,7 @@ export async function refreshUpdateNotice() {
     const view = await getUpdates();
     state = view?.state || {};
     state.install_mode = view?.install_mode;
+    state.package_format = view?.package_format;
   } catch { return; }   // an unreachable check simply leaves the notice alone
   const tag = state.status === "update-available" ? String(state.latest || "") : "";
   if (!tag || S.updateNoticeDismissed === tag) { removeUpdateNotice(); return; }

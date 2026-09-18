@@ -149,20 +149,24 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 `scripts/build.sh macos` also assembles the local `.app`. On Ubuntu 22.04 x86_64,
 `scripts/build.sh linux` builds the shell, bakes the GNU Linux runtime, and
 assembles `build/linux/scm-workbench-linux-amd64.deb`; it requires the Tauri
-WebKitGTK/GTK development packages plus `clang`, `zstd`, and `patchelf`.
-`scripts/check_linux_package.sh` must be run against the installed executable
-under Xvfb. See [docs/linux-packaging.md](docs/linux-packaging.md) for the exact
-layout and commands. The complete platform-specific assembly and smoke checks
-live in `.github/workflows/package.yml`. The smoke checks treat native IPC
+WebKitGTK/GTK development packages plus `clang`, `zstd`, and `patchelf`. On an
+x86_64 Arch host, `scripts/build.sh arch` assembles
+`build/arch/scm-workbench-linux-arch-x86_64.pkg.tar.zst` through the checked-in
+PKGBUILD template. Release CI builds the shell/runtime once on Ubuntu, then
+packages those same bytes and runs clean-container lifecycle smokes on current
+Arch and Manjaro. See [docs/linux-packaging.md](docs/linux-packaging.md) for the
+exact dependencies and commands. The complete platform-specific assembly and
+smoke checks live in `.github/workflows/package.yml`. The smoke checks treat native IPC
 markers emitted by the embedded UI as rendered-UI evidence, assert port 8038
 stays closed, and separately assert that no WebView request occurred.
 
-The supported release matrix is **macOS ARM64**, **Windows x64**, and
-**Debian/Ubuntu Linux x86_64**. There is no Intel/universal macOS artifact, ARM
-Windows artifact, or Linux ARM64 artifact. The macOS workflow wraps the
-ad-hoc-signed app in a drag-to-Applications DMG, which is also the sole macOS
-in-app updater payload. Windows publishes a portable ZIP. Linux publishes a
-package-manager-owned `.deb` and intentionally uses manual update installation.
+The supported release matrix is **macOS ARM64**, **Windows x64**, and x86_64
+Linux on **Debian/Ubuntu** and current **Arch/Manjaro**. There is no
+Intel/universal macOS artifact, ARM Windows artifact, or Linux ARM64 artifact.
+The macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG,
+which is also the sole macOS in-app updater payload. Windows publishes a
+portable ZIP. Linux publishes package-manager-owned `.deb` and `.pkg.tar.zst`
+artifacts and intentionally uses manual update installation.
 The DMG is not notarized, and current Windows artifacts are unsigned. Those
 signing tradeoffs, including the expected macOS **Open Anyway** and Windows
 SmartScreen prompts, are explicitly accepted for the current first slice. Do
@@ -170,7 +174,7 @@ not add Developer ID/notarization or an OV certificate as part of this work.
 
 ## Releasing a new version
 
-**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG, portable Windows x64 ZIP, and Debian/Ubuntu x86_64 `.deb` to the GitHub release.
+**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG, portable Windows x64 ZIP, Debian/Ubuntu x86_64 `.deb`, and Arch/Manjaro x86_64 `.pkg.tar.zst` to the GitHub release.
 
 Stable tags use `vMAJOR.MINOR.PATCH`. Beta tags use a SemVer prerelease suffix such as `v0.9.0-beta.1`, and their GitHub release must be marked as a prerelease. The packaging workflow verifies that the GitHub prerelease flag agrees with the tag and creates a correctly marked fallback release when needed. The prerelease opt-in control is exposed only in Advanced mode under **Settings > App updates**, but the selected channel remains active across later Simple/Advanced mode changes. Opted-in users receive the highest version across stable and prerelease releases; everyone else receives stable releases only.
 
@@ -179,7 +183,7 @@ Stable tags use `vMAJOR.MINOR.PATCH`. Beta tags use a SemVer prerelease suffix s
 git tag -a v0.1.1 -m "v0.1.1"
 git push origin v0.1.1
 
-# 2. create the release with its notes; CI attaches the DMG, ZIP, and DEB
+# 2. create the release with its notes; CI attaches the DMG, ZIP, DEB, and Arch package
 gh release create v0.1.1 --title "v0.1.1" --notes-file notes.md --verify-tag
 
 # Beta example: the tag, title, and GitHub prerelease flag must agree

@@ -1808,6 +1808,8 @@ def _valid_update_state(st: Any) -> bool:
                     asset["id"] <= 0 or asset["tag"] != latest):
                 return False
             name = updater._asset_name(asset["name"])
+            if name != updater.expected_asset_name():
+                return False
             if (isinstance(asset["size"], bool) or not isinstance(asset["size"], int) or
                     not 1 <= asset["size"] <= updater.ASSET_MAX_BYTES):
                 return False
@@ -2085,7 +2087,7 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             return None, ["No newer update is available from the current checked state."]
         latest = st["latest"]
         if updater.install_mode() != "automatic":
-            return None, ["Linux updates must be installed manually with the Debian package."]
+            return None, ["Linux updates must be installed manually with the operating system package."]
         if any(j.get("kind") == "update" and j.get("status") == "running"
                for j in JOBS.values()):
             return None, ["an update is already running; try again later"]
@@ -3302,10 +3304,15 @@ def updates_view() -> dict:
     channel = _selected_update_channel()
     state = copy.deepcopy(current_update_state(load_update_state(), channel))
     state["checking"] = checking
+    install_mode = updater.install_mode()
+    try:
+        package_format = updater.package_format()
+    except updater.UpdateError:
+        package_format = "unsupported" if install_mode == "manual" else None
     return {"current": SERVER_VERSION, "repo": updater.UPDATE_REPO,
             "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
             "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or "",
-            "install_mode": updater.install_mode(),
+            "install_mode": install_mode, "package_format": package_format,
             "state": state}
 
 

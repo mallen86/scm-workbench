@@ -1,0 +1,19 @@
+# Release packaging recipe for the prebuilt SCM Workbench Linux payload.
+# scripts/build_linux_arch.py replaces the version token and stages root/.
+pkgname=scm-workbench
+pkgver=__SCM_WORKBENCH_PKGVER__
+pkgrel=1
+pkgdesc='Desktop workbench for Silhouette Card Maker'
+arch=('x86_64')
+url='https://github.com/mallen86/scm-workbench'
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'xdg-utils')
+options=('!strip' '!debug')
+source=()
+sha256sums=()
+
+package() {
+  test -x "$startdir/root/usr/lib/scm-workbench/scm-workbench"
+  test -x "$startdir/root/usr/lib/scm-workbench/runtime/python/install/bin/python3.13"
+  cp -a "$startdir/root/." "$pkgdir/"
+}

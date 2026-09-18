@@ -594,12 +594,16 @@ jobs:
           retention-days: 1  # see the macos step above
 
   linux:
-    # Build on the oldest supported baseline. The resulting amd64 package is
-    # tested on Ubuntu 22.04 here and is also installable on Debian 12+.
+    # Build once on the oldest supported GNU/Linux baseline, then package the
+    # same x86_64 shell/runtime for Debian-family and Arch-family desktops.
     runs-on: ubuntu-22.04
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/../scm-workbench-tauri-linux-target
       PIP_FIND_LINKS: file://${{ github.workspace }}/ciwheels
+      # Pin the official x86_64 Arch build environment. pacman -Syu in the
+      # install smoke refreshes its rolling userspace before package testing.
+      ARCH_CONTAINER: archlinux:base-devel@sha256:4894f5a268c696fad671966f383175a13faf433c9d9c88cdd4e32eaa2d18838b
+      MANJARO_CONTAINER: manjarolinux/base@sha256:bbf1f1d746f28e138eea610e140d2f28cbb5b7c5da2fbff034b883527aa604e9
     steps:
       - uses: actions/checkout@v4
       - name: Record build revision
@@ -684,11 +688,49 @@ jobs:
           export XDG_RUNTIME_DIR="$runtime_dir"
           xvfb-run -a dbus-run-session -- \
             scripts/check_linux_package.sh /usr/lib/scm-workbench/scm-workbench
-      - name: Upload Debian package
+      - name: Assemble the Arch package in a pinned clean container
+        run: |
+          docker run --rm \
+            --env HOST_UID="$(id -u)" --env HOST_GID="$(id -g)" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$CARGO_TARGET_DIR:/cargo-target:ro" \
+            --workdir /workspace \
+            "$ARCH_CONTAINER" bash -euo pipefail -c '
+              groupadd --non-unique --gid "$HOST_GID" builder
+              useradd --non-unique --uid "$HOST_UID" --gid "$HOST_GID" --create-home builder
+              runuser -u builder -- python scripts/build_linux_arch.py \
+                --binary /cargo-target/release/scm-workbench \
+                --bundle /workspace/build/linux
+              beta=$(runuser -u builder -- python -c \
+                "from scripts.build_linux_arch import arch_version; print(arch_version(\"0.9.0-beta.2\"))")
+              beta10=$(runuser -u builder -- python -c \
+                "from scripts.build_linux_arch import arch_version; print(arch_version(\"0.9.0-beta.10\"))")
+              test "$(vercmp "$beta" 0.9.0)" = -1
+              test "$(vercmp "$beta" "$beta10")" = -1
+            '
+      - name: Install and smoke-test the Arch package in a clean Arch container
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            "$ARCH_CONTAINER" \
+            /workspace/scripts/check_arch_package.sh \
+            /workspace/build/linux/scm-workbench-linux-arch-x86_64.pkg.tar.zst
+      - name: Install and smoke-test the Arch package in a clean Manjaro container
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            "$MANJARO_CONTAINER" \
+            /workspace/scripts/check_arch_package.sh \
+            /workspace/build/linux/scm-workbench-linux-arch-x86_64.pkg.tar.zst
+      - name: Upload Linux packages
         uses: actions/upload-artifact@v4
         with:
           name: scm-workbench-linux-${{ steps.build_meta.outputs.short_sha }}
-          path: build/linux/scm-workbench-linux-amd64.deb
+          path: |
+            build/linux/scm-workbench-linux-amd64.deb
+            build/linux/scm-workbench-linux-arch-x86_64.pkg.tar.zst
           retention-days: 1
 
   release:
@@ -707,7 +749,8 @@ jobs:
         # The release itself (title + notes) is created *outside* this
         # workflow - `gh release create vX.Y.Z --notes-file ...` right before
         # the tag push, or from the GitHub UI. This job adds the macOS DMG,
-        # portable Windows ZIP, and Debian/Ubuntu amd64 package. If
+        # portable Windows ZIP, Debian/Ubuntu package, and Arch/Manjaro
+        # package. If
         # no release exists for the tag, create one with prerelease status
         # derived from the SemVer suffix. An existing release must agree so a
         # beta tag can never leak into the stable updater channel.
@@ -739,7 +782,7 @@ jobs:
               echo "Uploading release assets (attempt $attempt of 3)"
               set +e
               timeout --signal=TERM --kill-after=5s 75s \
-                gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip scm-workbench-linux-amd64.deb --clobber \
+                gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" scm-workbench-macos.dmg scm-workbench-windows.zip scm-workbench-linux-amd64.deb scm-workbench-linux-arch-x86_64.pkg.tar.zst --clobber \
                 2>&1 | tee "$upload_log"
               status=${PIPESTATUS[0]}
               set -e

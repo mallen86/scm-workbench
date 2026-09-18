@@ -37,6 +37,7 @@ The app manages and launches tools from the sibling `silhouette-card-maker` and 
 - `tauri/src/` — native shell, worker RPC, lifecycle, and update helper.
 - `tests/` — Python unit/integration/security tests.
 - `scripts/check_ui_*.py` — executable frontend and transport contracts, usually backed by Node.
+- `scripts/build_linux_*.py`, `packaging/arch/PKGBUILD.in` — Debian and Arch package assembly.
 - `.github/workflows/package.yml` — canonical packaging and release workflow.
 
 ## Core architecture rules
@@ -179,8 +180,8 @@ Always compare local verification with the current steps in `.github/workflows/p
 
 ## Packaging and releases
 
-- Supported release targets are macOS ARM64, Windows x64, and Debian/Ubuntu Linux x86_64.
-- macOS uses a drag-to-Applications DMG as both installer and in-app updater payload; Windows publishes a portable ZIP; Linux publishes a package-manager-owned `.deb` and uses manual update installation.
+- Supported release targets are macOS ARM64, Windows x64, and Linux x86_64 on Debian/Ubuntu and current Arch/Manjaro.
+- macOS uses a drag-to-Applications DMG as both installer and in-app updater payload; Windows publishes a portable ZIP; Linux publishes package-manager-owned `.deb` and `.pkg.tar.zst` artifacts and uses manual update installation.
 - Current artifacts are intentionally not Developer ID/notarized or OV-signed. Do not change that policy incidentally.
 - A `v*` tag is the release version source of truth. `scripts/inject_version.py` synchronizes Python, Tauri, Cargo, and packaging metadata.
 - `workflow_dispatch` runs packaging without creating a tagged release; tag pushes build and attach release assets.

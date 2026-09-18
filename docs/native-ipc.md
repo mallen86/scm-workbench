@@ -583,9 +583,13 @@ ceiling, exact declared/received-size checks, an exact GitHub release-CDN host a
 and SHA-256 verification when GitHub supplies a digest. A completed download is
 published from a unique temporary file only after validation. On macOS the updater
 requires exactly one `scm-workbench-macos.dmg`; Windows requires its exact portable
-ZIP. Linux release discovery requires exactly one `scm-workbench-linux-amd64.deb`,
-reports `install_mode: "manual"`, and opens the validated tag-bound release page
-instead of downloading, staging, or replacing package-manager-owned `/usr` files.
+ZIP. Linux release discovery reads bounded OS metadata, requires x86_64, and selects
+exactly one target-bound package: `scm-workbench-linux-amd64.deb` for Debian/Ubuntu
+or `scm-workbench-linux-arch-x86_64.pkg.tar.zst` for Arch/Manjaro. Cached asset
+metadata is rejected if it belongs to another local target. Linux reports
+`install_mode: "manual"` plus a bounded package-format descriptor and opens the
+validated tag-bound release page instead of downloading, staging, or replacing
+package-manager-owned `/usr` files.
 DMGs are attached only with fixed
 `/usr/bin/hdiutil` arguments (`-readonly -noautoopen -nobrowse`), parsed through
 bounded plist data, copied through a no-follow safe tree walk, and detached before
@@ -777,10 +781,11 @@ packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.
 Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
-assembles the local macOS bundle, while `scripts/build.sh linux` bakes the GNU
-Linux runtime and assembles the amd64 `.deb`. The packaging workflow is the
-canonical assembly path for all three platforms; Linux additionally runs
-`scripts/check_linux_package.sh` under Xvfb. See
+assembles the local macOS bundle, while `scripts/build.sh linux` and
+`scripts/build.sh arch` build the two x86_64 Linux packages. The packaging workflow
+is the canonical assembly path: it builds the GNU Linux shell/runtime once, packages
+those bytes as `.deb` and `.pkg.tar.zst`, and runs Xvfb lifecycle smokes on Ubuntu,
+current Arch, and current Manjaro. See
 [linux-packaging.md](linux-packaging.md).
 
 The supported release matrix is deliberately narrow:
@@ -788,13 +793,13 @@ The supported release matrix is deliberately narrow:
 * **macOS ARM64 only** (`macos-14`, `uname -m` must be `arm64`). There is no
   Intel or universal macOS artifact.
 * **Windows x64 only** (`AMD64`/MSVC). There is no ARM Windows artifact.
-* **Debian/Ubuntu Linux x86_64 only** (Ubuntu 22.04+ and Debian 12+). There is
-  no Linux ARM64 artifact, and Arch packaging remains follow-up work.
+* **Linux x86_64 only**: Ubuntu 22.04+, Debian 12+, and current Arch/Manjaro.
+  There is no Linux ARM64 artifact.
 
 The current signing tradeoff is explicitly accepted for this first slice:
 macOS releases are ad-hoc signed, not Developer ID signed or notarized, so a
 download may require **Open Anyway** in Privacy & Security. Current Windows
-releases and the Debian package are unsigned; Windows may require the one-time
+and Linux packages are unsigned; Windows may require the one-time
 SmartScreen prompt. No new certificate, notarization, or signing work is part
 of this slice; those are future release work, not prerequisites for the current
 artifacts.

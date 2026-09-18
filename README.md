@@ -37,13 +37,21 @@ The Windows version is portable and does not use an installer.
 
 ### Debian or Ubuntu 64-bit
 
-The initial Linux package supports x86_64/amd64 systems running Ubuntu 22.04 or later, or Debian 12 or later.
+The Debian package supports x86_64/amd64 systems running Ubuntu 22.04 or later, or Debian 12 or later.
 
 1. Download `scm-workbench-linux-amd64.deb`.
 2. Open it with your software manager, or run `sudo apt install ./scm-workbench-linux-amd64.deb` from its download folder.
 3. Open **SCM Workbench** from your application menu, or run `scm-workbench`.
 
-The package includes its own private Python runtime. App files are installed under `/usr/lib/scm-workbench`; settings, repositories, images, and output stay in `$XDG_DATA_HOME/scm-workbench` (normally `~/.local/share/scm-workbench`).
+### Arch Linux or Manjaro 64-bit
+
+The Arch package supports current x86_64 Arch Linux and Manjaro systems.
+
+1. Download `scm-workbench-linux-arch-x86_64.pkg.tar.zst`.
+2. From its download folder, run `sudo pacman -U ./scm-workbench-linux-arch-x86_64.pkg.tar.zst`.
+3. Open **SCM Workbench** from your application menu, or run `scm-workbench`.
+
+Both Linux packages include the same private Python runtime. App files are installed under `/usr/lib/scm-workbench`; settings, repositories, images, and output stay in `$XDG_DATA_HOME/scm-workbench` (normally `~/.local/share/scm-workbench`).
 
 ## Your first launch
 
@@ -83,7 +91,7 @@ Your choices and job history stay the same when you switch modes.
 
 ## Updates and your files
 
-Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. On macOS and Windows, Workbench can install an update itself. On Linux, it opens the exact GitHub release so you can install the new `.deb` with your software manager; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
+Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. On macOS and Windows, Workbench can install an update itself. On Linux, it detects the supported distribution and opens the exact GitHub release for the matching Debian or Arch package; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
 
 Use **Settings > Open data folder** if you want to view or back up your Workbench files.
 

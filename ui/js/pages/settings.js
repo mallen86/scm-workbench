@@ -485,6 +485,8 @@ PAGES.settings = (root) => {
     let busy = false;
     let checkPending = false;
     let manualInstall = false;
+    let manualPackage = null;
+    let manualInstaller = null;
     const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
 
     const render = async () => {
@@ -503,6 +505,10 @@ PAGES.settings = (root) => {
       }
       const st = r.state || {};
       manualInstall = r.install_mode === "manual";
+      manualPackage = r.package_format === "arch" ? "Arch package"
+        : r.package_format === "deb" ? "Debian package" : null;
+      manualInstaller = r.package_format === "arch" ? "install it with pacman"
+        : r.package_format === "deb" ? "install it with your software manager" : null;
       betaI.checked = st.channel === "beta";
       betaI.disabled = busy || checkPending || st.checking || updateInstallActive();
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
@@ -548,8 +554,9 @@ PAGES.settings = (root) => {
           const latest = vv(st.latest);
           const releaseUrl = serverReleaseUrl(st.release_url);
           if (manualInstall) {
-            setBtn(`View ${latest} download`, releaseUrl
-              ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null, !releaseUrl);
+            setBtn(`View ${latest} download`, releaseUrl && manualPackage
+              ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null,
+              !releaseUrl || !manualPackage);
           } else {
             setBtn(`Download & install ${latest}`, startUpdate);
           }
@@ -558,7 +565,9 @@ PAGES.settings = (root) => {
           uStatus.replaceChildren(
             st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest), released,
             manualInstall
-              ? ". Download the Debian package from the release page and install it with your software manager. Your decklists, images, and settings stay put."
+              ? (manualPackage
+                ? `. Download the ${manualPackage} from the release page and ${manualInstaller}. Your decklists, images, and settings stay put.`
+                : ". This Linux distribution does not have a supported update package. Your decklists, images, and settings stay put.")
               : ". The install replaces the app folder and reopens it. Your decklists, images, and settings stay put.",
             whatsNew ? " " : "", whatsNew,
           );

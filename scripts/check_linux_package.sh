@@ -82,9 +82,21 @@ await_ipc() {
     return 1
 }
 
+worker_is_running() {
+    kill -0 "$1" 2>/dev/null || return 1
+    # A container without a real init can retain an already-terminated orphan
+    # as a zombie. It has no executable lifetime left and a normal desktop init
+    # reaps it immediately, so do not mistake that test-harness artifact for a
+    # live worker.
+    state="$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$state" ] || return 1
+    case "$state" in Z*) return 1 ;; esac
+    return 0
+}
+
 assert_worker_stopped() {
     for _ in $(seq 1 60); do
-        if ! kill -0 "$worker_pid" 2>/dev/null; then
+        if ! worker_is_running "$worker_pid"; then
             worker_pid=""
             return 0
         fi

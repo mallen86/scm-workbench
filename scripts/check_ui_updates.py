@@ -52,8 +52,9 @@ def main():
                    'Switch to Advanced mode to change whether beta releases are included.',
                    'setSettings({ update_channel: channel })',
                    'st.prerelease ? "A newer beta version is available: "',
-                   'r.install_mode === "manual"', 'View ${latest} download',
-                   'Download the Debian package from the release page'):
+                   'r.install_mode === "manual"', 'r.package_format === "arch"',
+                   'View ${latest} download', 'Download the ${manualPackage}',
+                   'This Linux distribution does not have a supported update package.'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
     beta_input = page.find('const betaI = el("input"')
@@ -90,8 +91,11 @@ def main():
                    "startUpdateStrip(result.job?.id);",
                    "if (_updStrip && _updStrip.isConnected) return;",
                    'beta ? "Beta update available" : "Update available"',
-                   'state.install_mode === "manual"', '"View download"',
-                   'Install the Debian package with your software manager.'):
+                   'state.install_mode === "manual"', 'state.package_format === "arch"',
+                   'state.package_format = view?.package_format;',
+                   '"View download"', 'Install the Arch package with pacman.',
+                   'Install the Debian package with your software manager.',
+                   'This Linux distribution does not have a supported update package.'):
         if marker not in updater_ui:
             return fail(f"the sidebar update notice is missing {marker}")
     # Only a genuinely newer release may raise the notice.
@@ -332,7 +336,7 @@ if (updaterUi.updateInstallActive()) fail("install actions did not re-enable aft
 
 // Linux exposes the exact release without admitting a self-update into /usr.
 updaterUi.stopUpdateStrip();
-globalThis.__updateState = { install_mode: "manual", state: {
+globalThis.__updateState = { install_mode: "manual", package_format: "deb", state: {
   status: "update-available", latest: "v5.1", channel: "stable", prerelease: false,
   release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v5.1",
 } };
@@ -346,6 +350,30 @@ if (!manualNotice?.isConnected || !elementText(manualNotice).includes("Install t
 manualButton.onclick();
 if (globalThis.__openedUpdateUrls.length !== 1 || !globalThis.__openedUpdateUrls[0].url.endsWith("/releases/tag/v5.1"))
   fail("the Linux notice did not open its server-validated release page");
+
+globalThis.__updateState = { install_mode: "manual", package_format: "arch", state: {
+  status: "update-available", latest: "v5.2", channel: "stable", prerelease: false,
+  release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v5.2",
+} };
+await updaterUi.refreshUpdateNotice();
+const archNotice = globalThis.__updateNodes.get("#updatenotice");
+const archButton = descendants(archNotice).find(node =>
+  node.tag === "button" && elementText(node).includes("View download"));
+if (!archNotice?.isConnected || !elementText(archNotice).includes("Install the Arch package with pacman") ||
+    elementText(archNotice).includes("Debian") || !archButton?.onclick)
+  fail(`the Arch notice did not expose the target-bound manual package: ${archNotice ? elementText(archNotice) : "missing notice"}`);
+
+globalThis.__updateState = { install_mode: "manual", package_format: "unexpected", state: {
+  status: "update-available", latest: "v5.3", channel: "stable", prerelease: false,
+  release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v5.3",
+} };
+await updaterUi.refreshUpdateNotice();
+const unsupportedNotice = globalThis.__updateNodes.get("#updatenotice");
+const unsupportedButton = descendants(unsupportedNotice).find(node =>
+  node.tag === "button" && elementText(node).includes("View download"));
+if (!elementText(unsupportedNotice).includes("does not have a supported update package") ||
+    !unsupportedButton?.disabled || unsupportedButton?.onclick)
+  fail("malformed Linux package metadata did not disable the manual action");
 
 // Packaged startup forces a fresh check before painting its result. Its daily
 // timer repeats that flow without allowing duplicate scheduler installation.
