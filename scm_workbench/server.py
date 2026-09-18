@@ -10887,6 +10887,13 @@ def delete_template(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, in
 # ============================================================================
 
 POSTPROCESS_SOURCE_MAX_BYTES = postprocessing.SOURCE_MAX_BYTES
+# JSON string escaping can expand otherwise valid UTF-8 source substantially.
+# Keep the transport envelope bounded, but large enough that source and
+# requirements limits are rejected by the application with a structured JSON
+# response instead of closing a socket while the client is still sending.
+POSTPROCESS_HTTP_REQUEST_MAX_BYTES = (
+    POSTPROCESS_SOURCE_MAX_BYTES + postprocessing.REQUIREMENTS_MAX_BYTES
+) * 6 + 16 * 1024
 POSTPROCESS_RESPONSE_MAX_BYTES = 512 * 1024
 POSTPROCESS_GUIDE_MAX_BYTES = 256 * 1024
 POSTPROCESS_GUIDE_FILE = _HERE.parent / "docs" / "image-postprocessing.md"
@@ -11208,9 +11215,11 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         try:
             if path == "/api/postprocessors":
-                body = self._body(strict=True, max_bytes=POSTPROCESS_SOURCE_MAX_BYTES + postprocessing.REQUIREMENTS_MAX_BYTES + 16 * 1024)
+                body = self._body(strict=True, max_bytes=POSTPROCESS_HTTP_REQUEST_MAX_BYTES)
                 if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)
-                try: return self._json(postprocessor_save(body), 200)
+                try:
+                    result = postprocessor_save(body)
+                    return self._json(result, 200 if result.get("ok") else 400)
                 except Exception as exc: return self._json(_postprocessor_error(exc), 400)
             m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})/(duplicate|trust)", path)
             if m:

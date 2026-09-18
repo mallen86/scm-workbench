@@ -273,6 +273,7 @@ class HttpContractTests(unittest.TestCase):
         })
         self.assertEqual(status, 400)
         self.assertFalse(rejected["ok"])
+        self.assertIn("source is too large", rejected["errors"][0])
 
     def test_settings_persistence_shape_and_nested_merge(self):
         status, result = self.request("POST", "/api/settings", {
