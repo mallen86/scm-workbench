@@ -82,7 +82,7 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 ## How it works
 
 * **One manifest, two users.** The server holds a single option manifest for every job (each option: type, choices, default, help, and any required upstream flags). The UI renders forms *from it* and the server assembles argv *from it* — so the on-screen command preview is byte-identical to what runs. Workbench probes option-bearing upstream scripts through bounded `--help` subprocesses, caches the discovered flags by script/interpreter identity, disables unsupported controls or workflows with a reason, and repeats that validation server-side so stale forms and job-history settings cannot bypass it. Known scripts with no CLI parser are checked for existence only and are never executed for discovery.
-* **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on both platforms.
+* **Jobs** are `subprocess.Popen` children with UTF-8 forced (`PYTHONUTF8=1` — Windows codepages can't print some card names), `CREATE_NO_WINDOW` on Windows (no console pop-ups), and session/process-group isolation so *Stop* kills cleanly on macOS, Linux, and Windows.
 * **Live logs** use native aggregate polling for packaged Tauri windows and a
   per-job SSE stream (`/api/jobs/<id>/stream`) in the browser; history is
   persisted to `data/jobs.json` + `data/logs/` (or the app data folder, when
@@ -147,35 +147,44 @@ find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 
 `PIP_FIND_LINKS=file://$(pwd)/ciwheels` is used by CI and by
 `scripts/build.sh` when baking the bundled runtime. On an ARM64 Mac,
-`scripts/build.sh macos` also assembles the local `.app`. The complete
-platform-specific assembly and smoke checks live in
-`.github/workflows/package.yml`; use that workflow (or a matching local copy
-of its steps) for the Windows bundle. The smoke checks treat the native IPC
+`scripts/build.sh macos` also assembles the local `.app`. On Ubuntu 22.04 x86_64,
+`scripts/build.sh linux` builds the shell, bakes the GNU Linux runtime, and
+assembles `build/linux/scm-workbench-linux-amd64.deb`; it requires the Tauri
+WebKitGTK/GTK development packages plus `clang`, `zstd`, and `patchelf`. On an
+x86_64 Arch host, `scripts/build.sh arch` assembles
+`build/arch/scm-workbench-linux-arch-x86_64.pkg.tar.zst` through the checked-in
+PKGBUILD template. Release CI builds the shell/runtime once on Ubuntu, then
+packages those same bytes and runs clean-container lifecycle smokes on current
+Arch and Manjaro. See [docs/linux-packaging.md](docs/linux-packaging.md) for the
+exact dependencies and commands. The complete platform-specific assembly and
+smoke checks live in `.github/workflows/package.yml`. The smoke checks treat native IPC
 markers emitted by the embedded UI as rendered-UI evidence, assert port 8038
 stays closed, and separately assert that no WebView request occurred.
 
-The supported release matrix is **macOS ARM64 only** and **Windows x64 only**:
-there is no Intel/universal macOS artifact and no ARM Windows artifact. The
-macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG,
-which is also the sole in-app updater payload. The DMG is not notarized, and
-current Windows artifacts are unsigned. Those signing
-tradeoffs, including the expected macOS **Open Anyway** and Windows SmartScreen
-prompts, are explicitly
-accepted for the current first slice. Do not add Developer ID/notarization or
-an OV certificate as part of this work.
+The supported release matrix is **macOS ARM64**, **Windows x64**, and x86_64
+Linux on **Debian/Ubuntu** and current **Arch/Manjaro**. There is no
+Intel/universal macOS artifact, ARM Windows artifact, or Linux ARM64 artifact.
+The macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG,
+which is also the sole macOS in-app updater payload. Windows publishes a
+portable ZIP. Linux publishes package-manager-owned `.deb` and `.pkg.tar.zst`
+artifacts and intentionally uses manual update installation.
+The DMG is not notarized, and current Windows artifacts are unsigned. Those
+signing tradeoffs, including the expected macOS **Open Anyway** and Windows
+SmartScreen prompts, are explicitly accepted for the current first slice. Do
+not add Developer ID/notarization or an OV certificate as part of this work.
 
 ## Releasing a new version
 
-**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG and the portable Windows x64 ZIP to the GitHub release.
+**The tag is the only version input.** On a `v*` tag push the workflow runs `scripts/inject_version.py`, which pins the tag (minus its `v`) into the Python version, Tauri config/Cargo metadata, and the project metadata consumed during packaging. The running app, native shell, and release metadata therefore share one version. The workflow then attaches the macOS ARM64 DMG, portable Windows x64 ZIP, Debian/Ubuntu x86_64 `.deb`, and Arch/Manjaro x86_64 `.pkg.tar.zst` to the GitHub release.
 
 Stable tags use `vMAJOR.MINOR.PATCH`. Beta tags use a SemVer prerelease suffix such as `v0.9.0-beta.1`, and their GitHub release must be marked as a prerelease. The packaging workflow verifies that the GitHub prerelease flag agrees with the tag and creates a correctly marked fallback release when needed. The prerelease opt-in control is exposed only in Advanced mode under **Settings > App updates**, but the selected channel remains active across later Simple/Advanced mode changes. Opted-in users receive the highest version across stable and prerelease releases; everyone else receives stable releases only.
 
 ```bash
-# 1. the tag is the version; push it and CI builds both packages
+# 1. the tag is the version; push it and CI builds every package
 git tag -a v0.1.1 -m "v0.1.1"
 git push origin v0.1.1
 
-# 2. create the release with its notes; CI attaches the DMG and ZIP
+# 2. create the release with its notes; CI attaches the DMG, ZIP, DEB, and Arch package
 gh release create v0.1.1 --title "v0.1.1" --notes-file notes.md --verify-tag
 
 # Beta example: the tag, title, and GitHub prerelease flag must agree

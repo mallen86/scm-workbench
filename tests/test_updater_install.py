@@ -294,7 +294,7 @@ class ExtractionTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(extracted.stat().st_mode), 0o755)
 
-    def test_mac_and_windows_release_shapes_match_the_actual_workflows(self):
+    def test_release_shapes_match_the_actual_platform_workflows(self):
         mac = self.extract(self.zips.mac([
             ("SCM Workbench.app/Contents/Resources/app.dat", b"data"),
         ]), name="mac.zip", dest="mac-staging")
@@ -311,6 +311,7 @@ class ExtractionTests(unittest.TestCase):
         workflow = (root / ".github/workflows/package.yml").read_text(encoding="utf-8")
         builder = (root / "scripts/build_macos_dmg.sh").read_text(encoding="utf-8")
         local_builder = (root / "scripts/build.sh").read_text(encoding="utf-8")
+        arch_check = (root / "scripts/check_arch_package.sh").read_text(encoding="utf-8")
         background = (root / "tauri/dmg-background.png").read_bytes()
         self.assertIn("scm-workbench-macos.dmg", workflow)
         self.assertIn("scripts/build_macos_dmg.sh", workflow)
@@ -324,17 +325,31 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(background[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(tuple(int.from_bytes(background[n:n + 4], "big")
                                for n in (16, 20)), (660, 400))
-        # macOS publishes the same standard DMG for manual and in-app
-        # installation; only Windows retains a ZIP payload.
+        # macOS publishes its DMG, Windows its portable ZIP, and Linux exact
+        # package-manager-owned Debian and Arch payloads.
         self.assertNotIn("scm-workbench-macos.zip", workflow)
         self.assertIn("scm-workbench-windows.zip", workflow)
+        self.assertIn("scm-workbench-linux-amd64.deb", workflow)
+        self.assertIn("scm-workbench-linux-arch-x86_64.pkg.tar.zst", workflow)
+        self.assertIn("scripts/build_linux_deb.py", workflow)
+        self.assertIn("scripts/build_linux_arch.py", workflow)
+        self.assertIn("scripts/check_arch_package.sh", workflow)
+        self.assertIn("archlinux:base-devel@sha256:", workflow)
+        self.assertIn("manjarolinux/base@sha256:", workflow)
+        self.assertIn("pacman -U --noconfirm", arch_check)
+        self.assertIn("pacman -Qkk scm-workbench", arch_check)
+        self.assertIn("updater.expected_asset_name()", arch_check)
+        self.assertIn("check_linux_package.sh", arch_check)
+        self.assertGreaterEqual(workflow.count("scripts/check_arch_package.sh"), 2)
         self.assertIn("actions: write", workflow)
-        self.assertEqual(workflow.count("python scripts/check_ui_history.py"), 2)
+        self.assertEqual(workflow.count("python scripts/check_ui_history.py"), 3)
         release_upload = next(line for line in workflow.splitlines()
                               if 'gh release upload "$GITHUB_REF_NAME"' in line)
         self.assertIn("scm-workbench-macos.dmg", release_upload)
         self.assertNotIn("scm-workbench-macos.zip", release_upload)
         self.assertIn("scm-workbench-windows.zip", release_upload)
+        self.assertIn("scm-workbench-linux-amd64.deb", release_upload)
+        self.assertIn("scm-workbench-linux-arch-x86_64.pkg.tar.zst", release_upload)
         upload_at = workflow.index('gh release upload "$GITHUB_REF_NAME"')
         cleanup_at = workflow.index("actions/runs/$GITHUB_RUN_ID/artifacts")
         self.assertGreater(cleanup_at, upload_at)
@@ -477,6 +492,7 @@ class DmgPreparationTests(unittest.TestCase):
     def test_dmg_mount_copy_detach_and_signature_use_fixed_helpers(self):
         calls = []
         with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_rename_noreplace", side_effect=os.rename), \
                 patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls)):
             result = updater.prepare_dmg(self.work / "update.dmg", self.candidate, "v2.0.0")
         self.assertEqual(result, self.candidate)
@@ -546,6 +562,7 @@ class DmgPreparationTests(unittest.TestCase):
 
         calls = []
         with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_rename_noreplace", side_effect=os.rename), \
                 patch.object(updater, "_run_fixed_helper", side_effect=self.fake_helper(calls)), \
                 patch.object(updater, "_verify_macos_candidate",
                              side_effect=updater.UpdateError("bad signature")):
@@ -563,6 +580,7 @@ class DmgPreparationTests(unittest.TestCase):
 
         calls = []
         with patch.object(updater, "sys", type("Platform", (), {"platform": "darwin"})()), \
+                patch.object(updater, "_rename_noreplace", side_effect=os.rename), \
                 patch.object(updater, "_run_fixed_helper",
                              side_effect=self.fake_helper(calls, hostile=safe_chain)):
             updater.prepare_dmg(self.work / "update.dmg", self.candidate, "2.0.0")
@@ -646,6 +664,12 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         server.save_settings(json.loads(json.dumps(server.DEFAULT_SETTINGS)))
         self.old_repo = updater.UPDATE_REPO
         updater.UPDATE_REPO = "owner/workbench"
+        self.install_mode = patch.object(updater, "install_mode", return_value="automatic")
+        self.install_mode.start()
+        self.expected_asset = patch.object(
+            updater, "expected_asset_name", return_value=updater.MACOS_DMG_ASSET,
+        )
+        self.expected_asset.start()
         self.asset = {
             "id": 9, "tag": "v2.0.0", "name": "scm-workbench-macos.dmg",
             "url": "https://github.com/owner/workbench/releases/download/v2.0.0/scm-workbench-macos.dmg",
@@ -658,6 +682,8 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         for name, value in self.saved.items():
             setattr(server, name, value)
         updater.UPDATE_REPO = self.old_repo
+        self.expected_asset.stop()
+        self.install_mode.stop()
         self.temp.cleanup()
 
     def state(self, **changes):
@@ -695,6 +721,25 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.assertEqual(observed["latest"], "v2.0.0")
         self.assertEqual(observed["asset"], canonical["asset"])
         self.assertEqual(observed["channel"], "stable")
+
+    def test_linux_manual_packages_cannot_enter_self_update_worker(self):
+        for name in (updater.LINUX_DEB_ASSET, updater.LINUX_ARCH_ASSET):
+            with self.subTest(asset=name), \
+                    patch.object(updater, "expected_asset_name", return_value=name), \
+                    patch.object(updater, "install_mode", return_value="manual"), \
+                    patch.object(server.threading, "Thread") as thread:
+                server.save_update_state(self.state(asset={
+                    **self.asset,
+                    "name": name,
+                    "url": self.asset["url"].replace(
+                        updater.MACOS_DMG_ASSET, name,
+                    ),
+                }))
+                job, errors = server.start_update_job()
+            self.assertIsNone(job)
+            self.assertIn("installed manually", errors[0])
+            thread.assert_not_called()
+            self.assertEqual(server.JOBS, {})
 
     def test_stale_mismatched_asset_and_downgrade_or_same_release_are_rejected(self):
         cases = [

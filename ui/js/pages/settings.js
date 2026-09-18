@@ -484,6 +484,9 @@ PAGES.settings = (root) => {
 
     let busy = false;
     let checkPending = false;
+    let manualInstall = false;
+    let manualPackage = null;
+    let manualInstaller = null;
     const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
 
     const render = async () => {
@@ -501,6 +504,11 @@ PAGES.settings = (root) => {
         return;
       }
       const st = r.state || {};
+      manualInstall = r.install_mode === "manual";
+      manualPackage = r.package_format === "arch" ? "Arch package"
+        : r.package_format === "deb" ? "Debian package" : null;
+      manualInstaller = r.package_format === "arch" ? "install it with pacman"
+        : r.package_format === "deb" ? "install it with your software manager" : null;
       betaI.checked = st.channel === "beta";
       betaI.disabled = busy || checkPending || st.checking || updateInstallActive();
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
@@ -545,12 +553,22 @@ PAGES.settings = (root) => {
         case "update-available": {
           const latest = vv(st.latest);
           const releaseUrl = serverReleaseUrl(st.release_url);
-          setBtn(`Download & install ${latest}`, startUpdate);
+          if (manualInstall) {
+            setBtn(`View ${latest} download`, releaseUrl && manualPackage
+              ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null,
+              !releaseUrl || !manualPackage);
+          } else {
+            setBtn(`Download & install ${latest}`, startUpdate);
+          }
           const released = st.published ? ` (released ${new Date(st.published).toLocaleDateString()})` : "";
           const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
           uStatus.replaceChildren(
             st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest), released,
-            ". The install replaces the app folder and reopens it. Your decklists, images, and settings stay put.",
+            manualInstall
+              ? (manualPackage
+                ? `. Download the ${manualPackage} from the release page and ${manualInstaller}. Your decklists, images, and settings stay put.`
+                : ". This Linux distribution does not have a supported update package. Your decklists, images, and settings stay put.")
+              : ". The install replaces the app folder and reopens it. Your decklists, images, and settings stay put.",
             whatsNew ? " " : "", whatsNew,
           );
           if (whatsNew) {
@@ -589,7 +607,9 @@ PAGES.settings = (root) => {
       // Keep the sidebar notice in step with what this card now shows.
       refreshUpdateNotice();
       if (r?.state?.status === "up-to-date") toast("ok", `No update. ${vv(r.state.latest)} is the newest.`);
-      else if (r?.state?.status === "update-available") toast("ok", `Update available: ${vv(r.state.latest)}. Press the button above to install it.`);
+      else if (r?.state?.status === "update-available") toast("ok", manualInstall
+        ? `Update available: ${vv(r.state.latest)}. Open the release page to download it.`
+        : `Update available: ${vv(r.state.latest)}. Press the button above to install it.`);
       else if (r?.state?.status === "auth-required") toast("warn", "The release repo is private. This check will work once it is public.");
     }
 

@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import threading
+import sys
 import time
 import unittest
 import urllib.error
@@ -15,7 +16,7 @@ from scm_workbench import server, updater
 
 
 def current_asset_name():
-    return "scm-workbench-windows.zip" if os.name == "nt" else "scm-workbench-macos.dmg"
+    return updater.expected_asset_name()
 
 
 class FakeResponse:
@@ -313,31 +314,95 @@ class UpdaterMetadataTests(unittest.TestCase):
         with patch.object(updater, "gh_request", return_value=(200, {}, body)):
             self.assertEqual(updater.latest_release()["body"], "valid")
 
-    def test_pick_asset_requires_exact_architecture_name_and_unique_match(self):
-        mac = {"name": "scm-workbench-macos.dmg", "id": 1}
+    def test_linux_target_resolution_is_distro_and_architecture_bound(self):
+        for release, expected in (
+            ({"ID": "debian", "ID_LIKE": ""}, "deb"),
+            ({"ID": "ubuntu", "ID_LIKE": "debian"}, "deb"),
+            ({"ID": "arch", "ID_LIKE": ""}, "arch"),
+            ({"ID": "manjaro", "ID_LIKE": "arch"}, "arch"),
+        ):
+            with self.subTest(release=release):
+                self.assertEqual(updater.linux_package_format(
+                    os_release=release, machine="x86_64"), expected)
+        for machine in ("aarch64", "arm64", "i686", ""):
+            with self.subTest(machine=machine), self.assertRaises(updater.UpdateError):
+                updater.linux_package_format(os_release={"ID": "arch"}, machine=machine)
+        for release in ({"ID": "fedora"}, {"ID": "endeavouros", "ID_LIKE": "arch"}):
+            with self.subTest(release=release), self.assertRaisesRegex(
+                    updater.UpdateError, "no package for Linux distribution"):
+                updater.linux_package_format(os_release=release, machine="amd64")
+
+    def test_os_release_parser_is_bounded_strict_and_nonexecuting(self):
+        parsed = updater._parse_os_release(
+            'NAME="Arch Linux"\nID=arch\nID_LIKE="arch linux"\nHOME_URL="https://archlinux.org/"\n'
+        )
+        self.assertEqual(parsed["ID"], "arch")
+        self.assertEqual(parsed["ID_LIKE"], "arch linux")
+        for invalid in (
+            "ID=arch\nID=manjaro\n",
+            "ID =arch\n",
+            "ID='unterminated\n",
+            "ID=arch extra\n",
+            "id=arch\n",
+            "ID=arch\x00\n",
+            "ID=arch\n" * (updater.OS_RELEASE_MAX_LINES + 1),
+            "ID=" + "x" * updater.OS_RELEASE_MAX_BYTES,
+        ):
+            with self.subTest(sample=invalid[:40]), self.assertRaises(updater.UpdateError):
+                updater._parse_os_release(invalid)
+        with tempfile.TemporaryDirectory(prefix="scm-os-release-") as temp:
+            path = Path(temp) / "os-release"
+            path.write_text("ID=manjaro\nID_LIKE=arch\n", encoding="utf-8")
+            self.assertEqual(updater._read_os_release(path)["ID"], "manjaro")
+            path.write_bytes(b"x" * (updater.OS_RELEASE_MAX_BYTES + 1))
+            with self.assertRaisesRegex(updater.UpdateError, "too large"):
+                updater._read_os_release(path)
+
+    def test_pick_asset_requires_exact_target_name_and_unique_match(self):
+        mac = {"name": updater.MACOS_DMG_ASSET, "id": 1}
         legacy = {"name": "scm-workbench-macos.zip", "id": 9}
-        win = {"name": "scm-workbench-windows.zip", "id": 2}
+        win = {"name": updater.WINDOWS_ASSET, "id": 2}
+        deb = {"name": updater.LINUX_DEB_ASSET, "id": 3}
+        arch = {"name": updater.LINUX_ARCH_ASSET, "id": 4}
         release = {"assets": [
             {"name": "scm-workbench-macos-arm64.zip"},
-            legacy,
-            mac,
-            win,
-            {"name": "windows-debug.zip"},
+            legacy, mac, win, deb, arch, {"name": "windows-debug.zip"},
         ]}
         self.assertIs(updater.pick_asset(release, "darwin-arm64"), mac)
         self.assertIs(updater.pick_asset(release, "macos"), mac)
         self.assertIs(updater.pick_asset(release, "windows-x64"), win)
         self.assertIs(updater.pick_asset(release, "win32"), win)
+        self.assertIs(updater.pick_asset(release, "linux-deb-amd64"), deb)
+        self.assertIs(updater.pick_asset(release, "linux-arch-x86_64"), arch)
+        self.assertEqual(updater.install_mode("linux"), "manual")
+        self.assertEqual(updater.install_mode("manjaro"), "manual")
+        self.assertEqual(updater.install_mode("darwin"), "automatic")
 
-        for platform in ("linux", "darwin", "win32"):
-            with self.subTest(platform=platform):
+        for target, expected in (
+            ("linux-deb-amd64", updater.LINUX_DEB_ASSET),
+            ("linux-arch-x86_64", updater.LINUX_ARCH_ASSET),
+            ("darwin", updater.MACOS_DMG_ASSET),
+            ("win32", updater.WINDOWS_ASSET),
+        ):
+            with self.subTest(platform=target):
                 assets = list(release["assets"])
-                expected = "scm-workbench-macos.dmg" if platform == "darwin" else "scm-workbench-windows.zip"
                 assets.append({"name": expected})
                 with self.assertRaises(updater.UpdateError):
-                    updater.pick_asset({"assets": assets}, platform)
+                    updater.pick_asset({"assets": assets}, target)
         with self.assertRaises(updater.UpdateError):
-            updater.pick_asset({"assets": [mac]}, "linux")
+            updater.pick_asset({"assets": [mac, deb]}, "linux-arch-x86_64")
+
+    def test_linux_packages_are_metadata_only_and_never_self_installed(self):
+        for name, suffix in (
+            (updater.LINUX_DEB_ASSET, ".deb"),
+            (updater.LINUX_ARCH_ASSET, ".pkg.tar.zst"),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    updater.UpdateError, "installed manually"):
+                updater.prepare_asset(
+                    {"name": name}, Path("download" + suffix),
+                    Path("candidate"), "v2.0.0",
+                )
 
     def test_macos_requires_dmg_and_never_falls_back_to_legacy_zip(self):
         dmg = {"name": updater.MACOS_DMG_ASSET, "id": 10}
@@ -569,9 +634,12 @@ class UpdaterJobTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-job-")
         self.repo = patch.object(updater, "UPDATE_REPO", "owner/workbench")
+        self.mode = patch.object(updater, "install_mode", return_value="automatic")
         self.repo.start()
+        self.mode.start()
 
     def tearDown(self):
+        self.mode.stop()
         self.repo.stop()
         self.temp.cleanup()
 
@@ -723,6 +791,23 @@ class UpdateStateTests(unittest.TestCase):
         path.write_bytes(b"x" * (server._UPDATE_STATE_MAX_BYTES + 1))
         self.assertEqual(server.load_update_state()["status"], "error")
         self.assertEqual(path.read_bytes(), b"x" * (server._UPDATE_STATE_MAX_BYTES + 1))
+
+    def test_cached_asset_for_another_local_target_is_rejected(self):
+        tag = "v2.0.0"
+        state = self.valid_state(
+            status="update-available", latest=tag, checked_at=time.time(),
+            asset=self.installable_asset(tag),
+        )
+        server.save_update_state(state)
+        before = server.UPDATE_STATE_FILE.read_bytes()
+        wrong_target = (updater.LINUX_ARCH_ASSET
+                        if state["asset"]["name"] != updater.LINUX_ARCH_ASSET
+                        else updater.LINUX_DEB_ASSET)
+        with patch.object(updater, "expected_asset_name", return_value=wrong_target):
+            loaded = server.load_update_state()
+        self.assertEqual(loaded["status"], "error")
+        self.assertEqual(loaded["reason"], "saved update state is invalid")
+        self.assertEqual(server.UPDATE_STATE_FILE.read_bytes(), before)
 
     def test_legacy_stable_state_is_projected_without_rewriting_it(self):
         state = self.valid_state()

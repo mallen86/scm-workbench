@@ -4,7 +4,7 @@
 # a single Tauri shell (tauri/) that hosts one webview and spawns the bundled
 # runtime running the UI server — there is no briefcase step anymore.
 #
-#   Usage: scripts/build.sh [macos|windows]
+#   Usage: scripts/build.sh [macos|linux|arch|windows]
 #
 # What it runs (the three steps the CI job runs, in order):
 #   1. cargo build --release --features custom-protocol   (the window)
@@ -17,6 +17,10 @@
 set -e
 cd "$(dirname "$0")/.."
 plat="${1:-macos}"
+case "$plat" in
+    macos|linux|arch|windows) ;;
+    *) echo "usage: scripts/build.sh [macos|linux|arch|windows]" >&2; exit 2 ;;
+esac
 
 if [ ! -x .venv/bin/python ]; then
     echo ".venv is missing - set it up first (CONTRIBUTING.md: uv venv && uv sync)." >&2
@@ -36,10 +40,9 @@ echo "==> 2/3  baking the bundled runtime into build/$plat"
 .venv/bin/python scripts/bake_runtime.py --bundle "build/$plat"
 
 echo "==> 3/3  assembling the bundle"
-# The assembly is platform-specific (macOS .app layout vs. Windows flat exe).
-# The canonical, signing-included version lives in .github/workflows/package.yml
-# ("Assemble the .app" / "Assemble the bundle" steps). For a local macos build
-# we replicate it; for windows the CI step is the source of truth.
+# The assembly is platform-specific (macOS .app, Debian .deb, Arch
+# .pkg.tar.zst, or Windows flat bundle). The canonical release version lives in
+# package.yml. Local builds reproduce release layouts; Windows remains CI-owned.
 if [ "$plat" = "macos" ]; then
     bundle="$PWD/build/macos"
     app="$bundle/SCM Workbench.app"
@@ -53,6 +56,17 @@ if [ "$plat" = "macos" ]; then
     mv "$bundle/runtime" "$app/Contents/runtime"
     rm -rf "$bundle/.bake"
     echo "    built: $app"
+elif [ "$plat" = "linux" ] || [ "$plat" = "arch" ]; then
+    case "${CARGO_TARGET_DIR:-}" in
+        "") binary="$PWD/tauri/target/release/scm-workbench" ;;
+        /*) binary="$CARGO_TARGET_DIR/release/scm-workbench" ;;
+        *) binary="$PWD/tauri/$CARGO_TARGET_DIR/release/scm-workbench" ;;
+    esac
+    if [ "$plat" = "arch" ]; then
+        .venv/bin/python scripts/build_linux_arch.py --binary "$binary" --bundle "$PWD/build/arch"
+    else
+        .venv/bin/python scripts/build_linux_deb.py --binary "$binary" --bundle "$PWD/build/linux"
+    fi
 else
     echo "    (windows: run the package.yml 'Assemble the bundle' steps, or push a tag)"
 fi

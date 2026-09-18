@@ -2,11 +2,12 @@
 //
 // One process family, no clients, no servers-as-citizens:
 //
-//   SCM Workbench.exe (this binary, GUI subsystem)
-//     └── python  <data>/runtime/.../python.exe -m scm_workbench.server
+//   SCM Workbench native shell
+//     └── bundled python -m scm_workbench.server
 //           └── jobs (spawned by the server, killed by the server)
 //
-// The window is a Tauri webview (WebView2 on Windows, WKWebView on macOS).
+// The window is a Tauri webview (WebView2 on Windows, WKWebView on macOS,
+// WebKitGTK on Linux).
 // Nothing here needs .NET, pythonnet, or any third-party runtime on the
 // machine. If the worker cannot start, the window says so — loudly. There is
 // no browser tab to fall back to.
@@ -47,14 +48,14 @@ fn wait_for_update_restart_notice(duration: Duration) {
 /// The worker is the app's only long-lived child and it in turn spawns the
 /// job processes the user runs; a plain `kill` leaves those running. So we
 /// terminate the group the child was placed in: its verified worker process
-/// group on macOS. Upstream jobs intentionally have their own groups and Python
+/// group on Unix. Upstream jobs intentionally have their own groups and Python
 /// reaps them on protocol EOF before this fallback. On Windows the complete tree
 /// is contained by the retained kill-on-close job object.
 ///
 /// Callers must still own an unreaped Child; signalling a stale numeric PID or
 /// process-group identifier is forbidden.
 fn kill_worker_tree(child: &Child) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         // The ready handshake proves pgid == pid. `kill(-pgid, SIGKILL)`
         // terminates the worker group after cooperative upstream-job cleanup.
@@ -76,7 +77,7 @@ type WorkerSlot = Arc<Mutex<Option<Child>>>;
 /// unwinding. A hard shell kill cannot run Rust destructors; kernel closure of
 /// protocol stdin is the independent worker-side backstop for that path.
 ///
-/// On macOS the worker is also put in its own process group (see
+/// On Unix the worker is also put in its own process group (see
 /// `spawn_worker`) so a signal reaches every grandchild too; on Windows it is
 /// assigned to a job object whose handle is retained here until the shell
 /// exits. Both are belt to the `child.kill()` braces below.
@@ -785,31 +786,62 @@ fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
     }
 }
 
+/// Resolve the Linux data location according to the XDG base-directory
+/// contract. Relative XDG/HOME values are ignored so packaged state can never
+/// land relative to an arbitrary launch directory.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn linux_data_dir_from(
+    xdg_data_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(path) = xdg_data_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return path.join("scm-workbench");
+    }
+    if let Some(path) = home.map(PathBuf::from).filter(|path| path.is_absolute()) {
+        return path.join(".local/share/scm-workbench");
+    }
+    // A desktop login always supplies HOME. Failing closed under a path which
+    // cannot normally be created is safer than silently writing beside the
+    // executable when a malformed launch environment omits it.
+    PathBuf::from("/nonexistent/scm-workbench")
+}
+
 /// The data area: %LOCALAPPDATA%\scm-workbench (Windows),
-/// ~/Library/Application Support/scm-workbench (macOS) — or SCM_WORKBENCH_DATA.
-/// Same place the legacy launcher always used, so an existing install's
-/// runtime, repos and settings are picked up by the new shell in place.
+/// ~/Library/Application Support/scm-workbench (macOS), or
+/// $XDG_DATA_HOME/scm-workbench (Linux, falling back to ~/.local/share).
+/// SCM_WORKBENCH_DATA remains the explicit development/test override.
 fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("SCM_WORKBENCH_DATA") {
+    if let Some(d) = std::env::var_os("SCM_WORKBENCH_DATA").filter(|value| !value.is_empty()) {
         return PathBuf::from(d);
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = std::env::var_os("HOME").unwrap_or_default();
         PathBuf::from(home).join("Library/Application Support/scm-workbench")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        let local = std::env::var("LOCALAPPDATA")
-            .or_else(|_| std::env::var("USERPROFILE"))
+        let local = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .unwrap_or_default();
         PathBuf::from(local).join("scm-workbench")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_data_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        linux_data_dir_from(None, std::env::var_os("HOME"))
     }
 }
 
 /// The app root:
-///   Windows bundle — the package sits at <exe dir>/app/scm_workbench, so the
-///                     root is the exe's directory itself;
+///   Windows/Linux — the package sits at <exe dir>/app/scm_workbench, so the
+///                   root is the native executable's directory itself;
 ///   macOS bundle   — an app bundle may only carry Contents/ at its root
 ///                     (the code-signature seal covers exactly that), so the
 ///                     payload lives in <App>.app/Contents/{app,runtime} and
@@ -847,7 +879,7 @@ fn app_root(exe: &Path) -> PathBuf {
 ///  2. the app's own runtime inside the bundle (the release layout, where
 ///     the machine needs to provide nothing):
 ///       Windows — <root>/runtime/python/install/python.exe
-///       macOS   — <root>/runtime/python/install/bin/python3.13
+///       macOS/Linux — <root>/runtime/python/install/bin/python3.13
 ///     (the pbs pin that scripts/bake_runtime.py unpacks — 3.13 today);
 ///  3. the legacy data-area private runtime (pre-bundle architecture).
 fn worker_python(root: &Path, data: &Path) -> PathBuf {
@@ -857,11 +889,11 @@ fn worker_python(root: &Path, data: &Path) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
     candidates.push(root.join("runtime/python/install/python.exe"));
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     candidates.push(root.join("runtime/python/install/bin/python3.13"));
     #[cfg(windows)]
     candidates.push(data.join("runtime/python/install/python.exe"));
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     candidates.push(data.join("runtime/python/install/bin/python3.13"));
     for c in &candidates {
         if c.is_file() {
@@ -917,14 +949,13 @@ fn spawn_worker(
         root.to_path_buf()
     };
     cmd.env("PYTHONPATH", pkg);
-    // On macOS the payload (app/, runtime/) lives under Contents/ - inside
-    // the code-signature seal. Python compiling __pycache__ pyc's back into
-    // that tree on the user's own first launch would break the seal of the
-    // copy on disk: harmless while the quarantine is off, but the bundle
-    // would read "damaged" again the moment it was re-quarantined. The
-    // explicit -B above protects every platform; keep the environment guard
-    // on macOS too so launches stay write-free even if argv is refactored.
-    #[cfg(target_os = "macos")]
+    // The packaged app/runtime tree is immutable: sealed under Contents on
+    // macOS and normally root-owned under /usr/lib on Linux. Python compiling
+    // __pycache__ files there would break the macOS seal or attempt to mutate
+    // package-manager-owned files. The explicit -B above protects every
+    // platform; keep the environment guard on Unix too so launches remain
+    // write-free if argv is refactored.
+    #[cfg(unix)]
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -959,7 +990,7 @@ fn spawn_worker(
     #[cfg(not(windows))]
     let _ = worker;
 
-    // macOS: move the (already running) worker into its own process group so
+    // Unix: move the (already running) worker into its own process group so
     // `kill(-pgid, SIGKILL)` reaches the worker. Done from the
     // *parent* after spawn, via setpgid(child_pid, child_pid) — a parent may
     // regroup its direct child, and this is the form that does not touch the
@@ -967,7 +998,7 @@ fn spawn_worker(
     // the runner: an exception in the pre-exec hook aborts the whole spawn.)
     // If exec wins, record the miss; the worker's self-grouping and exact
     // readiness response are the mandatory fallback before UI admission.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         let pid = child.id() as libc::pid_t;
         // setpgid(pid,pid) is valid only before the child execs or after the
@@ -1363,5 +1394,40 @@ mod restart_notice_tests {
         assert_eq!(UPDATE_RESTART_GRACE_SECONDS, 3);
         assert!(elapsed >= Duration::from_millis(10));
         assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_data_directory_honors_absolute_xdg_then_home() {
+        assert_eq!(
+            linux_data_dir_from(
+                Some(std::ffi::OsString::from("/srv/user-data")),
+                Some(std::ffi::OsString::from("/home/alice")),
+            ),
+            PathBuf::from("/srv/user-data/scm-workbench"),
+        );
+        assert_eq!(
+            linux_data_dir_from(None, Some(std::ffi::OsString::from("/home/alice"))),
+            PathBuf::from("/home/alice/.local/share/scm-workbench"),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_data_directory_ignores_relative_base_paths() {
+        assert_eq!(
+            linux_data_dir_from(
+                Some(std::ffi::OsString::from("relative-xdg")),
+                Some(std::ffi::OsString::from("/home/alice")),
+            ),
+            PathBuf::from("/home/alice/.local/share/scm-workbench"),
+        );
+        assert_eq!(
+            linux_data_dir_from(
+                Some(std::ffi::OsString::from("relative-xdg")),
+                Some(std::ffi::OsString::from("relative-home")),
+            ),
+            PathBuf::from("/nonexistent/scm-workbench"),
+        );
     }
 }

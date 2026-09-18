@@ -3,7 +3,9 @@
 updater.py — check for, and install, newer versions of the SCM Workbench app.
 
 The app is packaged as a Tauri bundle and shipped as GitHub release assets
-(macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP). This module
+(macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP; Linux:
+Debian and Arch-family packages installed manually through the operating
+system). This module
 talks to the releases of the Workbench's own repository:
 
   * fetch the newest stable release by default, or the highest published
@@ -11,11 +13,13 @@ talks to the releases of the Workbench's own repository:
     is private, so checks cannot see it until it is public; no credentials are
     stored in the app),
   * compare it with the running version,
-  * on "update available" an in-process job downloads the exact platform
-    asset. macOS DMGs are mounted read-only and copied into a validated app
-    candidate; Windows ZIPs use the bounded extractor. The candidate is then
-    handed to the native helper through a durable journal/request protocol.
-    The helper owns publication, health verification, rollback, and relaunch.
+  * on "update available" macOS and Windows use an in-process job to download
+    the exact platform asset. macOS DMGs are mounted read-only and copied into
+    a validated app candidate; Windows ZIPs use the bounded extractor. The
+    candidate is then handed to the native helper through a durable
+    journal/request protocol. Linux resolves its local distribution and CPU,
+    exposes only the exact matching package, and leaves installation to the
+    package manager rather than writing into /usr.
 
 The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
@@ -27,10 +31,12 @@ Standard library only — same rule as the rest of the Workbench.
 import hashlib
 import json
 import os
+import platform as platform_module
 import plistlib
 import posixpath
 import re
 import secrets
+import shlex
 import signal
 import struct
 import shutil
@@ -64,9 +70,15 @@ ARCHIVE_COMPONENT_MAX_BYTES = 255
 ARCHIVE_COMPRESSION_RATIO_MAX = 200
 
 # macOS uses its standard DMG for both manual and in-app installation.
-# Windows remains a portable ZIP application.
+# Windows remains a portable ZIP application. Linux publishes exact Debian and
+# Arch packages, but installation stays package-manager-owned rather than
+# self-updating /usr.
 MACOS_DMG_ASSET = "scm-workbench-macos.dmg"
 WINDOWS_ASSET = "scm-workbench-windows.zip"
+LINUX_DEB_ASSET = "scm-workbench-linux-amd64.deb"
+LINUX_ARCH_ASSET = "scm-workbench-linux-arch-x86_64.pkg.tar.zst"
+OS_RELEASE_MAX_BYTES = 64 * 1024
+OS_RELEASE_MAX_LINES = 1024
 HDIUTIL = "/usr/bin/hdiutil"
 CODESIGN = "/usr/bin/codesign"
 DMG_COMMAND_TIMEOUT = 30
@@ -530,35 +542,156 @@ def latest_release(timeout: int = 25, *, include_prereleases: bool = False) -> d
     raise UpdateError(f"GitHub API error {status} on the releases lookup")
 
 
-def pick_asset(release: dict, platform: str = None) -> dict:
-    """Select one exact supported release asset.
+def _parse_os_release(text: str) -> dict[str, str]:
+    """Parse one bounded os-release document without executing shell syntax."""
+    if not isinstance(text, str):
+        raise UpdateError("Linux distribution metadata is invalid")
+    try:
+        encoded_size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise UpdateError("Linux distribution metadata is invalid") from exc
+    if encoded_size > OS_RELEASE_MAX_BYTES:
+        raise UpdateError("Linux distribution metadata is invalid")
+    lines = text.splitlines()
+    if len(lines) > OS_RELEASE_MAX_LINES:
+        raise UpdateError("Linux distribution metadata is invalid")
+    values = {}
+    assignment = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = assignment.fullmatch(line)
+        if not match:
+            raise UpdateError("Linux distribution metadata is invalid")
+        key, encoded = match.group("key"), match.group("value")
+        if key in values:
+            raise UpdateError("Linux distribution metadata is ambiguous")
+        try:
+            decoded = [""] if encoded == "" else shlex.split(encoded, comments=False, posix=True)
+        except ValueError as exc:
+            raise UpdateError("Linux distribution metadata is invalid") from exc
+        try:
+            decoded_size = len(decoded[0].encode("utf-8")) if len(decoded) == 1 else 0
+        except UnicodeEncodeError as exc:
+            raise UpdateError("Linux distribution metadata is invalid") from exc
+        if len(decoded) != 1 or decoded_size > 4096 or any(
+                ord(char) < 0x20 or ord(char) == 0x7f for char in decoded[0]):
+            raise UpdateError("Linux distribution metadata is invalid")
+        values[key] = decoded[0]
+    return values
 
-    macOS accepts exactly one DMG and Windows accepts exactly one portable
-    ZIP. Other package names never become implicit fallbacks.
-    """
+
+def _read_os_release(path: Path | None = None) -> dict[str, str]:
+    candidates = (Path(path),) if path is not None else (
+        Path("/etc/os-release"), Path("/usr/lib/os-release"),
+    )
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as source:
+                raw = source.read(OS_RELEASE_MAX_BYTES + 1)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise UpdateError("Linux distribution metadata is unavailable") from exc
+        if len(raw) > OS_RELEASE_MAX_BYTES:
+            raise UpdateError("Linux distribution metadata is too large")
+        try:
+            return _parse_os_release(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise UpdateError("Linux distribution metadata is invalid") from exc
+    raise UpdateError("Linux distribution metadata is unavailable")
+
+
+def linux_package_format(*, os_release: dict | None = None,
+                         machine: str | None = None) -> str:
+    """Resolve one supported Linux package family, or fail closed."""
+    machine = platform_module.machine() if machine is None else machine
+    if not isinstance(machine, str) or machine.strip().lower() not in ("x86_64", "amd64"):
+        raise UpdateError("the release has no Linux package for this CPU architecture")
+    values = _read_os_release() if os_release is None else os_release
+    if not isinstance(values, dict):
+        raise UpdateError("Linux distribution metadata is invalid")
+    distro = values.get("ID", "")
+    like = values.get("ID_LIKE", "")
+    if not isinstance(distro, str) or not isinstance(like, str):
+        raise UpdateError("Linux distribution metadata is invalid")
+    distro = distro.strip().lower()
+    if distro in ("debian", "ubuntu"):
+        return "deb"
+    if distro in ("arch", "manjaro"):
+        return "arch"
+    raise UpdateError(f"the release has no package for Linux distribution {distro or 'unknown'}")
+
+
+def expected_asset_name(platform: str = None, *, os_release: dict | None = None,
+                        machine: str | None = None) -> str:
+    """Return the one exact release asset allowed for the local target."""
+    explicit = platform is not None
     platform = platform or (sys.platform if os.name != "nt" else "win32")
     if platform in ("darwin", "macos", "darwin-arm64", "macos-arm64"):
-        expected = (MACOS_DMG_ASSET,)
-        label = "darwin arm64"
-    elif platform in ("win32", "windows", "windows-x64", "win64"):
-        expected = (WINDOWS_ASSET,)
-        label = "windows x64"
-    else:
-        raise UpdateError(f"the release has no installable archive for {platform}")
+        return MACOS_DMG_ASSET
+    if platform in ("win32", "windows", "windows-x64", "win64"):
+        return WINDOWS_ASSET
+    if platform in ("linux-deb-amd64", "linux-debian-amd64"):
+        return LINUX_DEB_ASSET
+    if platform == "linux-arch-x86_64":
+        return LINUX_ARCH_ASSET
+    if platform in ("debian", "ubuntu", "arch", "archlinux", "manjaro"):
+        distro = "arch" if platform == "archlinux" else platform
+        resolved = linux_package_format(os_release={"ID": distro}, machine=machine)
+        return LINUX_ARCH_ASSET if resolved == "arch" else LINUX_DEB_ASSET
+    if isinstance(platform, str) and platform.startswith("linux"):
+        resolved = linux_package_format(os_release=os_release, machine=machine)
+        return LINUX_ARCH_ASSET if resolved == "arch" else LINUX_DEB_ASSET
+    qualifier = "explicit " if explicit else ""
+    raise UpdateError(f"the release has no installable archive for {qualifier}{platform}")
+
+
+def package_format(platform: str = None, *, os_release: dict | None = None,
+                   machine: str | None = None) -> str | None:
+    """Return ``deb``/``arch`` for Linux and ``None`` elsewhere."""
+    runtime = platform or (sys.platform if os.name != "nt" else "win32")
+    if not (isinstance(runtime, str) and (
+            runtime.startswith("linux") or runtime in {
+                "debian", "ubuntu", "arch", "archlinux", "manjaro",
+            })):
+        return None
+    name = expected_asset_name(platform, os_release=os_release, machine=machine)
+    return "arch" if name == LINUX_ARCH_ASSET else "deb"
+
+
+def install_mode(platform: str = None) -> str:
+    """Return whether this platform may replace its own installed payload."""
+    platform = platform or (sys.platform if os.name != "nt" else "win32")
+    linux = isinstance(platform, str) and (
+        platform.startswith("linux") or platform in {
+            "debian", "ubuntu", "arch", "archlinux", "manjaro",
+        }
+    )
+    return "manual" if linux else "automatic"
+
+
+def pick_asset(release: dict, platform: str = None) -> dict:
+    """Select the one exact supported asset for the resolved local target."""
+    expected = expected_asset_name(platform)
+    labels = {
+        MACOS_DMG_ASSET: "darwin arm64",
+        WINDOWS_ASSET: "windows x64",
+        LINUX_DEB_ASSET: "Debian/Ubuntu x86_64",
+        LINUX_ARCH_ASSET: "Arch/Manjaro x86_64",
+    }
+    label = labels[expected]
     assets = release.get("assets") if isinstance(release, dict) else None
     assets = assets if isinstance(assets, list) else []
-    matches = {
-        name: [a for a in assets if isinstance(a, dict) and a.get("name") == name]
-        for name in expected
-    }
-    if any(len(values) > 1 for values in matches.values()):
+    matches = [
+        asset for asset in assets
+        if isinstance(asset, dict) and asset.get("name") == expected
+    ]
+    if len(matches) != 1:
         names = ", ".join(str(a.get("name", "")) for a in assets if isinstance(a, dict)) or "none"
         raise UpdateError(f"the release has no unambiguous {label} asset (assets: {names})")
-    for name in expected:
-        if matches[name]:
-            return matches[name][0]
-    names = ", ".join(str(a.get("name", "")) for a in assets if isinstance(a, dict)) or "none"
-    raise UpdateError(f"the release has no unambiguous {label} asset (assets: {names})")
+    return matches[0]
 
 
 # ----------------------------------------------------------------------------
@@ -733,7 +866,11 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
 
     import ctypes
     import errno
-    libc = ctypes.CDLL(None, use_errno=True)
+    # python-build-standalone may not re-export glibc symbols from the main
+    # executable. Load the platform libc explicitly on Linux so renameat2 is
+    # available to the bundled interpreter as well as the system interpreter.
+    libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith("linux") else None,
+                       use_errno=True)
     if sys.platform == "darwin":
         renamex = getattr(libc, "renamex_np", None)
         if renamex is None:
@@ -1671,6 +1808,8 @@ def prepare_asset(asset: dict, downloaded: Path, candidate: Path,
         return prepare_dmg(downloaded, candidate, expected_version, log=log)
     if name == WINDOWS_ASSET:
         return extract_app(downloaded, candidate, log=log, publish_bundle_root=True)
+    if name in (LINUX_DEB_ASSET, LINUX_ARCH_ASSET):
+        raise UpdateError("Linux updates must be installed manually with the operating system package")
     raise UpdateError("the release asset name is not supported")
 
 
@@ -1953,6 +2092,8 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         # never reads as "nothing is happening".
         job["progress"] = {"stage": "fetch", "done": 0, "total": 0}
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
+        if install_mode() != "automatic":
+            raise UpdateError("Linux updates must be installed manually with the operating system package")
         # 1) re-verify (the state that started the job can be a few minutes old)
         channel = plan.get("channel", "stable")
         if channel not in ("stable", "beta"):

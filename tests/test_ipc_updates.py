@@ -57,7 +57,12 @@ class UpdateIpcTests(unittest.TestCase):
 
     def test_get_shape_and_strict_methods(self):
         result = self.dispatch("updates.get", {})["result"]
-        self.assertEqual(set(result), {"current", "repo", "packaged", "bundle", "state"})
+        self.assertEqual(set(result), {
+            "current", "repo", "packaged", "bundle", "install_mode",
+            "package_format", "state",
+        })
+        self.assertIn(result["install_mode"], ("automatic", "manual"))
+        self.assertIn(result["package_format"], (None, "deb", "arch", "unsupported"))
         self.assertIs(result["state"]["checking"], False)
         self.assertNotIn("checking", json.loads(server.UPDATE_STATE_FILE.read_text()))
         for method, params in (("updates.get", {"x": 1}),

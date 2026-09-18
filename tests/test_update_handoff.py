@@ -96,6 +96,7 @@ class HandoffRecordTests(unittest.TestCase):
                 legacy = []
                 log = io.StringIO()
                 with patch.object(updater, "_is_install_bundle", return_value=True), \
+                     patch.object(updater, "install_mode", return_value="automatic"), \
                      patch.object(updater, "latest_release", return_value=release), \
                      patch.object(updater, "pick_asset", return_value=asset), \
                      patch.object(updater, "download", side_effect=fake_download), \
