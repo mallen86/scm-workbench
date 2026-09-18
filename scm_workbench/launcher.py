@@ -58,11 +58,22 @@ def _runtime_download_name() -> str:
     """
     import platform as _plat
     release = "20260814"  # pinned pbs build carrying RUNTIME_VERSION; bump deliberately
+    machine = _plat.machine().lower()
     if sys.platform == "win32":
-        arch = "aarch64" if _plat.machine() == "ARM64" else "x86_64"
+        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
         return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-pc-windows-msvc-pgo-full.tar.zst"
-    arch = "aarch64" if _plat.machine() == "arm64" else "x86_64"
-    return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
+    if sys.platform == "darwin":
+        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
+        return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-apple-darwin-pgo+lto-full.tar.zst"
+    if sys.platform.startswith("linux"):
+        if machine in ("x86_64", "amd64"):
+            arch = "x86_64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "aarch64"
+        else:
+            raise RuntimeError(f"unsupported Linux architecture: {machine or 'unknown'}")
+        return f"cpython-{RUNTIME_VERSION}+{release}-{arch}-unknown-linux-gnu-pgo+lto-full.tar.zst"
+    raise RuntimeError(f"unsupported runtime platform: {sys.platform}")
 
 
 def _runtime_python_path(rt: Path) -> Path:

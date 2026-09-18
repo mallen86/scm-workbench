@@ -1100,7 +1100,13 @@ pub(crate) fn target_for_current_exe(exe: &Path) -> PathBuf {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| exe.to_path_buf())
     }
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        exe.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| exe.to_path_buf())
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         exe.to_path_buf()
     }
@@ -1184,7 +1190,11 @@ fn executable_for_target(target: &Path) -> PathBuf {
     {
         target.join("SCM Workbench.exe")
     }
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        target.join("scm-workbench")
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         target.to_path_buf()
     }
@@ -1245,6 +1255,23 @@ fn validate_application_layout(root: &Path) -> io::Result<()> {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let meta = fs::symlink_metadata(root)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err(invalid("Linux application target is not a directory"));
+        }
+        for required in [
+            root.join("scm-workbench"),
+            root.join("app/scm_workbench"),
+            root.join("app/ui"),
+            root.join("runtime"),
+        ] {
+            if !required.exists() {
+                return Err(invalid("Linux application layout is incomplete"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1295,6 +1322,7 @@ fn validate_tree_inner(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn path_is_safe_link(path: &Path, root: &Path) -> io::Result<bool> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_symlink() {
@@ -2413,6 +2441,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn distinct_processes_have_distinct_start_tokens() {
+        // Linux /proc start times are measured in clock ticks. Ensure this
+        // child cannot share the test process's startup tick on fast runners.
+        #[cfg(target_os = "linux")]
+        std::thread::sleep(Duration::from_millis(50));
         let mut child = Command::new("sleep").arg("2").spawn().unwrap();
         let child_id = process_identity(child.id()).unwrap();
         let self_id = process_identity(std::process::id()).unwrap();
@@ -2802,7 +2834,15 @@ mod tests {
             fs::write(path.join("SCM Workbench.exe"), b"executable").unwrap();
             make_executable(&path.join("SCM Workbench.exe"));
         }
-        #[cfg(all(not(target_os = "macos"), not(windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            fs::create_dir_all(path.join("app/ui")).unwrap();
+            fs::create_dir_all(path.join("runtime")).unwrap();
+            fs::write(path.join("app/scm_workbench"), marker).unwrap();
+            fs::write(path.join("scm-workbench"), b"executable").unwrap();
+            make_executable(&path.join("scm-workbench"));
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         {
             fs::create_dir_all(path).unwrap();
             fs::write(path.join("marker"), marker).unwrap();
@@ -2818,7 +2858,11 @@ mod tests {
         {
             path.join("app/scm_workbench")
         }
-        #[cfg(all(not(target_os = "macos"), not(windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            path.join("app/scm_workbench")
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         {
             path.join("marker")
         }

@@ -1853,6 +1853,10 @@ def _bundle_shape(path: Path) -> bool:
             return (directory(path) and regular(path / "SCM Workbench.exe") and
                     directory(path / "app/scm_workbench") and
                     directory(path / "app/ui") and directory(path / "runtime"))
+        if sys.platform.startswith("linux"):
+            return (directory(path) and regular(path / "scm-workbench") and
+                    directory(path / "app/scm_workbench") and
+                    directory(path / "app/ui") and directory(path / "runtime"))
     except (OSError, RuntimeError):
         pass
     return False
@@ -1869,7 +1873,8 @@ def _own_bundle() -> Optional[str]:
     if exe:
         for parent in (exe, *exe.parents):
             if ((sys.platform == "darwin" and parent.suffix == ".app") or
-                    (os.name == "nt" and _bundle_shape(parent))):
+                    ((os.name == "nt" or sys.platform.startswith("linux")) and
+                     _bundle_shape(parent))):
                 if _bundle_shape(parent):
                     return str(parent.resolve())
     return None
@@ -2079,6 +2084,8 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
                 st["asset"].get("tag") != st.get("latest")):
             return None, ["No newer update is available from the current checked state."]
         latest = st["latest"]
+        if updater.install_mode() != "automatic":
+            return None, ["Linux updates must be installed manually with the Debian package."]
         if any(j.get("kind") == "update" and j.get("status") == "running"
                for j in JOBS.values()):
             return None, ["an update is already running; try again later"]
@@ -3298,6 +3305,7 @@ def updates_view() -> dict:
     return {"current": SERVER_VERSION, "repo": updater.UPDATE_REPO,
             "packaged": os.environ.get("SCM_WORKBENCH_PACKAGED") == "1",
             "bundle": os.environ.get("SCM_WORKBENCH_BUNDLE") or "",
+            "install_mode": updater.install_mode(),
             "state": state}
 
 
@@ -4356,7 +4364,10 @@ def _open_artifact_source(snapshot: dict) -> Tuple[int, os.stat_result]:
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             if index < len(parts) - 1:
                 flags |= os.O_DIRECTORY
-            next_fd = os.open(part, flags, dir_fd=fd)
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                raise ArtifactExportError("artifact source is unavailable") from exc
             os.close(fd)
             fd = next_fd
         st = os.fstat(fd)
@@ -8929,7 +8940,10 @@ def _rename_delete_candidate(directory_fd: int, source: str, destination: str,
     """Atomically move a name without replacing another name."""
     import ctypes
 
-    libc = ctypes.CDLL(None, use_errno=True)
+    # The bundled Linux interpreter does not necessarily re-export glibc's
+    # renameat2 symbol from its main executable; load libc explicitly there.
+    libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith("linux") else None,
+                       use_errno=True)
     source_raw = os.fsencode(source)
     destination_raw = os.fsencode(destination)
     destination_fd = directory_fd if destination_fd is None else destination_fd

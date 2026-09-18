@@ -179,8 +179,8 @@ Always compare local verification with the current steps in `.github/workflows/p
 
 ## Packaging and releases
 
-- Supported release targets are macOS ARM64 and Windows x64.
-- macOS uses a drag-to-Applications DMG as both the installer and in-app updater payload; only Windows publishes a ZIP.
+- Supported release targets are macOS ARM64, Windows x64, and Debian/Ubuntu Linux x86_64.
+- macOS uses a drag-to-Applications DMG as both installer and in-app updater payload; Windows publishes a portable ZIP; Linux publishes a package-manager-owned `.deb` and uses manual update installation.
 - Current artifacts are intentionally not Developer ID/notarized or OV-signed. Do not change that policy incidentally.
 - A `v*` tag is the release version source of truth. `scripts/inject_version.py` synchronizes Python, Tauri, Cargo, and packaging metadata.
 - `workflow_dispatch` runs packaging without creating a tagged release; tag pushes build and attach release assets.

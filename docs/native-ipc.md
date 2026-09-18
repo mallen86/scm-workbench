@@ -542,8 +542,8 @@ OS-action path and URL policy. This is a transport/orchestration boundary, not
 a general native escape hatch.
 
 The shell supervises the same single worker for its entire lifetime. Closing
-the window or a hard shell exit reaps it and its descendants: macOS uses a
-process group and Windows uses a kill-on-close job object; the IPC worker
+the window or a hard shell exit reaps it and its descendants: macOS and Linux
+use a process group and Windows uses a kill-on-close job object; the IPC worker
 also exits when its direct shell supervisor disappears. The worker is started
 with `--ipc --no-browser`; it does not start another worker or browser.
 When the IPC input reaches EOF, the worker's shutdown callback terminates every
@@ -583,7 +583,10 @@ ceiling, exact declared/received-size checks, an exact GitHub release-CDN host a
 and SHA-256 verification when GitHub supplies a digest. A completed download is
 published from a unique temporary file only after validation. On macOS the updater
 requires exactly one `scm-workbench-macos.dmg`; Windows requires its exact portable
-ZIP. DMGs are attached only with fixed
+ZIP. Linux release discovery requires exactly one `scm-workbench-linux-amd64.deb`,
+reports `install_mode: "manual"`, and opens the validated tag-bound release page
+instead of downloading, staging, or replacing package-manager-owned `/usr` files.
+DMGs are attached only with fixed
 `/usr/bin/hdiutil` arguments (`-readonly -noautoopen -nobrowse`), parsed through
 bounded plist data, copied through a no-follow safe tree walk, and detached before
 any candidate publication or handoff. The mounted app's identity, version,
@@ -774,18 +777,24 @@ packaged smoke contract. The lower-layer Python, Rust, and Node
 contracts cover the asynchronous repository and update operations.
 Build the shell with
 `cargo build --release --features custom-protocol`. `scripts/build.sh macos`
-then assembles the local macOS bundle; the packaging workflow is the canonical
-assembly path for both platforms.
+assembles the local macOS bundle, while `scripts/build.sh linux` bakes the GNU
+Linux runtime and assembles the amd64 `.deb`. The packaging workflow is the
+canonical assembly path for all three platforms; Linux additionally runs
+`scripts/check_linux_package.sh` under Xvfb. See
+[linux-packaging.md](linux-packaging.md).
 
 The supported release matrix is deliberately narrow:
 
 * **macOS ARM64 only** (`macos-14`, `uname -m` must be `arm64`). There is no
   Intel or universal macOS artifact.
 * **Windows x64 only** (`AMD64`/MSVC). There is no ARM Windows artifact.
+* **Debian/Ubuntu Linux x86_64 only** (Ubuntu 22.04+ and Debian 12+). There is
+  no Linux ARM64 artifact, and Arch packaging remains follow-up work.
 
 The current signing tradeoff is explicitly accepted for this first slice:
 macOS releases are ad-hoc signed, not Developer ID signed or notarized, so a
 download may require **Open Anyway** in Privacy & Security. Current Windows
-releases are unsigned and may require the one-time SmartScreen prompt. No new
-certificate, notarization, or signing work is part of this slice; those are
-future release work, not prerequisites for the current artifacts.
+releases and the Debian package are unsigned; Windows may require the one-time
+SmartScreen prompt. No new certificate, notarization, or signing work is part
+of this slice; those are future release work, not prerequisites for the current
+artifacts.

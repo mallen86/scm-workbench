@@ -3,7 +3,8 @@
 updater.py — check for, and install, newer versions of the SCM Workbench app.
 
 The app is packaged as a Tauri bundle and shipped as GitHub release assets
-(macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP). This module
+(macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP; Linux: a
+Debian package installed manually through the operating system). This module
 talks to the releases of the Workbench's own repository:
 
   * fetch the newest stable release by default, or the highest published
@@ -11,11 +12,12 @@ talks to the releases of the Workbench's own repository:
     is private, so checks cannot see it until it is public; no credentials are
     stored in the app),
   * compare it with the running version,
-  * on "update available" an in-process job downloads the exact platform
-    asset. macOS DMGs are mounted read-only and copied into a validated app
-    candidate; Windows ZIPs use the bounded extractor. The candidate is then
-    handed to the native helper through a durable journal/request protocol.
-    The helper owns publication, health verification, rollback, and relaunch.
+  * on "update available" macOS and Windows use an in-process job to download
+    the exact platform asset. macOS DMGs are mounted read-only and copied into
+    a validated app candidate; Windows ZIPs use the bounded extractor. The
+    candidate is then handed to the native helper through a durable
+    journal/request protocol. Linux exposes the exact release but leaves .deb
+    installation to the package manager rather than writing into /usr.
 
 The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
@@ -64,9 +66,11 @@ ARCHIVE_COMPONENT_MAX_BYTES = 255
 ARCHIVE_COMPRESSION_RATIO_MAX = 200
 
 # macOS uses its standard DMG for both manual and in-app installation.
-# Windows remains a portable ZIP application.
+# Windows remains a portable ZIP application. Linux publishes one exact .deb,
+# but installing it stays package-manager-owned rather than self-updating /usr.
 MACOS_DMG_ASSET = "scm-workbench-macos.dmg"
 WINDOWS_ASSET = "scm-workbench-windows.zip"
+LINUX_DEB_ASSET = "scm-workbench-linux-amd64.deb"
 HDIUTIL = "/usr/bin/hdiutil"
 CODESIGN = "/usr/bin/codesign"
 DMG_COMMAND_TIMEOUT = 30
@@ -530,11 +534,17 @@ def latest_release(timeout: int = 25, *, include_prereleases: bool = False) -> d
     raise UpdateError(f"GitHub API error {status} on the releases lookup")
 
 
+def install_mode(platform: str = None) -> str:
+    """Return whether this platform may replace its own installed payload."""
+    platform = platform or (sys.platform if os.name != "nt" else "win32")
+    return "manual" if platform in ("linux", "linux-x64", "linux-amd64") else "automatic"
+
+
 def pick_asset(release: dict, platform: str = None) -> dict:
     """Select one exact supported release asset.
 
-    macOS accepts exactly one DMG and Windows accepts exactly one portable
-    ZIP. Other package names never become implicit fallbacks.
+    macOS accepts exactly one DMG, Windows one portable ZIP, and Linux one
+    amd64 Debian package. Other names never become implicit fallbacks.
     """
     platform = platform or (sys.platform if os.name != "nt" else "win32")
     if platform in ("darwin", "macos", "darwin-arm64", "macos-arm64"):
@@ -543,6 +553,9 @@ def pick_asset(release: dict, platform: str = None) -> dict:
     elif platform in ("win32", "windows", "windows-x64", "win64"):
         expected = (WINDOWS_ASSET,)
         label = "windows x64"
+    elif platform in ("linux", "linux-x64", "linux-amd64"):
+        expected = (LINUX_DEB_ASSET,)
+        label = "linux amd64"
     else:
         raise UpdateError(f"the release has no installable archive for {platform}")
     assets = release.get("assets") if isinstance(release, dict) else None
@@ -733,7 +746,11 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
 
     import ctypes
     import errno
-    libc = ctypes.CDLL(None, use_errno=True)
+    # python-build-standalone may not re-export glibc symbols from the main
+    # executable. Load the platform libc explicitly on Linux so renameat2 is
+    # available to the bundled interpreter as well as the system interpreter.
+    libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith("linux") else None,
+                       use_errno=True)
     if sys.platform == "darwin":
         renamex = getattr(libc, "renamex_np", None)
         if renamex is None:
@@ -1671,6 +1688,8 @@ def prepare_asset(asset: dict, downloaded: Path, candidate: Path,
         return prepare_dmg(downloaded, candidate, expected_version, log=log)
     if name == WINDOWS_ASSET:
         return extract_app(downloaded, candidate, log=log, publish_bundle_root=True)
+    if name == LINUX_DEB_ASSET:
+        raise UpdateError("Linux updates must be installed manually with the Debian package")
     raise UpdateError("the release asset name is not supported")
 
 
@@ -1953,6 +1972,8 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         # never reads as "nothing is happening".
         job["progress"] = {"stage": "fetch", "done": 0, "total": 0}
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
+        if install_mode() != "automatic":
+            raise UpdateError("Linux updates must be installed manually with the Debian package")
         # 1) re-verify (the state that started the job can be a few minutes old)
         channel = plan.get("channel", "stable")
         if channel not in ("stable", "beta"):

@@ -35,6 +35,16 @@ You only need to do this once. Updates do not require you to repeat these steps.
 
 The Windows version is portable and does not use an installer.
 
+### Debian or Ubuntu 64-bit
+
+The initial Linux package supports x86_64/amd64 systems running Ubuntu 22.04 or later, or Debian 12 or later.
+
+1. Download `scm-workbench-linux-amd64.deb`.
+2. Open it with your software manager, or run `sudo apt install ./scm-workbench-linux-amd64.deb` from its download folder.
+3. Open **SCM Workbench** from your application menu, or run `scm-workbench`.
+
+The package includes its own private Python runtime. App files are installed under `/usr/lib/scm-workbench`; settings, repositories, images, and output stay in `$XDG_DATA_HOME/scm-workbench` (normally `~/.local/share/scm-workbench`).
+
 ## Your first launch
 
 Workbench downloads the card-making tools and game information it needs. This can take a few minutes, and progress is shown in the app. Keep the window open until it says your workspace is ready.
@@ -73,7 +83,7 @@ Your choices and job history stay the same when you switch modes.
 
 ## Updates and your files
 
-Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
+Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. On macOS and Windows, Workbench can install an update itself. On Linux, it opens the exact GitHub release so you can install the new `.deb` with your software manager; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
 
 Use **Settings > Open data folder** if you want to view or back up your Workbench files.
 

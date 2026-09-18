@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, ico } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
+import { $, S, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -166,6 +166,19 @@ function removeUpdateNotice() {
 
 const displayTag = tag => "v" + String(tag || "").replace(/^v/, "");
 
+function releasePageUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    const part = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+    const path = url.pathname.split("/");
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password ||
+        url.search || url.hash || path.length !== 6 || !part.test(path[1]) || !part.test(path[2]) ||
+        path[3] !== "releases" || path[4] !== "tag" || !path[5]) return null;
+    return url.href;
+  } catch { return null; }
+}
+
 /** Start one update from any UI entry point and synchronize shared chrome. */
 export async function startUpdateInstall() {
   if (updateInstallActive()) {
@@ -191,35 +204,47 @@ function renderUpdateNotice(tag, state) {
   if (!foot) return;
   const released = state.published ? new Date(state.published) : null;
   const beta = state.prerelease === true;
+  const manual = state.install_mode === "manual";
   const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, beta ? "Beta update available" : "Update available"));
   const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss until the app restarts",
     "aria-label": "Dismiss the update notice" }, ico("x"));
   close.onclick = () => { S.updateNoticeDismissed = tag; removeUpdateNotice(); };
   head.append(close);
-  const meta = el("div", { class: "rp-meta" }, released && !Number.isNaN(released.getTime())
-    ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
-    : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`);
+  const meta = el("div", { class: "rp-meta" }, manual
+    ? (released && !Number.isNaN(released.getTime())
+      ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. Install the Debian package with your software manager.`
+      : `${beta ? "This is a beta release. " : ""}Install the Debian package with your software manager.`)
+    : (released && !Number.isNaN(released.getTime())
+      ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
+      : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`));
   const row = el("div", { class: "rp-row" },
-    el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to install.`), meta);
+    el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to ${manual ? "download" : "install"}.`), meta);
   const actions = el("div", { class: "rp-actions" });
-  const install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), "Update now");
-  install.onclick = async () => {
-    install.disabled = true;
-    let result;
-    try {
-      result = await startUpdateInstall();
-    } catch (error) {
-      install.disabled = false;
-      meta.textContent = error?.message || "The update could not start.";
-      return;
-    }
-    if (!result?.ok) {
-      install.disabled = false;
-      meta.textContent = result?.errors?.[0] || "The update could not start.";
-      return;
-    }
-    // startUpdateInstall replaces this notice with the shared progress strip.
-  };
+  let install;
+  if (manual) {
+    const releaseUrl = releasePageUrl(state.release_url);
+    install = el("button", { type: "button", class: "btn sm primary", disabled: !releaseUrl }, ico("external"), "View download");
+    install.onclick = releaseUrl ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null;
+  } else {
+    install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), "Update now");
+    install.onclick = async () => {
+      install.disabled = true;
+      let result;
+      try {
+        result = await startUpdateInstall();
+      } catch (error) {
+        install.disabled = false;
+        meta.textContent = error?.message || "The update could not start.";
+        return;
+      }
+      if (!result?.ok) {
+        install.disabled = false;
+        meta.textContent = result?.errors?.[0] || "The update could not start.";
+        return;
+      }
+      // startUpdateInstall replaces this notice with the shared progress strip.
+    };
+  }
   actions.append(install);
   const notice = el("div", { class: "repoprog sidebar-note", id: "updatenotice" }, head, row, actions);
   foot.before(notice);
@@ -232,7 +257,9 @@ export async function refreshUpdateNotice() {
   if (_updStrip && _updStrip.isConnected) return;
   let state = {};
   try {
-    state = (await getUpdates())?.state || {};
+    const view = await getUpdates();
+    state = view?.state || {};
+    state.install_mode = view?.install_mode;
   } catch { return; }   // an unreachable check simply leaves the notice alone
   const tag = state.status === "update-available" ? String(state.latest || "") : "";
   if (!tag || S.updateNoticeDismissed === tag) { removeUpdateNotice(); return; }

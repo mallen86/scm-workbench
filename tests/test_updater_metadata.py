@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import threading
+import sys
 import time
 import unittest
 import urllib.error
@@ -15,7 +16,11 @@ from scm_workbench import server, updater
 
 
 def current_asset_name():
-    return "scm-workbench-windows.zip" if os.name == "nt" else "scm-workbench-macos.dmg"
+    if os.name == "nt":
+        return updater.WINDOWS_ASSET
+    if sys.platform.startswith("linux"):
+        return updater.LINUX_DEB_ASSET
+    return updater.MACOS_DMG_ASSET
 
 
 class FakeResponse:
@@ -317,27 +322,43 @@ class UpdaterMetadataTests(unittest.TestCase):
         mac = {"name": "scm-workbench-macos.dmg", "id": 1}
         legacy = {"name": "scm-workbench-macos.zip", "id": 9}
         win = {"name": "scm-workbench-windows.zip", "id": 2}
+        linux = {"name": "scm-workbench-linux-amd64.deb", "id": 3}
         release = {"assets": [
             {"name": "scm-workbench-macos-arm64.zip"},
             legacy,
             mac,
             win,
+            linux,
             {"name": "windows-debug.zip"},
         ]}
         self.assertIs(updater.pick_asset(release, "darwin-arm64"), mac)
         self.assertIs(updater.pick_asset(release, "macos"), mac)
         self.assertIs(updater.pick_asset(release, "windows-x64"), win)
         self.assertIs(updater.pick_asset(release, "win32"), win)
+        self.assertIs(updater.pick_asset(release, "linux"), linux)
+        self.assertIs(updater.pick_asset(release, "linux-amd64"), linux)
+        self.assertEqual(updater.install_mode("linux"), "manual")
+        self.assertEqual(updater.install_mode("darwin"), "automatic")
 
-        for platform in ("linux", "darwin", "win32"):
+        for platform, expected in (
+            ("linux", updater.LINUX_DEB_ASSET),
+            ("darwin", updater.MACOS_DMG_ASSET),
+            ("win32", updater.WINDOWS_ASSET),
+        ):
             with self.subTest(platform=platform):
                 assets = list(release["assets"])
-                expected = "scm-workbench-macos.dmg" if platform == "darwin" else "scm-workbench-windows.zip"
                 assets.append({"name": expected})
                 with self.assertRaises(updater.UpdateError):
                     updater.pick_asset({"assets": assets}, platform)
         with self.assertRaises(updater.UpdateError):
             updater.pick_asset({"assets": [mac]}, "linux")
+
+    def test_linux_deb_is_metadata_only_and_never_self_installed(self):
+        with self.assertRaisesRegex(updater.UpdateError, "installed manually"):
+            updater.prepare_asset(
+                {"name": updater.LINUX_DEB_ASSET}, Path("download.deb"),
+                Path("candidate"), "v2.0.0",
+            )
 
     def test_macos_requires_dmg_and_never_falls_back_to_legacy_zip(self):
         dmg = {"name": updater.MACOS_DMG_ASSET, "id": 10}
@@ -569,9 +590,12 @@ class UpdaterJobTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="scm-updater-job-")
         self.repo = patch.object(updater, "UPDATE_REPO", "owner/workbench")
+        self.mode = patch.object(updater, "install_mode", return_value="automatic")
         self.repo.start()
+        self.mode.start()
 
     def tearDown(self):
+        self.mode.stop()
         self.repo.stop()
         self.temp.cleanup()
 

@@ -51,7 +51,9 @@ def main():
                    'if (!simple) betaI.onchange = changeUpdateChannel;',
                    'Switch to Advanced mode to change whether beta releases are included.',
                    'setSettings({ update_channel: channel })',
-                   'st.prerelease ? "A newer beta version is available: "'):
+                   'st.prerelease ? "A newer beta version is available: "',
+                   'r.install_mode === "manual"', 'View ${latest} download',
+                   'Download the Debian package from the release page'):
         if marker not in page:
             return fail(f"settings page is missing {marker}")
     beta_input = page.find('const betaI = el("input"')
@@ -87,7 +89,9 @@ def main():
                    "!tag || S.updateNoticeDismissed === tag",
                    "startUpdateStrip(result.job?.id);",
                    "if (_updStrip && _updStrip.isConnected) return;",
-                   'beta ? "Beta update available" : "Update available"'):
+                   'beta ? "Beta update available" : "Update available"',
+                   'state.install_mode === "manual"', '"View download"',
+                   'Install the Debian package with your software manager.'):
         if marker not in updater_ui:
             return fail(f"the sidebar update notice is missing {marker}")
     # Only a genuinely newer release may raise the notice.
@@ -116,11 +120,13 @@ def main():
                    'os.environ.get("SCM_WORKBENCH_NO_UPDATE_CHECK") == "1"'):
         if marker not in backend:
             return fail(f"automatic update backend is missing {marker}")
+    linux_smoke = (ROOT / "scripts" / "check_linux_package.sh").read_text(encoding="utf-8")
     if workflow.count("SCM_WORKBENCH_NO_UPDATE_CHECK=1") != 2 or \
-            workflow.count('SCM_WORKBENCH_NO_UPDATE_CHECK = "1"') != 2:
+            workflow.count('SCM_WORKBENCH_NO_UPDATE_CHECK = "1"') != 2 or \
+            "SCM_WORKBENCH_NO_UPDATE_CHECK=1" not in linux_smoke:
         return fail("packaging lifecycle smokes do not disable release-network checks")
-    if workflow.count("python scripts/check_ui_update_security.py") != 2:
-        return fail("both package targets must run the updater security contract")
+    if workflow.count("python scripts/check_ui_update_security.py") != 3:
+        return fail("all three package targets must run the updater security contract")
     for marker in ("expected_prerelease=false",
                    'version_without_build=${GITHUB_REF_NAME%%+*}',
                    '[[ "$version_without_build" == *-* ]]',
@@ -234,9 +240,10 @@ globalThis.__updateJobs = {
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
 globalThis.__updateSharedState = { info: { settings: { ui_mode: "advanced" } } };
-const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); }`);
+const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); } export function openUrl(url, label) { globalThis.__openedUpdateUrls.push({ url, label }); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
 globalThis.__updateState = { state: {} };
+globalThis.__openedUpdateUrls = [];
 globalThis.__automaticChecks = [];
 globalThis.__startUpdateRequest = async () => ({ ok: true, job: { id: "update-1" } });
 const updaterUpdates = dataUrl(`
@@ -322,6 +329,23 @@ listedJob = { ...listedJob, status: "fail" };
 globalThis.__updateTick();
 await new Promise(resolve => realTimeout(resolve, 0));
 if (updaterUi.updateInstallActive()) fail("install actions did not re-enable after update failure");
+
+// Linux exposes the exact release without admitting a self-update into /usr.
+updaterUi.stopUpdateStrip();
+globalThis.__updateState = { install_mode: "manual", state: {
+  status: "update-available", latest: "v5.1", channel: "stable", prerelease: false,
+  release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v5.1",
+} };
+await updaterUi.refreshUpdateNotice();
+const manualNotice = globalThis.__updateNodes.get("#updatenotice");
+const descendants = node => node ? [node, ...node.children.flatMap(descendants)] : [];
+const manualButton = descendants(manualNotice).find(node =>
+  node.tag === "button" && elementText(node).includes("View download"));
+if (!manualNotice?.isConnected || !elementText(manualNotice).includes("Install the Debian package") || !manualButton?.onclick)
+  fail(`the Linux notice did not expose a manual Debian download: ${manualNotice ? elementText(manualNotice) : "missing notice"}`);
+manualButton.onclick();
+if (globalThis.__openedUpdateUrls.length !== 1 || !globalThis.__openedUpdateUrls[0].url.endsWith("/releases/tag/v5.1"))
+  fail("the Linux notice did not open its server-validated release page");
 
 // Packaged startup forces a fresh check before painting its result. Its daily
 // timer repeats that flow without allowing duplicate scheduler installation.
