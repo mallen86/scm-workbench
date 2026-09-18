@@ -252,9 +252,11 @@ def install(manifest_path: Path) -> None:
     ], "Resolving compatible PyPI wheels")
     wheels = postprocessing.validate_wheel_report(_read_report(resolve_report), max_artifacts=MAX_WHEELS)
     try:
-        with lock_file.open("x", encoding="utf-8") as stream:
+        with lock_file.open("xb") as stream:
             postprocessing._private(lock_file)
-            stream.write(postprocessing.wheel_lock_text(wheels))
+            # The parent verifies this exact lock digest. Avoid Windows text
+            # newline translation so the published bytes match that digest.
+            stream.write(postprocessing.wheel_lock_text(wheels).encode("utf-8"))
             stream.flush(); os.fsync(stream.fileno())
     except OSError as exc:
         raise InstallerError("could not write the dependency lock") from exc

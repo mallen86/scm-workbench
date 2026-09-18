@@ -42,7 +42,7 @@ def process_image(image_path, context):
     STATE.append(context['name'])
     Path(image_path).write_bytes(Path(image_path).read_bytes())
 """
-            source.write_text(source_text, encoding="utf-8")
+            source.write_bytes(source_text.encode("utf-8"))
             manifest = root / "run" / "manifest.json"
             manifest.write_text(json.dumps({"source_path": str(source), "run_root": str(root / "run"),
                 "entries": runner_entries(entries), "revision": revision_digest(source_text, []),
@@ -70,7 +70,7 @@ def process_image(image_path, context):
                 "    with open(image_path, 'ab') as stream:\n"
                 "        stream.write(demo_dependency.VALUE)\n"
             )
-            source = root / "run" / "processor.py"; source.write_text(source_text, encoding="utf-8")
+            source = root / "run" / "processor.py"; source.write_bytes(source_text.encode("utf-8"))
             requirements = ["demo==1.0"]
             manifest = root / "run" / "manifest.json"
             manifest.write_text(json.dumps({
@@ -95,7 +95,7 @@ def process_image(image_path, context):
             root = Path(temp).resolve(); (root / "run/work/front").mkdir(parents=True)
             image = root / "run/work/front/a.png"; image.write_bytes(png())
             source_text = "def process_image(image_path, context):\n    return 1\n"
-            source = root / "run" / "processor.py"; source.write_text(source_text)
+            source = root / "run" / "processor.py"; source.write_bytes(source_text.encode("utf-8"))
             manifest = root / "run" / "manifest.json"; manifest.write_text(json.dumps({
                 "source_path": str(source), "run_root": str(root / "run"),
                 "entries": [{"staged": str(image), "name": "a.png", "role": "front",

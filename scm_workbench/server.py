@@ -7745,9 +7745,11 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         raise postprocessing.ValidationError("not enough free space to stage the image batch safely")
     entries = postprocessing.stage_images(records, run_dir, cancelled=cancelled)
     source_path = run_dir / "processor.py"
-    with source_path.open("x", encoding="utf-8") as source_stream:
+    with source_path.open("xb") as source_stream:
         postprocessing._private(source_path)
-        source_stream.write(item["source"])
+        # Preserve the exact bytes covered by the approved revision. Text-mode
+        # writes translate LF to CRLF on Windows and invalidate the digest.
+        source_stream.write(item["source"].encode("utf-8"))
         source_stream.flush(); os.fsync(source_stream.fileno())
     private_manifest = Path(job["postprocess_manifest"])
     environment = status_now["environment"]

@@ -1,4 +1,5 @@
 # Bugs
+- [x] Preserve approved postprocessor source and dependency-lock bytes on Windows instead of invalidating their revision digests through newline translation.
 - [x] Return a structured validation error for oversized processor source payloads instead of resetting the browser HTTP connection.
 - [x] Preserve verified postprocessor libraries and trust across compatible app/runtime replacement without binding Python compatibility to bundle paths, inodes, or timestamps.
 - [x] Bound release-asset uploads to five minutes, retry transient server failures, and retain Actions artifacts when attachment fails.

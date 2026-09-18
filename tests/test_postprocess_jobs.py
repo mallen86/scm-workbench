@@ -136,6 +136,34 @@ class PostprocessJobTests(unittest.TestCase):
         args["scope"] = "both"
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 3)
 
+    def test_preparation_preserves_the_approved_source_bytes(self):
+        image = self.repo / "game" / "front" / "card.png"
+        image.write_bytes(PNG)
+        source = (
+            "def process_image(image_path, context):\r\n"
+            "    return None\r\n"
+        )
+        item = self.save_and_trust(source)
+        run_dir = self.data / "postprocessing" / "runs" / "source-bytes"
+        job = {
+            "id": "source-bytes",
+            "scm_path": str(self.repo),
+            "postprocess_run": str(run_dir),
+            "postprocess_manifest": str(run_dir / "manifest.json"),
+            "cancel_event": threading.Event(),
+        }
+
+        server._prepare_image_postprocess_job(job, {
+            "processor_id": item["id"],
+            "revision_hash": item["revision"],
+            "scope": "front",
+        })
+
+        self.assertEqual(
+            (run_dir / "processor.py").read_bytes(),
+            source.encode("utf-8"),
+        )
+
     def test_success_publishes_atomically_and_releases_exclusive_lease(self):
         image = self.repo / "game" / "front" / "card.png"
         image.write_bytes(PNG)
@@ -267,7 +295,7 @@ class PostprocessJobTests(unittest.TestCase):
         report_path.write_text(json.dumps(report), encoding="utf-8")
         lock_text = f"demo==1.0 --hash=sha256:{artifact_hash}\n"
         lock_path = stage / "requirements.lock"
-        lock_path.write_text(lock_text, encoding="utf-8")
+        lock_path.write_bytes(lock_text.encode("utf-8"))
         job = {
             "id": "fixture", "dependency_stage": str(stage),
             "dependency_target": str(target), "dependency_report": str(report_path),
@@ -302,7 +330,7 @@ class PostprocessJobTests(unittest.TestCase):
         repeat_report = repeat_stage / "resolve-report.json"
         repeat_report.write_text(json.dumps(report), encoding="utf-8")
         repeat_lock = repeat_stage / "requirements.lock"
-        repeat_lock.write_text(lock_text, encoding="utf-8")
+        repeat_lock.write_bytes(lock_text.encode("utf-8"))
         repeat_job = {
             **job,
             "id": "fixture-repeat",
@@ -334,7 +362,7 @@ class PostprocessJobTests(unittest.TestCase):
         repair_report = repair_stage / "resolve-report.json"
         repair_report.write_text(json.dumps(report), encoding="utf-8")
         repair_lock = repair_stage / "requirements.lock"
-        repair_lock.write_text(lock_text, encoding="utf-8")
+        repair_lock.write_bytes(lock_text.encode("utf-8"))
         repair_job = {
             **job,
             "id": "fixture-repair",
