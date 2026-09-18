@@ -5330,7 +5330,8 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         try:
             store = postprocessing.ProcessorStore(DATA_DIR, cwd)
             item = store.get(processor_id, include_source=False)
-            status = store.status(processor_id, interpreter=python)
+            status = store.status(processor_id, interpreter=python,
+                          environment_verifier=_verify_dependency_environment)
             meta = status["environment"]
             trusted = status["processor"].get("trusted")
             if (item.get("revision") != item.get("active_revision") or
@@ -7705,7 +7706,8 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     with _POSTPROCESS_REGISTRY_LOCK:
         store = _postprocessor_store()
         item = store.get(args["processor_id"])
-        status_now = store.status(item["id"], interpreter=python)
+        status_now = store.status(item["id"], interpreter=python,
+                                  environment_verifier=_verify_dependency_environment)
         if str(args.get("revision_hash") or "") != item.get("revision"):
             raise postprocessing.ConflictError("processor revision is stale")
         if not status_now["processor"].get("trusted"):
@@ -10935,7 +10937,10 @@ def postprocessors_list() -> dict:
                         "environment_fingerprint", "environment_ready", "environment_status"}
         for item in store.list():
             try:
-                item = {**item, **store.status(item["id"], interpreter=python)["processor"]}
+                item = {**item, **store.status(
+                item["id"], interpreter=python,
+                environment_verifier=_verify_dependency_environment,
+            )["processor"]}
             except postprocessing.PostProcessingError:
                 pass
             rows.append({key: value for key, value in item.items() if key in summary_keys})
@@ -10946,7 +10951,10 @@ def postprocessor_get(processor_id: str) -> dict:
     with _POSTPROCESS_REGISTRY_LOCK:
         store = _postprocessor_store()
         item = store.get(processor_id)
-        status = store.status(processor_id, interpreter=job_python(load_settings()))
+        status = store.status(
+        processor_id, interpreter=job_python(load_settings()),
+        environment_verifier=_verify_dependency_environment,
+    )
         return {**item, **status["processor"], "environment": status["environment"]}
 
 
@@ -10992,7 +11000,8 @@ def postprocessor_trust(processor_id: str, params: dict) -> dict:
     with _POSTPROCESS_REGISTRY_LOCK:
         store = _postprocessor_store()
         python = job_python(load_settings())
-        current = store.status(processor_id, interpreter=python)
+        current = store.status(processor_id, interpreter=python,
+                           environment_verifier=_verify_dependency_environment)
         _verify_dependency_environment(current["environment"])
         item = store.trust(
             processor_id, params["revision_hash"], params.get("environment_fingerprint"),
@@ -11019,7 +11028,10 @@ def postprocessor_delete(processor_id: str, params: dict) -> dict:
 
 def postprocessor_status(processor_id: str) -> dict:
     with _POSTPROCESS_REGISTRY_LOCK:
-        return _postprocessor_store().status(processor_id, interpreter=job_python(load_settings()))
+        return _postprocessor_store().status(
+            processor_id, interpreter=job_python(load_settings()),
+            environment_verifier=_verify_dependency_environment,
+        )
 
 
 def postprocessor_import_selected(source_path: str) -> dict:

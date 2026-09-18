@@ -1,4 +1,5 @@
 # Bugs
+- [x] Preserve verified postprocessor libraries and trust across compatible app/runtime replacement without binding Python compatibility to bundle paths, inodes, or timestamps.
 - [x] Bound release-asset uploads to five minutes, retry transient server failures, and retain Actions artifacts when attachment fails.
 - [x] Replace the blank Job History startup flash with an honest loading state and remove the duplicate UI bootstrap that repeated every startup request.
 - [x] Keep Create PDF and MTG Fetch Card Art options available when a slow Windows machine exceeds the bounded help probe by safely reading literal Click options from source.

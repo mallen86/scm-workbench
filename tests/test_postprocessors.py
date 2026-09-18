@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest import mock
 from scm_workbench.postprocessing import (
     ConflictError,
     IntegrityError,
+    _legacy_environment_compatible,
     ProcessorStore,
     PublicationTransaction,
     TransactionError,
@@ -126,6 +128,98 @@ class PostprocessorTests(unittest.TestCase):
             store.trust(plain["id"], plain["revision"], plain_fingerprint)
             unchanged_plain = store.record_environment(plain["id"], plain["revision"], "")
             self.assertTrue(unchanged_plain["processor"]["trusted"])
+
+    def test_verified_legacy_environment_is_rekeyed_without_losing_trust(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProcessorStore(temp)
+            item = store.save("Libraries", SOURCE, "demo==1.0")
+            artifact_hash = "a" * 64
+            wheels = [{
+                "canonical_name": "demo", "name": "demo", "version": "1.0",
+                "sha256": artifact_hash,
+            }]
+            lock_hash = hashlib.sha256(
+                f"demo==1.0 --hash=sha256:{artifact_hash}\n".encode("utf-8")
+            ).hexdigest()
+            old_fingerprint = "b" * 64
+            new_fingerprint = "c" * 64
+            old_path = store.root / "environments" / old_fingerprint
+            (old_path / "site-packages").mkdir(parents=True)
+            (old_path / "ready.json").write_text(json.dumps({
+                "fingerprint": old_fingerprint,
+                "requirements": item["requirements"],
+                "lock_hash": lock_hash,
+                "wheels": wheels,
+                "files": 0,
+                "bytes": 0,
+                "tree_digest": artifact_hash,
+            }), encoding="utf-8")
+            metadata_path = store._processor(item["id"]) / "metadata.json"
+            metadata = store._metadata(item["id"])
+            metadata.update({
+                "trusted": item["revision"], "environment": old_fingerprint,
+                "trusted_tree_digest": artifact_hash,
+                "installed_revision": item["revision"],
+                "installed_environment": old_fingerprint,
+                "installed_tree_digest": artifact_hash,
+                "lock_hash": lock_hash,
+            })
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            verified = []
+
+            with (mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value=new_fingerprint),
+                  mock.patch("scm_workbench.postprocessing._legacy_environment_compatible", return_value=True)):
+                status = store.status(
+                    item["id"], interpreter="replacement-python",
+                    environment_verifier=lambda environment: verified.append(environment["path"]),
+                )
+
+            new_path = store.root / "environments" / new_fingerprint
+            self.assertEqual(verified, [str(old_path)])
+            self.assertFalse(old_path.exists())
+            self.assertTrue(new_path.is_dir())
+            self.assertEqual(json.loads((new_path / "ready.json").read_text())["fingerprint"], new_fingerprint)
+            self.assertTrue(status["environment"]["ready"])
+            self.assertTrue(status["processor"]["trusted"])
+            migrated = store._metadata(item["id"])
+            self.assertEqual(migrated["installed_environment"], new_fingerprint)
+            self.assertEqual(migrated["environment"], new_fingerprint)
+
+    def test_legacy_environment_migration_fails_closed_without_abi_proof(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProcessorStore(temp)
+            item = store.save("Libraries", SOURCE, "demo==1.0")
+            artifact_hash = "a" * 64
+            wheel = {"canonical_name": "demo", "name": "demo", "version": "1.0",
+                     "sha256": artifact_hash}
+            lock_hash = hashlib.sha256(
+                f"demo==1.0 --hash=sha256:{artifact_hash}\n".encode("utf-8")
+            ).hexdigest()
+            old_fingerprint = "b" * 64
+            new_fingerprint = "c" * 64
+            old_path = store.root / "environments" / old_fingerprint
+            (old_path / "site-packages").mkdir(parents=True)
+            (old_path / "ready.json").write_text(json.dumps({
+                "fingerprint": old_fingerprint, "requirements": item["requirements"],
+                "lock_hash": lock_hash, "wheels": [wheel], "files": 0, "bytes": 0,
+                "tree_digest": artifact_hash,
+            }), encoding="utf-8")
+            metadata = store._metadata(item["id"])
+            metadata.update({
+                "installed_revision": item["revision"], "installed_environment": old_fingerprint,
+                "installed_tree_digest": artifact_hash, "lock_hash": lock_hash,
+            })
+            (store._processor(item["id"]) / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value=new_fingerprint),
+                  mock.patch("scm_workbench.postprocessing._legacy_environment_compatible", return_value=False)):
+                status = store.status(
+                    item["id"], interpreter="replacement-python",
+                    environment_verifier=lambda _environment: None,
+                )
+            self.assertEqual(status["environment"]["status"], "stale")
+            self.assertTrue(old_path.is_dir())
+            self.assertEqual(store._metadata(item["id"])["installed_environment"], old_fingerprint)
 
     def test_saved_revision_tampering_is_detected_before_trust_or_run(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -306,7 +400,7 @@ class PostprocessorTests(unittest.TestCase):
                 with self.assertRaisesRegex(IntegrityError, "metadata is inconsistent"):
                     store.status(item["id"], interpreter="replacement-python")
 
-    def test_interpreter_probe_disables_bytecode_writes(self):
+    def test_interpreter_fingerprint_tracks_compatibility_not_file_identity(self):
         calls = []
 
         class FakeProcess:
@@ -317,19 +411,34 @@ class PostprocessorTests(unittest.TestCase):
 
         def fake_popen(argv, **kwargs):
             calls.append(argv)
+            name = Path(argv[0]).parent.name
+            version = [3, 14, 0] if name == "new-minor" else [3, 13, 99] if name == "new-patch" else [3, 13, 0]
+            free_threaded = name == "new-abi"
             kwargs["stdout"].write(json.dumps({
-                "implementation": "CPython", "version": [3, 13, 0], "abi": "",
-                "soabi": "cpython-313-test", "cache_tag": "cpython-313",
-                "platform": "test", "machine": "arm64",
+                "implementation": "CPython", "version": version, "abi": "t" if free_threaded else "",
+                "soabi": "cpython-313t-test" if free_threaded else "cpython-313-test",
+                "cache_tag": "cpython-313t" if free_threaded else "cpython-313",
+                "platform": "macosx-11.0-arm64", "machine": "arm64", "multiarch": "darwin",
+                "byteorder": "little", "pointer_bits": 64,
             }).encode("utf-8"))
             return FakeProcess()
 
         with tempfile.TemporaryDirectory() as temp:
-            interpreter = Path(temp) / "python"
-            interpreter.write_bytes(b"fixture")
+            root = Path(temp)
+            paths = {name: root / name / "python" for name in
+                     ("original", "relocated", "new-patch", "new-minor", "new-abi")}
+            for index, path in enumerate(paths.values()):
+                path.parent.mkdir()
+                path.write_bytes(b"different-file-identity-" + bytes([index]))
             with mock.patch("scm_workbench.postprocessing.subprocess.Popen", side_effect=fake_popen):
-                self.assertEqual(len(interpreter_fingerprint(interpreter)), 64)
-        self.assertEqual(calls[0][1:4], ["-I", "-B", "-c"])
+                fingerprints = {name: interpreter_fingerprint(path) for name, path in paths.items()}
+        self.assertEqual(len(fingerprints["original"]), 64)
+        self.assertEqual(fingerprints["original"], fingerprints["relocated"])
+        self.assertEqual(fingerprints["original"], fingerprints["new-patch"])
+        self.assertNotEqual(fingerprints["original"], fingerprints["new-minor"])
+        self.assertNotEqual(fingerprints["original"], fingerprints["new-abi"])
+        self.assertEqual(len(calls), len(paths))
+        self.assertTrue(all(call[1:4] == ["-I", "-B", "-c"] for call in calls))
 
     def test_environment_and_pip_helpers_are_bounded(self):
         fingerprint = environment_fingerprint(["Pillow"])
@@ -341,6 +450,34 @@ class PostprocessorTests(unittest.TestCase):
         report = {"install": [{"metadata": {"name": "Pillow", "version": "1"}, "download_info": {"url": "https://files.pythonhosted.org/packages/Pillow.whl", "archive_info": {"hashes": {"sha256": "a" * 64}}}}]}
         self.assertEqual(validate_wheel_report(report)[0]["name"], "Pillow")
         with self.assertRaises(ValidationError): validate_wheel_report({"install": [{"metadata": {}, "download_info": {"url": "http://x/a.whl", "archive_info": {}}}]})
+
+    def test_legacy_migration_requires_current_native_wheel_tag(self):
+        try:
+            from packaging.tags import interpreter_name, interpreter_version, sys_tags
+        except ImportError:
+            from pip._vendor.packaging.tags import interpreter_name, interpreter_version, sys_tags
+        preferred = interpreter_name() + interpreter_version()
+        native_tag = next(tag for tag in sys_tags()
+                          if tag.interpreter == preferred and tag.abi != "none" and tag.platform != "any")
+        wheel = {"canonical_name": "demo", "version": "1.0"}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            info = root / "site-packages" / "demo-1.0.dist-info"
+            info.mkdir(parents=True)
+            (info / "METADATA").write_text(
+                "Metadata-Version: 2.1\nName: demo\nVersion: 1.0\nRequires-Python: >=3.13\n",
+                encoding="utf-8",
+            )
+            (info / "WHEEL").write_text(
+                f"Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: {native_tag}\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(_legacy_environment_compatible({"path": str(root)}, [wheel], sys.executable))
+            (info / "WHEEL").write_text(
+                "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(_legacy_environment_compatible({"path": str(root)}, [wheel], sys.executable))
 
 
 if __name__ == "__main__":

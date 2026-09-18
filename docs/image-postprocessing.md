@@ -40,11 +40,11 @@ Enter one package request per line in the processor editor, using a package name
 opencv-python==4.12.0.88
 ```
 
-Workbench accepts compatible wheel packages only and installs them into a private, interpreter-specific environment below Workbench data. It never installs them into the app bundle or system Python. URLs, local paths, VCS packages, custom indexes, pip options, and source builds are not accepted.
+Workbench accepts compatible wheel packages only and installs them into a private, interpreter-compatible environment below Workbench data. It never installs them into the app bundle or system Python. URLs, local paths, VCS packages, custom indexes, pip options, and source builds are not accepted.
 
 Save the revision before choosing **Install / update libraries**. Review and confirm the package list, wait for the dependency job to finish, then trust the resulting exact revision/environment. Choosing this action again resolves the currently compatible wheel set. Existing trust is preserved only when the verified dependency fingerprint and installed tree are unchanged; otherwise you must trust the new environment. A source-only edit with unchanged requirements reuses the installed environment, so you only need to review and trust the new source revision.
 
-A replacement app runtime has a new interpreter fingerprint. Workbench then marks previously installed libraries as needing reinstallation and clears their environment-bound trust while keeping the processor source available to review and edit.
+The interpreter fingerprint follows wheel compatibility: Python implementation and major/minor version, ABI tags, platform, and architecture. Rebuilding, relocating, or updating the app with a compatible runtime—including a Python patch update—preserves the verified environment and its trust. A genuinely incompatible Python minor version, ABI, platform, or architecture marks the old libraries as needing reinstallation while keeping the processor source available to review and edit.
 
 The packaged runtime already includes Pillow, so Pillow-only processors normally need no additional requirement.
 

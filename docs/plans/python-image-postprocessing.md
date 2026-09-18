@@ -244,9 +244,11 @@ Reasons:
 - Python documents virtual environments as disposable and inherently non-portable because installed scripts contain absolute interpreter paths.
 - The packaged interpreter already lives in a signed/read-only app payload on macOS and a shipped runtime on Windows; modifying either makes updates and verification unsafe.
 - `pip install --target` can publish packages into a data-directory staging tree.
-- A target environment can be keyed to the exact interpreter/platform fingerprint and rebuilt when that fingerprint changes.
+- A target environment can be keyed to a wheel-compatibility fingerprint and rebuilt when that compatibility boundary changes.
 
-The fingerprint must include at least Python implementation/version/ABI, platform/architecture, runner contract version, normalized requested requirements, and the resolved lock hash. Identical locks may share one immutable environment across processors. A job pins the fingerprint for its lifetime, and garbage collection never removes an environment with a live reference.
+The fingerprint includes Python implementation and major/minor version, ABI/cache tags, stable `sysconfig` platform, architecture, pointer width and byte order, runner contract version, normalized requested requirements, and the resolved lock hash. Interpreter path, inode, timestamps, and Python patch version are deliberately excluded: rebuilding, relocating, re-signing, or patch-updating an otherwise compatible runtime must not invalidate an exact verified environment tree. Identical locks may share one immutable environment across processors. A job pins the fingerprint for its lifetime, and garbage collection never removes an environment with a live reference.
+
+A legacy identity-bound environment may be re-keyed once without downloading it again only after its full tree digest is reverified, every installed distribution and version matches the hash lock, every immutable `WHEEL` tag and `Requires-Python` declaration accepts the selected interpreter, and at least one native wheel carries that interpreter's exact ABI tag. That last proof binds the otherwise irreversible legacy fingerprint to the current Python minor/ABI/platform. Pure-wheel-only or otherwise ambiguous legacy trees fail closed as stale and require a normal reinstall/re-approval.
 
 ### Accepted requirements
 
@@ -294,7 +296,7 @@ Start with explicit, testable limits and tune them with real packages before rel
 - bounded on-disk job log and bounded individual output records;
 - minimum free-space reserve before and during installation.
 
-A failed/cancelled install deletes staging and never changes the prior ready environment. An app or interpreter update marks incompatible environments stale rather than trying to copy or repair them in place; processor source remains available to review and edit while the user reinstalls libraries for the selected runtime.
+A failed/cancelled install deletes staging and never changes the prior ready environment. A compatible app rebuild, relocation, re-sign, or Python patch update preserves the environment and trust. An incompatible Python minor/ABI/platform/architecture change marks the environment stale rather than trying to copy or repair it in place; processor source remains available to review and edit while the user reinstalls libraries for the selected runtime.
 
 ## Backend execution pipeline
 
@@ -582,7 +584,7 @@ Cover:
 - stale expected revisions and concurrent saves;
 - atomic-write failures and corrupt/truncated metadata;
 - symlink/reparse-point processor directories;
-- trust invalidation on every source, requirement, lock, interpreter, or contract change;
+- trust invalidation on every source, requirement, lock, incompatible interpreter, or contract change, without invalidation for interpreter path/inode/timestamp or patch-only changes;
 - no source in info, history, logs, or command previews.
 
 ### Requirements and installer
@@ -657,7 +659,7 @@ The feature is complete only when all of the following are true:
 
 - It is absent from Simple-mode navigation and cannot start or mutate through stale Simple-mode requests.
 - A user can create or import a bounded processor, inspect/edit it, save an immutable revision, and explicitly trust that exact revision.
-- Optional compatible PyPI wheel packages install into a hashed, interpreter-specific environment below Workbench data without modifying the bundled/system Python.
+- Optional compatible PyPI wheel packages install into a hashed, interpreter-compatibility-keyed environment below Workbench data without modifying the bundled/system Python.
 - Workbench discovers the images and calls the processor once per staged image in one batch process; scripts do not need directory loops.
 - Expensive module initialization happens once per job.
 - Scripts never receive real managed image paths through the supported contract.

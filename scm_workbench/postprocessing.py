@@ -12,6 +12,8 @@ import ast
 import hashlib
 import itertools
 import json
+from email.parser import BytesParser
+from email.policy import default as EMAIL_POLICY
 import os
 import re
 import shutil
@@ -30,6 +32,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 CONTRACT_VERSION = "1"
+INTERPRETER_FINGERPRINT_SCHEMA = 2
 SOURCE_MAX_BYTES = 256 * 1024
 NAME_MAX_BYTES = 96
 REQUIREMENT_LINE_MAX_BYTES = 256
@@ -54,6 +57,7 @@ _RECOVERY_LOCK = threading.RLock()
 _RECOVERED_ROOTS: set[str] = set()
 _INTERPRETER_PROBE_LOCK = threading.RLock()
 _INTERPRETER_PROBE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_ENVIRONMENT_MIGRATION_LOCK = threading.RLock()
 
 _FORMATS = ("png", "jpeg", "gif", "webp", "bmp")
 _EXT_FORMAT = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".gif": "gif", ".webp": "webp", ".bmp": "bmp"}
@@ -1074,6 +1078,14 @@ def recover_transactions(
 
 
 def interpreter_fingerprint(interpreter: str | Path = sys.executable) -> str:
+    """Hash wheel/runtime compatibility, not one app bundle's file identity.
+
+    The resolved path and stat tuple deliberately remain in the probe-cache key
+    so replacing an interpreter always re-runs the bounded probe. They are not
+    part of the returned fingerprint: copying or rebuilding the same compatible
+    runtime changes its inode and timestamps without invalidating installed
+    wheels. A Python minor/ABI/platform change still produces a new fingerprint.
+    """
     path = Path(interpreter).resolve()
     try:
         observed = path.stat()
@@ -1084,11 +1096,13 @@ def interpreter_fingerprint(interpreter: str | Path = sys.executable) -> str:
     with _INTERPRETER_PROBE_LOCK:
         probe = _INTERPRETER_PROBE_CACHE.get(identity)
     if probe is None:
-        code = ("import json,platform,sys,sysconfig;print(json.dumps({"
+        code = ("import json,platform,struct,sys,sysconfig;print(json.dumps({"
                 "'implementation':platform.python_implementation(),'version':list(sys.version_info[:3]),"
                 "'abi':getattr(sys,'abiflags',''),'soabi':sysconfig.get_config_var('SOABI') or '',"
                 "'cache_tag':getattr(sys.implementation,'cache_tag','') or '',"
-                "'platform':platform.platform(),'machine':platform.machine()}))")
+                "'platform':sysconfig.get_platform(),'machine':platform.machine(),"
+                "'multiarch':sysconfig.get_config_var('MULTIARCH') or '',"
+                "'byteorder':sys.byteorder,'pointer_bits':struct.calcsize('P')*8}))")
         environment = {key: value for key, value in os.environ.items() if key in
                        {"PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL"}}
         with tempfile.TemporaryFile() as output:
@@ -1108,16 +1122,22 @@ def interpreter_fingerprint(interpreter: str | Path = sys.executable) -> str:
             try: probe = json.loads(output.read().decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ValidationError("selected Python interpreter returned invalid metadata") from exc
-        required = {"implementation", "version", "abi", "soabi", "cache_tag", "platform", "machine"}
+        required = {"implementation", "version", "abi", "soabi", "cache_tag", "platform",
+                    "machine", "multiarch", "byteorder", "pointer_bits"}
+        string_keys = required - {"version", "pointer_bits"}
         if (not isinstance(probe, dict) or set(probe) != required or
                 not isinstance(probe.get("version"), list) or len(probe["version"]) != 3 or
-                any(not isinstance(value, int) for value in probe["version"]) or
-                any(not isinstance(probe.get(key), str) or len(probe[key]) > 512 for key in required - {"version"})):
+                any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 999
+                    for value in probe["version"]) or
+                not isinstance(probe.get("pointer_bits"), int) or isinstance(probe["pointer_bits"], bool) or
+                probe["pointer_bits"] not in (32, 64, 128) or
+                any(not isinstance(probe.get(key), str) or len(probe[key]) > 512 for key in string_keys)):
             raise ValidationError("selected Python interpreter returned invalid metadata")
         with _INTERPRETER_PROBE_LOCK:
             if len(_INTERPRETER_PROBE_CACHE) >= 64: _INTERPRETER_PROBE_CACHE.clear()
             _INTERPRETER_PROBE_CACHE[identity] = probe
-    value = {**probe, "interpreter": str(path), "identity": list(identity[1:])}
+    value = {key: probe[key] for key in probe if key != "version"}
+    value.update({"schema": INTERPRETER_FINGERPRINT_SCHEMA, "python": probe["version"][:2]})
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -1177,6 +1197,125 @@ def wheel_lock_text(wheels: Sequence[Mapping[str, Any]]) -> str:
     if not rows:
         raise ValidationError("wheel lock is empty")
     return "\n".join(rows) + "\n"
+
+
+def _legacy_environment_compatible(environment: Mapping[str, Any], wheels: Sequence[Mapping[str, Any]],
+                                   interpreter: str | Path) -> bool:
+    """Prove that a verified legacy tree was resolved for this Python ABI.
+
+    Old ready markers contain an identity-bound fingerprint but not the probe
+    that produced it.  Migration therefore fails closed unless the immutable
+    tree has one exact current-interpreter native wheel tag, every installed
+    wheel tag is accepted by the current interpreter, and every
+    ``Requires-Python`` declaration accepts its version.
+    """
+    try:
+        if not (1 <= len(wheels) <= 256):
+            return False
+        expected = []
+        for wheel in wheels:
+            name = str(wheel.get("canonical_name", ""))
+            version = str(wheel.get("version", ""))
+            if (not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?", name) or
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}", version)):
+                return False
+            expected.append((name, version))
+        if len({name for name, _version in expected}) != len(expected):
+            return False
+
+        site_packages = Path(str(environment.get("path") or "")) / "site-packages"
+        _no_links(site_packages)
+        if not site_packages.is_dir():
+            return False
+        distributions = []
+        metadata_bytes = 0
+        dist_info = []
+        for child in _bounded_children(site_packages, 20_000, "dependency environment"):
+            if child.name.endswith(".dist-info"):
+                observed = os.lstat(child)
+                if _is_link_or_reparse(observed) or not stat.S_ISDIR(observed.st_mode):
+                    return False
+                dist_info.append(child)
+        if len(dist_info) != len(expected):
+            return False
+        actual = []
+        tag_combinations = 0
+        for directory in dist_info:
+            wheel_raw = _read_regular_bytes(directory / "WHEEL", "wheel metadata", 16 * 1024)
+            package_raw = _read_regular_bytes(directory / "METADATA", "package metadata", 128 * 1024)
+            metadata_bytes += len(wheel_raw) + len(package_raw)
+            if metadata_bytes > 8 * 1024 * 1024:
+                return False
+            wheel_metadata = BytesParser(policy=EMAIL_POLICY).parsebytes(wheel_raw)
+            package_metadata = BytesParser(policy=EMAIL_POLICY).parsebytes(package_raw)
+            names = package_metadata.get_all("Name", [])
+            versions = package_metadata.get_all("Version", [])
+            requires_python = package_metadata.get_all("Requires-Python", [])
+            tags = wheel_metadata.get_all("Tag", [])
+            if len(names) != 1 or len(versions) != 1 or len(requires_python) > 1 or not (1 <= len(tags) <= 64):
+                return False
+            name = re.sub(r"[-_.]+", "-", str(names[0])).lower()
+            version = str(versions[0])
+            if (not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?", name) or
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}", version)):
+                return False
+            clean_tags = []
+            for value in tags:
+                tag = str(value)
+                parts = tag.split("-")
+                if (len(tag) > 256 or len(parts) != 3 or
+                        any(not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*", part) for part in parts)):
+                    return False
+                combinations = 1
+                for part in parts:
+                    combinations *= len(part.split("."))
+                tag_combinations += combinations
+                if tag_combinations > 4096:
+                    return False
+                clean_tags.append(tag)
+            specifier = str(requires_python[0]) if requires_python else ""
+            if len(specifier) > 256 or any(unicodedata.category(character).startswith("C") for character in specifier):
+                return False
+            actual.append((name, version))
+            distributions.append({"tags": clean_tags, "requires_python": specifier})
+        if sorted(actual) != sorted(expected):
+            return False
+
+        payload = json.dumps({"distributions": distributions}, separators=(",", ":")).encode("utf-8")
+        if len(payload) > 1024 * 1024:
+            return False
+        code = (
+            "import json,platform,sys\n"
+            "try:\n from packaging.specifiers import SpecifierSet\n from packaging.tags import interpreter_name,interpreter_version,parse_tag,sys_tags\n from packaging.version import Version\n"
+            "except ImportError:\n from pip._vendor.packaging.specifiers import SpecifierSet\n from pip._vendor.packaging.tags import interpreter_name,interpreter_version,parse_tag,sys_tags\n from pip._vendor.packaging.version import Version\n"
+            "p=json.load(sys.stdin); current=set(sys_tags()); preferred=interpreter_name()+interpreter_version(); bound=False\n"
+            "for d in p['distributions']:\n"
+            " declared=set()\n"
+            " for raw in d['tags']: declared.update(parse_tag(raw))\n"
+            " if not declared.intersection(current): raise SystemExit(2)\n"
+            " if d['requires_python'] and not SpecifierSet(d['requires_python']).contains(Version(platform.python_version()),prereleases=True): raise SystemExit(2)\n"
+            " if any(t.interpreter==preferred and t.abi!='none' and t.platform!='any' for t in declared): bound=True\n"
+            "print(json.dumps({'compatible':True,'bound':bound},separators=(',',':')))"
+        )
+        environment_variables = {key: value for key, value in os.environ.items() if key in
+                                 {"PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL"}}
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen([str(Path(interpreter).resolve()), "-I", "-B", "-c", code],
+                                       stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
+                                       env=environment_variables, shell=False)
+            try:
+                process.communicate(payload, timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=1)
+                return False
+            if process.returncode != 0 or output.tell() > 4096:
+                return False
+            output.seek(0)
+            result = json.loads(output.read().decode("utf-8"))
+        return result == {"compatible": True, "bound": True}
+    except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError, PostProcessingError,
+            subprocess.SubprocessError, ValueError):
+        return False
 
 
 class ProcessorStore:
@@ -1428,19 +1567,23 @@ class ProcessorStore:
         clean_name = name or path.stem or "Imported processor"
         return self.save(clean_name, source, "")
 
-    def environment_metadata(self, requirements: Sequence[str], lock_hash: str = "", *, interpreter: str | Path = sys.executable) -> dict:
-        req = normalize_requirements(requirements); fingerprint = environment_fingerprint(req, lock_hash, interpreter=interpreter, contract=self.contract)
-        path = self.root / "environments" / fingerprint
+    def _environment_metadata_at(self, requirements: Sequence[str], lock_hash: str, fingerprint: str,
+                                 *, path: Path | None = None,
+                                 accepted_marker_fingerprints: set[str] | None = None) -> dict:
+        req = normalize_requirements(requirements)
+        location = path or (self.root / "environments" / fingerprint)
         if not req:
             return {"fingerprint": fingerprint, "requirements": [], "ready": True,
-                    "status": "ready", "path": str(path), "files": 0, "bytes": 0,
+                    "status": "ready", "path": str(location), "files": 0, "bytes": 0,
                     "tree_digest": None, "wheels": []}
-        ready = _read_json(path / "ready.json", "environment marker", missing=None)
+        ready = _read_json(location / "ready.json", "environment marker", missing=None)
         locked_wheels: list[dict[str, str]] = []
-        lock_valid = not req
-        if req and isinstance(ready, dict) and isinstance(ready.get("wheels"), list):
+        lock_valid = False
+        if isinstance(ready, dict) and isinstance(ready.get("wheels"), list):
             try:
                 locked = ready["wheels"]
+                if not (1 <= len(locked) <= 256):
+                    raise ValidationError("invalid wheel lock")
                 lock_text = wheel_lock_text(locked).encode("utf-8")
                 lock_valid = hashlib.sha256(lock_text).hexdigest() == lock_hash
                 locked_wheels = [{"name": str(wheel["canonical_name"]),
@@ -1448,28 +1591,126 @@ class ProcessorStore:
                                   "sha256": str(wheel["sha256"])} for wheel in locked]
             except (KeyError, TypeError, ValidationError):
                 lock_valid = False
-        tree_valid = (not req or (isinstance(ready, dict) and
-                      isinstance(ready.get("files"), int) and ready.get("files") >= 0 and
-                      isinstance(ready.get("bytes"), int) and ready.get("bytes") >= 0 and
+        tree_valid = (isinstance(ready, dict) and
+                      isinstance(ready.get("files"), int) and not isinstance(ready.get("files"), bool) and
+                      ready.get("files") >= 0 and
+                      isinstance(ready.get("bytes"), int) and not isinstance(ready.get("bytes"), bool) and
+                      ready.get("bytes") >= 0 and
                       isinstance(ready.get("tree_digest"), str) and
-                      re.fullmatch(r"[0-9a-f]{64}", ready["tree_digest"])))
-        ready_valid = (isinstance(ready, dict) and ready.get("fingerprint") == fingerprint and
+                      re.fullmatch(r"[0-9a-f]{64}", ready["tree_digest"]))
+        accepted = accepted_marker_fingerprints or {fingerprint}
+        ready_valid = (isinstance(ready, dict) and ready.get("fingerprint") in accepted and
                        ready.get("requirements") == list(req) and ready.get("lock_hash", "") == lock_hash and
-                       lock_valid and tree_valid and path.is_dir() and not path.is_symlink())
+                       lock_valid and tree_valid and location.is_dir() and not location.is_symlink())
         return {"fingerprint": fingerprint, "requirements": list(req), "ready": bool(ready_valid),
-                "status": "ready" if ready_valid else "missing", "path": str(path),
+                "status": "ready" if ready_valid else "missing", "path": str(location),
                 "files": ready.get("files") if ready_valid else None,
                 "bytes": ready.get("bytes") if ready_valid else None,
                 "tree_digest": ready.get("tree_digest") if ready_valid else None,
                 "wheels": locked_wheels if ready_valid else []}
 
-    def status(self, processor_id: str, *, interpreter: str | Path = sys.executable) -> dict:
+    def environment_metadata(self, requirements: Sequence[str], lock_hash: str = "", *, interpreter: str | Path = sys.executable) -> dict:
+        req = normalize_requirements(requirements)
+        fingerprint = environment_fingerprint(req, lock_hash, interpreter=interpreter, contract=self.contract)
+        return self._environment_metadata_at(req, lock_hash, fingerprint)
+
+    def _migrate_legacy_environment(self, processor_id: str, item: Mapping[str, Any], lock_hash: str,
+                                    current: Mapping[str, Any], interpreter: str | Path,
+                                    verifier: Callable[[dict], None]) -> bool:
+        """Re-key one exact verified pre-schema-2 environment without reinstalling it."""
+        requirements = tuple(item.get("requirements") or ())
+        if not requirements:
+            # A dependency-free tree has no immutable wheel metadata with which
+            # to prove the legacy interpreter ABI. Re-approval is cheap and is
+            # safer than guessing at an irreversible old fingerprint.
+            return False
+        with _ENVIRONMENT_MIGRATION_LOCK:
+            metadata = self._metadata(processor_id)
+            revision = item.get("revision")
+            old_fingerprint = metadata.get("installed_environment")
+            new_fingerprint = current.get("fingerprint")
+            if (metadata.get("installed_revision") != revision or metadata.get("lock_hash") != lock_hash or
+                    not isinstance(old_fingerprint, str) or old_fingerprint == new_fingerprint or
+                    not isinstance(new_fingerprint, str)):
+                return False
+            environments = self.root / "environments"
+            new_environment = self.environment_metadata(requirements, lock_hash, interpreter=interpreter)
+            candidate = new_environment if new_environment["ready"] else self._environment_metadata_at(
+                requirements, lock_hash, old_fingerprint,
+                path=environments / old_fingerprint,
+                accepted_marker_fingerprints={old_fingerprint, new_fingerprint},
+            )
+            if (not candidate["ready"] or
+                    metadata.get("installed_tree_digest") != candidate.get("tree_digest")):
+                return False
+            try:
+                marker = _read_json(Path(candidate["path"]) / "ready.json", "environment marker")
+                wheels = marker.get("wheels") if isinstance(marker, dict) else None
+                # The bounded metadata check is intentionally first: a truly
+                # incompatible runtime can fail cheaply instead of re-hashing
+                # a multi-gigabyte tree on every status refresh. No migration
+                # occurs until the full immutable tree is verified below.
+                if not isinstance(wheels, list) or not _legacy_environment_compatible(candidate, wheels, interpreter):
+                    return False
+                verifier(dict(candidate))
+            except (OSError, PostProcessingError):
+                return False
+
+            if Path(candidate["path"]) != Path(new_environment["path"]):
+                old_path = Path(candidate["path"])
+                new_path = Path(new_environment["path"])
+                if os.path.lexists(new_path):
+                    return False
+                original_marker = marker
+                migrated_marker = {**marker, "fingerprint": new_fingerprint}
+                try:
+                    _atomic_json(old_path / "ready.json", migrated_marker)
+                    os.rename(old_path, new_path)
+                    _fsync_directory(environments)
+                except OSError:
+                    if old_path.is_dir() and not old_path.is_symlink():
+                        try: _atomic_json(old_path / "ready.json", original_marker)
+                        except (OSError, PostProcessingError): pass
+                    return False
+                new_environment = self.environment_metadata(requirements, lock_hash, interpreter=interpreter)
+                if not new_environment["ready"]:
+                    return False
+
+            latest = self._metadata(processor_id)
+            stable_keys = ("active_revision", "installed_revision", "installed_environment",
+                           "installed_tree_digest", "lock_hash", "trusted", "environment",
+                           "trusted_tree_digest")
+            if any(latest.get(key) != metadata.get(key) for key in stable_keys):
+                return False
+            was_trusted = (metadata.get("trusted") == revision and
+                           metadata.get("environment") == old_fingerprint and
+                           metadata.get("trusted_tree_digest") == candidate.get("tree_digest"))
+            latest.update({
+                "installed_environment": new_fingerprint,
+                "installed_tree_digest": candidate.get("tree_digest"),
+            })
+            if was_trusted:
+                latest.update({"environment": new_fingerprint,
+                               "trusted_tree_digest": candidate.get("tree_digest")})
+            else:
+                latest.update({"trusted": None, "environment": None, "trusted_tree_digest": None})
+            _atomic_json(self._processor(processor_id) / "metadata.json", latest)
+            return True
+
+    def status(self, processor_id: str, *, interpreter: str | Path = sys.executable,
+               environment_verifier: Callable[[dict], None] | None = None) -> dict:
         item = self.get(processor_id, include_source=False)
         metadata = self._metadata(processor_id)
         lock_hash = (metadata.get("lock_hash") or "") if metadata.get("installed_revision") == item["revision"] else ""
         environment = self.environment_metadata(item["requirements"], lock_hash, interpreter=interpreter)
         installed_environment = metadata.get("installed_environment")
         stale = installed_environment is not None and installed_environment != environment["fingerprint"]
+        if stale and environment_verifier is not None and self._migrate_legacy_environment(
+                processor_id, item, lock_hash, environment, interpreter, environment_verifier):
+            metadata = self._metadata(processor_id)
+            environment = self.environment_metadata(item["requirements"], lock_hash, interpreter=interpreter)
+            installed_environment = metadata.get("installed_environment")
+            stale = installed_environment is not None and installed_environment != environment["fingerprint"]
         if stale:
             # A different Python compatibility fingerprint is expected after a
             # real runtime change. Never use or trust the old tree, but keep the
