@@ -3233,7 +3233,8 @@ def _render_release_notes(src: str) -> str:
 
     def flush_list():
         if items:
-            out.append("<ul>" + "".join("<li>" + inline(x) + "</li>" for x in items) + "</ul>")
+            tag = items[0][0]
+            out.append(f"<{tag}>" + "".join("<li>" + inline(x) + "</li>" for _, x in items) + f"</{tag}>")
             items.clear()
 
     for raw in src.splitlines():
@@ -3256,8 +3257,14 @@ def _render_release_notes(src: str) -> str:
             out.append(f"<h{level}>" + inline(heading.group(2)) + f"</h{level}>")
             continue
         item = re.match(r"^[-*+]\s+(.*)$", stripped)
-        if item:
-            flush_para(); items.append(item.group(1)); continue
+        ordered = re.match(r"^\d{1,4}[.)]\s+(.*)$", stripped)
+        if item or ordered:
+            flush_para()
+            tag, value = ("ul", item.group(1)) if item else ("ol", ordered.group(1))
+            if items and items[0][0] != tag:
+                flush_list()
+            items.append((tag, value))
+            continue
         flush_list(); para.append(stripped)
     if fence:
         out.append("<pre><code>" + html.escape("\n".join(code), quote=True) + "</code></pre>")
@@ -10879,6 +10886,8 @@ def delete_template(raw: Any, settings: Optional[dict] = None) -> Tuple[dict, in
 
 POSTPROCESS_SOURCE_MAX_BYTES = postprocessing.SOURCE_MAX_BYTES
 POSTPROCESS_RESPONSE_MAX_BYTES = 512 * 1024
+POSTPROCESS_GUIDE_MAX_BYTES = 256 * 1024
+POSTPROCESS_GUIDE_FILE = _HERE.parent / "docs" / "image-postprocessing.md"
 _POSTPROCESS_REGISTRY_LOCK = threading.RLock()
 
 
@@ -10891,6 +10900,30 @@ def _postprocessor_store() -> postprocessing.ProcessorStore:
 
 def _postprocessor_error(exc: Exception) -> dict:
     return {"ok": False, "errors": [" ".join(str(exc).split())[:256] or "post-processor operation failed"]}
+
+
+def postprocessor_guide() -> dict:
+    """Return the exact bundled guide as bounded, server-rendered safe HTML."""
+    try:
+        raw = postprocessing._read_regular_bytes(
+            POSTPROCESS_GUIDE_FILE, "post-processing guide", POSTPROCESS_GUIDE_MAX_BYTES,
+        )
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise postprocessing.IntegrityError("post-processing guide is not valid UTF-8") from exc
+        try:
+            body = _render_release_notes(source)
+        except updater.UpdateError as exc:
+            raise postprocessing.IntegrityError("post-processing guide could not be rendered") from exc
+        return {
+            "ok": True,
+            "title": "Image post-processing guide",
+            "version": SERVER_VERSION,
+            "body": body,
+        }
+    except postprocessing.PostProcessingError as exc:
+        return _postprocessor_error(exc)
 
 
 def postprocessors_list() -> dict:
@@ -11130,6 +11163,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(load_settings())
             if path == "/api/postprocessors":
                 return self._json(postprocessors_list())
+            if path == "/api/postprocessors/guide":
+                result = postprocessor_guide()
+                return self._json(result, 200 if result.get("ok") else 500)
             m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})(/status)?", path)
             if m:
                 try:

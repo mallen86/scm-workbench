@@ -310,9 +310,12 @@ class ExtractionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/package.yml").read_text(encoding="utf-8")
         builder = (root / "scripts/build_macos_dmg.sh").read_text(encoding="utf-8")
+        local_builder = (root / "scripts/build.sh").read_text(encoding="utf-8")
         background = (root / "tauri/dmg-background.png").read_bytes()
         self.assertIn("scm-workbench-macos.dmg", workflow)
         self.assertIn("scripts/build_macos_dmg.sh", workflow)
+        self.assertEqual(workflow.count("image-postprocessing.md"), 4)
+        self.assertIn("docs/image-postprocessing.md", local_builder)
         self.assertIn('ln -s /Applications "$root/Applications"', builder)
         self.assertIn('set position of item "SCM Workbench.app" to {170, 225}', builder)
         self.assertIn('set position of item "Applications" to {490, 225}', builder)

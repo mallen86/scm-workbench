@@ -33,6 +33,7 @@ def main() -> int:
 
     for required in (
         'nativeCall("postprocessors.list")',
+        'nativeCall("postprocessors.guide")',
         'nativeCall("postprocessors.get", { processor_id: id })',
         'nativeCall("postprocessors.save", params)',
         'nativeCall("postprocessors.duplicate", params)',
@@ -54,6 +55,12 @@ def main() -> int:
     for required in (
         'PAGES.postprocess = root =>',
         'if (uiMode() === "simple")',
+        'postprocessors.guide()',
+        'body.innerHTML = result.body',
+        'backdrop.onclick = close',
+        'Bundled with SCM Workbench v',
+        'aria-label": "Open the image post-processing guide',
+        'pp-guide-modal',
         'import { renderPythonHighlight } from "../python-highlight.js";',
         'source.value = d.source',
         'state.dirty',
@@ -96,7 +103,7 @@ def main() -> int:
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
     if not simple_pages or "postprocess" in simple_pages.group(1):
         return fail("post-processing was added to Simple-mode routes")
-    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", "@media (max-width: 760px)"):
+    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
     if ('go("postprocess", { scope: "both" })' not in fetch or "postprocessPrefill" not in nav or
@@ -147,6 +154,7 @@ globalThis.nativeInvoke = function(command, rpc) {
   return Promise.resolve({ ok: true, command, rpc });
 };
 await facade.list();
+await facade.guide();
 await facade.get("abc/def");
 await facade.save({ processor_id: null, name: "Example", source: "def process_image(image_path, context):\n    pass\n", requirements: "" });
 await facade.trust("abc", "f".repeat(64), null);
@@ -154,7 +162,7 @@ await facade.remove("abc", "f".repeat(64));
 await facade.status("abc");
 const methods = nativeCalls.map(call => call.rpc?.method);
 if (JSON.stringify(methods) !== JSON.stringify([
-  "postprocessors.list", "postprocessors.get", "postprocessors.save",
+  "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.save",
   "postprocessors.trust", "postprocessors.delete", "postprocessors.status",
 ])) fail("native post-processing method routing is incorrect");
 if (nativeCalls.some(call => call.command !== "wb_rpc" || call.receiver !== globalThis))
@@ -169,6 +177,7 @@ if (!rejected || fetchCalls.length) fail("native rejection silently fell back to
 delete globalThis.nativeInvoke;
 fetchCalls = [];
 await facade.list();
+await facade.guide();
 await facade.get("abc/def");
 await facade.save({ name: "Example", source: "def process_image(image_path, context):\n    pass\n", requirements: "" });
 await facade.duplicate("abc", "Copy", "1".repeat(64));
@@ -177,7 +186,7 @@ await facade.remove("abc", "4".repeat(64));
 await facade.status("abc");
 const routes = fetchCalls.map(call => `${call.options?.method || "GET"} ${call.url}`);
 if (JSON.stringify(routes) !== JSON.stringify([
-  "GET /api/postprocessors", "GET /api/postprocessors/abc%2Fdef",
+  "GET /api/postprocessors", "GET /api/postprocessors/guide", "GET /api/postprocessors/abc%2Fdef",
   "POST /api/postprocessors", "POST /api/postprocessors/abc/duplicate",
   "POST /api/postprocessors/abc/trust", "DELETE /api/postprocessors/abc",
   "GET /api/postprocessors/abc/status",

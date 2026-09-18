@@ -41,6 +41,11 @@ export function list() {
   return checked(native.native ? native.value : httpJson("/api/postprocessors"));
 }
 
+export function guide() {
+  const native = nativeCall("postprocessors.guide");
+  return checked(native.native ? native.value : httpJson("/api/postprocessors/guide"));
+}
+
 export function get(id) {
   const native = nativeCall("postprocessors.get", { processor_id: id });
   return checked(native.native ? native.value : httpJson(idPath(id)));
@@ -112,5 +117,5 @@ export async function importSource({ saveDraft } = {}) {
   return typeof saveDraft === "function" ? saveDraft(payload) : save(payload);
 }
 
-export const postprocessors = Object.freeze({ list, get, save, duplicate, trust, delete: remove, status, canImport, importSource });
+export const postprocessors = Object.freeze({ list, guide, get, save, duplicate, trust, delete: remove, status, canImport, importSource });
 export { MAX_SOURCE_BYTES, MAX_REQUIREMENTS_BYTES };

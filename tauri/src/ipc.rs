@@ -567,6 +567,7 @@ fn validate_method(method: &str) -> Result<(), String> {
         | "updates.poll"
         | "updates.start"
         | "postprocessors.list"
+        | "postprocessors.guide"
         | "postprocessors.get"
         | "postprocessors.save"
         | "postprocessors.duplicate"
@@ -838,6 +839,7 @@ mod tests {
             "updates.poll",
             "updates.start",
             "postprocessors.list",
+            "postprocessors.guide",
             "postprocessors.get",
             "postprocessors.save",
             "postprocessors.duplicate",

@@ -127,6 +127,30 @@ class IpcPostprocessorTests(unittest.TestCase):
         self.assertEqual(listed["environment_status"], "stale")
         self.assertNotEqual(edited["revision"], saved["revision"])
 
+    def test_guide_returns_version_bound_rendered_markdown(self):
+        guide = self.root / "guide.md"
+        guide.write_text(
+            "# Processor guide\n\nUse **trusted** code.\n\n```python\nprint('<script>')\n```\n\n<script>bad()</script>\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(server, "POSTPROCESS_GUIDE_FILE", guide):
+            result = self.call("postprocessors.guide")
+        self.assertEqual(result["title"], "Image post-processing guide")
+        self.assertEqual(result["version"], server.SERVER_VERSION)
+        self.assertIn("<h1>Processor guide</h1>", result["body"])
+        self.assertIn("<b>trusted</b>", result["body"])
+        self.assertIn("<pre><code>", result["body"])
+        self.assertIn("&lt;script&gt;", result["body"])
+        self.assertNotIn("<script>", result["body"])
+        self.assertNotIn("```", result["body"])
+
+        oversized = self.root / "oversized-guide.md"
+        oversized.write_bytes(b"x" * (server.POSTPROCESS_GUIDE_MAX_BYTES + 1))
+        with mock.patch.object(server, "POSTPROCESS_GUIDE_FILE", oversized):
+            rejected = self.call("postprocessors.guide")
+        self.assertFalse(rejected["ok"])
+        self.assertIn("too large", rejected["errors"][0])
+
     def test_private_import_is_bounded_and_simple_mode_denies_mutation(self):
         source = self.root / "chosen.py"
         source.write_text(SOURCE, encoding="utf-8")
@@ -145,6 +169,12 @@ class IpcPostprocessorTests(unittest.TestCase):
         response = ipc.dispatch({
             "id": "post", "method": "postprocessors.save",
             "params": {"name": "Missing source"},
+        })
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "bad_request")
+
+        response = ipc.dispatch({
+            "id": "post", "method": "postprocessors.guide", "params": {"unexpected": True},
         })
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"]["code"], "bad_request")

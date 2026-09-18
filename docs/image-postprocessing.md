@@ -1,6 +1,6 @@
 # Image post-processing
 
-Image post-processing is an Advanced-mode workflow that runs a user-owned Python callback against fetched card images before Create PDF.
+Image post-processing is an Advanced-mode workflow that runs a user-owned Python callback against fetched card images before Create PDF. The **Guide** button in the Processor library opens a rendered copy of this document bundled with the running Workbench version.
 
 ## Trust and safety
 

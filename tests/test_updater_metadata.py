@@ -1133,12 +1133,14 @@ class ReleaseNotesTests(unittest.TestCase):
 Raw <b>HTML</b> and [\"><img src=x onerror=alert(1)>](https://example.com)
 [x](javascript:alert(1)) [x](data:text/html,alert(1))
 - **bold** and *italic* with `inline <script>`
+1. first ordered item
+2. second ordered item
 ```html
 <script>alert(1)</script>
 <img src=x onerror=alert(1)>
 ```'''
         rendered = server._render_release_notes(source)
-        allowed = {"h1", "h2", "h3", "h4", "p", "ul", "li", "code", "pre", "b", "i"}
+        allowed = {"h1", "h2", "h3", "h4", "p", "ul", "ol", "li", "code", "pre", "b", "i"}
         tags = re.findall(r"</?([A-Za-z][A-Za-z0-9]*)\b", rendered)
         self.assertTrue(set(tags) <= allowed, rendered)
         self.assertNotIn("<script", rendered.lower())
@@ -1150,6 +1152,7 @@ Raw <b>HTML</b> and [\"><img src=x onerror=alert(1)>](https://example.com)
         self.assertIn("&lt;img", rendered)
         self.assertIn("<b>bold</b>", rendered)
         self.assertIn("<i>italic</i>", rendered)
+        self.assertIn("<ol><li>first ordered item</li><li>second ordered item</li></ol>", rendered)
 
     def test_markdown_source_and_rendered_caps(self):
         with self.assertRaises(updater.UpdateError):

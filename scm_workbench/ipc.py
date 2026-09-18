@@ -48,7 +48,7 @@ ALLOWED_METHODS = frozenset((
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
     "offset.set", "offset.delete", "decklists.import_selected",
-    "postprocessors.list", "postprocessors.get", "postprocessors.save",
+    "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.save",
     "postprocessors.duplicate", "postprocessors.trust", "postprocessors.delete",
     "postprocessors.status",
 )) | PRIVATE_METHODS
@@ -209,6 +209,9 @@ def dispatch(request: dict) -> dict:
             if method == "postprocessors.list":
                 if params: return _bad_params(request_id, "postprocessors.list does not accept parameters")
                 result = server.postprocessors_list()
+            elif method == "postprocessors.guide":
+                if params: return _bad_params(request_id, "postprocessors.guide does not accept parameters")
+                result = server.postprocessor_guide()
             elif method == "postprocessors.get":
                 if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
                     return _bad_params(request_id, "postprocessors.get requires exactly processor_id")

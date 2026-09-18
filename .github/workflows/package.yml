@@ -98,6 +98,8 @@ jobs:
           cp "$CARGO_TARGET_DIR/release/scm-workbench" "$app/Contents/MacOS/SCM Workbench"
           cp -R "$ws/scm_workbench" "$app/Contents/app/scm_workbench"
           cp -R "$ws/ui" "$app/Contents/app/ui"
+          mkdir -p "$app/Contents/app/docs"
+          cp "$ws/docs/image-postprocessing.md" "$app/Contents/app/docs/image-postprocessing.md"
           mv "$bundle/runtime" "$app/Contents/runtime"
           rm -rf "$bundle/.bake"
           # The icon: one .iconset from the shared 1024px source, iconutil
@@ -168,6 +170,7 @@ jobs:
           export PYTHONDONTWRITEBYTECODE=1
           export SCM_WORKBENCH_NO_UPDATE_CHECK=1
           "$app/Contents/runtime/python/install/bin/python3.13" -c "import PIL, ezdxf, pypdfium2, bs4, numpy, matplotlib; print('smoke: the bundled runtime imports its job dependencies')"
+          (cd "$app/Contents/app" && "$app/Contents/runtime/python/install/bin/python3.13" -B -c "from scm_workbench import server; result = server.postprocessor_guide(); assert result.get('ok') and '<h1>Image post-processing</h1>' in result.get('body', ''); print('smoke: bundled post-processing guide renders')")
           "$app/Contents/runtime/python/install/bin/python3.13" "$ws/scripts/check_pdf_preview_helper.py" "$app/Contents/app/scm_workbench/pdf_preview_helper.py"
           data="$(mktemp -d /private/tmp/scm-workbench-smoke.XXXXXX)/scm-data"
           export SCM_WORKBENCH_DATA="$data"
@@ -462,11 +465,18 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $bundle "app") | Out-Null
           Copy-Item (Join-Path $ws "scm_workbench") (Join-Path $bundle "app\scm_workbench") -Recurse
           Copy-Item (Join-Path $ws "ui") (Join-Path $bundle "app\ui") -Recurse
+          New-Item -ItemType Directory -Force (Join-Path $bundle "app\docs") | Out-Null
+          Copy-Item (Join-Path $ws "docs\image-postprocessing.md") (Join-Path $bundle "app\docs\image-postprocessing.md")
           # The bake's scratch dir (the requirements clones live there briefly)
           # must not ship inside the bundle:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue
           Get-ChildItem $bundle | Select-Object Name, Length
           $runtimePython = Join-Path $bundle "runtime\python\install\python.exe"
+          Push-Location (Join-Path $bundle "app")
+          try {
+            & $runtimePython -B -c "from scm_workbench import server; result = server.postprocessor_guide(); assert result.get('ok') and '<h1>Image post-processing</h1>' in result.get('body', ''); print('smoke: bundled post-processing guide renders')"
+            if ($LASTEXITCODE) { throw "packaged post-processing guide smoke failed" }
+          } finally { Pop-Location }
           & $runtimePython (Join-Path $ws "scripts\check_pdf_preview_helper.py") (Join-Path $bundle "app\scm_workbench\pdf_preview_helper.py")
           if ($LASTEXITCODE) { throw "packaged PDF preview helper smoke failed" }
       - name: Smoke test - embedded UI and native IPC

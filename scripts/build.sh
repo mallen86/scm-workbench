@@ -48,6 +48,8 @@ if [ "$plat" = "macos" ]; then
     cp "$PWD/tauri/target/release/scm-workbench" "$app/Contents/MacOS/SCM Workbench"
     cp -R "$PWD/scm_workbench" "$app/Contents/app/scm_workbench"
     cp -R "$PWD/ui" "$app/Contents/app/ui"
+    mkdir -p "$app/Contents/app/docs"
+    cp "$PWD/docs/image-postprocessing.md" "$app/Contents/app/docs/image-postprocessing.md"
     mv "$bundle/runtime" "$app/Contents/runtime"
     rm -rf "$bundle/.bake"
     echo "    built: $app"

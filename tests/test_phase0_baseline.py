@@ -236,6 +236,12 @@ class HttpContractTests(unittest.TestCase):
     def test_postprocessor_http_round_trip_and_body_bound(self):
         status, _settings = self.request("POST", "/api/settings", {"ui_mode": "advanced"})
         self.assertEqual(status, 200)
+        status, guide = self.request("GET", "/api/postprocessors/guide")
+        self.assertEqual(status, 200)
+        self.assertTrue(guide["ok"])
+        self.assertEqual(guide["version"], server.SERVER_VERSION)
+        self.assertIn("<h1>Image post-processing</h1>", guide["body"])
+        self.assertNotIn("```", guide["body"])
         source = "def process_image(image_path, context):\n    return None\n"
         status, saved = self.request("POST", "/api/postprocessors", {
             "processor_id": None, "name": "HTTP processor", "source": source,

@@ -171,6 +171,50 @@ function repaintLibrary() {
   }
 }
 
+async function showGuide() {
+  const root = $("#modal-root");
+  const modal = $(".modal", root);
+  const backdrop = $(".modal-backdrop", root);
+  let open = true;
+  const onKey = event => { if (event.key === "Escape") close(); };
+  const close = () => {
+    if (!open) return;
+    open = false;
+    root.hidden = true;
+    modal.classList.remove("pp-guide-modal");
+    backdrop.onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  modal.classList.add("pp-guide-modal");
+  modal.replaceChildren(
+    el("div", { class: "m-ico info" }, ico("book")),
+    el("h3", {}, "Image post-processing guide"),
+    el("div", { class: "m-loading" }, "Loading the guide bundled with this version…"),
+  );
+  root.hidden = false;
+  backdrop.onclick = close;
+  document.addEventListener("keydown", onKey);
+  try {
+    const result = await postprocessors.guide();
+    if (!open) return;
+    modal.replaceChildren(el("h3", {}, result.title || "Image post-processing guide"));
+    modal.append(el("p", { class: "m-when" }, `Bundled with SCM Workbench v${result.version || "unknown"}`));
+    const body = el("div", { class: "notes pp-guide-content" });
+    // The server reads the version-bundled Markdown through a bounded regular
+    // file and emits only its small escaped HTML subset.
+    body.innerHTML = result.body || "<p>(The bundled guide is empty.)</p>";
+    modal.append(body, el("div", { class: "m-actions" }, el("button", { class: "btn primary", type: "button", onclick: close }, "Close")));
+  } catch (error) {
+    if (!open) return;
+    modal.replaceChildren(
+      el("div", { class: "m-ico warn" }, ico("alert")),
+      el("h3", {}, "Guide unavailable"),
+      el("p", {}, error?.message || "The bundled image post-processing guide could not be loaded."),
+      el("div", { class: "m-actions" }, el("button", { class: "btn", type: "button", onclick: close }, "Close")),
+    );
+  }
+}
+
 async function newProcessor() {
   if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
   state.selected = null;
@@ -330,7 +374,7 @@ PAGES.postprocess = root => {
   const wrap = el("div", {});
   wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to fetched card images."));
   wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
-  const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor")), el("div", { class: "pp-library-list" }));
+  const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("div", { class: "actions" }, el("button", { class: "btn btn-ghost pp-guide", type: "button", "aria-label": "Open the image post-processing guide", onclick: showGuide }, ico("book"), "Guide"), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor"))), el("div", { class: "pp-library-list" }));
   wrap.append(library);
   const sourceEditor = el("div", { class: "pp-source-wrap" },
     el("pre", { class: "pp-source-highlight", "aria-hidden": "true" }, el("code", { class: "pp-source-code" })),

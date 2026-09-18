@@ -69,13 +69,13 @@ with `{}` parameters and an exact
 `{"ready":true,"process_group":true}` result; the worker emits that result
 only after POSIX process-group containment is established (Windows relies on
 the retained kill-on-close job object). It is not exposed through public
-`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-eight methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-nine methods: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `pdf_preview.start`, `pdf_preview.poll`,
 `pdf_preview.cancel`, `template.resolve`, `template.delete`, `file.list`,
 `file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
-`updates.poll`, `updates.start`, `postprocessors.list`, `postprocessors.get`,
+`updates.poll`, `updates.start`, `postprocessors.list`, `postprocessors.guide`, `postprocessors.get`,
 `postprocessors.save`, `postprocessors.duplicate`, `postprocessors.trust`,
 `postprocessors.delete`, `postprocessors.status`, and the virtual Rust facade
 `fs.delete_images`. That facade is validated publicly but translates into
@@ -91,6 +91,7 @@ parameter contracts below.
 | `GET /api/settings` | `settings.get` | `server.load_settings()` |
 | `POST /api/settings` | `settings.set` | `server.update_settings()` |
 | `GET /api/postprocessors` | `postprocessors.list` | `server.postprocessors_list()` |
+| `GET /api/postprocessors/guide` | `postprocessors.guide` | `server.postprocessor_guide()` |
 | `GET /api/postprocessors/<id>` | `postprocessors.get` | `server.postprocessor_get()` |
 | `POST /api/postprocessors` | `postprocessors.save` | `server.postprocessor_save()` |
 | `POST /api/postprocessors/<id>/duplicate` | `postprocessors.duplicate` | `server.postprocessor_duplicate()` |
@@ -132,7 +133,13 @@ there is no packaged raw-file caller. The IPC-mode worker rejects path-based
 `POST /api/decklists/import` so packaged
 content cannot bypass the native picker. Native selection is otherwise a client
 transport choice, not route removal. The methods use these exact parameter and
-result shapes inside the common RPC envelope. For `settings.set`,
+result shapes inside the common RPC envelope. `postprocessors.guide` accepts
+only `{}`. It reads the fixed version-bundled `docs/image-postprocessing.md`
+through one stable regular-file handle with a 256 KiB source cap, renders only
+the escaped Markdown subset used for release notes, and returns bounded HTML
+plus the running app version; the raw Markdown and arbitrary HTML are never
+sent to the WebView. Packaging copies that exact source document beside the
+Python application code on both platforms. For `settings.set`,
 the worker holds the settings lock across load, schema validation, merge, and
 atomic commit. It writes a sibling temporary file and replaces `settings.json`
 with `os.replace`; a failed validation or write leaves the previous file intact.
