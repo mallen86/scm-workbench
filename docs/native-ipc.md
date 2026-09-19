@@ -92,7 +92,7 @@ parameter contracts below.
 | `POST /api/settings` | `settings.set` | `server.update_settings()` |
 | `GET /api/postprocessors` | `postprocessors.list` | `server.postprocessors_list()` |
 | `GET /api/postprocessors/guide` | `postprocessors.guide` | `server.postprocessor_guide()` |
-| `GET /api/postprocessors/<id>` | `postprocessors.get` | `server.postprocessor_get()` |
+| `GET /api/postprocessors/<id>` (optional exact `revision` query) | `postprocessors.get` (optional exact `revision_hash`) | `server.postprocessor_get()` |
 | `POST /api/postprocessors` | `postprocessors.save` | `server.postprocessor_save()` |
 | `POST /api/postprocessors/<id>/duplicate` | `postprocessors.duplicate` | `server.postprocessor_duplicate()` |
 | `POST /api/postprocessors/<id>/trust` | `postprocessors.trust` | `server.postprocessor_trust()` |

@@ -1459,6 +1459,26 @@ class ProcessorStore:
                 except PostProcessingError: continue
         return tuple(result)
 
+    def revisions(self, processor_id: str) -> tuple[dict, ...]:
+        """Return bounded, verified summaries for every immutable revision."""
+        metadata = self._metadata(processor_id)
+        directory = self._processor(processor_id) / "revisions"
+        result = []
+        for source_path in _bounded_children(
+                directory, REVISIONS_MAX_COUNT * 2, "processor revisions"):
+            if source_path.suffix != ".py":
+                continue
+            item = self.get(processor_id, revision=source_path.stem, include_source=False)
+            observed = os.lstat(source_path)
+            result.append({
+                "revision": item["revision"],
+                "source_bytes": item["source_bytes"],
+                "saved_at": observed.st_mtime,
+                "active": item["revision"] == metadata.get("active_revision"),
+            })
+        result.sort(key=lambda item: (-item["saved_at"], item["revision"]))
+        return tuple(result)
+
     def trust(self, processor_id: str, revision: str, environment: str | None = None, *, interpreter: str | Path = sys.executable) -> dict:
         metadata = self._metadata(processor_id)
         if revision != metadata.get("active_revision"):

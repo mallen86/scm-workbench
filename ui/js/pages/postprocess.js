@@ -267,7 +267,42 @@ async function importSource() {
   } catch (error) { toast("err", error.message || "Could not import the processor."); }
 }
 async function revert() {
-  if (!state.dirty || await confirmModal({ title: "Revert unsaved changes?", text: "Your current editor contents will be replaced.", okLabel: "Revert changes", danger: true })) setEditorValue(state.loaded || { name: "New processor", source: TEMPLATE, requirements: "" });
+  if (!state.loaded) {
+    if (!state.dirty || await confirmModal({ title: "Revert unsaved changes?", text: "Your current editor contents will be replaced.", okLabel: "Revert changes", danger: true }))
+      setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+    return;
+  }
+  const revisions = Array.isArray(state.loaded.revisions) ? state.loaded.revisions : [];
+  const activeRevision = revision(state.loaded);
+  const picker = el("select", { class: "input pp-revision-picker", "aria-label": "Saved processor revision" });
+  for (const item of revisions) {
+    const saved = new Date(Number(item.saved_at) * 1000);
+    const when = Number.isFinite(saved.getTime()) ? saved.toLocaleString() : "Saved revision";
+    picker.append(el("option", { value: item.revision, selected: item.revision === activeRevision },
+      `${item.revision.slice(0, 12)} · ${when}${item.active ? " · current" : ""}`));
+  }
+  if (!revisions.length) picker.append(el("option", { value: activeRevision }, `${activeRevision.slice(0, 12)} · current`));
+  const approved = await confirmModal({
+    title: "Revert to a saved revision?",
+    text: "Choose the immutable revision to load. Your current editor contents will be replaced. Loading an older revision does not make it active until you save it.",
+    content: el("label", {}, "Saved revision", picker),
+    okLabel: "Load revision",
+    danger: true,
+  });
+  if (!approved) return;
+  const chosen = picker.value;
+  if (chosen === activeRevision) {
+    setEditorValue(state.loaded);
+    return;
+  }
+  try {
+    const historical = await postprocessors.get(state.loaded.id, chosen);
+    setEditorValue({ ...historical, name: state.loaded.name });
+    state.dirty = true;
+    updateEditorState();
+    updateLockSummary();
+    toast("ok", `Loaded revision ${chosen.slice(0, 12)}. Save it to make it current.`);
+  } catch (error) { toast("err", error.message || "Could not load the saved revision."); }
 }
 async function trustRevision() {
   const p = state.loaded || selectedProcessor();

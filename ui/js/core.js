@@ -178,7 +178,7 @@ export async function openUrl(url, what) {
 
 /* --------------------------------- modal ---------------------------------- */
 
-export function confirmModal({ title, text, paras = [], list = [], icon = "alert", iconCls = "warn", okLabel = "OK", okClass = "btn", danger = false }) {
+export function confirmModal({ title, text, paras = [], list = [], content = null, icon = "alert", iconCls = "warn", okLabel = "OK", okClass = "btn", danger = false }) {
   return new Promise(resolve => {
     const root = $("#modal-root");
     const m = $(".modal", root);
@@ -188,6 +188,7 @@ export function confirmModal({ title, text, paras = [], list = [], icon = "alert
     if (text) m.append(el("p", {}, text));
     for (const p of paras) m.append(el("p", {}, p));
     if (list.length) m.append(el("div", { class: "m-list" }, ...list.map(x => el("div", {}, x))));
+    if (content) m.append(content);
     const actions = el("div", { class: "m-actions" },
       el("button", { class: "btn", onclick: () => { close(); resolve(false); } }, "Cancel"),
       el("button", { class: `btn ${danger ? "danger" : "primary"}`, onclick: () => { close(); resolve(true); } }, okLabel),

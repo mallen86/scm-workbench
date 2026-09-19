@@ -34,7 +34,8 @@ def main() -> int:
     for required in (
         'nativeCall("postprocessors.list")',
         'nativeCall("postprocessors.guide")',
-        'nativeCall("postprocessors.get", { processor_id: id })',
+        'nativeCall("postprocessors.get", params)',
+        'params.revision_hash = revisionHash',
         'nativeCall("postprocessors.save", params)',
         'nativeCall("postprocessors.duplicate", params)',
         'nativeCall("postprocessors.trust", params)',
@@ -70,6 +71,10 @@ def main() -> int:
         'p.id === state.selected',
         'pp-cursor',
         'pp-source-highlight',
+        'pp-revision-picker',
+        'Saved processor revision',
+        'Loading an older revision does not make it active until you save it.',
+        'postprocessors.get(state.loaded.id, chosen)',
         'paintSourceHighlight(source)',
         'syncSourceHighlightScroll(source)',
         'Resolved library lock',
@@ -156,15 +161,18 @@ globalThis.nativeInvoke = function(command, rpc) {
 await facade.list();
 await facade.guide();
 await facade.get("abc/def");
+await facade.get("abc", "f".repeat(64));
 await facade.save({ processor_id: null, name: "Example", source: "def process_image(image_path, context):\n    pass\n", requirements: "" });
 await facade.trust("abc", "f".repeat(64), null);
 await facade.remove("abc", "f".repeat(64));
 await facade.status("abc");
 const methods = nativeCalls.map(call => call.rpc?.method);
 if (JSON.stringify(methods) !== JSON.stringify([
-  "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.save",
-  "postprocessors.trust", "postprocessors.delete", "postprocessors.status",
+  "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.get",
+  "postprocessors.save", "postprocessors.trust", "postprocessors.delete", "postprocessors.status",
 ])) fail("native post-processing method routing is incorrect");
+if (nativeCalls[3].rpc.params.revision_hash !== "f".repeat(64))
+  fail("native historical revision was not bound to the request");
 if (nativeCalls.some(call => call.command !== "wb_rpc" || call.receiver !== globalThis))
   fail("native post-processing invoke binding is incorrect");
 if (fetchCalls.length) fail("native operations used HTTP fallback");
@@ -179,6 +187,7 @@ fetchCalls = [];
 await facade.list();
 await facade.guide();
 await facade.get("abc/def");
+await facade.get("abc", "e".repeat(64));
 await facade.save({ name: "Example", source: "def process_image(image_path, context):\n    pass\n", requirements: "" });
 await facade.duplicate("abc", "Copy", "1".repeat(64));
 await facade.trust("abc", "2".repeat(64), "3".repeat(64));
@@ -187,6 +196,7 @@ await facade.status("abc");
 const routes = fetchCalls.map(call => `${call.options?.method || "GET"} ${call.url}`);
 if (JSON.stringify(routes) !== JSON.stringify([
   "GET /api/postprocessors", "GET /api/postprocessors/guide", "GET /api/postprocessors/abc%2Fdef",
+  `GET /api/postprocessors/abc?revision=${"e".repeat(64)}`,
   "POST /api/postprocessors", "POST /api/postprocessors/abc/duplicate",
   "POST /api/postprocessors/abc/trust", "DELETE /api/postprocessors/abc",
   "GET /api/postprocessors/abc/status",

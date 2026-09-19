@@ -11004,15 +11004,20 @@ def postprocessors_list() -> dict:
         return {"ok": True, "processors": rows}
 
 
-def postprocessor_get(processor_id: str) -> dict:
+def postprocessor_get(processor_id: str, revision_hash: Optional[str] = None) -> dict:
     with _POSTPROCESS_REGISTRY_LOCK:
         store = _postprocessor_store()
-        item = store.get(processor_id)
+        item = store.get(processor_id, revision=revision_hash)
+        if revision_hash is not None:
+            return {**item, "active": item["revision"] == item["active_revision"]}
         status = store.status(
-        processor_id, interpreter=job_python(load_settings()),
-        environment_verifier=_verify_dependency_environment,
-    )
-        return {**item, **status["processor"], "environment": status["environment"]}
+            processor_id, interpreter=job_python(load_settings()),
+            environment_verifier=_verify_dependency_environment,
+        )
+        return {
+            **item, **status["processor"], "environment": status["environment"],
+            "revisions": list(store.revisions(processor_id)),
+        }
 
 
 def postprocessor_save(params: dict) -> dict:
@@ -11238,7 +11243,18 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})(/status)?", path)
             if m:
                 try:
-                    return self._json(postprocessor_status(m.group(1)) if m.group(2) else postprocessor_get(m.group(1)))
+                    revision_values = q.get("revision", [])
+                    if (m.group(2) and revision_values) or len(revision_values) > 1:
+                        raise postprocessing.ValidationError("invalid processor revision request")
+                    revision_hash = revision_values[0] if revision_values else None
+                    if revision_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", revision_hash):
+                        raise postprocessing.ValidationError("invalid processor revision")
+                    return self._json(
+                        postprocessor_status(m.group(1)) if m.group(2)
+                        else postprocessor_get(m.group(1), revision_hash)
+                    )
+                except postprocessing.ValidationError as exc:
+                    return self._json(_postprocessor_error(exc), 400)
                 except Exception as exc:
                     return self._json(_postprocessor_error(exc), 404)
             if path == "/api/updates":

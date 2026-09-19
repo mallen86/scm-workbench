@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import threading
 import traceback
@@ -213,9 +214,13 @@ def dispatch(request: dict) -> dict:
                 if params: return _bad_params(request_id, "postprocessors.guide does not accept parameters")
                 result = server.postprocessor_guide()
             elif method == "postprocessors.get":
-                if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
-                    return _bad_params(request_id, "postprocessors.get requires exactly processor_id")
-                result = server.postprocessor_get(params["processor_id"])
+                allowed = ({"processor_id"}, {"processor_id", "revision_hash"})
+                if (set(params) not in allowed or not isinstance(params.get("processor_id"), str) or
+                        ("revision_hash" in params and
+                         (not isinstance(params["revision_hash"], str) or
+                          re.fullmatch(r"[0-9a-f]{64}", params["revision_hash"]) is None))):
+                    return _bad_params(request_id, "postprocessors.get requires processor_id and an optional revision_hash")
+                result = server.postprocessor_get(params["processor_id"], params.get("revision_hash"))
             elif method == "postprocessors.save":
                 required = {"name", "source", "requirements", "processor_id", "expected_revision"}
                 if (set(params) != required or not isinstance(params.get("name"), str) or

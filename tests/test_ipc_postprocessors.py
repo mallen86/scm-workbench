@@ -64,6 +64,9 @@ class IpcPostprocessorTests(unittest.TestCase):
         detail = self.call("postprocessors.get", {"processor_id": processor["id"]})
         self.assertEqual(detail["source"], SOURCE)
         self.assertEqual(detail["environment"]["status"], "ready")
+        self.assertEqual([item["revision"] for item in detail["revisions"]],
+                         [processor["revision"]])
+        self.assertTrue(detail["revisions"][0]["active"])
         fingerprint = detail["environment_fingerprint"]
 
         stale = self.call("postprocessors.trust", {
@@ -86,6 +89,15 @@ class IpcPostprocessorTests(unittest.TestCase):
         })["processor"]
         self.assertNotEqual(edited["revision"], processor["revision"])
         self.assertFalse(edited["trusted"])
+        current = self.call("postprocessors.get", {"processor_id": processor["id"]})
+        self.assertEqual({item["revision"] for item in current["revisions"]},
+                         {processor["revision"], edited["revision"]})
+        historical = self.call("postprocessors.get", {
+            "processor_id": processor["id"], "revision_hash": processor["revision"],
+        })
+        self.assertEqual(historical["source"], SOURCE)
+        self.assertFalse(historical["active"])
+        self.assertNotIn("environment", historical)
         deleted = self.call("postprocessors.delete", {
             "processor_id": processor["id"],
             "expected_revision": edited["revision"],
@@ -175,6 +187,13 @@ class IpcPostprocessorTests(unittest.TestCase):
 
         response = ipc.dispatch({
             "id": "post", "method": "postprocessors.guide", "params": {"unexpected": True},
+        })
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "bad_request")
+
+        response = ipc.dispatch({
+            "id": "post", "method": "postprocessors.get",
+            "params": {"processor_id": "a" * 32, "revision_hash": "not-a-revision"},
         })
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"]["code"], "bad_request")

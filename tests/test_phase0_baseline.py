@@ -262,8 +262,25 @@ class HttpContractTests(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         self.assertTrue(trusted["processor"]["trusted"])
+        revised_source = source + "\n# revised\n"
+        status, revised = self.request("POST", "/api/postprocessors", {
+            "processor_id": processor["id"], "name": "HTTP processor",
+            "source": revised_source, "requirements": "",
+            "expected_revision": processor["revision"],
+        })
+        self.assertEqual(status, 200)
+        revised = revised["processor"]
+        status, historical = self.request(
+            "GET", f"/api/postprocessors/{processor['id']}?revision={processor['revision']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(historical["source"], source)
+        self.assertFalse(historical["active"])
+        status, current = self.request("GET", f"/api/postprocessors/{processor['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual({item["revision"] for item in current["revisions"]},
+                         {processor["revision"], revised["revision"]})
         status, deleted = self.request("DELETE", f"/api/postprocessors/{processor['id']}", {
-            "processor_id": processor["id"], "expected_revision": processor["revision"],
+            "processor_id": processor["id"], "expected_revision": revised["revision"],
         })
         self.assertEqual(status, 200)
         self.assertTrue(deleted["ok"])

@@ -6,7 +6,7 @@ Image post-processing is an Advanced-mode workflow that runs a user-owned Python
 
 Processors and installed libraries run as your desktop user account. Workbench runs them in a separate bounded process, gives the callback private staged image copies, validates every result, and publishes the batch only after every image succeeds. Those protections prevent ordinary failures from leaving a partially changed image set, but they do **not** make arbitrary Python safe. Only trust code and packages you have reviewed.
 
-Saving source creates an immutable, untrusted revision. Trust applies only to that exact source revision and dependency environment; an edit or dependency change requires approval again.
+Saving source creates an immutable, untrusted revision. Trust applies only to that exact source revision and dependency environment; an edit or dependency change requires approval again. **Revert** lists the processor's bounded immutable history. Loading an older revision replaces the editor contents but does not reactivate or trust it; review it and choose **Save revision** to make it current.
 
 ## Callback contract
 

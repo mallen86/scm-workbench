@@ -46,9 +46,12 @@ export function guide() {
   return checked(native.native ? native.value : httpJson("/api/postprocessors/guide"));
 }
 
-export function get(id) {
-  const native = nativeCall("postprocessors.get", { processor_id: id });
-  return checked(native.native ? native.value : httpJson(idPath(id)));
+export function get(id, revisionHash = null) {
+  const params = { processor_id: id };
+  if (revisionHash !== null) params.revision_hash = revisionHash;
+  const native = nativeCall("postprocessors.get", params);
+  const query = revisionHash === null ? "" : `?revision=${encodeURIComponent(revisionHash)}`;
+  return checked(native.native ? native.value : httpJson(idPath(id) + query));
 }
 
 export function save(payload) {

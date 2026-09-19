@@ -64,6 +64,11 @@ class PostprocessorTests(unittest.TestCase):
             second = store.save("Example", SOURCE + "\n# edit\n", [], processor_id=first["id"], expected_revision=first["revision"])
             self.assertNotEqual(first["revision"], second["revision"])
             self.assertFalse(second["trusted"])
+            revisions = {item["revision"]: item for item in store.revisions(first["id"])}
+            self.assertEqual(set(revisions), {first["revision"], second["revision"]})
+            self.assertFalse(revisions[first["revision"]]["active"])
+            self.assertTrue(revisions[second["revision"]]["active"])
+            self.assertEqual(store.get(first["id"], revision=first["revision"])["source"], SOURCE)
             with self.assertRaisesRegex(ConflictError, "revision is stale"):
                 store.trust(first["id"], first["revision"])
             self.assertEqual(len(store.list()), 1)
