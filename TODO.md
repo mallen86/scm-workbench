@@ -59,6 +59,7 @@
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 - [x] Calibration sheets appear to be hardcoded. upgrading scm v3.0.0 to current main adds a legal size calibration sheet but that doesn't show up in the calibration list. Make the buttons enumerated from the actual files.
+- [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
 
 # Features
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.

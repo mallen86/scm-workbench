@@ -64,6 +64,27 @@ export function optionDefault(o) {
 }
 
 
+function configuredOptionDefault(kind, o) {
+  const configured = kind === "create_pdf" ? S.info?.settings?.defaults : null;
+  if (!configured || typeof configured !== "object" || Array.isArray(configured) ||
+      o.available === false || !Object.prototype.hasOwnProperty.call(configured, o.key)) {
+    return optionDefault(o);
+  }
+  const value = configured[o.key];
+  if ((o.unavailable_choices || {})[String(value)]) return optionDefault(o);
+  if (o.type === "number" || o.type === "range") {
+    return typeof value === "number" && Number.isFinite(value) ? value : optionDefault(o);
+  }
+  if (o.type === "select" || o.type === "segment") {
+    if (typeof value !== "string" ||
+        (o.choices && !o.choices.some(([candidate]) => String(candidate) === value))) {
+      return optionDefault(o);
+    }
+  }
+  return Array.isArray(value) ? [...value] : value;
+}
+
+
 function runButtonLocked(button) {
   return !!button && (button.classList.contains("wait") || button.classList.contains("capability-disabled"));
 }
@@ -75,8 +96,26 @@ export function defaultArgs(kind) {
   const args = {};
   for (const g of spec.groups || [])
     for (const o of g.options)
-      args[o.key] = optionDefault(o);
+      args[o.key] = configuredOptionDefault(kind, o);
   return args;
+}
+
+
+/* Adopt newly saved defaults only where an existing form still held the old
+   default. Explicit edits survive navigation and settings refreshes. */
+export function applySavedFormDefaults(kind, previous, next) {
+  const args = S.forms[kind];
+  const spec = S.manifest[kind];
+  if (!args || !spec || !previous || !next ||
+      typeof previous !== "object" || typeof next !== "object") return;
+  const allowed = new Set((spec.groups || []).flatMap(group =>
+    (group.options || []).map(option => option.key)));
+  for (const [key, value] of Object.entries(next)) {
+    if (allowed.has(key) && Object.prototype.hasOwnProperty.call(previous, key) &&
+        Object.is(args[key], previous[key])) {
+      args[key] = Array.isArray(value) ? [...value] : value;
+    }
+  }
 }
 
 

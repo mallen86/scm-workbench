@@ -2,6 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes } from "../updates-transport.js";
+import { applySavedFormDefaults } from "../forms.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
 // URL reaches the OS browser. A release link must remain on GitHub and have
@@ -327,9 +328,9 @@ PAGES.settings = (root) => {
   const csSel = el("select", { class: "input" }, ...S.info.scm.card_sizes.map(c => el("option", { value: c.name, selected: (d.card_size || "standard") === c.name ? "selected" : null }, c.name)));
   const psSel = el("select", { class: "input" }, ...S.info.scm.paper_sizes.map(p => el("option", { value: p.name, selected: (d.paper_size || "letter") === p.name ? "selected" : null }, p.name)));
   const ppiR = el("input", { class: "range", type: "range", min: 150, max: 1200, step: 10 });
-  ppiR.value = d.ppi || 300;
+  ppiR.value = d.ppi ?? 300;
   const qualR = el("input", { class: "range", type: "range", min: 0, max: 100, step: 1 });
-  qualR.value = d.quality || 100;
+  qualR.value = d.quality ?? 100;
   const ppiV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
   const qualV = el("input", { class: "rangeval", type: "number", step: 1, min: 0 });
   const setFill = r => r.style.setProperty("--fill", ((r.value - r.min) / (r.max - r.min)) * 100 + "%");
@@ -356,7 +357,19 @@ PAGES.settings = (root) => {
   ));
   dc.append(el("div", { style: "margin-top:12px" },
     el("button", { class: "btn primary", onclick: async () => {
-      await setSettings({ defaults: { card_size: csSel.value, paper_size: psSel.value, ppi: toNum(ppiV.value, +ppiR.value), quality: toNum(qualV.value, +qualR.value) } });
+      const requestedDefaults = {
+        card_size: csSel.value,
+        paper_size: psSel.value,
+        ppi: toNum(ppiV.value, +ppiR.value),
+        quality: toNum(qualV.value, +qualR.value),
+      };
+      const result = await setSettings({ defaults: requestedDefaults });
+      const savedSettings = result?.settings && typeof result.settings === "object"
+        ? result.settings : { ...s, defaults: { ...d, ...requestedDefaults } };
+      const savedDefaults = savedSettings.defaults && typeof savedSettings.defaults === "object"
+        ? savedSettings.defaults : requestedDefaults;
+      applySavedFormDefaults("create_pdf", d, savedDefaults);
+      S.info.settings = savedSettings;
       toast("ok", "Defaults saved.");
       go("settings");
     } }, ico("check"), "Save defaults"),

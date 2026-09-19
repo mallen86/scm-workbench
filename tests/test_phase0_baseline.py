@@ -283,6 +283,7 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["settings"]["defaults"]["card_size"], "extra")
         self.assertEqual(result["settings"]["defaults"]["paper_size"], "letter")
+        self.assertEqual(result["settings"]["defaults"]["ppi"], 600)
 
         persisted = json.loads(server.SETTINGS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -294,6 +295,14 @@ class HttpContractTests(unittest.TestCase):
         status, loaded = self.request("GET", "/api/settings")
         self.assertEqual(status, 200)
         self.assertEqual(loaded, result["settings"])
+
+        status, manifest = self.request("GET", "/api/manifest")
+        self.assertEqual(status, 200)
+        defaults = {option["key"]: option.get("default")
+                    for group in manifest["create_pdf"]["groups"]
+                    for option in group["options"]}
+        self.assertEqual(defaults["ppi"], 600)
+        self.assertIn("--ppi 600", server.build_preview("create_pdf", {})["cmd"])
 
     def test_allowed_root_rejects_parent_and_symlink_escape(self):
         roots = server.allowed_roots(server.load_settings())

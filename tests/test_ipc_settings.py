@@ -130,6 +130,31 @@ class SettingsIpcTests(unittest.TestCase):
                                        "params": {"changes": {}, "extra": 1}})
                          ["error"]["code"], "bad_request")
 
+    def test_saved_defaults_overlay_detached_manifest_without_cache_rebuild(self):
+        server.MANIFEST_CACHE.update({
+            "create_pdf": {"groups": [{"options": [
+                {"key": "card_size", "type": "select", "default": "standard",
+                 "choices": [["standard", "Standard"], ["poker", "Poker"]]},
+                {"key": "ppi", "type": "range", "default": 1200},
+            ]}]},
+        })
+        server._REPOS_MTIME["t"] = float("inf")
+
+        self.assertTrue(self.native({"defaults": {"card_size": "poker", "ppi": 600}})
+                        ["result"]["ok"])
+        first = server.get_manifest()
+        first_options = {option["key"]: option["default"]
+                         for option in first["create_pdf"]["groups"][0]["options"]}
+        self.assertEqual(first_options, {"card_size": "poker", "ppi": 600})
+        self.assertEqual(server.MANIFEST_CACHE["create_pdf"]["groups"][0]["options"][1]
+                         ["default"], 1200)
+
+        self.assertTrue(self.native({"defaults": {"ppi": 450}})["result"]["ok"])
+        second = server.get_manifest()
+        second_options = {option["key"]: option["default"]
+                          for option in second["create_pdf"]["groups"][0]["options"]}
+        self.assertEqual(second_options, {"card_size": "poker", "ppi": 450})
+
     def test_ui_only_change_preserves_manifest_and_capability_caches(self):
         server.MANIFEST_CACHE["old"] = {"stale": True}
         server._INFO_SNAP.update(t=1, v={"stale": True})
