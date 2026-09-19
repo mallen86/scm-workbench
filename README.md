@@ -91,7 +91,7 @@ Your choices and job history stay the same when you switch modes.
 
 ## Updates and your files
 
-Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. On macOS and Windows, Workbench can install an update itself. On Linux, it detects the supported distribution and opens the exact GitHub release for the matching Debian or Arch package; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
+Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. Turning beta updates off while running a prerelease offers the newest stable release even when its version is lower, with an explicit confirmation before installation. On macOS and Windows, Workbench can install an update itself. On Linux, it detects the supported distribution and opens the exact GitHub release for the matching Debian or Arch package; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
 
 Use **Settings > Open data folder** if you want to view or back up your Workbench files.
 

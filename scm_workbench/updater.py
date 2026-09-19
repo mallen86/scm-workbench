@@ -283,6 +283,18 @@ def is_newer(latest, current) -> bool:
     return a > b
 
 
+def is_stable_downgrade(channel, current, latest) -> bool:
+    """Allow an opted-out prerelease build to return to the newest stable."""
+    return bool(
+        channel == "stable" and
+        canonical_version(str(current or "")) is not None and
+        canonical_version(str(latest or "")) is not None and
+        is_prerelease(current) and not is_prerelease(latest) and
+        canonical_version(str(current)) != canonical_version(str(latest)) and
+        not is_newer(latest, current)
+    )
+
+
 # ----------------------------------------------------------------------------
 # GitHub over plain HTTPS
 # ----------------------------------------------------------------------------
@@ -2044,9 +2056,9 @@ def _begin_handoff(job: dict, plan: dict, token: str, target: Path,
 
 
 def run_job(job: dict, plan: dict, log_f) -> None:
-    """Download + install a newer release, then hand over to the new app.
+    """Download and install the checked release, then hand over to the new app.
 
-    plan keys: repo, current, latest, asset {name,url,size},
+    plan keys: repo, current, latest, asset {name,url,size}, channel, downgrade,
     bundle (the app folder to replace, None when not packaged), and work (the
     scratch directory).
     """
@@ -2105,7 +2117,10 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         if channel == "stable" and release_prerelease:
             raise UpdateError("the stable channel returned a prerelease during re-verification")
         same_release = (rel["tag"].lstrip("v") == plan.get("current"))
-        if same_release or not is_newer(rel["tag"], plan.get("current")):
+        stable_downgrade = is_stable_downgrade(channel, plan.get("current"), rel["tag"])
+        if (plan.get("downgrade") is True) != stable_downgrade:
+            raise UpdateError("the checked update direction changed during re-verification")
+        if same_release or (not is_newer(rel["tag"], plan.get("current")) and not stable_downgrade):
             if same_release:
                 # The running app *is* the newest release (a check that ran
                 # while the release it found was still unpublished, or a

@@ -52,6 +52,8 @@ def main():
                    'Switch to Advanced mode to change whether beta releases are included.',
                    'setSettings({ update_channel: channel })',
                    'st.prerelease ? "A newer beta version is available: "',
+                   'st.downgrade === true', 'Install stable ${latest}',
+                   'The latest stable version is ready to replace this beta:',
                    'r.install_mode === "manual"', 'r.package_format === "arch"',
                    'View ${latest} download', 'Download the ${manualPackage}',
                    'This Linux distribution does not have a supported update package.'):
@@ -91,6 +93,10 @@ def main():
                    "startUpdateStrip(result.job?.id);",
                    "if (_updStrip && _updStrip.isConnected) return;",
                    'beta ? "Beta update available" : "Update available"',
+                   'downgrade ? "Stable version available"',
+                   'downgrade ? "Switch to stable" : "Update now"',
+                   'title: "Switch back to stable?"',
+                   'okLabel: "Install stable version"',
                    'state.install_mode === "manual"', 'state.package_format === "arch"',
                    'state.package_format = view?.package_format;',
                    '"View download"', 'Install the Arch package with pacman.',
@@ -98,7 +104,7 @@ def main():
                    'This Linux distribution does not have a supported update package.'):
         if marker not in updater_ui:
             return fail(f"the sidebar update notice is missing {marker}")
-    # Only a genuinely newer release may raise the notice.
+    # Only a server-approved update or stable-channel downgrade may raise the notice.
     if 'state.status === "update-available" ? String(state.latest || "") : ""' not in updater_ui:
         return fail("the update notice does not gate on an available release")
     css = (UI.parent / "theme.css").read_text(encoding="utf-8")
@@ -244,10 +250,12 @@ globalThis.__updateJobs = {
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
 globalThis.__updateSharedState = { info: { settings: { ui_mode: "advanced" } } };
-const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); } export function openUrl(url, label) { globalThis.__openedUpdateUrls.push({ url, label }); }`);
+const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); } export function openUrl(url, label) { globalThis.__openedUpdateUrls.push({ url, label }); } export function confirmModal(options) { globalThis.__updateConfirms.push(options); return Promise.resolve(globalThis.__updateConfirmResult); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
 globalThis.__updateState = { state: {} };
 globalThis.__openedUpdateUrls = [];
+globalThis.__updateConfirms = [];
+globalThis.__updateConfirmResult = false;
 globalThis.__automaticChecks = [];
 globalThis.__startUpdateRequest = async () => ({ ok: true, job: { id: "update-1" } });
 const updaterUpdates = dataUrl(`
@@ -333,6 +341,28 @@ listedJob = { ...listedJob, status: "fail" };
 globalThis.__updateTick();
 await new Promise(resolve => realTimeout(resolve, 0));
 if (updaterUi.updateInstallActive()) fail("install actions did not re-enable after update failure");
+
+// Leaving the beta channel exposes the stable target and requires an explicit
+// confirmation before an older stable build reaches the install transport.
+updaterUi.stopUpdateStrip();
+globalThis.__updateState = { install_mode: "automatic", state: {
+  status: "update-available", latest: "v4.9", channel: "stable", prerelease: false,
+  downgrade: true, release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v4.9",
+} };
+await updaterUi.refreshUpdateNotice();
+const downgradeNotice = globalThis.__updateNodes.get("#updatenotice");
+if (!downgradeNotice?.isConnected || !elementText(downgradeNotice).includes("Stable version available") ||
+    !elementText(downgradeNotice).includes("Switch to stable"))
+  fail("the beta-to-stable notice did not explain the downgrade action");
+let downgradeStarts = 0;
+globalThis.__startUpdateRequest = async () => { downgradeStarts++; return { ok: false, errors: ["stopped"] }; };
+const cancelledDowngrade = await updaterUi.startUpdateInstall();
+if (!cancelledDowngrade.cancelled || downgradeStarts !== 0 || globalThis.__updateConfirms.length !== 1)
+  fail("a cancelled stable downgrade reached the install transport");
+globalThis.__updateConfirmResult = true;
+const acceptedDowngrade = await updaterUi.startUpdateInstall();
+if (acceptedDowngrade.ok !== false || downgradeStarts !== 1 || globalThis.__updateConfirms.length !== 2)
+  fail("a confirmed stable downgrade did not reach the install transport exactly once");
 
 // Linux exposes the exact release without admitting a self-update into /usr.
 updaterUi.stopUpdateStrip();

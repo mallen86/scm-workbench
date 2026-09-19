@@ -107,5 +107,6 @@
     - [x] Allow picking a specific revision when clicking Revert button
     - [x] Job history should take you to the specific processor used for the job
 - [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
+    - [x] Allow downgrading from beta to stable
 - [x] Add and verify the first Debian/Ubuntu x86_64 package with the bundled runtime, native IPC, XDG data, manual package-manager updates, and lifecycle smoke coverage.
 - [x] Add Arch/Manjaro x86_64 packaging with exact distro-bound updates, a package recipe, clean-container install checks, and WebKitGTK/native IPC lifecycle smokes.

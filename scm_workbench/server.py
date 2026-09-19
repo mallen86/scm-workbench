@@ -1806,7 +1806,9 @@ def current_update_state(raw: dict, channel: Optional[str] = None) -> dict:
     channel = channel if channel in _UPDATE_CHANNELS else _selected_update_channel()
     if raw.get("channel") != channel:
         return _default_update_state(channel)
-    if raw.get("status") == "update-available" and not updater.is_newer(raw.get("latest"), SERVER_VERSION):
+    if (raw.get("status") == "update-available" and
+            not updater.is_newer(raw.get("latest"), SERVER_VERSION) and
+            not updater.is_stable_downgrade(channel, SERVER_VERSION, raw.get("latest"))):
         state = copy.deepcopy(raw)
         state["status"] = "up-to-date"
         return state
@@ -2022,7 +2024,8 @@ def run_update_check(channel: Optional[str] = None) -> dict:
                 raise updater.UpdateError("release prerelease status changed during the check")
             if channel == "stable" and release_prerelease:
                 raise updater.UpdateError("the stable channel returned a prerelease")
-            if updater.is_newer(release_tag, SERVER_VERSION):
+            if (updater.is_newer(release_tag, SERVER_VERSION) or
+                    updater.is_stable_downgrade(channel, SERVER_VERSION, release_tag)):
                 try:
                     asset = updater.pick_asset(rel)
                 except updater.UpdateError as e:
@@ -2133,12 +2136,16 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             return None, ["an update is already running; try again later"]
         channel = _selected_update_channel()
         st = current_update_state(load_update_state(), channel)
+        stable_downgrade = updater.is_stable_downgrade(
+            channel, SERVER_VERSION, st.get("latest"),
+        )
         if (not _valid_update_state(st) or st.get("status") != "update-available" or
                 st.get("channel") != channel or st.get("current") != SERVER_VERSION or
-                not updater.is_newer(st.get("latest"), SERVER_VERSION) or
+                (not updater.is_newer(st.get("latest"), SERVER_VERSION) and
+                 not stable_downgrade) or
                 not isinstance(st.get("asset"), dict) or
                 st["asset"].get("tag") != st.get("latest")):
-            return None, ["No newer update is available from the current checked state."]
+            return None, ["No installable update is available from the current checked state."]
         latest = st["latest"]
         if updater.install_mode() != "automatic":
             return None, ["Linux updates must be installed manually with the operating system package."]
@@ -2152,8 +2159,10 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             LOGS_DIR.mkdir(parents=True, exist_ok=True)
             job = {
                 "id": job_id, "ts": time.time(), "kind": "update",
-                "title": f"Update the app to {latest}",
-                "cmd": f"workbench: self-update → {latest}", "args": {},
+                "title": (f"Switch the app to stable {latest}" if stable_downgrade
+                          else f"Update the app to {latest}"),
+                "cmd": (f"workbench: switch to stable → {latest}" if stable_downgrade
+                        else f"workbench: self-update → {latest}"), "args": {},
                 "status": "running", "exit_code": None,
                 "log_file": str(LOGS_DIR / f"{job_id}.log"), "log_lines": [],
                 "first_seq": 0, "subs": [], "warnings": [],
@@ -2190,6 +2199,7 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             "latest": st["latest"],
             "asset": copy.deepcopy(st["asset"]),
             "channel": channel,
+            "downgrade": stable_downgrade,
             "bundle": _own_bundle(),
             "work": DATA_DIR / "update",
         }
@@ -3365,6 +3375,10 @@ def updates_view() -> dict:
     channel = _selected_update_channel()
     state = copy.deepcopy(current_update_state(load_update_state(), channel))
     state["checking"] = checking
+    state["downgrade"] = bool(
+        state.get("status") == "update-available" and
+        updater.is_stable_downgrade(channel, SERVER_VERSION, state.get("latest"))
+    )
     install_mode = updater.install_mode()
     try:
         package_format = updater.package_format()

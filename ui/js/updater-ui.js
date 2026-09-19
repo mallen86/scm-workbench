@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
+import { $, S, confirmModal, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -186,6 +186,18 @@ export async function startUpdateInstall() {
   }
   _updRequestPending = true;
   try {
+    let state;
+    try { state = (await getUpdates())?.state || {}; }
+    catch { return { ok: false, errors: ["The checked update state is unavailable."] }; }
+    if (state.downgrade === true) {
+      const approved = await confirmModal({
+        title: "Switch back to stable?",
+        text: `This beta is newer than the latest stable release. Workbench will install ${displayTag(state.latest)} and preserve your settings, decklists, images, and job history.`,
+        okLabel: "Install stable version",
+        danger: true,
+      });
+      if (!approved) return { ok: false, cancelled: true, errors: [] };
+    }
     const result = await startUpdateRequest();
     if (result?.ok) {
       removeUpdateNotice();
@@ -204,27 +216,35 @@ function renderUpdateNotice(tag, state) {
   if (!foot) return;
   const released = state.published ? new Date(state.published) : null;
   const beta = state.prerelease === true;
+  const downgrade = state.downgrade === true;
   const manual = state.install_mode === "manual";
   const manualPackage = state.package_format === "arch" ? "Arch package"
     : state.package_format === "deb" ? "Debian package" : null;
   const manualInstruction = state.package_format === "arch" ? "Install the Arch package with pacman."
     : state.package_format === "deb" ? "Install the Debian package with your software manager." : null;
-  const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, beta ? "Beta update available" : "Update available"));
+  const head = el("div", { class: "rp-head rp-head-row" }, el("span", {}, downgrade ? "Stable version available" : beta ? "Beta update available" : "Update available"));
   const close = el("button", { type: "button", class: "btn sm ghost", title: "Dismiss until the app restarts",
     "aria-label": "Dismiss the update notice" }, ico("x"));
   close.onclick = () => { S.updateNoticeDismissed = tag; removeUpdateNotice(); };
   head.append(close);
-  const meta = el("div", { class: "rp-meta" }, manual
-    ? (manualInstruction
-      ? (released && !Number.isNaN(released.getTime())
-        ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. ${manualInstruction}`
-        : `${beta ? "This is a beta release. " : ""}${manualInstruction}`)
-      : "This Linux distribution does not have a supported update package.")
-    : (released && !Number.isNaN(released.getTime())
-      ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
-      : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`));
+  const meta = el("div", { class: "rp-meta" }, downgrade
+    ? (manual
+      ? (manualInstruction ? `Install the latest stable release to leave the beta channel. ${manualInstruction}`
+        : "This Linux distribution does not have a supported update package.")
+      : "Install the latest stable release to leave the beta channel. Your app data stays put.")
+    : manual
+      ? (manualInstruction
+        ? (released && !Number.isNaN(released.getTime())
+          ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. ${manualInstruction}`
+          : `${beta ? "This is a beta release. " : ""}${manualInstruction}`)
+        : "This Linux distribution does not have a supported update package.")
+      : (released && !Number.isNaN(released.getTime())
+        ? `${beta ? "Beta released" : "Released"} ${released.toLocaleDateString()}. The app closes and reopens as the new version.`
+        : `${beta ? "This is a beta release. " : ""}The app closes and reopens as the new version.`));
   const row = el("div", { class: "rp-row" },
-    el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to ${manual ? "download" : "install"}.`), meta);
+    el("div", { class: "rp-label" }, downgrade
+      ? `Stable ${displayTag(tag)} is ready to ${manual ? "download" : "install"}.`
+      : `SCM Workbench ${displayTag(tag)} is ready to ${manual ? "download" : "install"}.`), meta);
   const actions = el("div", { class: "rp-actions" });
   let install;
   if (manual) {
@@ -232,7 +252,7 @@ function renderUpdateNotice(tag, state) {
     install = el("button", { type: "button", class: "btn sm primary", disabled: !releaseUrl || !manualPackage }, ico("external"), "View download");
     install.onclick = releaseUrl && manualPackage ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null;
   } else {
-    install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), "Update now");
+    install = el("button", { type: "button", class: "btn sm primary" }, ico("download"), downgrade ? "Switch to stable" : "Update now");
     install.onclick = async () => {
       install.disabled = true;
       let result;
@@ -245,7 +265,7 @@ function renderUpdateNotice(tag, state) {
       }
       if (!result?.ok) {
         install.disabled = false;
-        meta.textContent = result?.errors?.[0] || "The update could not start.";
+        if (!result?.cancelled) meta.textContent = result?.errors?.[0] || "The update could not start.";
         return;
       }
       // startUpdateInstall replaces this notice with the shared progress strip.

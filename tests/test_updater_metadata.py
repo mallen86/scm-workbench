@@ -237,6 +237,14 @@ class UpdaterMetadataTests(unittest.TestCase):
                          updater.parse_version("v1.2.3+two"))
         self.assertTrue(updater.is_prerelease("v1.2.3-beta.1+build"))
         self.assertFalse(updater.is_prerelease("v1.2.3+build"))
+        self.assertTrue(updater.is_stable_downgrade(
+            "stable", "0.9.0-beta.3", "v0.8.4"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "beta", "0.9.0-beta.3", "v0.8.4"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "stable", "0.8.4", "v0.8.3"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "stable", "0.9.0-beta.3", "v0.9.0"))
         for invalid in ("v01.2.3", "v1.2.3-beta..1", "v1.2.3-beta.01",
                         "v1.2.3+", " v1.2.3", "v1.2.3 ", "nightly"):
             self.assertIsNone(updater.canonical_version(invalid))
@@ -696,6 +704,30 @@ class UpdaterJobTests(unittest.TestCase):
         lookup.assert_called_once_with(include_prereleases=True)
         self.assertEqual(job["status"], "fail")
 
+    def test_run_job_reverifies_an_explicit_stable_downgrade(self):
+        target = self.asset("v1.5.0")
+        release = {"tag": "v1.5.0", "prerelease": False, "assets": [target]}
+        plan = self.plan(self.asset("v1.0.0"))
+        plan.update(current="2.0.0-beta.1", latest="v1.5.0", channel="stable",
+                    downgrade=True)
+        job = self.job()
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "download",
+                             side_effect=updater.UpdateError("stop after selection")) as download:
+            updater.run_job(job, plan, io.StringIO())
+        download.assert_called_once()
+        self.assertEqual(download.call_args.args[0], target["url"])
+        self.assertEqual(job["status"], "fail")
+
+        plan.pop("downgrade")
+        rejected = self.job()
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "download") as rejected_download:
+            updater.run_job(rejected, plan, io.StringIO())
+        rejected_download.assert_not_called()
+        self.assertEqual(rejected["status"], "fail")
+        self.assertIn("update direction changed", "".join(rejected["log_lines"]))
+
     def test_run_job_stable_channel_rejects_a_prerelease_before_download(self):
         prerelease = self.asset("v2.0.0-beta.1")
         release = {"tag": "v2.0.0-beta.1", "prerelease": True,
@@ -896,6 +928,28 @@ class UpdateStateTests(unittest.TestCase):
         self.assertTrue(state["prerelease"])
         self.assertEqual(server.load_update_state(), state)
 
+    def test_stable_channel_offers_latest_stable_to_a_newer_beta(self):
+        server.SERVER_VERSION = "2.0.0-beta.1"
+        tag = "v1.5.0"
+        asset = self.installable_asset(tag)
+        release = {
+            "tag": tag, "name": "stable", "body": "", "published": "",
+            "url": f"https://github.com/owner/workbench/releases/tag/{tag}",
+            "assets": [asset], "prerelease": False,
+        }
+        with patch.object(updater, "latest_release", return_value=release) as lookup:
+            state = server.run_update_check("stable")
+
+        lookup.assert_called_once_with(include_prereleases=False)
+        self.assertEqual(state["status"], "update-available")
+        self.assertEqual(state["latest"], tag)
+        self.assertEqual(state["asset"], asset)
+        self.assertEqual(server.current_update_state(state)["status"], "update-available")
+        view = server.updates_view()["state"]
+        self.assertTrue(view["downgrade"])
+        self.assertFalse(view["prerelease"])
+        self.assertNotIn("downgrade", server.load_update_state())
+
     def test_channel_switch_hides_cache_and_blocks_stale_install(self):
         stable = self.valid_state(
             status="update-available", latest="v2.0.0", prerelease=False,
@@ -910,7 +964,7 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual((view["status"], view["channel"]), ("never", "beta"))
         job, errors = server.start_update_job()
         self.assertIsNone(job)
-        self.assertIn("No newer update", errors[0])
+        self.assertIn("No installable update", errors[0])
 
         checked = server._default_update_state("beta")
         checked.update(status="up-to-date", latest="v2.0.0-beta.1",

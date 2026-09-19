@@ -691,8 +691,10 @@ fallback remains allowed, and native failure never retries over HTTP.
 
 `updates.get` is synchronous and returns exactly the existing `GET
 /api/updates` body: `current`, `repo`, `packaged`, `bundle`, and `state`. Its
-response-only `state.checking` boolean reports queued/running checks and is
-never persisted or accepted by the strict state-file schema. Persisted state
+response-only `state.checking` boolean reports queued/running checks, and the
+response-only `state.downgrade` boolean identifies an approved
+prerelease-to-stable install. Neither is persisted or accepted by the strict
+state-file schema. Persisted state
 binds each result to `channel` (`stable` or `beta`) and records whether the
 selected release is a `prerelease`. The beta opt-in control is rendered only
 in Advanced mode, but `settings.update_channel` remains authoritative in both
@@ -715,7 +717,10 @@ cap, 256-character bounded errors, random 32-hex IDs, monotonic timestamps,
 and 300-second terminal retention. Checks still share `run_update_check`'s
 channel-bound single-flight backend. Stable checks use GitHub's latest-release
 endpoint, while beta checks select the highest SemVer from a bounded release
-list containing both stable and prerelease entries. `updates.start` is synchronous and uses the existing
+list containing both stable and prerelease entries. When a prerelease user opts
+back into the stable channel, the newest stable release remains installable even
+if its version is lower; the worker re-verifies that exact direction before any
+download. `updates.start` is synchronous and uses the existing
 transactional admission fence, returning the exact `/api/updates/start` body.
 Native errors never retry through HTTP. Browser routes remain compatibility
 endpoints and support an optional encoded `tag` query parameter; omitting it

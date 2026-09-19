@@ -721,6 +721,40 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.assertEqual(observed["latest"], "v2.0.0")
         self.assertEqual(observed["asset"], canonical["asset"])
         self.assertEqual(observed["channel"], "stable")
+        self.assertFalse(observed["downgrade"])
+
+    def test_prerelease_can_start_exact_checked_stable_downgrade(self):
+        server.SERVER_VERSION = "2.0.0-beta.1"
+        tag = "v1.5.0"
+        asset = {
+            **self.asset,
+            "tag": tag,
+            "url": self.asset["url"].replace("v2.0.0", tag),
+        }
+        state = server._default_update_state("stable")
+        state.update(status="update-available", latest=tag, prerelease=False,
+                     asset=asset, checked_at=1.0)
+        server.save_update_state(state)
+        started = []
+
+        class NoRunThread:
+            def __init__(self, *, target, daemon, name):
+                started.append(target)
+            def start(self):
+                pass
+
+        with patch.object(server.threading, "Thread", NoRunThread):
+            job, errors = server.start_update_job()
+        self.assertFalse(errors)
+        self.assertEqual(job["title"], "Switch the app to stable v1.5.0")
+        observed = {}
+        with patch.object(updater, "run_job",
+                          side_effect=lambda _job, plan, _log: observed.update(plan)):
+            started[0]()
+        self.assertTrue(observed["downgrade"])
+        self.assertEqual(observed["channel"], "stable")
+        self.assertEqual(observed["current"], "2.0.0-beta.1")
+        self.assertEqual(observed["latest"], tag)
 
     def test_linux_manual_packages_cannot_enter_self_update_worker(self):
         for name in (updater.LINUX_DEB_ASSET, updater.LINUX_ARCH_ASSET):
