@@ -51,6 +51,7 @@ def main() -> int:
 
     # --- static wiring -----------------------------------------------------
     for required in ('export function jobPageFor(', 'export function jobPrefill(',
+                     'prefill.processor_id = processorId',
                      'export function jobRestorable(', 'export function jobIcon(',
                      'export function fmtJobTs(', 'export function openJobSettings(',
                      'export function jobHistoryRow(', 'export function renderJobHistory('):
@@ -183,6 +184,14 @@ const manifest = {
     title: "Generate a cutting template (DXF)", page: "templates",
     groups: [{ options: [{ key: "card_size", type: "select", default: "standard" }] }],
   },
+  postprocess_images: {
+    title: "Post-process images", page: "postprocess",
+    groups: [{ options: [
+      { key: "processor_id", type: "hidden", default: "" },
+      { key: "revision_hash", type: "hidden", default: "" },
+      { key: "scope", type: "select", default: "both" },
+    ] }],
+  },
 };
 
 const coreUrl = dataUrl(`
@@ -235,6 +244,17 @@ if (show(fetchPrefill) !== show({ page: "fetch", prefill: { kind: "fetch:mtg", a
 const pdfPrefill = history.jobPrefill({ kind: "create_pdf", args: { card_size: "poker" } });
 if (pdfPrefill.page !== "pdf" || pdfPrefill.prefill.plugin !== undefined)
   fail("a non-fetch job prefill grew a plugin");
+const processorId = "a".repeat(32);
+const postprocessPrefill = history.jobPrefill({
+  kind: "postprocess_images", args: { processor_id: processorId, revision_hash: "b".repeat(64), scope: "front" },
+});
+if (postprocessPrefill.page !== "postprocess" || postprocessPrefill.prefill.processor_id !== processorId)
+  fail("a post-processing job did not carry its exact processor into navigation");
+const invalidProcessorPrefill = history.jobPrefill({
+  kind: "postprocess_images", args: { processor_id: "../wrong" },
+});
+if (invalidProcessorPrefill.prefill.processor_id !== undefined)
+  fail("an invalid historical processor id reached post-processing navigation");
 if (history.jobPrefill({ kind: "update", args: {} }) !== null) fail("a page-less job produced a prefill");
 
 // --- icon + timestamp helpers ------------------------------------------

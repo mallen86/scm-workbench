@@ -111,13 +111,17 @@ async function refreshProcessors(selectId = state.selected, { preserveDirty = tr
   state.processors = normalizeList(result);
   state.loadError = false;
   const keepDraft = preserveDirty && state.dirty;
-  const requested = selectId || S.postprocessPrefill?.processor_id;
+  const prefillId = S.postprocessPrefill?.processor_id || null;
+  const requested = prefillId || selectId;
   if (keepDraft) {
     // A refresh must never turn an unsaved new draft into an edit of the
     // first saved processor, or silently move an existing draft to a peer.
     state.selected = state.processors.some(p => p.id === state.selected) ? state.selected : null;
   } else {
-    state.selected = state.processors.some(p => p.id === requested) ? requested : state.processors[0]?.id || null;
+    state.selected = state.processors.some(p => p.id === requested)
+      ? requested : (prefillId ? null : state.processors[0]?.id || null);
+    if (prefillId && !state.selected)
+      toast("warn", "The processor used by this job is no longer in the library.");
   }
   if (state.selected && keepDraft) {
     const summary = selectedProcessor();

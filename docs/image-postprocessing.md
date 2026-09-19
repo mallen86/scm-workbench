@@ -8,6 +8,8 @@ Processors and installed libraries run as your desktop user account. Workbench r
 
 Saving source creates an immutable, untrusted revision. Trust applies only to that exact source revision and dependency environment; an edit or dependency change requires approval again. **Revert** lists the processor's bounded immutable history. Loading an older revision replaces the editor contents but does not reactivate or trust it; review it and choose **Save revision** to make it current.
 
+Opening a post-processing job from **Job history** selects the exact processor recorded by that job. If the processor has since been deleted, Workbench leaves the library unselected instead of silently opening a different processor.
+
 ## Callback contract
 
 A processor defines one synchronous function:

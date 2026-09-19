@@ -32,6 +32,9 @@ export function jobPrefill(job) {
   if (!page) return null;
   const prefill = { kind: job.kind, args: job.args || {} };
   if (job.kind.startsWith("fetch:")) prefill.plugin = job.kind.slice("fetch:".length);
+  const processorId = job?.args?.processor_id;
+  if (page === "postprocess" && typeof processorId === "string" && /^[0-9a-f]{32}$/.test(processorId))
+    prefill.processor_id = processorId;
   return { page, prefill };
 }
 
