@@ -154,6 +154,33 @@ const capabilityRestored = forms.restoreArgs("capability_fixture", { borderless:
 if (capabilityRestored.borderless !== false || capabilityRestored.variant !== "default")
   fail("job-history restore reactivated an unsupported value");
 
+// Saved Create PDF preferences replace hard-coded manifest defaults for a
+// fresh form. A later save updates an untouched field but preserves a field
+// the user already edited while navigating between pages.
+globalThis.formState.info = { settings: { defaults: {
+  card_size: "poker", paper_size: "a4", ppi: 600, quality: 82,
+} } };
+globalThis.formState.manifest.create_pdf = { groups: [{ options: [
+  { key: "card_size", type: "select", default: "standard", choices: [["standard", "Standard"], ["poker", "Poker"]] },
+  { key: "paper_size", type: "select", default: "letter", choices: [["letter", "Letter"], ["a4", "A4"]] },
+  { key: "ppi", type: "range", default: 1200 },
+  { key: "quality", type: "range", default: 100 },
+] }] };
+const configuredDefaults = forms.defaultArgs("create_pdf");
+if (configuredDefaults.card_size !== "poker" || configuredDefaults.paper_size !== "a4" ||
+    configuredDefaults.ppi !== 600 || configuredDefaults.quality !== 82) {
+  fail("fresh Create PDF form ignored saved defaults");
+}
+globalThis.formState.forms.create_pdf = { ...configuredDefaults };
+forms.applySavedFormDefaults("create_pdf", globalThis.formState.info.settings.defaults,
+  { card_size: "standard", paper_size: "letter", ppi: 450, quality: 90 });
+if (globalThis.formState.forms.create_pdf.ppi !== 450 || globalThis.formState.forms.create_pdf.quality !== 90)
+  fail("new defaults did not replace untouched form defaults");
+globalThis.formState.forms.create_pdf.ppi = 700;
+forms.applySavedFormDefaults("create_pdf", { ppi: 450 }, { ppi: 300 });
+if (globalThis.formState.forms.create_pdf.ppi !== 700)
+  fail("saving defaults overwrote an explicitly edited form value");
+
 const box = {
   dataset: { kind: "fixture" }, isConnected: true, innerHTML: "initial", paints: 0,
   append() { this.paints++; },
@@ -172,7 +199,7 @@ globalThis.releases[0]({ cmd: "old" });
 await Promise.resolve();
 if (!paintsAfterNew || box.paints !== paintsAfterNew) fail("an out-of-order preview response repainted the box");
 
-console.log("ok: native/browser preview payloads, failure isolation, HTTP errors, import resolution, and stale response sequencing pass");
+console.log("ok: preview transport, saved form defaults, capability normalization, and stale response sequencing pass");
 ''',
         text=True,
         capture_output=True,

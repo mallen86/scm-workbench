@@ -55,6 +55,7 @@
 - [x] The cancel button for the jobs in simple mode has a weird square to the left of the text. Make it an actual X and also change the button to red to highlight the "danger" of clicking the button.
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
+- [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
 
 # Features
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.

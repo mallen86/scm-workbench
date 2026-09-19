@@ -63,7 +63,10 @@ def main() -> int:
     for source, marker in (
         (nav, 'await setSettings({ ui_mode: mode });'),
         (nav, 'then(() => setSettings({ theme }))'),
-        (settings, 'setSettings({ defaults:'),
+        (settings, 'import { applySavedFormDefaults } from "../forms.js";'),
+        (settings, 'const result = await setSettings({ defaults: requestedDefaults });'),
+        (settings, 'applySavedFormDefaults("create_pdf", d, savedDefaults);'),
+        (settings, 'S.info.settings = savedSettings;'),
         (settings, 'setSettings({ scm_dir:'),
         (settings, 'repoPathControl(scmI, "silhouette-card-maker")'),
         (settings, 'repoPathControl(exI, "scm-extras")'),
@@ -264,7 +267,7 @@ if (globalThis.document.documentElement.dataset.theme !== "dark" || globalThis.t
   fail("latest theme failure did not revert to the first confirmed theme");
 
 if (navSource.includes('fetch("/api/settings"')) fail("nav still contains a direct settings write");
-console.log("ok: native/browser settings payloads, no fallback, HTTP/application errors, ordered theme writes, and race-safe rollback pass");
+console.log("ok: settings transports, confirmed default refresh, ordered theme writes, and race-safe rollback pass");
 '''.strip()
     result = subprocess.run(
         [node, "--input-type=module", "-", str(FACADE), str(nav_path), str(UI / "transport.js")],

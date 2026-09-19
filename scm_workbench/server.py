@@ -5864,6 +5864,30 @@ def get_info_cached() -> dict:
         return _get_info_locked()
 
 
+def _apply_saved_manifest_defaults(manifest: dict, settings: dict) -> dict:
+    """Overlay validated Create PDF preferences on a detached manifest."""
+    defaults = settings.get("defaults") if isinstance(settings, dict) else None
+    spec = manifest.get("create_pdf") if isinstance(manifest, dict) else None
+    if not isinstance(defaults, dict) or not isinstance(spec, dict):
+        return manifest
+    for group in spec.get("groups") or []:
+        for option in group.get("options") or []:
+            key = option.get("key")
+            if (key not in _DEFAULT_FIELDS or key not in defaults or
+                    option.get("available") is False):
+                continue
+            value = defaults[key]
+            if validate_settings_changes({"defaults": {key: value}}):
+                continue
+            choices = option.get("choices")
+            if choices and not any(str(choice[0]) == str(value) for choice in choices):
+                continue
+            if (option.get("unavailable_choices") or {}).get(str(value)):
+                continue
+            option["default"] = value
+    return manifest
+
+
 def get_manifest() -> dict:
     with MANIFEST_LOCK:
         # Deployment-manifest mtimes invalidate real managed-tree changes;
@@ -5880,8 +5904,11 @@ def get_manifest() -> dict:
             _REPOS_MTIME["t"] = now
         # Bootstrap and repo-job threads may invalidate immediately after this
         # lock is released. Never hand serialization or a command builder the
-        # mutable cache object that those threads clear in place.
-        return copy.deepcopy(MANIFEST_CACHE)
+        # mutable cache object that those threads clear in place. Preferences
+        # overlay only the detached response, so saving defaults remains cheap
+        # and cannot mutate the capability-cached schema.
+        manifest = copy.deepcopy(MANIFEST_CACHE)
+    return _apply_saved_manifest_defaults(manifest, load_settings())
 
 
 def invalidate_manifest_cache() -> None:
