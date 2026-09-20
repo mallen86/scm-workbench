@@ -185,11 +185,13 @@ globalThis.formState.manifest.create_pdf = { groups: [{ options: [
   { key: "paper_size", type: "select", default: "letter", choices: [["letter", "Letter"], ["a4", "A4"]] },
   { key: "ppi", type: "range", default: 1200 },
   { key: "quality", type: "range", default: 100 },
+  { key: "extend_corners", type: "text", default: "3.5mm" },
 ] }] };
 const configuredDefaults = forms.defaultArgs("create_pdf");
 if (configuredDefaults.card_size !== "poker" || configuredDefaults.paper_size !== "a4" ||
-    configuredDefaults.ppi !== 600 || configuredDefaults.quality !== 82) {
-  fail("fresh Create PDF form ignored saved defaults");
+    configuredDefaults.ppi !== 600 || configuredDefaults.quality !== 82 ||
+    configuredDefaults.extend_corners !== "3.5mm") {
+  fail("fresh Create PDF form ignored saved or manifest defaults");
 }
 globalThis.formState.forms.create_pdf = { ...configuredDefaults };
 forms.applySavedFormDefaults("create_pdf", globalThis.formState.info.settings.defaults,
