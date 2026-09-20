@@ -1094,11 +1094,14 @@ def build_manifest(info: dict) -> dict:
         "simple_sections": [
             {
                 "title": "Print setup",
-                "rows": [["borderless", "load_offset", "only_fronts", "skip_bottom_left"]],
+                "rows": [
+                    ["borderless", "load_offset"],
+                    ["only_fronts", "skip_bottom_left"],
+                ],
             },
             {
                 "title": "Image finishing",
-                "rows": [["mpcfill_crop"]],
+                "rows": [["mpcfill_crop", "extend_corners_simple"]],
             },
         ],
         "description": "Lays out card images in a PDF that is ready to print, with registration marks for the cutting templates.",
@@ -1169,10 +1172,10 @@ def build_manifest(info: dict) -> dict:
                     _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
                          requires_flags=["--crop"],
                          help="Applies a 3mm crop to front images to remove MPCFill padding. To override it, switch to Advanced mode and use “Crop edges (fronts)”."),
-                    _opt("extend_corners_simple", "Simple mode corner extension", "toggle", default=True, simple_only=True,
+                    _opt("extend_corners_simple", "Extend Corners", "toggle", default=True, width="third", simple=True, simple_only=True,
                          requires_flags=["--extend_corners"],
                          requires_flag_metavars={"--extend_corners": ["TEXT"]},
-                         help="Simple mode always extends rounded front and double-sided image corners by 3.5mm."),
+                         help="Extends rounded front and double-sided image corners by 3.5mm. To override it, switch to Advanced mode and use “Extend rounded corners (fronts)”."),
                     _opt("crop", "Crop edges (fronts)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--crop"]),
                     _opt("crop_backs", "Crop edges (backs)", "text", placeholder="ex: 3mm", width="third",
@@ -5038,11 +5041,11 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 # the Crop boxes are the direct control - so a leftover value
                 # can't silently crop a PDF, and a typed value always wins.
                 v = "3mm"
-            if key == "extend_corners" and simple and "extend_corners_simple" in a:
-                # Supported Simple mode always uses the fixed safe preset. A
-                # hidden value retained from Advanced mode must not change it;
-                # switching back to Advanced restores the editable value.
-                v = "3.5mm"
+            if key == "extend_corners" and simple:
+                # The visible Simple-mode toggle owns this setting. Ignore any
+                # hidden value retained from Advanced mode: on uses the fixed
+                # 3.5mm preset, while off emits no corner-extension argument.
+                v = "3.5mm" if a.get("extend_corners_simple") else ""
             if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))

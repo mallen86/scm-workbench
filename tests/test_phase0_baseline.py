@@ -380,15 +380,20 @@ class HttpContractTests(unittest.TestCase):
         create = manifest["create_pdf"]
         self.assertEqual(create["simple_rows"], [["card_size", "paper_size"]])
         self.assertEqual(create["simple_sections"], [
-            {"title": "Print setup", "rows": [["borderless", "load_offset", "only_fronts", "skip_bottom_left"]]},
-            {"title": "Image finishing", "rows": [["mpcfill_crop"]]},
+            {"title": "Print setup", "rows": [
+                ["borderless", "load_offset"],
+                ["only_fronts", "skip_bottom_left"],
+            ]},
+            {"title": "Image finishing", "rows": [["mpcfill_crop", "extend_corners_simple"]]},
         ])
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(options["extend_corners_simple"]["simple_only"])
+        self.assertTrue(options["extend_corners_simple"]["simple"])
         self.assertTrue(options["extend_corners_simple"]["available"])
         self.assertTrue(options["extend_corners_simple"]["default"])
         self.assertEqual(options["extend_corners"]["default"], "3.5mm")
-        self.assertIn("switch to Advanced mode", options["mpcfill_crop"]["help"])
+        for key in ("mpcfill_crop", "extend_corners_simple"):
+            self.assertIn("switch to Advanced mode", options[key]["help"])
 
         settings = server.load_settings()
         settings["ui_mode"] = "simple"
@@ -396,17 +401,17 @@ class HttpContractTests(unittest.TestCase):
         server.invalidate_manifest_cache()
         args = {
             "card_size": "standard", "paper_size": "letter", "mpcfill_crop": True,
+            "extend_corners_simple": True,
         }
         preview = server.build_preview("create_pdf", args)
         self.assertFalse(preview["errors"])
         self.assertIn("--crop 3mm", preview["cmd"])
         self.assertIn("--extend_corners 3.5mm", preview["cmd"])
 
-        retained_advanced_value = server.build_preview(
+        disabled = server.build_preview(
             "create_pdf", {**args, "extend_corners": "4mm", "extend_corners_simple": False})
-        self.assertFalse(retained_advanced_value["errors"])
-        self.assertIn("--extend_corners 3.5mm", retained_advanced_value["cmd"])
-        self.assertNotIn("--extend_corners 4mm", retained_advanced_value["cmd"])
+        self.assertFalse(disabled["errors"])
+        self.assertNotIn("--extend_corners", disabled["cmd"])
 
         settings["ui_mode"] = "advanced"
         server.save_settings(settings)
