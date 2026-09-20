@@ -419,6 +419,18 @@ class HttpContractTests(unittest.TestCase):
         self.assertFalse(advanced_custom["errors"])
         self.assertIn("--extend_corners 4mm", advanced_custom["cmd"])
 
+    def test_fit_and_finishing_placeholders_are_clearly_examples(self):
+        create = server.get_manifest()["create_pdf"]
+        group = next(group for group in create["groups"] if group["title"] == "Fit & edge finishing")
+        options = {option["key"]: option for option in group["options"]}
+        dimensional = {
+            "crop", "crop_backs", "extend_edges", "extend_edges_backs",
+            "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs",
+        }
+        self.assertEqual({key for key in options if options[key].get("placeholder")}, dimensional)
+        for key in dimensional:
+            self.assertEqual(options[key]["placeholder"], "ex: 3mm")
+
     def test_advanced_pdf_directories_opt_into_browse_and_reset_controls(self):
         create = server.get_manifest()["create_pdf"]
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
