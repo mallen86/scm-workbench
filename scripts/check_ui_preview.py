@@ -47,6 +47,7 @@ def main() -> int:
         'o.type === "path" && o.browse_directory',
         'const selected = await pickDirectory();',
         'onclick: () => setValue(strVal(optionDefault(o)))',
+        'const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")

@@ -392,6 +392,10 @@ class HttpContractTests(unittest.TestCase):
         self.assertTrue(options["extend_corners_simple"]["available"])
         self.assertTrue(options["extend_corners_simple"]["default"])
         self.assertEqual(options["extend_corners"]["default"], "3.5mm")
+        self.assertEqual(
+            options["only_fronts"]["simple_help"],
+            "Creates front pages only and leaves out card-back pages.",
+        )
         for key in ("mpcfill_crop", "extend_corners_simple"):
             self.assertIn("switch to Advanced mode", options[key]["help"])
 
@@ -443,7 +447,9 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(browsable, {"front_dir", "double_sided_dir", "output_path"})
         self.assertEqual(options["front_dir"]["default"], "game/front")
         self.assertEqual(options["double_sided_dir"]["default"], "game/double_sided")
+        self.assertEqual(options["double_sided_dir"]["width"], "half")
         self.assertEqual(options["output_path"]["default"], "game/output/game.pdf")
+        self.assertEqual(options["output_path"]["width"], "half")
         self.assertEqual(options["output_path"]["browse_filename"], "game.pdf")
 
     def test_skip_indexes_are_a_plain_comma_separated_input(self):

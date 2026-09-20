@@ -467,7 +467,8 @@ export function renderOption(o, args, kind) {
     if (row && row.mode === "managed") wrap.append(el("span", { class: "help" },
       "Kept in the app's working area. When the run finishes, use the console's “Move to my files…” to save it elsewhere."));
   }
-  if (o.help) wrap.append(el("span", { class: "help" }, o.help));
+  const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;
+  if (help) wrap.append(el("span", { class: "help" }, help));
   if (o.available === false) {
     wrap.classList.add("option-unavailable");
     wrap.setAttribute("aria-disabled", "true");
