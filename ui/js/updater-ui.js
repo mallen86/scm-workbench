@@ -7,7 +7,7 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
+import { $, S, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
@@ -179,6 +179,50 @@ function releasePageUrl(value) {
   } catch { return null; }
 }
 
+/* Settings and the sidebar update notice share this exact in-app release-notes
+   flow. The server renders the markdown; only a validated GitHub release URL
+   may reach the OS browser action. */
+export function showWhatsNew(tag, releaseUrl) {
+  const safeReleaseUrl = releasePageUrl(releaseUrl);
+  return (async () => {
+    const root = $("#modal-root");
+    const m = $(".modal", root);
+    m.innerHTML = "";
+    m.append(el("div", { class: "m-ico info" }, ico("info")));
+    m.append(el("h3", {}, "What's new in ", String(tag ?? "")));
+    m.append(el("div", { class: "m-loading" }, "Fetching the release notes…"));
+    root.hidden = false;
+    const close = () => { root.hidden = true; };
+    try {
+      const r = await getUpdateNotes(tag);
+      if (!r.ok) throw new Error(r.error || "the release notes couldn't be fetched");
+      m.querySelectorAll(".m-ico, h3, .m-loading").forEach(n => n.remove());
+      m.append(el("h3", {}, "What's new in ", String(r.tag ?? "")));
+      if (r.published) m.append(el("p", { class: "m-when" }, "Released ", String(r.published)));
+      const body = el("div", { class: "notes" });
+      // The server's markdown renderer is the sole trusted HTML boundary.
+      body.innerHTML = r.body || "<p>(no notes on this release)</p>";
+      m.append(body);
+      const actions = el("div", { class: "m-actions" },
+        el("button", { class: "btn", onclick: close }, "Close"),
+      );
+      if (safeReleaseUrl) {
+        actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(safeReleaseUrl, "the release page"); } }, "Open on GitHub"));
+      }
+      m.append(actions);
+      document.addEventListener("keydown", function onKey(e) {
+        if (e.key !== "Escape") return;
+        close();
+        document.removeEventListener("keydown", onKey);
+      });
+    } catch (e) {
+      m.querySelector(".m-loading").remove();
+      m.append(el("p", {}, "The notes couldn't be loaded: " + e.message));
+      m.append(el("div", { class: "m-actions" }, el("button", { class: "btn", onclick: close }, "Close")));
+    }
+  })();
+}
+
 /** Start one update from any UI entry point and synchronize shared chrome. */
 export async function startUpdateInstall() {
   if (updateInstallActive()) {
@@ -226,9 +270,13 @@ function renderUpdateNotice(tag, state) {
   const row = el("div", { class: "rp-row" },
     el("div", { class: "rp-label" }, `SCM Workbench ${displayTag(tag)} is ready to ${manual ? "download" : "install"}.`), meta);
   const actions = el("div", { class: "rp-actions" });
+  const releaseUrl = releasePageUrl(state.release_url);
+  const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
+  if (whatsNew) {
+    whatsNew.onclick = e => { e.preventDefault(); showWhatsNew(tag, releaseUrl); };
+  }
   let install;
   if (manual) {
-    const releaseUrl = releasePageUrl(state.release_url);
     install = el("button", { type: "button", class: "btn sm primary", disabled: !releaseUrl || !manualPackage }, ico("external"), "View download");
     install.onclick = releaseUrl && manualPackage ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null;
   } else {
@@ -251,7 +299,7 @@ function renderUpdateNotice(tag, state) {
       // startUpdateInstall replaces this notice with the shared progress strip.
     };
   }
-  actions.append(install);
+  actions.append(whatsNew, install);
   const notice = el("div", { class: "repoprog sidebar-note", id: "updatenotice" }, head, row, actions);
   foot.before(notice);
   _noticeTag = tag;

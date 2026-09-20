@@ -1,7 +1,7 @@
 /* pages/settings — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { PAGES, S, api, el, ico, pageHead, toast, openUrl, $, $$ } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates, getUpdateNotes } from "../updates-transport.js";
+import { PAGES, S, api, el, ico, pageHead, toast, openUrl } from "../core.js";import { startGuidedTutorial } from "../guided-tutorial.js";import { revealPath } from "../native-actions.js";import { canPickRepoDirectory, pickRepoDirectory, setSettings } from "../settings-transport.js";import { listRepoRefs, setRepoSource, checkRepo } from "../repos-transport.js";import { getUpdates, checkUpdates } from "../updates-transport.js";
 import { applySavedFormDefaults } from "../forms.js";
 
 // Update state is server-validated, but keep this boundary defensive before a
@@ -44,55 +44,7 @@ function serverReleaseUrl(value) {
   }
 }
 
-/* In-app "What's new": the release notes live on GitHub, but the app's
-   window can't open a browser tab in its webview, so the notes are fetched
-   through the server (which also renders the markdown) and shown in the
-   app's own modal — same chrome as every other confirmation here. */
-function showWhatsNew(tag, releaseUrl) {
-  const safeReleaseUrl = serverReleaseUrl(releaseUrl);
-  return (async () => {
-    const root = $("#modal-root");
-    const m = $(".modal", root);
-    m.innerHTML = "";
-    m.append(el("div", { class: "m-ico info" }, ico("info")));
-    m.append(el("h3", {}, "What's new in ", String(tag ?? "")));
-    m.append(el("div", { class: "m-loading" }, "Fetching the release notes…"));
-    root.hidden = false;
-    const close = () => { root.hidden = true; };
-    try {
-      const r = await getUpdateNotes(tag);
-      if (!r.ok) throw new Error(r.error || "the release notes couldn't be fetched");
-      m.querySelectorAll(".m-ico, h3, .m-loading").forEach(n => n.remove());
-      m.append(el("h3", {}, "What's new in ", String(r.tag ?? "")));
-      if (r.published) m.append(el("p", { class: "m-when" }, "Released ", String(r.published)));
-      const body = el("div", { class: "notes" });
-      // The server's markdown renderer is the sole trusted HTML boundary.
-      body.innerHTML = r.body || "<p>(no notes on this release)</p>";
-      m.append(body);
-      const actions = el("div", { class: "m-actions" },
-        el("button", { class: "btn", onclick: close }, "Close"),
-      );
-      if (safeReleaseUrl) {
-        // a raw <a> here would carry target="_blank" — the app's webview can't
-        // spawn that (window.open is denied), and even href="#" bounces the
-        // whole app away on a mis-click. The OS browser is the
-        // honest target, and the app already has a sanctioned door for it.
-        actions.append(el("button", { class: "btn", onclick: () => { close(); openUrl(safeReleaseUrl, "the release page"); } }, "Open on GitHub"));
-      }
-      m.append(actions);
-      document.addEventListener("keydown", function onKey(e) {
-        if (e.key !== "Escape") return;
-        close();
-        document.removeEventListener("keydown", onKey);
-      });
-    } catch (e) {
-      m.querySelector(".m-loading").remove();
-      m.append(el("p", {}, "The notes couldn't be loaded: " + e.message));
-      m.append(el("div", { class: "m-actions" }, el("button", { class: "btn", onclick: close }, "Close")));
-    }
-  })();
-}
-import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { refreshUpdateNotice, startUpdateInstall, updateInstallActive } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
+import { doRun, numSteppers } from "../forms.js";import { refreshInfo } from "../info.js";import { go, uiMode } from "../nav.js";import { openConsole, attachStream, renderConsoleTabs, toggleConsole } from "../console.js";import { refreshUpdateNotice, showWhatsNew, startUpdateInstall, updateInstallActive } from "../updater-ui.js";import { watchJobDone } from "./utilities.js";export function repoCopyRow(row, container, simple = false) {
   const box = el("div", { class: "rcre", style: "margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft)" });
   let selectingPinned = false;
   let repoInitPending = false;
