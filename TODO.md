@@ -56,7 +56,7 @@
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 - [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
-- [ ] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
+- [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.

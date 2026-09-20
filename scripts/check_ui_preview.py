@@ -154,6 +154,15 @@ const capabilityRestored = forms.restoreArgs("capability_fixture", { borderless:
 if (capabilityRestored.borderless !== false || capabilityRestored.variant !== "default")
   fail("job-history restore reactivated an unsupported value");
 
+// Skip indexes use a normal text box in the live form, while completed jobs
+// retain the server-normalized integer array. History must restore that array
+// as editable comma-separated text rather than dropping it.
+globalThis.formState.manifest.skip_fixture = { groups: [{ options: [
+  { key: "skip", type: "text", int_list: true, default: "" },
+] }] };
+const skipRestored = forms.restoreArgs("skip_fixture", { skip: [0, 4, 6] });
+if (skipRestored.skip !== "0, 4, 6") fail("job-history skip indexes were not restored as text");
+
 // Saved Create PDF preferences replace hard-coded manifest defaults for a
 // fresh form. A later save updates an untouched field but preserves a field
 // the user already edited while navigating between pages.

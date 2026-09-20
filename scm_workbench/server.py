@@ -1193,9 +1193,9 @@ def build_manifest(info: dict) -> dict:
                 "title": "Advanced",
                 "collapsible": True,
                 "options": [
-                    _opt("skip", "Skip card indexes", "chips", int=True, placeholder="0, 4", width="half",
+                    _opt("skip", "Skip card indexes", "text", int_list=True, placeholder="ex: 0, 4", width="half",
                          requires_flags=["--skip"],
-                         help="Card indexes to skip, starting from zero. This can work around bad registration."),
+                         help="Comma-separated card indexes to skip, starting from zero. This can work around bad registration."),
                     _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
                          requires_flags=["--show_outline"]),
@@ -5965,7 +5965,18 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
                 if key in raw and not _unavailable_value_matches(o, v):
                     errors.append(f"{o['label']}: {o.get('unavailable_reason') or 'this option is unavailable.'}")
                 continue
-            if t == "chips":
+            if o.get("int_list"):
+                if isinstance(v, str):
+                    v = [x for x in re.split(r"[\s,]+", v.strip()) if x]
+                v = v if isinstance(v, list) else []
+                clean = []
+                for x in v:
+                    if re.fullmatch(r"\d+", str(x)):
+                        clean.append(int(x))
+                    else:
+                        errors.append(f"{o['label']}: “{x}” is not a valid index.")
+                args[key] = clean
+            elif t == "chips":
                 if isinstance(v, str):
                     v = [x.strip() for x in v.split(",") if x.strip()]
                 v = v if isinstance(v, list) else []

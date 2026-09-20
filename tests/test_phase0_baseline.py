@@ -415,6 +415,27 @@ class HttpContractTests(unittest.TestCase):
         self.assertNotIn("--crop 3mm", advanced["cmd"])
         self.assertNotIn("--extend_corners 3.5mm", advanced["cmd"])
 
+    def test_skip_indexes_are_a_plain_comma_separated_input(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        skip = options["skip"]
+        self.assertEqual(skip["type"], "text")
+        self.assertTrue(skip["int_list"])
+        self.assertEqual(skip["placeholder"], "ex: 0, 4")
+        self.assertIn("Comma-separated", skip["help"])
+
+        args, errors, _warnings = server.normalize_args(create, {"skip": "0, 4  6"})
+        self.assertFalse(errors)
+        self.assertEqual(args["skip"], [0, 4, 6])
+        _args, errors, _warnings = server.normalize_args(create, {"skip": "0, nope"})
+        self.assertTrue(any("not a valid index" in error for error in errors))
+
+        preview = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "skip": "0, 4 6",
+        })
+        self.assertFalse(preview["errors"])
+        self.assertIn("--skip 0 --skip 4 --skip 6", preview["cmd"])
+
     def test_custom_paper_label_names_the_dxf_and_saved_size(self):
         preview = server.build_preview("dxf_single", {
             "card_mode": "named", "card_size": "standard",

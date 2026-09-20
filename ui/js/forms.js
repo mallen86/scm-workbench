@@ -138,7 +138,10 @@ export function restoreArgs(kind, raw) {
       if (o.available === false || !Object.prototype.hasOwnProperty.call(raw, o.key)) continue;
       const v = raw[o.key];
       if ((o.unavailable_choices || {})[String(v)]) continue;
-      if (o.type === "chips" || o.type === "choice_chips") {
+      if (o.int_list) {
+        if (Array.isArray(v) && v.every(x => Number.isInteger(x) && x >= 0)) out[o.key] = v.join(", ");
+        else if (typeof v === "string") out[o.key] = v;
+      } else if (o.type === "chips" || o.type === "choice_chips") {
         if (Array.isArray(v)) out[o.key] = v.filter(
           x => typeof x === "string" && !(o.unavailable_choices || {})[String(x)],
         );
