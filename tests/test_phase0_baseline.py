@@ -521,6 +521,7 @@ class HttpContractTests(unittest.TestCase):
         create = server.get_manifest()["create_pdf"]
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(options["skip_bottom_left"]["simple"])
+        self.assertTrue(options["skip_bottom_left"]["simple_only"])
         self.assertEqual(options["skip_bottom_left"]["requires_flags"], ["--skip"])
         self.assertIn("card size", options["skip_bottom_left"]["help"])
 

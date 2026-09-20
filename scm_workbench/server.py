@@ -1208,7 +1208,7 @@ def build_manifest(info: dict) -> dict:
                          requires_flags=["--skip"],
                          help="Comma-separated card indexes to skip, starting from zero. This can work around bad registration."),
                     _opt("skip_bottom_left", "Skip bottom-left position", "toggle", default=False, width="half", simple=True,
-                         requires_flags=["--skip"],
+                         simple_only=True, requires_flags=["--skip"],
                          help="Skips the bottom-left card position for the selected paper, card size, and borderless layout."),
                     _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
