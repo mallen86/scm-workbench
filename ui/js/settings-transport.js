@@ -26,23 +26,30 @@ function checkedResult(data, status = 0) {
 }
 
 
-export function canPickRepoDirectory(scope = typeof window === "undefined" ? null : window) {
+export function canPickDirectory(scope = typeof window === "undefined" ? null : window) {
   return !!getTauriInvoke(scope);
 }
 
 
 /** Open the app-owned directory picker. Browser tabs cannot expose absolute paths. */
-export async function pickRepoDirectory() {
+export async function pickDirectory() {
   const invoke = getTauriInvoke();
-  if (!invoke) throw new Error("repository picker requires the app window");
+  if (!invoke) throw new Error("directory picker requires the app window");
   const selected = await invoke("wb_pick_repo_directory", {});
   if (selected === null) return null;
   if (typeof selected !== "string" || !selected || new TextEncoder().encode(selected).length > 4096 ||
       /[\u0000-\u001f\u007f]/.test(selected)) {
-    throw new Error("native repository picker returned an invalid path");
+    throw new Error("native directory picker returned an invalid path");
   }
   return selected;
 }
+
+
+// Repository settings and manifest-driven job forms share the same bounded,
+// parented native folder picker. Keep the repository names as compatibility
+// aliases for the Settings page and its existing callers.
+export const canPickRepoDirectory = canPickDirectory;
+export const pickRepoDirectory = pickDirectory;
 
 
 /** Persist a partial settings object through the native or browser boundary. */

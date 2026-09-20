@@ -44,6 +44,9 @@ def main() -> int:
         "o.unavailable_choices || {}",
         'control.disabled = true',
         'runBtn.classList.add("capability-disabled")',
+        'o.type === "path" && o.browse_directory',
+        'const selected = await pickDirectory();',
+        'onclick: () => setValue(strVal(optionDefault(o)))',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")
@@ -123,6 +126,7 @@ const jobsUrl = dataUrl("export const jobs = {}; ");
 const prepUrl = dataUrl("export const repoReady = () => true; ");
 const navUrl = dataUrl("export const uiMode = () => \"advanced\"; ");
 const jobEventsUrl = dataUrl("export const publishJobsUpdated = () => {}; ");
+const settingsTransportUrl = dataUrl("export const canPickDirectory = () => false; export const pickDirectory = async () => null; ");
 globalThis.releases = [];
 const previewStubUrl = dataUrl(`
   export function preview() {
@@ -135,7 +139,8 @@ const formsForTest = formsSource
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewStubUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)
-  .replace('from "./nav.js"', `from "${navUrl}"`);
+  .replace('from "./nav.js"', `from "${navUrl}"`)
+  .replace('from "./settings-transport.js"', `from "${settingsTransportUrl}"`);
 const forms = await import(dataUrl(formsForTest));
 
 // Capability metadata must reset unsupported values both for a fresh form and
@@ -162,6 +167,12 @@ globalThis.formState.manifest.skip_fixture = { groups: [{ options: [
 ] }] };
 const skipRestored = forms.restoreArgs("skip_fixture", { skip: [0, 4, 6] });
 if (skipRestored.skip !== "0, 4, 6") fail("job-history skip indexes were not restored as text");
+
+if (forms.directorySelectionValue({}, "/picked/fronts") !== "/picked/fronts" ||
+    forms.directorySelectionValue({ browse_filename: "game.pdf" }, "/picked/output/") !== "/picked/output/game.pdf" ||
+    forms.directorySelectionValue({ browse_filename: "game.pdf" }, "C:\\picked\\output\\") !== "C:\\picked\\output\\game.pdf") {
+  fail("directory selections were not converted to form path values");
+}
 
 // Saved Create PDF preferences replace hard-coded manifest defaults for a
 // fresh form. A later save updates an untouched field but preserves a field

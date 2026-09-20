@@ -415,6 +415,16 @@ class HttpContractTests(unittest.TestCase):
         self.assertNotIn("--crop 3mm", advanced["cmd"])
         self.assertNotIn("--extend_corners 3.5mm", advanced["cmd"])
 
+    def test_advanced_pdf_directories_opt_into_browse_and_reset_controls(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        browsable = {key for key, option in options.items() if option.get("browse_directory")}
+        self.assertEqual(browsable, {"front_dir", "double_sided_dir", "output_path"})
+        self.assertEqual(options["front_dir"]["default"], "game/front")
+        self.assertEqual(options["double_sided_dir"]["default"], "game/double_sided")
+        self.assertEqual(options["output_path"]["default"], "game/output/game.pdf")
+        self.assertEqual(options["output_path"]["browse_filename"], "game.pdf")
+
     def test_skip_indexes_are_a_plain_comma_separated_input(self):
         create = server.get_manifest()["create_pdf"]
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}

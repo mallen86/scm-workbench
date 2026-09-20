@@ -1,7 +1,7 @@
 /* forms — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
+import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";import { canPickDirectory, pickDirectory } from "./settings-transport.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -284,8 +284,43 @@ export function renderOption(o, args, kind) {
     case "text":
     case "path": {
       const i = el("input", { class: `input ${o.type === "path" ? "mono" : ""}`, placeholder: o.placeholder || "", value: strVal(args[o.key]) });
+      const setValue = value => {
+        i.value = value;
+        args[o.key] = value;
+        afterFormChange(kind, args);
+      };
       i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind, args); });
-      wrap.append(label, i);
+      if (o.type === "path" && o.browse_directory) {
+        const controls = el("div", { class: "path-control" }, i);
+        if (canPickDirectory()) {
+          const browse = el("button", {
+            class: "btn",
+            type: "button",
+            "aria-label": `Browse for ${o.label}`,
+            onclick: async () => {
+              browse.disabled = true;
+              try {
+                const selected = await pickDirectory();
+                if (selected !== null) setValue(directorySelectionValue(o, selected));
+              } catch (error) {
+                toast("err", error?.message || "Could not open the folder picker");
+              } finally {
+                browse.disabled = false;
+              }
+            },
+          }, ico("folder"), "Browse…");
+          controls.append(browse);
+        }
+        controls.append(el("button", {
+          class: "btn",
+          type: "button",
+          "aria-label": `Reset ${o.label} to its default`,
+          onclick: () => setValue(strVal(optionDefault(o))),
+        }, ico("refresh"), "Reset"));
+        wrap.append(label, controls);
+      } else {
+        wrap.append(label, i);
+      }
       break;
     }
     case "textarea": {
@@ -454,6 +489,15 @@ export function renderOption(o, args, kind) {
 
 
 export function strVal(v) { return v === null || v === undefined ? "" : String(v); }
+
+
+export function directorySelectionValue(option, directory) {
+  const selected = strVal(directory);
+  const filename = strVal(option?.browse_filename);
+  if (!filename) return selected;
+  const separator = selected.includes("\\") && !selected.includes("/") ? "\\" : "/";
+  return selected.replace(/[\\/]+$/, "") + separator + filename;
+}
 
 
 export function stepNum(input, d) {
