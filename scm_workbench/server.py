@@ -1094,7 +1094,7 @@ def build_manifest(info: dict) -> dict:
         "simple_sections": [
             {
                 "title": "Print setup",
-                "rows": [["borderless", "load_offset", "only_fronts"]],
+                "rows": [["borderless", "load_offset", "only_fronts", "skip_bottom_left"]],
             },
             {
                 "title": "Image finishing",
@@ -1198,6 +1198,9 @@ def build_manifest(info: dict) -> dict:
                     _opt("skip", "Skip card indexes", "text", int_list=True, placeholder="ex: 0, 4", width="half",
                          requires_flags=["--skip"],
                          help="Comma-separated card indexes to skip, starting from zero. This can work around bad registration."),
+                    _opt("skip_bottom_left", "Skip bottom-left position", "toggle", default=False, width="half", simple=True,
+                         requires_flags=["--skip"],
+                         help="Skips the bottom-left card position for the selected paper and borderless layout."),
                     _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
                          requires_flags=["--show_outline"]),
@@ -4883,6 +4886,22 @@ def _dxf_output_without_overwriting(cwd: Optional[Path], value: str) -> str:
     return raw
 
 
+_BOTTOM_LEFT_SKIP_INDEXES = {
+    "letter": (4, 6),
+    "a4": (4, 6),
+    "a3": (12, 12),
+    "tabloid": (12, 12),
+    "arch_b": (12, 14),
+    "legal": (5, 5),
+}
+
+
+def _bottom_left_skip_index(paper: Any, borderless: bool) -> Optional[int]:
+    key = re.sub(r"[\s-]+", "_", str(paper or "").strip().casefold())
+    indexes = _BOTTOM_LEFT_SKIP_INDEXES.get(key)
+    return indexes[1 if borderless else 0] if indexes else None
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -5037,7 +5056,17 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["--ppi", str(ppi)]
         if quality_available and not (simple and quality == 100):
             argv += ["--quality", str(quality)]
-        for idx in a.get("skip") or []:
+        skip_indexes = list(a.get("skip") or [])
+        if a.get("skip_bottom_left"):
+            if a.get("specialty"):
+                errors.append("Skip bottom-left position cannot be combined with a specialty layout.")
+            else:
+                bottom_left = _bottom_left_skip_index(paper, bool(a.get("borderless")))
+                if bottom_left is None:
+                    errors.append(f"Skip bottom-left position is not defined for paper size “{paper}”.")
+                elif bottom_left not in skip_indexes:
+                    skip_indexes.append(bottom_left)
+        for idx in skip_indexes:
             argv += ["--skip", str(idx)]
         if a.get("label"): argv += ["--label", str(a["label"])]
         if a.get("show_outline"): argv += ["--show_outline"]
@@ -6418,6 +6447,14 @@ def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
             continue
         if 0 <= index < total:
             skipped.add(index)
+    if args.get("skip_bottom_left") and not specialty_name:
+        defaults = settings.get("defaults", {})
+        bottom_left = _bottom_left_skip_index(
+            args.get("paper_size") or defaults.get("paper_size") or "letter",
+            bool(args.get("borderless")),
+        )
+        if bottom_left is not None and 0 <= bottom_left < total:
+            skipped.add(bottom_left)
     usable = total - len(skipped)
     if usable < 1:
         raise PdfPreviewError("Preview unavailable because every position on the first page is skipped.")

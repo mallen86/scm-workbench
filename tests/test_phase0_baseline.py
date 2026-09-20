@@ -380,7 +380,7 @@ class HttpContractTests(unittest.TestCase):
         create = manifest["create_pdf"]
         self.assertEqual(create["simple_rows"], [["card_size", "paper_size"]])
         self.assertEqual(create["simple_sections"], [
-            {"title": "Print setup", "rows": [["borderless", "load_offset", "only_fronts"]]},
+            {"title": "Print setup", "rows": [["borderless", "load_offset", "only_fronts", "skip_bottom_left"]]},
             {"title": "Image finishing", "rows": [["mpcfill_crop", "extend_corners_simple"]]},
         ])
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
@@ -445,6 +445,38 @@ class HttpContractTests(unittest.TestCase):
         })
         self.assertFalse(preview["errors"])
         self.assertIn("--skip 0 --skip 4 --skip 6", preview["cmd"])
+
+    def test_skip_bottom_left_uses_the_paper_and_borderless_layout_index(self):
+        expected = {
+            ("letter", False): 4, ("letter", True): 6,
+            ("a4", False): 4, ("a4", True): 6,
+            ("a3", False): 12, ("a3", True): 12,
+            ("tabloid", False): 12, ("tabloid", True): 12,
+            ("arch_b", False): 12, ("arch_b", True): 14,
+            ("legal", False): 5, ("legal", True): 5,
+        }
+        for (paper, borderless), index in expected.items():
+            with self.subTest(paper=paper, borderless=borderless):
+                self.assertEqual(server._bottom_left_skip_index(paper, borderless), index)
+        self.assertEqual(server._bottom_left_skip_index("ARCH-B", True), 14)
+        self.assertIsNone(server._bottom_left_skip_index("custom", False))
+
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        self.assertTrue(options["skip_bottom_left"]["simple"])
+        self.assertEqual(options["skip_bottom_left"]["requires_flags"], ["--skip"])
+
+        ordinary = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "skip_bottom_left": True,
+        })
+        self.assertFalse(ordinary["errors"])
+        self.assertIn("--skip 4", ordinary["cmd"])
+        borderless = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "borderless": True,
+            "skip": "6", "skip_bottom_left": True,
+        })
+        self.assertFalse(borderless["errors"])
+        self.assertEqual(borderless["cmd"].count("--skip 6"), 1)
 
     def test_custom_paper_label_names_the_dxf_and_saved_size(self):
         preview = server.build_preview("dxf_single", {
