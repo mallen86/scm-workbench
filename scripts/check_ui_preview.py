@@ -49,9 +49,17 @@ def main() -> int:
         'onclick: () => setValue(strVal(optionDefault(o)))',
         'const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;',
         'if (!await confirmSegmentChoice(o, args[o.key], v)) return;',
+        'const button = e.currentTarget;',
+        'button.classList.add("active");',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")
+    segment = forms[forms.find('case "segment"'):forms.find('case "toggle"')]
+    capture_at = segment.find('const button = e.currentTarget;')
+    confirm_at = segment.find('await confirmSegmentChoice(')
+    activate_at = segment.find('button.classList.add("active");')
+    if not (0 <= capture_at < confirm_at < activate_at) or 'e.currentTarget.classList.add' in segment:
+        return fail("segment buttons do not retain their target across async confirmation")
     for path in sorted(UI.rglob("*.js")):
         source = path.read_text(encoding="utf-8")
         if path.name != "preview.js" and "/api/preview" in source:

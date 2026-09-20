@@ -390,10 +390,13 @@ export function renderOption(o, args, kind) {
           disabled: !!unavailable,
           title: unavailable || null,
           onclick: async e => {
+            // DOM event.currentTarget is cleared once an async handler yields.
+            // Keep the clicked button before the confirmation modal awaits.
+            const button = e.currentTarget;
             if (!await confirmSegmentChoice(o, args[o.key], v)) return;
             args[o.key] = v;
             $$("button", seg).forEach(b => b.classList.remove("active"));
-            e.currentTarget.classList.add("active");
+            button.classList.add("active");
             afterFormChange(kind, args);
             o.onChange && o.onChange(v);
           },
