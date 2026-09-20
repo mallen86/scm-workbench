@@ -56,6 +56,7 @@
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 - [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
+- [ ] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.
@@ -100,3 +101,7 @@
 - [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
 - [x] Add and verify the first Debian/Ubuntu x86_64 package with the bundled runtime, native IPC, XDG data, manual package-manager updates, and lifecycle smoke coverage.
 - [x] Add Arch/Manjaro x86_64 packaging with exact distro-bound updates, a package recipe, clean-container install checks, and WebKitGTK/native IPC lifecycle smokes.
+- [ ] Add browse buttons to choose the folder for front card directory, double-sided card directory, and output directory in advanced mode. Add the button to the right of the inputs. Also add a reset button for each to go back to the default.
+- [ ] Add a toggle for skipping the bottom left image. The id of the bottom left image changes depending on if borderless is seleted and what paper type is selected. This will use the `--skip` option. Letter/non-borderless 4, letter/borderless 6, a4/non-borderless 4, a4/borderless 6, a3/non-borderless 12, a3/borderless 12, tabloid/non-borderless 12, tabloid/borderless 12, arch_b/non-borderless 12, arch_b/borderless 14, legal/non-borderless 5, legal/borderless 5. Note legal is added when using scm off main but add the handler for it no matter the scm version.
+- [ ] Always use `--extend_corners 3.5mm` in simple mode and make 3.5mm the default in advanced mode. Users can still change the setting in advanced mode but it should just be 3.5mm out of the box.
+- [ ] Change the suggested text in the fit & finish section in advanced mode to say "ex: 3mm" to make it clearer it's not a default 
