@@ -48,6 +48,7 @@ def main() -> int:
         'const selected = await pickDirectory();',
         'onclick: () => setValue(strVal(optionDefault(o)))',
         'const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;',
+        'if (!await confirmSegmentChoice(o, args[o.key], v)) return;',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")
@@ -143,6 +144,27 @@ const formsForTest = formsSource
   .replace('from "./nav.js"', `from "${navUrl}"`)
   .replace('from "./settings-transport.js"', `from "${settingsTransportUrl}"`);
 const forms = await import(dataUrl(formsForTest));
+
+const registrationWarning = {
+  title: "Enable 4 registration marks?",
+  text: "Are you sure? Only enable this option if you know what you're doing.",
+  okLabel: "Enable 4 marks",
+};
+const registrationOption = { confirm_choices: { "4": registrationWarning } };
+let confirmationRequest = null;
+const acceptedFour = await forms.confirmSegmentChoice(
+  registrationOption, "3", "4", async request => { confirmationRequest = request; return true; });
+if (!acceptedFour || confirmationRequest !== registrationWarning)
+  fail("selecting 4 registration marks did not request the manifest confirmation");
+const cancelledFour = await forms.confirmSegmentChoice(
+  registrationOption, "3", "4", async () => false);
+if (cancelledFour) fail("cancelling the 4-mark confirmation accepted the choice");
+let redundantPrompts = 0;
+if (!await forms.confirmSegmentChoice(
+      registrationOption, "4", "4", async () => { redundantPrompts++; return false; }) || redundantPrompts)
+  fail("reselecting the active registration choice prompted again");
+if (!await forms.confirmSegmentChoice(registrationOption, "4", "3", async () => false))
+  fail("returning to 3 registration marks required confirmation");
 
 // Capability metadata must reset unsupported values both for a fresh form and
 // when restoring an older job-history entry. A disabled choice cannot remain

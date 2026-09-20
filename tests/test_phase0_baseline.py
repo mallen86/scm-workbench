@@ -428,6 +428,15 @@ class HttpContractTests(unittest.TestCase):
         self.assertFalse(advanced_custom["errors"])
         self.assertIn("--extend_corners 4mm", advanced_custom["cmd"])
 
+    def test_four_registration_marks_require_explicit_confirmation(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        self.assertEqual(options["registration"]["confirm_choices"], {"4": {
+            "title": "Enable 4 registration marks?",
+            "text": "Are you sure? Only enable this option if you know what you're doing.",
+            "okLabel": "Enable 4 marks",
+        }})
+
     def test_fit_and_finishing_placeholders_are_clearly_examples(self):
         create = server.get_manifest()["create_pdf"]
         group = next(group for group in create["groups"] if group["title"] == "Fit & edge finishing")

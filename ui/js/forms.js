@@ -21,6 +21,13 @@ export function optVisible(o, spec) {
 }
 
 
+export async function confirmSegmentChoice(option, current, next, showConfirm = confirmModal) {
+  if (String(current) === String(next)) return true;
+  const confirmation = (option?.confirm_choices || {})[String(next)];
+  return confirmation ? !!(await showConfirm(confirmation)) : true;
+}
+
+
 export function repoRowForKind(kind) {
   const key = kind.startsWith("extras_") ? "extras" : "scm";
   return (S.info?.repos || []).find(r => r.key === key) || null;
@@ -382,7 +389,8 @@ export function renderOption(o, args, kind) {
           class: String(args[o.key]) === String(v) ? "active" : "",
           disabled: !!unavailable,
           title: unavailable || null,
-          onclick: e => {
+          onclick: async e => {
+            if (!await confirmSegmentChoice(o, args[o.key], v)) return;
             args[o.key] = v;
             $$("button", seg).forEach(b => b.classList.remove("active"));
             e.currentTarget.classList.add("active");

@@ -1136,7 +1136,12 @@ def build_manifest(info: dict) -> dict:
                          requires_flags=["--paper_size"]),
                     _opt("registration", "Registration marks", "segment",
                          choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third",
-                         requires_flags=["--registration"]),
+                         requires_flags=["--registration"],
+                         confirm_choices={"4": {
+                             "title": "Enable 4 registration marks?",
+                             "text": "Are you sure? Only enable this option if you know what you're doing.",
+                             "okLabel": "Enable 4 marks",
+                         }}),
                     _opt("specialty", "Specialty layout", "select", choices=specialty_choices, default="", width="third",
                          requires_flags=["--specialty"],
                          help="Overrides the card size, paper size, and registration settings."),
