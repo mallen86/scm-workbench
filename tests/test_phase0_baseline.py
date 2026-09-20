@@ -473,25 +473,47 @@ class HttpContractTests(unittest.TestCase):
         self.assertFalse(preview["errors"])
         self.assertIn("--skip 0 --skip 4 --skip 6", preview["cmd"])
 
-    def test_skip_bottom_left_uses_the_paper_and_borderless_layout_index(self):
-        expected = {
-            ("letter", False): 4, ("letter", True): 6,
-            ("a4", False): 4, ("a4", True): 6,
-            ("a3", False): 12, ("a3", True): 12,
-            ("tabloid", False): 12, ("tabloid", True): 12,
-            ("arch_b", False): 12, ("arch_b", True): 14,
-            ("legal", False): 5, ("legal", True): 5,
+    def test_skip_bottom_left_uses_paper_card_and_borderless_layout(self):
+        info = json.loads(json.dumps(server.get_info()))
+        scm_info = info["scm"]
+        scm_info["paper_sizes"][0]["aliases"] = ["ansi_a"]
+        scm_info["paper_sizes"].append({
+            "name": "legal", "width": "14in", "height": "8.5in", "aliases": [],
+        })
+        scm_info["card_sizes"].append({
+            "name": "mini", "width": "41mm", "height": "63mm", "aliases": ["small"],
+        })
+        scm_info["layouts"]["letter"]["mini"] = {
+            "default": {"num_rows": 3, "num_cols": 5},
+            "borderless": {"num_rows": 4, "num_cols": 4},
         }
-        for (paper, borderless), index in expected.items():
-            with self.subTest(paper=paper, borderless=borderless):
-                self.assertEqual(server._bottom_left_skip_index(paper, borderless), index)
-        self.assertEqual(server._bottom_left_skip_index("ARCH-B", True), 14)
-        self.assertIsNone(server._bottom_left_skip_index("custom", False))
+        scm_info["layouts"]["legal"] = {"standard": {
+            "default": {"num_rows": 2, "num_cols": 5},
+            "borderless": {"num_rows": 2, "num_cols": 5},
+        }}
+        expected = {
+            ("letter", "standard", False): 4,
+            ("letter", "standard", True): 6,
+            ("letter", "mini", False): 10,
+            ("letter", "mini", True): 12,
+            ("legal", "standard", False): 5,
+            ("legal", "standard", True): 5,
+            ("ansi_a", "small", False): 10,
+        }
+        for (paper, card, borderless), index in expected.items():
+            with self.subTest(paper=paper, card=card, borderless=borderless):
+                self.assertEqual(
+                    server._bottom_left_skip_index(info, paper, card, borderless), index)
+        self.assertIsNone(server._bottom_left_skip_index(
+            info, "letter", "unknown", False))
+        self.assertIsNone(server._bottom_left_skip_index(
+            info, "custom", "standard", False))
 
         create = server.get_manifest()["create_pdf"]
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(options["skip_bottom_left"]["simple"])
         self.assertEqual(options["skip_bottom_left"]["requires_flags"], ["--skip"])
+        self.assertIn("card size", options["skip_bottom_left"]["help"])
 
         ordinary = server.build_preview("create_pdf", {
             "card_size": "standard", "paper_size": "letter", "skip_bottom_left": True,
@@ -504,6 +526,16 @@ class HttpContractTests(unittest.TestCase):
         })
         self.assertFalse(borderless["errors"])
         self.assertEqual(borderless["cmd"].count("--skip 6"), 1)
+
+        args = {
+            "front_dir": "game/front", "back_dir": "game/back", "double_sided_dir": "",
+            "output_path": "game/output/game.pdf", "card_size": "mini", "paper_size": "letter",
+            "only_fronts": True, "skip_bottom_left": True,
+        }
+        argv, _cwd, _env, _title, _warnings, errors = server.build_command(
+            "create_pdf", args, server.load_settings(), info, write_deck=False)
+        self.assertFalse(errors)
+        self.assertEqual(argv[argv.index("--skip") + 1], "10")
 
     def test_custom_paper_label_names_the_dxf_and_saved_size(self):
         preview = server.build_preview("dxf_single", {

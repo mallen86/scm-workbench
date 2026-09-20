@@ -1204,7 +1204,7 @@ def build_manifest(info: dict) -> dict:
                          help="Comma-separated card indexes to skip, starting from zero. This can work around bad registration."),
                     _opt("skip_bottom_left", "Skip bottom-left position", "toggle", default=False, width="half", simple=True,
                          requires_flags=["--skip"],
-                         help="Skips the bottom-left card position for the selected paper and borderless layout."),
+                         help="Skips the bottom-left card position for the selected paper, card size, and borderless layout."),
                     _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
                          requires_flags=["--show_outline"]),
@@ -4890,20 +4890,39 @@ def _dxf_output_without_overwriting(cwd: Optional[Path], value: str) -> str:
     return raw
 
 
-_BOTTOM_LEFT_SKIP_INDEXES = {
-    "letter": (4, 6),
-    "a4": (4, 6),
-    "a3": (12, 12),
-    "tabloid": (12, 12),
-    "arch_b": (12, 14),
-    "legal": (5, 5),
-}
+def _named_layout_definition(items: Any, value: Any) -> Optional[dict]:
+    wanted = str(value or "").casefold()
+    if not wanted or not isinstance(items, list):
+        return None
+    return next((item for item in items
+                 if isinstance(item, dict) and any(
+                     isinstance(name, str) and name.casefold() == wanted
+                     for name in [item.get("name"), *(item.get("aliases") or [])])), None)
 
 
-def _bottom_left_skip_index(paper: Any, borderless: bool) -> Optional[int]:
-    key = re.sub(r"[\s-]+", "_", str(paper or "").strip().casefold())
-    indexes = _BOTTOM_LEFT_SKIP_INDEXES.get(key)
-    return indexes[1 if borderless else 0] if indexes else None
+def _create_pdf_layout(info: dict, paper: Any, card: Any, borderless: bool) -> Optional[dict]:
+    scm_info = info.get("scm") or {}
+    paper_def = _named_layout_definition(scm_info.get("paper_sizes", []), paper)
+    card_def = _named_layout_definition(scm_info.get("card_sizes", []), card)
+    if not paper_def or not card_def:
+        return None
+    variant = "borderless" if borderless else "default"
+    layout = (((scm_info.get("layouts") or {}).get(paper_def.get("name")) or {})
+              .get(card_def.get("name")) or {}).get(variant)
+    return layout if isinstance(layout, dict) else None
+
+
+def _bottom_left_skip_index(info: dict, paper: Any, card: Any, borderless: bool) -> Optional[int]:
+    layout = _create_pdf_layout(info, paper, card, borderless)
+    rows = layout.get("num_rows") if layout else None
+    columns = layout.get("num_cols") if layout else None
+    if (isinstance(rows, bool) or isinstance(columns, bool) or
+            not isinstance(rows, int) or not isinstance(columns, int) or
+            rows < 1 or columns < 1 or rows > 32 or columns > 32):
+        return None
+    # Upstream assigns indexes row-major from the top-left, so the first
+    # position in the last row is the bottom-left slot.
+    return (rows - 1) * columns
 
 
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
@@ -5065,9 +5084,12 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             if a.get("specialty"):
                 errors.append("Skip bottom-left position cannot be combined with a specialty layout.")
             else:
-                bottom_left = _bottom_left_skip_index(paper, bool(a.get("borderless")))
+                bottom_left = _bottom_left_skip_index(
+                    info, paper, card, bool(a.get("borderless")))
                 if bottom_left is None:
-                    errors.append(f"Skip bottom-left position is not defined for paper size “{paper}”.")
+                    errors.append(
+                        f"Skip bottom-left position is not defined for paper size “{paper}” "
+                        f"and card size “{card}”.")
                 elif bottom_left not in skip_indexes:
                     skip_indexes.append(bottom_left)
         for idx in skip_indexes:
@@ -6404,13 +6426,6 @@ def _pdf_preview_validate_paper(info: dict, args: dict, settings: dict) -> None:
         raise PdfPreviewError("Preview unavailable because the selected paper size is too large for a safe live preview.")
 
 
-def _pdf_preview_named_definition(items: list, value: str) -> Optional[dict]:
-    wanted = value.casefold()
-    return next((item for item in items
-                 if any(isinstance(name, str) and name.casefold() == wanted
-                        for name in [item.get("name"), *(item.get("aliases") or [])])), None)
-
-
 def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
     """Return the verified number of usable card positions on page one."""
     scm_info = info.get("scm") or {}
@@ -6422,19 +6437,12 @@ def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
             if specialty else None
     else:
         defaults = settings.get("defaults", {})
-        paper = _pdf_preview_named_definition(
-            scm_info.get("paper_sizes", []),
-            str(args.get("paper_size") or defaults.get("paper_size") or "letter"),
+        layout = _create_pdf_layout(
+            info,
+            args.get("paper_size") or defaults.get("paper_size") or "letter",
+            args.get("card_size") or defaults.get("card_size") or "standard",
+            bool(args.get("borderless")),
         )
-        card = _pdf_preview_named_definition(
-            scm_info.get("card_sizes", []),
-            str(args.get("card_size") or defaults.get("card_size") or "standard"),
-        )
-        variant = "borderless" if args.get("borderless") else "default"
-        layout = None
-        if paper and card:
-            layout = (((scm_info.get("layouts") or {}).get(paper.get("name")) or {})
-                      .get(card.get("name")) or {}).get(variant)
     rows = layout.get("num_rows") if isinstance(layout, dict) else None
     columns = layout.get("num_cols") if isinstance(layout, dict) else None
     if (isinstance(rows, bool) or isinstance(columns, bool) or
@@ -6454,7 +6462,9 @@ def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
     if args.get("skip_bottom_left") and not specialty_name:
         defaults = settings.get("defaults", {})
         bottom_left = _bottom_left_skip_index(
+            info,
             args.get("paper_size") or defaults.get("paper_size") or "letter",
+            args.get("card_size") or defaults.get("card_size") or "standard",
             bool(args.get("borderless")),
         )
         if bottom_left is not None and 0 <= bottom_left < total:
