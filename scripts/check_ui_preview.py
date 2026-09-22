@@ -44,9 +44,22 @@ def main() -> int:
         "o.unavailable_choices || {}",
         'control.disabled = true',
         'runBtn.classList.add("capability-disabled")',
+        'o.type === "path" && o.browse_directory',
+        'const selected = await pickDirectory();',
+        'onclick: () => setValue(strVal(optionDefault(o)))',
+        'const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;',
+        'if (!await confirmSegmentChoice(o, args[o.key], v)) return;',
+        'const button = e.currentTarget;',
+        'button.classList.add("active");',
     ):
         if required not in forms:
             return fail(f"preview retry/sequencing/rendering contract lost: {required}")
+    segment = forms[forms.find('case "segment"'):forms.find('case "toggle"')]
+    capture_at = segment.find('const button = e.currentTarget;')
+    confirm_at = segment.find('await confirmSegmentChoice(')
+    activate_at = segment.find('button.classList.add("active");')
+    if not (0 <= capture_at < confirm_at < activate_at) or 'e.currentTarget.classList.add' in segment:
+        return fail("segment buttons do not retain their target across async confirmation")
     for path in sorted(UI.rglob("*.js")):
         source = path.read_text(encoding="utf-8")
         if path.name != "preview.js" and "/api/preview" in source:
@@ -123,6 +136,7 @@ const jobsUrl = dataUrl("export const jobs = {}; ");
 const prepUrl = dataUrl("export const repoReady = () => true; ");
 const navUrl = dataUrl("export const uiMode = () => \"advanced\"; ");
 const jobEventsUrl = dataUrl("export const publishJobsUpdated = () => {}; ");
+const settingsTransportUrl = dataUrl("export const canPickDirectory = () => false; export const pickDirectory = async () => null; ");
 globalThis.releases = [];
 const previewStubUrl = dataUrl(`
   export function preview() {
@@ -135,8 +149,30 @@ const formsForTest = formsSource
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewStubUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)
-  .replace('from "./nav.js"', `from "${navUrl}"`);
+  .replace('from "./nav.js"', `from "${navUrl}"`)
+  .replace('from "./settings-transport.js"', `from "${settingsTransportUrl}"`);
 const forms = await import(dataUrl(formsForTest));
+
+const registrationWarning = {
+  title: "Enable 4 registration marks?",
+  text: "Are you sure? Only enable this option if you know what you're doing.",
+  okLabel: "Enable 4 marks",
+};
+const registrationOption = { confirm_choices: { "4": registrationWarning } };
+let confirmationRequest = null;
+const acceptedFour = await forms.confirmSegmentChoice(
+  registrationOption, "3", "4", async request => { confirmationRequest = request; return true; });
+if (!acceptedFour || confirmationRequest !== registrationWarning)
+  fail("selecting 4 registration marks did not request the manifest confirmation");
+const cancelledFour = await forms.confirmSegmentChoice(
+  registrationOption, "3", "4", async () => false);
+if (cancelledFour) fail("cancelling the 4-mark confirmation accepted the choice");
+let redundantPrompts = 0;
+if (!await forms.confirmSegmentChoice(
+      registrationOption, "4", "4", async () => { redundantPrompts++; return false; }) || redundantPrompts)
+  fail("reselecting the active registration choice prompted again");
+if (!await forms.confirmSegmentChoice(registrationOption, "4", "3", async () => false))
+  fail("returning to 3 registration marks required confirmation");
 
 // Capability metadata must reset unsupported values both for a fresh form and
 // when restoring an older job-history entry. A disabled choice cannot remain
@@ -154,6 +190,21 @@ const capabilityRestored = forms.restoreArgs("capability_fixture", { borderless:
 if (capabilityRestored.borderless !== false || capabilityRestored.variant !== "default")
   fail("job-history restore reactivated an unsupported value");
 
+// Skip indexes use a normal text box in the live form, while completed jobs
+// retain the server-normalized integer array. History must restore that array
+// as editable comma-separated text rather than dropping it.
+globalThis.formState.manifest.skip_fixture = { groups: [{ options: [
+  { key: "skip", type: "text", int_list: true, default: "" },
+] }] };
+const skipRestored = forms.restoreArgs("skip_fixture", { skip: [0, 4, 6] });
+if (skipRestored.skip !== "0, 4, 6") fail("job-history skip indexes were not restored as text");
+
+if (forms.directorySelectionValue({}, "/picked/fronts") !== "/picked/fronts" ||
+    forms.directorySelectionValue({ browse_filename: "game.pdf" }, "/picked/output/") !== "/picked/output/game.pdf" ||
+    forms.directorySelectionValue({ browse_filename: "game.pdf" }, "C:\\picked\\output\\") !== "C:\\picked\\output\\game.pdf") {
+  fail("directory selections were not converted to form path values");
+}
+
 // Saved Create PDF preferences replace hard-coded manifest defaults for a
 // fresh form. A later save updates an untouched field but preserves a field
 // the user already edited while navigating between pages.
@@ -165,11 +216,13 @@ globalThis.formState.manifest.create_pdf = { groups: [{ options: [
   { key: "paper_size", type: "select", default: "letter", choices: [["letter", "Letter"], ["a4", "A4"]] },
   { key: "ppi", type: "range", default: 1200 },
   { key: "quality", type: "range", default: 100 },
+  { key: "extend_corners", type: "text", default: "3.5mm" },
 ] }] };
 const configuredDefaults = forms.defaultArgs("create_pdf");
 if (configuredDefaults.card_size !== "poker" || configuredDefaults.paper_size !== "a4" ||
-    configuredDefaults.ppi !== 600 || configuredDefaults.quality !== 82) {
-  fail("fresh Create PDF form ignored saved defaults");
+    configuredDefaults.ppi !== 600 || configuredDefaults.quality !== 82 ||
+    configuredDefaults.extend_corners !== "3.5mm") {
+  fail("fresh Create PDF form ignored saved or manifest defaults");
 }
 globalThis.formState.forms.create_pdf = { ...configuredDefaults };
 forms.applySavedFormDefaults("create_pdf", globalThis.formState.info.settings.defaults,

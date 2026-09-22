@@ -280,7 +280,7 @@ export function updateFooter() {
   f.innerHTML = "";
   const job = S.jobs.find(j => j.id === S.activeJobId);
   if (!job) return;
-  f.append(
+  f.append(...[
     el("span", { class: `statusdot ${job.status}` }, job.status),
     job.exit_code != null ? el("span", { class: "mono" }, `exit ${job.exit_code}`) : null,
     el("span", { class: "mono" }, fmtTs(job.ts)),
@@ -311,7 +311,7 @@ export function updateFooter() {
       } }, ico("folder"), "Reveal folder");
     })(),
     el("button", { class: "btn btn-ghost btn-sm", onclick: () => { if (job.status === "running") jobs.kill(job.id).then(() => toast("warn", "Stopping…")).catch(e => toast("err", e.message || "Could not stop job")); } }, ico("stop"), "Stop"),
-  );
+  ].filter(child => child != null));
 }
 
 

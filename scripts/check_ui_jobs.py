@@ -30,6 +30,11 @@ def main() -> int:
         "lineTruncated" not in console or "initial.omitted" not in console or "initial.nextSeq" not in console):
         print("FAIL: console does not page and visibly cap completed logs")
         return 1
+    footer = console[console.find("export function updateFooter"):
+                     console.find("export async function openJobPdf")]
+    if "].filter(child => child != null));" not in footer:
+        print("FAIL: console footer can stringify absent conditional controls as null")
+        return 1
     if "typeof handlers === \"number\"" in jobs:
         print("FAIL: subscribe retains undocumented positional argument mangling")
         return 1

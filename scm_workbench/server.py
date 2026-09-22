@@ -1121,7 +1121,10 @@ def build_manifest(info: dict) -> dict:
         "simple_sections": [
             {
                 "title": "Print setup",
-                "rows": [["borderless", "load_offset", "only_fronts"]],
+                "rows": [
+                    ["borderless", "load_offset"],
+                    ["only_fronts", "skip_bottom_left"],
+                ],
             },
             {
                 "title": "Image finishing",
@@ -1134,18 +1137,21 @@ def build_manifest(info: dict) -> dict:
                 "title": "Sources & output",
                 "options": [
                     _opt("front_dir", "Front images folder", "path", default="game/front", width="half",
-                         requires_flags=["--front_dir_path"], help="Folder containing card front images."),
+                         browse_directory=True, requires_flags=["--front_dir_path"],
+                         help="Folder containing card front images."),
                     _opt("back_dir", "Card back folder", "path", default="game/back", width="half",
                          requires_flags=["--back_dir_path"], help="Folder containing the optional card back image."),
                     _opt("double_sided_dir", "Double-sided folder", "path", default="game/double_sided", width="half",
-                         requires_flags=["--double_sided_dir_path"],
+                         browse_directory=True, requires_flags=["--double_sided_dir_path"],
                          help="Folder containing cards with different front and back art."),
-                    _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="full",
+                    _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="half",
+                         browse_directory=True, browse_filename="game.pdf",
                          requires_flags=["--output_path"]),
                     _opt("output_images", "Output images instead of a PDF", "toggle", default=False, width="third",
                          requires_flags=["--output_images"]),
                     _opt("only_fronts", "Front pages only", "toggle", default=False, width="third", simple=True,
-                         requires_flags=["--only_fronts"]),
+                         requires_flags=["--only_fronts"],
+                         simple_help="Creates front pages only and leaves out card-back pages."),
                 ],
             },
             {
@@ -1157,7 +1163,12 @@ def build_manifest(info: dict) -> dict:
                          requires_flags=["--paper_size"]),
                     _opt("registration", "Registration marks", "segment",
                          choices=[["3", "3 marks"], ["4", "4 marks"]], default="3", width="third",
-                         requires_flags=["--registration"]),
+                         requires_flags=["--registration"],
+                         confirm_choices={"4": {
+                             "title": "Enable 4 registration marks?",
+                             "text": "Are you sure? Only enable this option if you know what you're doing.",
+                             "okLabel": "Enable 4 marks",
+                         }}),
                     _opt("specialty", "Specialty layout", "select", choices=specialty_choices, default="", width="third",
                          requires_flags=["--specialty"],
                          help="Overrides the card size, paper size, and registration settings."),
@@ -1194,25 +1205,25 @@ def build_manifest(info: dict) -> dict:
                     _opt("mpcfill_crop", "MPCFill Crop", "toggle", default=False, width="third", simple=True, simple_only=True,
                          requires_flags=["--crop"],
                          help="Applies a 3mm crop to front images to remove MPCFill padding. To override it, switch to Advanced mode and use “Crop edges (fronts)”."),
-                    _opt("extend_corners_simple", "Extend Corners", "toggle", default=False, width="third", simple=True, simple_only=True,
+                    _opt("extend_corners_simple", "Extend Corners", "toggle", default=True, width="third", simple=True, simple_only=True,
                          requires_flags=["--extend_corners"],
                          requires_flag_metavars={"--extend_corners": ["TEXT"]},
                          help="Extends rounded front and double-sided image corners by 3.5mm. To override it, switch to Advanced mode and use “Extend rounded corners (fronts)”."),
-                    _opt("crop", "Crop edges (fronts)", "text", placeholder="3mm · 0.125in", width="third",
+                    _opt("crop", "Crop edges (fronts)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--crop"]),
-                    _opt("crop_backs", "Crop edges (backs)", "text", placeholder="3mm · 0.125in", width="third",
+                    _opt("crop_backs", "Crop edges (backs)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--crop_backs"]),
-                    _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="3mm", width="third",
+                    _opt("extend_edges", "Extend edges (fronts)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_edges"]),
-                    _opt("extend_edges_backs", "Extend edges (backs)", "text", placeholder="3mm", width="third",
+                    _opt("extend_edges_backs", "Extend edges (backs)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_edges_backs"]),
-                    _opt("extend_corners", "Extend rounded corners (fronts)", "text", placeholder="3mm", width="third",
+                    _opt("extend_corners", "Extend rounded corners (fronts)", "text", default="3.5mm", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_corners"]),
-                    _opt("extend_corners_backs", "Extend rounded corners (backs)", "text", placeholder="3mm", width="third",
+                    _opt("extend_corners_backs", "Extend rounded corners (backs)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_corners_backs"]),
-                    _opt("extend_bleed", "Extend outer bleed (front pages)", "text", placeholder="3mm", width="third",
+                    _opt("extend_bleed", "Extend outer bleed (front pages)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_bleed"]),
-                    _opt("extend_bleed_backs", "Extend outer bleed (back pages)", "text", placeholder="3mm", width="third",
+                    _opt("extend_bleed_backs", "Extend outer bleed (back pages)", "text", placeholder="ex: 3mm", width="third",
                          requires_flags=["--extend_bleed_backs"]),
                 ],
             },
@@ -1220,9 +1231,12 @@ def build_manifest(info: dict) -> dict:
                 "title": "Advanced",
                 "collapsible": True,
                 "options": [
-                    _opt("skip", "Skip card indexes", "chips", int=True, placeholder="0, 4", width="half",
+                    _opt("skip", "Skip card indexes", "text", int_list=True, placeholder="ex: 0, 4", width="half",
                          requires_flags=["--skip"],
-                         help="Card indexes to skip, starting from zero. This can work around bad registration."),
+                         help="Comma-separated card indexes to skip, starting from zero. This can work around bad registration."),
+                    _opt("skip_bottom_left", "Skip bottom-left position", "toggle", default=False, width="half", simple=True,
+                         simple_only=True, requires_flags=["--skip"],
+                         help="Skips the bottom-left card position for the selected paper, card size, and borderless layout."),
                     _opt("label", "Custom page label", "text", width="half", requires_flags=["--label"]),
                     _opt("show_outline", "Show white cut outline", "toggle", default=False, width="half",
                          requires_flags=["--show_outline"]),
@@ -5030,6 +5044,41 @@ def _dxf_output_without_overwriting(cwd: Optional[Path], value: str) -> str:
     return raw
 
 
+def _named_layout_definition(items: Any, value: Any) -> Optional[dict]:
+    wanted = str(value or "").casefold()
+    if not wanted or not isinstance(items, list):
+        return None
+    return next((item for item in items
+                 if isinstance(item, dict) and any(
+                     isinstance(name, str) and name.casefold() == wanted
+                     for name in [item.get("name"), *(item.get("aliases") or [])])), None)
+
+
+def _create_pdf_layout(info: dict, paper: Any, card: Any, borderless: bool) -> Optional[dict]:
+    scm_info = info.get("scm") or {}
+    paper_def = _named_layout_definition(scm_info.get("paper_sizes", []), paper)
+    card_def = _named_layout_definition(scm_info.get("card_sizes", []), card)
+    if not paper_def or not card_def:
+        return None
+    variant = "borderless" if borderless else "default"
+    layout = (((scm_info.get("layouts") or {}).get(paper_def.get("name")) or {})
+              .get(card_def.get("name")) or {}).get(variant)
+    return layout if isinstance(layout, dict) else None
+
+
+def _bottom_left_skip_index(info: dict, paper: Any, card: Any, borderless: bool) -> Optional[int]:
+    layout = _create_pdf_layout(info, paper, card, borderless)
+    rows = layout.get("num_rows") if layout else None
+    columns = layout.get("num_cols") if layout else None
+    if (isinstance(rows, bool) or isinstance(columns, bool) or
+            not isinstance(rows, int) or not isinstance(columns, int) or
+            rows < 1 or columns < 1 or rows > 32 or columns > 32):
+        return None
+    # Upstream assigns indexes row-major from the top-left, so the first
+    # position in the last row is the bottom-left slot.
+    return (rows - 1) * columns
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -5166,11 +5215,11 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 # the Crop boxes are the direct control - so a leftover value
                 # can't silently crop a PDF, and a typed value always wins.
                 v = "3mm"
-            if key == "extend_corners" and not v and a.get("extend_corners_simple") and simple:
-                # The simple preset mirrors MPCFill Crop: keep the direct CLI
-                # value authoritative, and never let a hidden simple-only value
-                # affect an Advanced-mode command.
-                v = "3.5mm"
+            if key == "extend_corners" and simple:
+                # The visible Simple-mode toggle owns this setting. Ignore any
+                # hidden value retained from Advanced mode: on uses the fixed
+                # 3.5mm preset, while off emits no corner-extension argument.
+                v = "3.5mm" if a.get("extend_corners_simple") else ""
             if v: argv += ["--" + key, str(v)]
         ppi = a.get("ppi")
         ppi = int(ppi) if ppi not in (None, "") else int(d.get("ppi", 1200))
@@ -5184,7 +5233,20 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["--ppi", str(ppi)]
         if quality_available and not (simple and quality == 100):
             argv += ["--quality", str(quality)]
-        for idx in a.get("skip") or []:
+        skip_indexes = list(a.get("skip") or [])
+        if a.get("skip_bottom_left"):
+            if a.get("specialty"):
+                errors.append("Skip bottom-left position cannot be combined with a specialty layout.")
+            else:
+                bottom_left = _bottom_left_skip_index(
+                    info, paper, card, bool(a.get("borderless")))
+                if bottom_left is None:
+                    errors.append(
+                        f"Skip bottom-left position is not defined for paper size “{paper}” "
+                        f"and card size “{card}”.")
+                elif bottom_left not in skip_indexes:
+                    skip_indexes.append(bottom_left)
+        for idx in skip_indexes:
             argv += ["--skip", str(idx)]
         if a.get("label"): argv += ["--label", str(a["label"])]
         if a.get("show_outline"): argv += ["--show_outline"]
@@ -6173,7 +6235,18 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
                 if key in raw and not _unavailable_value_matches(o, v):
                     errors.append(f"{o['label']}: {o.get('unavailable_reason') or 'this option is unavailable.'}")
                 continue
-            if t == "chips":
+            if o.get("int_list"):
+                if isinstance(v, str):
+                    v = [x for x in re.split(r"[\s,]+", v.strip()) if x]
+                v = v if isinstance(v, list) else []
+                clean = []
+                for x in v:
+                    if re.fullmatch(r"\d+", str(x)):
+                        clean.append(int(x))
+                    else:
+                        errors.append(f"{o['label']}: “{x}” is not a valid index.")
+                args[key] = clean
+            elif t == "chips":
                 if isinstance(v, str):
                     v = [x.strip() for x in v.split(",") if x.strip()]
                 v = v if isinstance(v, list) else []
@@ -6573,13 +6646,6 @@ def _pdf_preview_validate_paper(info: dict, args: dict, settings: dict) -> None:
         raise PdfPreviewError("Preview unavailable because the selected paper size is too large for a safe live preview.")
 
 
-def _pdf_preview_named_definition(items: list, value: str) -> Optional[dict]:
-    wanted = value.casefold()
-    return next((item for item in items
-                 if any(isinstance(name, str) and name.casefold() == wanted
-                        for name in [item.get("name"), *(item.get("aliases") or [])])), None)
-
-
 def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
     """Return the verified number of usable card positions on page one."""
     scm_info = info.get("scm") or {}
@@ -6591,19 +6657,12 @@ def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
             if specialty else None
     else:
         defaults = settings.get("defaults", {})
-        paper = _pdf_preview_named_definition(
-            scm_info.get("paper_sizes", []),
-            str(args.get("paper_size") or defaults.get("paper_size") or "letter"),
+        layout = _create_pdf_layout(
+            info,
+            args.get("paper_size") or defaults.get("paper_size") or "letter",
+            args.get("card_size") or defaults.get("card_size") or "standard",
+            bool(args.get("borderless")),
         )
-        card = _pdf_preview_named_definition(
-            scm_info.get("card_sizes", []),
-            str(args.get("card_size") or defaults.get("card_size") or "standard"),
-        )
-        variant = "borderless" if args.get("borderless") else "default"
-        layout = None
-        if paper and card:
-            layout = (((scm_info.get("layouts") or {}).get(paper.get("name")) or {})
-                      .get(card.get("name")) or {}).get(variant)
     rows = layout.get("num_rows") if isinstance(layout, dict) else None
     columns = layout.get("num_cols") if isinstance(layout, dict) else None
     if (isinstance(rows, bool) or isinstance(columns, bool) or
@@ -6620,6 +6679,16 @@ def _pdf_preview_page_slots(info: dict, args: dict, settings: dict) -> int:
             continue
         if 0 <= index < total:
             skipped.add(index)
+    if args.get("skip_bottom_left") and not specialty_name:
+        defaults = settings.get("defaults", {})
+        bottom_left = _bottom_left_skip_index(
+            info,
+            args.get("paper_size") or defaults.get("paper_size") or "letter",
+            args.get("card_size") or defaults.get("card_size") or "standard",
+            bool(args.get("borderless")),
+        )
+        if bottom_left is not None and 0 <= bottom_left < total:
+            skipped.add(bottom_left)
     usable = total - len(skipped)
     if usable < 1:
         raise PdfPreviewError("Preview unavailable because every position on the first page is skipped.")

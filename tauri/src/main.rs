@@ -143,9 +143,10 @@ fn embedded_index_url() -> Url {
     Url::parse(&format!("{origin}/index.html")).expect("embedded Tauri URL is valid")
 }
 
-/// Native repository selection owns the directory picker. Browsers cannot
-/// provide an absolute filesystem path, so this command is intentionally
-/// separate from worker RPC and available only to the embedded app window.
+/// Native directory selection owns the folder picker used by repository
+/// settings and manifest-driven job forms. Browsers cannot provide an absolute
+/// filesystem path, so this command is intentionally separate from worker RPC
+/// and available only to the embedded app window.
 #[tauri::command]
 async fn wb_pick_repo_directory(window: WebviewWindow) -> Result<Value, String> {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -153,14 +154,14 @@ async fn wb_pick_repo_directory(window: WebviewWindow) -> Result<Value, String> 
         .dialog()
         .file()
         .set_parent(&window)
-        .set_title("Select repository folder")
+        .set_title("Select folder")
         .pick_folder(move |path| {
             let _ = sender.send(path);
         });
     let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
         .await
-        .map_err(|_| "repository folder picker failed".to_string())
-        .and_then(|result| result.map_err(|_| "repository folder picker failed".to_string()))?;
+        .map_err(|_| "folder picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "folder picker failed".to_string()))?;
     let Some(path) = selected else {
         return Ok(Value::Null);
     };

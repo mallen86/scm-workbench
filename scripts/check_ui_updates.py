@@ -38,11 +38,13 @@ def main():
     ):
         if marker not in source:
             return fail(f"updates facade is missing {marker}")
-    if 'import { getUpdates, checkUpdates, getUpdateNotes } from "../updates-transport.js";' not in page:
+    if 'import { getUpdates, checkUpdates } from "../updates-transport.js";' not in page:
         return fail("settings page does not import the updates facade")
-    if 'import { refreshUpdateNotice, startUpdateInstall, updateInstallActive } from "../updater-ui.js";' not in page:
-        return fail("settings page does not use the shared update-install controller")
-    for marker in ("getUpdates()", "checkUpdates(true)", "getUpdateNotes(tag)", "startUpdateInstall()",
+    if 'import { refreshUpdateNotice, showWhatsNew, startUpdateInstall, updateInstallActive } from "../updater-ui.js";' not in page:
+        return fail("settings page does not use the shared update controller and release-notes view")
+    if "function showWhatsNew(" in page:
+        return fail("settings duplicates the shared release-notes view")
+    for marker in ("getUpdates()", "checkUpdates(true)", "startUpdateInstall()", "showWhatsNew(st.latest, releaseUrl)",
                    "let checkPending = false", "checkPending = true", "checkPending = false",
                    "if (checkPending || st.checking)", "if (updateInstallActive())",
                    'setBtn("Updating…", null, true)', "uBtn.disabled = true;",
@@ -76,6 +78,7 @@ def main():
                    'setInterval(tick, 250)', "export function updateInstallActive()",
                    "export async function startUpdateInstall()", "UPDATE_ACTIVE_STATUSES",
                    "export function startAutomaticUpdateChecks()",
+                   "export function showWhatsNew(tag, releaseUrl)", "getUpdateNotes(tag)",
                    "AUTOMATIC_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000",
                    "await checkUpdates(true)", "await refreshUpdateNotice()",
                    "_updRequestPending = true", "removeUpdateNotice();"):
@@ -101,7 +104,10 @@ def main():
                    'state.package_format = view?.package_format;',
                    '"View download"', 'Install the Arch package with pacman.',
                    'Install the Debian package with your software manager.',
-                   'This Linux distribution does not have a supported update package.'):
+                   'This Linux distribution does not have a supported update package.',
+                   'el("a", { class: "linkish" }, "What\'s new")',
+                   'showWhatsNew(tag, releaseUrl);',
+                   'actions.append(whatsNew, install);'):
         if marker not in updater_ui:
             return fail(f"the sidebar update notice is missing {marker}")
     # Only a server-approved update or stable-channel downgrade may raise the notice.
@@ -228,17 +234,32 @@ class Classes {
 }
 class Element {
   constructor(tag, attrs = {}, children = []) {
-    this.tag = tag; this.children = []; this.textContent = ""; this.isConnected = true;
+    this.tag = tag; this.children = []; this.textContent = ""; this.innerHTML = ""; this.isConnected = true;
     this.classList = new Classes(attrs.class); this.style = {}; this.dataset = {};
     this.append(...children); Object.assign(this, Object.fromEntries(Object.entries(attrs).filter(([key]) => key !== "class")));
   }
   append(...children) { for (const child of children.flat()) { if (child instanceof Element) this.children.push(child); else if (child != null) this.textContent += String(child); } }
   before(child) { globalThis.__insertedUpdateStrip = child; child.isConnected = true; }
   remove() { this.isConnected = false; if (this.id) globalThis.__updateNodes.delete("#" + this.id); }
+  matches(selector) { return selector.startsWith(".") ? this.classList.contains(selector.slice(1)) : this.tag === selector; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(",").map(value => value.trim());
+    const found = [];
+    for (const child of this.children) {
+      if (selectors.some(value => child.matches(value))) found.push(child);
+      found.push(...child.querySelectorAll(selector));
+    }
+    return found;
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   get firstElementChild() { return this.children[0] || null; }
 }
 globalThis.__updateNodes = new Map();
 globalThis.__updateFoot = new Element("footer");
+globalThis.__updateModalRoot = new Element("div", { id: "modal-root" });
+globalThis.__updateModalRoot.hidden = true;
+globalThis.__updateModal = new Element("div", { class: "modal" });
+globalThis.__updateModalRoot.append(globalThis.__updateModal);
 globalThis.__makeUpdateElement = (tag, attrs, children) => {
   const node = new Element(tag, attrs, children);
   if (node.id) globalThis.__updateNodes.set("#" + node.id, node);
@@ -250,13 +271,15 @@ globalThis.__updateJobs = {
   log: async () => ({ lines: ["Extracting the new app …", "    ! archive contained an unsafe path", "✕ exited with code 1"] }),
 };
 globalThis.__updateSharedState = { info: { settings: { ui_mode: "advanced" } } };
-const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { return selector === ".sidebar-foot" ? globalThis.__updateFoot : globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); } export function openUrl(url, label) { globalThis.__openedUpdateUrls.push({ url, label }); } export function confirmModal(options) { globalThis.__updateConfirms.push(options); return Promise.resolve(globalThis.__updateConfirmResult); }`);
+const updaterCore = dataUrl(`export const S = globalThis.__updateSharedState; export function $(selector) { if (selector === ".sidebar-foot") return globalThis.__updateFoot; if (selector === "#modal-root") return globalThis.__updateModalRoot; if (selector === ".modal") return globalThis.__updateModal; return globalThis.__updateNodes.get(selector) || null; } export function el(tag, attrs, ...children) { return globalThis.__makeUpdateElement(tag, attrs || {}, children); } export function ico(name) { return globalThis.__makeUpdateElement("span", { "data-ico": name }, []); } export function openUrl(url, label) { globalThis.__openedUpdateUrls.push({ url, label }); } export function confirmModal(options) { globalThis.__updateConfirms.push(options); return Promise.resolve(globalThis.__updateConfirmResult); }`);
 const updaterJobs = dataUrl(`export const jobs = globalThis.__updateJobs;`);
 globalThis.__updateState = { state: {} };
 globalThis.__openedUpdateUrls = [];
 globalThis.__updateConfirms = [];
 globalThis.__updateConfirmResult = false;
 globalThis.__automaticChecks = [];
+globalThis.__updateNoteRequests = [];
+globalThis.document = { addEventListener() {}, removeEventListener() {} };
 globalThis.__startUpdateRequest = async () => ({ ok: true, job: { id: "update-1" } });
 const updaterUpdates = dataUrl(`
   export const getUpdates = async () => globalThis.__updateState;
@@ -264,6 +287,10 @@ const updaterUpdates = dataUrl(`
     globalThis.__automaticChecks.push(force);
     if (globalThis.__automaticCheckResult) globalThis.__updateState = globalThis.__automaticCheckResult;
     return globalThis.__updateState;
+  };
+  export const getUpdateNotes = async tag => {
+    globalThis.__updateNoteRequests.push(tag);
+    return { ok: true, tag, published: "January 2, 2026", body: "<p>Shared release notes</p>" };
   };
   export const startUpdate = async () => globalThis.__startUpdateRequest();
 `);
@@ -375,8 +402,18 @@ const manualNotice = globalThis.__updateNodes.get("#updatenotice");
 const descendants = node => node ? [node, ...node.children.flatMap(descendants)] : [];
 const manualButton = descendants(manualNotice).find(node =>
   node.tag === "button" && elementText(node).includes("View download"));
+const whatsNewLink = descendants(manualNotice).find(node =>
+  node.tag === "a" && elementText(node).includes("What's new"));
 if (!manualNotice?.isConnected || !elementText(manualNotice).includes("Install the Debian package") || !manualButton?.onclick)
   fail(`the Linux notice did not expose a manual Debian download: ${manualNotice ? elementText(manualNotice) : "missing notice"}`);
+if (!whatsNewLink?.onclick) fail("the sidebar update notice did not expose What's new");
+let notesDefaultPrevented = false;
+whatsNewLink.onclick({ preventDefault() { notesDefaultPrevented = true; } });
+await Promise.resolve(); await Promise.resolve();
+const notesBody = globalThis.__updateModal.querySelector(".notes");
+if (!notesDefaultPrevented || globalThis.__updateNoteRequests.join() !== "v5.1" ||
+    globalThis.__updateModalRoot.hidden || notesBody?.innerHTML !== "<p>Shared release notes</p>")
+  fail("the sidebar What's new link did not use the shared in-app release-notes view");
 manualButton.onclick();
 if (globalThis.__openedUpdateUrls.length !== 1 || !globalThis.__openedUpdateUrls[0].url.endsWith("/releases/tag/v5.1"))
   fail("the Linux notice did not open its server-validated release page");

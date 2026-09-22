@@ -60,6 +60,7 @@
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
 - [x] Calibration sheets appear to be hardcoded. upgrading scm v3.0.0 to current main adds a legal size calibration sheet but that doesn't show up in the calibration list. Make the buttons enumerated from the actual files.
 - [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
+- [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.
@@ -110,3 +111,7 @@
     - [x] Allow downgrading from beta to stable
 - [x] Add and verify the first Debian/Ubuntu x86_64 package with the bundled runtime, native IPC, XDG data, manual package-manager updates, and lifecycle smoke coverage.
 - [x] Add Arch/Manjaro x86_64 packaging with exact distro-bound updates, a package recipe, clean-container install checks, and WebKitGTK/native IPC lifecycle smokes.
+- [x] Add browse buttons to choose the folder for front card directory, double-sided card directory, and output directory in advanced mode. Add the button to the right of the inputs. Also add a reset button for each to go back to the default.
+- [x] Add a toggle for skipping the bottom-left image using the `--skip` option. Derive its index from the selected paper size, card size, and borderless variant in the connected SCM layout data, including layouts such as legal when available.
+- [x] Default the Simple-mode Extend Corners toggle to on at 3.5mm and make 3.5mm the default in Advanced mode. Users can turn it off in Simple mode or change the value in Advanced mode.
+- [x] Change the suggested text in the fit & finish section in advanced mode to say "ex: 3mm" to make it clearer it's not a default

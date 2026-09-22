@@ -29,10 +29,12 @@ def main() -> int:
     index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
 
     for required in (
-        'export function canPickRepoDirectory(',
-        'export async function pickRepoDirectory()',
+        'export function canPickDirectory(',
+        'export async function pickDirectory()',
+        'export const canPickRepoDirectory = canPickDirectory;',
+        'export const pickRepoDirectory = pickDirectory;',
         'invoke("wb_pick_repo_directory", {})',
-        'repository picker requires the app window',
+        'directory picker requires the app window',
         'export async function setSettings(changes)',
         'method: "settings.set"',
         'params: { changes }',
@@ -140,30 +142,31 @@ internals.invoke = function(method, args) {
   pickerCalls.push({ method, args, receiver: this });
   return Promise.resolve("/picked/scm");
 };
-if (!facade.canPickRepoDirectory() || await facade.pickRepoDirectory() !== "/picked/scm" ||
+if (!facade.canPickDirectory() || facade.canPickRepoDirectory !== facade.canPickDirectory ||
+    facade.pickRepoDirectory !== facade.pickDirectory || await facade.pickDirectory() !== "/picked/scm" ||
     JSON.stringify(pickerCalls[0]) !== JSON.stringify({
       method: "wb_pick_repo_directory", args: {}, receiver: internals,
-    }) || fetchCalls) fail("native repository picker command or binding is wrong");
+    }) || fetchCalls) fail("native directory picker command or binding is wrong");
 internals.invoke = () => Promise.resolve(null);
-if (await facade.pickRepoDirectory() !== null) fail("repository picker cancellation was not preserved");
+if (await facade.pickDirectory() !== null) fail("directory picker cancellation was not preserved");
 
 internals.invoke = () => Promise.reject(new Error("native down"));
 let nativeRejected = false;
 try { await facade.setSettings({ ui_mode: "simple" }); } catch (error) { nativeRejected = error.message === "native down"; }
 if (!nativeRejected || fetchCalls) fail("native settings rejection silently fell back to HTTP");
 let pickerRejected = false;
-try { await facade.pickRepoDirectory(); } catch (error) { pickerRejected = error.message === "native down"; }
+try { await facade.pickDirectory(); } catch (error) { pickerRejected = error.message === "native down"; }
 if (!pickerRejected || fetchCalls) fail("native picker rejection silently fell back to HTTP");
 
 // Browser mode posts the patch itself, and both HTTP and application-level
 // failures become rejected promises.
 delete globalThis.window;
-if (facade.canPickRepoDirectory()) fail("browser was reported as picker-capable");
+if (facade.canPickDirectory()) fail("browser was reported as picker-capable");
 let browserPickerRejected = false;
-try { await facade.pickRepoDirectory(); } catch (error) {
-  browserPickerRejected = error.message === "repository picker requires the app window";
+try { await facade.pickDirectory(); } catch (error) {
+  browserPickerRejected = error.message === "directory picker requires the app window";
 }
-if (!browserPickerRejected || fetchCalls) fail("browser repository picker did not fail closed");
+if (!browserPickerRejected || fetchCalls) fail("browser directory picker did not fail closed");
 const requests = [];
 globalThis.fetch = async (url, options) => {
   requests.push({ url, options });

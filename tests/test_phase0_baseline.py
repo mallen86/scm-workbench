@@ -469,12 +469,22 @@ class HttpContractTests(unittest.TestCase):
         create = manifest["create_pdf"]
         self.assertEqual(create["simple_rows"], [["card_size", "paper_size"]])
         self.assertEqual(create["simple_sections"], [
-            {"title": "Print setup", "rows": [["borderless", "load_offset", "only_fronts"]]},
+            {"title": "Print setup", "rows": [
+                ["borderless", "load_offset"],
+                ["only_fronts", "skip_bottom_left"],
+            ]},
             {"title": "Image finishing", "rows": [["mpcfill_crop", "extend_corners_simple"]]},
         ])
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}
         self.assertTrue(options["extend_corners_simple"]["simple_only"])
+        self.assertTrue(options["extend_corners_simple"]["simple"])
         self.assertTrue(options["extend_corners_simple"]["available"])
+        self.assertTrue(options["extend_corners_simple"]["default"])
+        self.assertEqual(options["extend_corners"]["default"], "3.5mm")
+        self.assertEqual(
+            options["only_fronts"]["simple_help"],
+            "Creates front pages only and leaves out card-back pages.",
+        )
         for key in ("mpcfill_crop", "extend_corners_simple"):
             self.assertIn("switch to Advanced mode", options[key]["help"])
 
@@ -483,26 +493,148 @@ class HttpContractTests(unittest.TestCase):
         server.save_settings(settings)
         server.invalidate_manifest_cache()
         args = {
-            "card_size": "standard", "paper_size": "letter",
-            "mpcfill_crop": True, "extend_corners_simple": True,
+            "card_size": "standard", "paper_size": "letter", "mpcfill_crop": True,
+            "extend_corners_simple": True,
         }
         preview = server.build_preview("create_pdf", args)
         self.assertFalse(preview["errors"])
         self.assertIn("--crop 3mm", preview["cmd"])
         self.assertIn("--extend_corners 3.5mm", preview["cmd"])
 
-        direct = server.build_preview("create_pdf", {**args, "extend_corners": "4mm"})
-        self.assertFalse(direct["errors"])
-        self.assertIn("--extend_corners 4mm", direct["cmd"])
-        self.assertNotIn("--extend_corners 3.5mm", direct["cmd"])
+        disabled = server.build_preview(
+            "create_pdf", {**args, "extend_corners": "4mm", "extend_corners_simple": False})
+        self.assertFalse(disabled["errors"])
+        self.assertNotIn("--extend_corners", disabled["cmd"])
 
         settings["ui_mode"] = "advanced"
         server.save_settings(settings)
         server.invalidate_manifest_cache()
-        advanced = server.build_preview("create_pdf", args)
-        self.assertFalse(advanced["errors"])
-        self.assertNotIn("--crop 3mm", advanced["cmd"])
-        self.assertNotIn("--extend_corners 3.5mm", advanced["cmd"])
+        advanced_default = server.build_preview("create_pdf", {**args, "extend_corners": "3.5mm"})
+        self.assertFalse(advanced_default["errors"])
+        self.assertNotIn("--crop 3mm", advanced_default["cmd"])
+        self.assertIn("--extend_corners 3.5mm", advanced_default["cmd"])
+        advanced_custom = server.build_preview("create_pdf", {**args, "extend_corners": "4mm"})
+        self.assertFalse(advanced_custom["errors"])
+        self.assertIn("--extend_corners 4mm", advanced_custom["cmd"])
+
+    def test_four_registration_marks_require_explicit_confirmation(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        self.assertEqual(options["registration"]["confirm_choices"], {"4": {
+            "title": "Enable 4 registration marks?",
+            "text": "Are you sure? Only enable this option if you know what you're doing.",
+            "okLabel": "Enable 4 marks",
+        }})
+
+    def test_fit_and_finishing_placeholders_are_clearly_examples(self):
+        create = server.get_manifest()["create_pdf"]
+        group = next(group for group in create["groups"] if group["title"] == "Fit & edge finishing")
+        options = {option["key"]: option for option in group["options"]}
+        dimensional = {
+            "crop", "crop_backs", "extend_edges", "extend_edges_backs",
+            "extend_corners", "extend_corners_backs", "extend_bleed", "extend_bleed_backs",
+        }
+        self.assertEqual({key for key in options if options[key].get("placeholder")}, dimensional)
+        for key in dimensional:
+            self.assertEqual(options[key]["placeholder"], "ex: 3mm")
+
+    def test_advanced_pdf_directories_opt_into_browse_and_reset_controls(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        browsable = {key for key, option in options.items() if option.get("browse_directory")}
+        self.assertEqual(browsable, {"front_dir", "double_sided_dir", "output_path"})
+        self.assertEqual(options["front_dir"]["default"], "game/front")
+        self.assertEqual(options["double_sided_dir"]["default"], "game/double_sided")
+        self.assertEqual(options["double_sided_dir"]["width"], "half")
+        self.assertEqual(options["output_path"]["default"], "game/output/game.pdf")
+        self.assertEqual(options["output_path"]["width"], "half")
+        self.assertEqual(options["output_path"]["browse_filename"], "game.pdf")
+
+    def test_skip_indexes_are_a_plain_comma_separated_input(self):
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        skip = options["skip"]
+        self.assertEqual(skip["type"], "text")
+        self.assertTrue(skip["int_list"])
+        self.assertEqual(skip["placeholder"], "ex: 0, 4")
+        self.assertIn("Comma-separated", skip["help"])
+
+        args, errors, _warnings = server.normalize_args(create, {"skip": "0, 4  6"})
+        self.assertFalse(errors)
+        self.assertEqual(args["skip"], [0, 4, 6])
+        _args, errors, _warnings = server.normalize_args(create, {"skip": "0, nope"})
+        self.assertTrue(any("not a valid index" in error for error in errors))
+
+        preview = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "skip": "0, 4 6",
+        })
+        self.assertFalse(preview["errors"])
+        self.assertIn("--skip 0 --skip 4 --skip 6", preview["cmd"])
+
+    def test_skip_bottom_left_uses_paper_card_and_borderless_layout(self):
+        info = json.loads(json.dumps(server.get_info()))
+        scm_info = info["scm"]
+        scm_info["paper_sizes"][0]["aliases"] = ["ansi_a"]
+        scm_info["paper_sizes"].append({
+            "name": "legal", "width": "14in", "height": "8.5in", "aliases": [],
+        })
+        scm_info["card_sizes"].append({
+            "name": "mini", "width": "41mm", "height": "63mm", "aliases": ["small"],
+        })
+        scm_info["layouts"]["letter"]["mini"] = {
+            "default": {"num_rows": 3, "num_cols": 5},
+            "borderless": {"num_rows": 4, "num_cols": 4},
+        }
+        scm_info["layouts"]["legal"] = {"standard": {
+            "default": {"num_rows": 2, "num_cols": 5},
+            "borderless": {"num_rows": 2, "num_cols": 5},
+        }}
+        expected = {
+            ("letter", "standard", False): 4,
+            ("letter", "standard", True): 6,
+            ("letter", "mini", False): 10,
+            ("letter", "mini", True): 12,
+            ("legal", "standard", False): 5,
+            ("legal", "standard", True): 5,
+            ("ansi_a", "small", False): 10,
+        }
+        for (paper, card, borderless), index in expected.items():
+            with self.subTest(paper=paper, card=card, borderless=borderless):
+                self.assertEqual(
+                    server._bottom_left_skip_index(info, paper, card, borderless), index)
+        self.assertIsNone(server._bottom_left_skip_index(
+            info, "letter", "unknown", False))
+        self.assertIsNone(server._bottom_left_skip_index(
+            info, "custom", "standard", False))
+
+        create = server.get_manifest()["create_pdf"]
+        options = {option["key"]: option for group in create["groups"] for option in group["options"]}
+        self.assertTrue(options["skip_bottom_left"]["simple"])
+        self.assertTrue(options["skip_bottom_left"]["simple_only"])
+        self.assertEqual(options["skip_bottom_left"]["requires_flags"], ["--skip"])
+        self.assertIn("card size", options["skip_bottom_left"]["help"])
+
+        ordinary = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "skip_bottom_left": True,
+        })
+        self.assertFalse(ordinary["errors"])
+        self.assertIn("--skip 4", ordinary["cmd"])
+        borderless = server.build_preview("create_pdf", {
+            "card_size": "standard", "paper_size": "letter", "borderless": True,
+            "skip": "6", "skip_bottom_left": True,
+        })
+        self.assertFalse(borderless["errors"])
+        self.assertEqual(borderless["cmd"].count("--skip 6"), 1)
+
+        args = {
+            "front_dir": "game/front", "back_dir": "game/back", "double_sided_dir": "",
+            "output_path": "game/output/game.pdf", "card_size": "mini", "paper_size": "letter",
+            "only_fronts": True, "skip_bottom_left": True,
+        }
+        argv, _cwd, _env, _title, _warnings, errors = server.build_command(
+            "create_pdf", args, server.load_settings(), info, write_deck=False)
+        self.assertFalse(errors)
+        self.assertEqual(argv[argv.index("--skip") + 1], "10")
 
     def test_custom_paper_label_names_the_dxf_and_saved_size(self):
         preview = server.build_preview("dxf_single", {

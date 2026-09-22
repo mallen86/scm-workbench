@@ -9,6 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = ROOT / "ui" / "js" / "pages" / "settings.js"
+UPDATER_UI = ROOT / "ui" / "js" / "updater-ui.js"
 
 
 def fail(message: str) -> int:
@@ -20,22 +21,24 @@ def main() -> int:
     if not SETTINGS.is_file():
         return fail("settings page is missing")
     source = SETTINGS.read_text(encoding="utf-8")
+    updater_ui = UPDATER_UI.read_text(encoding="utf-8")
 
-    # The release-notes body is the only HTML supplied by the server.  The
-    # other innerHTML writes are fixed-value DOM resets, never interpolations.
-    assignments = re.findall(
-        r"(?m)^\s*([A-Za-z_$][\w$]*)\.innerHTML\s*=\s*([^\n;]+)", source
-    )
-    allowed = {
+    # The release-notes body is the only HTML supplied by the server. The
+    # Settings page and shared update UI otherwise use fixed-value DOM resets.
+    assignment_pattern = r"(?m)^\s*([A-Za-z_$][\w$]*)\.innerHTML\s*=\s*([^\n;]+)"
+    page_assignments = re.findall(assignment_pattern, source)
+    updater_assignments = re.findall(assignment_pattern, updater_ui)
+    if set(page_assignments) != {("box", '""')}:
+        return fail(f"unexpected Settings innerHTML writes: {page_assignments!r}")
+    allowed_updater = {
         ("m", '""'),
-        ("box", '""'),
         ("body", 'r.body || "<p>(no notes on this release)</p>"'),
     }
-    if set(assignments) != allowed:
-        return fail(f"unexpected innerHTML writes: {assignments!r}")
+    if set(updater_assignments) != allowed_updater:
+        return fail(f"unexpected updater innerHTML writes: {updater_assignments!r}")
     if "uStatus.innerHTML" in source:
         return fail("update metadata is interpolated into innerHTML")
-    if "body.innerHTML = r.body ||" not in source:
+    if "body.innerHTML = r.body ||" not in updater_ui:
         return fail("the server-rendered release-notes body boundary is missing")
 
     # release_url is persisted remote metadata.  It must be constrained to
@@ -48,10 +51,19 @@ def main() -> int:
         'path[3] !== "releases"',
         'path[4] !== "tag"',
         'const releaseUrl = serverReleaseUrl(st.release_url);',
-        'const safeReleaseUrl = serverReleaseUrl(releaseUrl);',
     ):
         if marker not in source:
-            return fail(f"release URL validation is missing {marker}")
+            return fail(f"Settings release URL validation is missing {marker}")
+    for marker in (
+        'function releasePageUrl(value)',
+        'url.protocol !== "https:"',
+        'url.hostname !== "github.com"',
+        'path[3] !== "releases"',
+        'path[4] !== "tag"',
+        'const safeReleaseUrl = releasePageUrl(releaseUrl);',
+    ):
+        if marker not in updater_ui:
+            return fail(f"shared release-notes URL validation is missing {marker}")
 
     # setBtn must be initialized before the checking fast path can call it.
     set_button = source.find("const setBtn =")
@@ -79,7 +91,7 @@ const fail = message => { throw new Error(message); };
 // double.  This exercises the production code without requiring a browser or
 // adding a package solely to mark the no-build UI tree as ESM.
 const urlStart = source.indexOf("function serverReleaseUrl(value)");
-const urlEnd = source.indexOf("\n}\n\n/* In-app", urlStart) + 2;
+const urlEnd = source.indexOf("\n}\n\nimport { doRun", urlStart) + 2;
 if (urlStart < 0 || urlEnd < 2) fail("could not locate serverReleaseUrl");
 const serverReleaseUrl = new Function(`${source.slice(urlStart, urlEnd)}; return serverReleaseUrl;`)();
 if (serverReleaseUrl("javascript:alert(1)") !== null ||

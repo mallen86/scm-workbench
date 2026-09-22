@@ -162,9 +162,17 @@ class PdfFrontPreviewTests(unittest.TestCase):
         self.assertEqual(server._pdf_preview_page_slots(
             info, {"paper_size": "arch_b", "card_size": "micro", "borderless": True}, settings), 81)
         self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "arch_b", "card_size": "micro", "borderless": True,
+                   "skip": [72], "skip_bottom_left": True}, settings), 80)
+        self.assertEqual(server._pdf_preview_page_slots(
             info, {"specialty": "full-sheet"}, settings), 100)
         self.assertEqual(server._pdf_preview_page_slots(
             info, {"paper_size": "a3", "card_size": "standard", "skip": [0, "1", 99]}, settings), 16)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "a3", "card_size": "standard", "skip_bottom_left": True}, settings), 17)
+        self.assertEqual(server._pdf_preview_page_slots(
+            info, {"paper_size": "a3", "card_size": "standard", "skip": [12],
+                   "skip_bottom_left": True}, settings), 17)
 
     def test_sources_are_limited_to_the_pinned_checkout(self):
         outside = self.fixture.outside / "front"

@@ -1,7 +1,7 @@
 /* forms — part of the SCM Workbench UI (vanilla ES modules, no build
    step; the entry point is ui/js/app.js, which imports every page). */
 
-import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";
+import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";import { canPickDirectory, pickDirectory } from "./settings-transport.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -19,6 +19,13 @@ export function optVisible(o, spec) {
   if (o.hidden) return false;
   if (uiMode() !== "simple" || !kindHasSimple(spec)) return true;
   return !!o.simple;
+}
+
+
+export async function confirmSegmentChoice(option, current, next, showConfirm = confirmModal) {
+  if (String(current) === String(next)) return true;
+  const confirmation = (option?.confirm_choices || {})[String(next)];
+  return confirmation ? !!(await showConfirm(confirmation)) : true;
 }
 
 
@@ -139,7 +146,10 @@ export function restoreArgs(kind, raw) {
       if (o.available === false || !Object.prototype.hasOwnProperty.call(raw, o.key)) continue;
       const v = raw[o.key];
       if ((o.unavailable_choices || {})[String(v)]) continue;
-      if (o.type === "chips" || o.type === "choice_chips") {
+      if (o.int_list) {
+        if (Array.isArray(v) && v.every(x => Number.isInteger(x) && x >= 0)) out[o.key] = v.join(", ");
+        else if (typeof v === "string") out[o.key] = v;
+      } else if (o.type === "chips" || o.type === "choice_chips") {
         if (Array.isArray(v)) out[o.key] = v.filter(
           x => typeof x === "string" && !(o.unavailable_choices || {})[String(x)],
         );
@@ -282,8 +292,43 @@ export function renderOption(o, args, kind) {
     case "text":
     case "path": {
       const i = el("input", { class: `input ${o.type === "path" ? "mono" : ""}`, placeholder: o.placeholder || "", value: strVal(args[o.key]) });
+      const setValue = value => {
+        i.value = value;
+        args[o.key] = value;
+        afterFormChange(kind, args);
+      };
       i.addEventListener("input", () => { args[o.key] = i.value; afterFormChange(kind, args); });
-      wrap.append(label, i);
+      if (o.type === "path" && o.browse_directory) {
+        const controls = el("div", { class: "path-control" }, i);
+        if (canPickDirectory()) {
+          const browse = el("button", {
+            class: "btn",
+            type: "button",
+            "aria-label": `Browse for ${o.label}`,
+            onclick: async () => {
+              browse.disabled = true;
+              try {
+                const selected = await pickDirectory();
+                if (selected !== null) setValue(directorySelectionValue(o, selected));
+              } catch (error) {
+                toast("err", error?.message || "Could not open the folder picker");
+              } finally {
+                browse.disabled = false;
+              }
+            },
+          }, ico("folder"), "Browse…");
+          controls.append(browse);
+        }
+        controls.append(el("button", {
+          class: "btn",
+          type: "button",
+          "aria-label": `Reset ${o.label} to its default`,
+          onclick: () => setValue(strVal(optionDefault(o))),
+        }, ico("refresh"), "Reset"));
+        wrap.append(label, controls);
+      } else {
+        wrap.append(label, i);
+      }
       break;
     }
     case "textarea": {
@@ -345,10 +390,14 @@ export function renderOption(o, args, kind) {
           class: String(args[o.key]) === String(v) ? "active" : "",
           disabled: !!unavailable,
           title: unavailable || null,
-          onclick: e => {
+          onclick: async e => {
+            // DOM event.currentTarget is cleared once an async handler yields.
+            // Keep the clicked button before the confirmation modal awaits.
+            const button = e.currentTarget;
+            if (!await confirmSegmentChoice(o, args[o.key], v)) return;
             args[o.key] = v;
             $$("button", seg).forEach(b => b.classList.remove("active"));
-            e.currentTarget.classList.add("active");
+            button.classList.add("active");
             afterFormChange(kind, args);
             o.onChange && o.onChange(v);
           },
@@ -430,7 +479,8 @@ export function renderOption(o, args, kind) {
     if (row && row.mode === "managed") wrap.append(el("span", { class: "help" },
       "Kept in the app's working area. When the run finishes, use the console's “Move to my files…” to save it elsewhere."));
   }
-  if (o.help) wrap.append(el("span", { class: "help" }, o.help));
+  const help = uiMode() === "simple" ? (o.simple_help || o.help) : o.help;
+  if (help) wrap.append(el("span", { class: "help" }, help));
   if (o.available === false) {
     wrap.classList.add("option-unavailable");
     wrap.setAttribute("aria-disabled", "true");
@@ -452,6 +502,15 @@ export function renderOption(o, args, kind) {
 
 
 export function strVal(v) { return v === null || v === undefined ? "" : String(v); }
+
+
+export function directorySelectionValue(option, directory) {
+  const selected = strVal(directory);
+  const filename = strVal(option?.browse_filename);
+  if (!filename) return selected;
+  const separator = selected.includes("\\") && !selected.includes("/") ? "\\" : "/";
+  return selected.replace(/[\\/]+$/, "") + separator + filename;
+}
 
 
 export function stepNum(input, d) {
