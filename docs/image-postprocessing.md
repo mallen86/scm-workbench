@@ -101,7 +101,7 @@ Run it as follows:
 1. Fetch the deck's card images normally.
 2. Open **Image post-processing** and choose **Simple Upscaler (4×)**.
 3. Select **Front and double-sided** (or a narrower scope), confirm the reported image count, then run the processor.
-4. Wait for validation and transactional publication to finish.
+4. Wait for validation and transactional publication to finish. In Simple mode, **Cancel processing** is available while the job runs; if cancellation succeeds before publication, the original images remain unchanged.
 5. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
 
 The upscaler scales every selected image each time it runs; it does not detect previous runs. If an older beta processed only some files, restore or re-fetch the original images before running it again, or the previously processed images will be enlarged a second time (16× their original dimensions). Advanced mode shows the bundled source as read-only. Choose **Duplicate** there if you want an editable copy, then review and trust the resulting custom revision before running it.

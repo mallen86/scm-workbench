@@ -401,6 +401,24 @@ function attachRunStatus(root) {
   const status = el("div", { class: "pp-run-status", "aria-live": "polite", hidden: true });
   const host = $(".pp-run-card", root) || root;
   host.append(status);
+  let stoppingId = null;
+  const requestCancel = async jobId => {
+    if (stoppingId === jobId) return;
+    stoppingId = jobId;
+    paint();
+    try {
+      const result = await jobs.kill(jobId);
+      if (result?.ok) toast("warn", "Stopping…");
+      else {
+        if (stoppingId === jobId) stoppingId = null;
+        toast("warn", "The job has already finished.");
+      }
+    } catch (error) {
+      if (stoppingId === jobId) stoppingId = null;
+      toast("err", error?.message || "Could not stop the processor job.");
+    }
+    paint();
+  };
   const paint = () => {
     const running = state.job && (S.jobs || []).find(j => j.id === state.job.id);
     if (!running) { status.hidden = true; status.replaceChildren(); return; }
@@ -412,6 +430,11 @@ function attachRunStatus(root) {
     if (running.status === "running") {
       const done = Number(running.progress?.current || 0), total = Number(running.progress?.total || running.image_total || 0);
       panel.append(el("div", { class: "pp-progress" }, el("progress", { max: total || 1, value: Math.min(done, total || 1) }), el("span", { class: "small faint" }, total ? `${done} / ${total}` : "Preparing image set…")));
+      if (uiMode() === "simple") panel.append(el("button", {
+        class: "btn btn-ghost btn-sm pp-cancel", type: "button",
+        disabled: stoppingId === running.id,
+        onclick: () => requestCancel(running.id),
+      }, stoppingId === running.id ? "Stopping…" : "Cancel processing"));
     } else if (running.status === "ok") status.append(el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF"));
   };
   const previewListener = event => {

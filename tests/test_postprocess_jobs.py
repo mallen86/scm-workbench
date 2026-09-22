@@ -248,6 +248,7 @@ class PostprocessJobTests(unittest.TestCase):
         item = self.save_and_trust(
             "def process_image(image_path, context):\n    return None\n"
         )
+        self.settings["ui_mode"] = "simple"
         entered = threading.Event()
         def blocked(job, _args):
             entered.set()

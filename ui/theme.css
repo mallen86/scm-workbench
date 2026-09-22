@@ -1704,6 +1704,7 @@ cursor: pointer;
 .pp-status.ok { color: var(--ok); background: var(--ok-soft); }
 .pp-status.fail, .pp-status.killed { color: var(--err); background: var(--err-soft); }
 .pp-progress { display: grid; gap: 6px; }
+.pp-cancel { justify-self: start; }
 .pp-run-status progress { width: 100%; height: 8px; accent-color: var(--accent); }
 @media (max-width: 760px) {
   .pp-library > .card-head { align-items: flex-start; flex-wrap: wrap; }

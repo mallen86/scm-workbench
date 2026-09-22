@@ -96,6 +96,10 @@ def main() -> int:
         'const host = $(".pp-run-card", root) || root',
         'host.append(status)',
         'class: "pp-progress"',
+        'const result = await jobs.kill(jobId)',
+        'if (uiMode() === "simple") panel.append(',
+        'disabled: stoppingId === running.id',
+        'Cancel processing',
         'Go to Create PDF',
         'function renderSimplePostprocess()',
         'state.processors.filter(canRun)',
@@ -120,7 +124,7 @@ def main() -> int:
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
     if not simple_pages or "postprocess" not in simple_pages.group(1):
         return fail("post-processing is missing from Simple-mode routes")
-    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", ".pp-simple-detail", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
+    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-cancel", ".pp-lock", ".pp-simple-detail", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
     if ('go("postprocess", { scope: "both" })' not in fetch or "postprocessPrefill" not in nav or
@@ -255,6 +259,88 @@ if (!rejected || fetchCalls.length !== requestsBeforePickerFailure)
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         return fail("post-processing transport contract failed")
+
+    cancel_script = r'''
+import fs from "node:fs";
+const encode = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
+let source = fs.readFileSync(process.argv[1], "utf8");
+const fail = message => { throw new Error(message); };
+let mode = "simple", killResult, tick;
+const calls = [], toasts = [];
+const S = { jobs: [{ id: "job-one", kind: "postprocess_images", status: "running", progress: { current: 1, total: 3 } }] };
+const el = (tag, attrs = {}, ...children) => ({
+  tag, className: attrs.class || "", hidden: !!attrs.hidden, disabled: !!attrs.disabled,
+  onclick: attrs.onclick, children,
+  append(...items) { this.children.push(...items); },
+  replaceChildren(...items) { this.children = items; },
+});
+const buttons = node => [node, ...(node.children || []).flatMap(child => typeof child === "object" && child ? buttons(child) : [])]
+  .filter(child => child.tag === "button" && child.className.includes("pp-cancel"));
+globalThis.document = { addEventListener() {}, removeEventListener() {}, querySelector() { return null; } };
+globalThis.setInterval = fn => { tick = fn; return 1; };
+globalThis.clearInterval = () => {};
+globalThis.__cancelTest = { S, el, calls, toasts, mode: () => mode, kill: id => { calls.push(id); return killResult(id); } };
+const modules = {
+  "../core.js": `const x = globalThis.__cancelTest; export const PAGES = {}; export const S = x.S;
+    export const $ = (_selector, root) => root; export const el = x.el;
+    export const toast = (...args) => x.toasts.push(args);
+    export const confirmModal = () => {}; export const ico = () => ""; export const pageHead = () => {};`,
+  "../forms.js": `export const afterFormChange = () => {}; export const COMMAND_PREVIEW_EVENT = "preview";
+    export const doRun = () => {}; export const formArgs = () => null; export const formCard = () => {};`,
+  "../jobs.js": `export const jobs = { list: async () => ({ jobs: globalThis.__cancelTest.S.jobs }),
+    kill: id => globalThis.__cancelTest.kill(id) };`,
+  "../nav.js": `export const go = () => {}; export const uiMode = () => globalThis.__cancelTest.mode();`,
+  "../python-highlight.js": `export const renderPythonHighlight = () => {};`,
+  "../postprocess-transport.js": `export const postprocessors = {};`,
+  "./utilities.js": `export const watchJobDone = () => {};`,
+};
+for (const [path, stub] of Object.entries(modules)) {
+  const needle = `from "${path}"`;
+  if (!source.includes(needle)) fail(`post-processing import changed: ${path}`);
+  source = source.replace(needle, `from "${encode(stub)}"`);
+}
+const { attachRunStatus } = await import(encode(source + "\nexport { attachRunStatus };"));
+const root = el("div");
+attachRunStatus(root);
+await new Promise(resolve => setImmediate(resolve));
+let cancel = buttons(root);
+if (cancel.length !== 1 || cancel[0].disabled || cancel[0].children.at(-1) !== "Cancel processing")
+  fail("Simple running processor job has no enabled cancel button");
+let complete;
+killResult = () => new Promise(resolve => { complete = resolve; });
+const pending = cancel[0].onclick();
+cancel = buttons(root);
+if (calls.length !== 1 || calls[0] !== "job-one" || !cancel[0].disabled || cancel[0].children.at(-1) !== "Stopping…")
+  fail("cancellation did not target the active job and disable repeated clicks");
+await cancel[0].onclick();
+if (calls.length !== 1) fail("repeated cancel click issued a second request");
+complete({ ok: true });
+await pending;
+S.jobs[0].status = "killed";
+await tick();
+if (buttons(root).length || !root.children[0].children[0].children[0].children[0].includes("Original images were not changed."))
+  fail("terminal processor job still offers cancellation or lost its safe-outcome message");
+mode = "advanced";
+S.jobs = [{ id: "job-two", kind: "postprocess_images", status: "running" }];
+await tick();
+if (buttons(root).length) fail("Advanced processor status gained a Simple-only cancel button");
+mode = "simple";
+killResult = () => Promise.reject(new Error("transport failed"));
+await tick();
+cancel = buttons(root);
+await cancel[0].onclick();
+if (buttons(root)[0].disabled || !toasts.some(([kind, text]) => kind === "err" && text === "transport failed"))
+  fail("failed cancellation did not restore the action and report the error");
+root.__dispose();
+'''
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", cancel_script, str(PAGE)],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    if result.returncode:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return fail("Simple post-processing cancellation contract failed")
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 
