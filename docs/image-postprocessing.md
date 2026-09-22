@@ -1,12 +1,14 @@
 # Image post-processing
 
-Image post-processing is an Advanced-mode workflow that runs a user-owned Python callback against fetched card images before Create PDF. The **Guide** button in the Processor library opens a rendered copy of this document bundled with the running Workbench version.
+Image post-processing runs an approved Python callback against fetched card images before Create PDF. Simple mode can select and run processors that are already trusted and ready, including the built-in **Simple Upscaler (4×)**. Advanced mode also provides the Processor library for creating, editing, reviewing, and installing optional libraries. The **Guide** button in that library opens a rendered copy of this document bundled with the running Workbench version.
 
 ## Trust and safety
 
 Processors and installed libraries run as your desktop user account. Workbench runs them in a separate bounded process, gives the callback private staged image copies, validates every result, and publishes the batch only after every image succeeds. Those protections prevent ordinary failures from leaving a partially changed image set, but they do **not** make arbitrary Python safe. Only trust code and packages you have reviewed.
 
-Saving source creates an immutable, untrusted revision. Trust applies only to that exact source revision and dependency environment; an edit or dependency change requires approval again. **Revert** lists the processor's bounded immutable history. Loading an older revision replaces the editor contents but does not reactivate or trust it; review it and choose **Save revision** to make it current.
+The built-in Simple Upscaler is read-only, app-trusted, and uses Pillow from the bundled runtime, so it needs no separate installation. It can be duplicated in Advanced mode when a customized version is needed; that duplicate starts untrusted like any user processor.
+
+Saving user source creates an immutable, untrusted revision. Trust applies only to that exact source revision and dependency environment; an edit or dependency change requires approval again. **Revert** lists the processor's bounded immutable history. Loading an older revision replaces the editor contents but does not reactivate or trust it; review it and choose **Save revision** to make it current.
 
 Opening a post-processing job from **Job history** selects the exact processor recorded by that job. If the processor has since been deleted, Workbench leaves the library unselected instead of silently opening a different processor.
 
@@ -50,9 +52,9 @@ The interpreter fingerprint follows wheel compatibility: Python implementation a
 
 The packaged runtime already includes Pillow, so Pillow-only processors normally need no additional requirement.
 
-## Example: upscale Scryfall images from 300 to 1200 PPI
+## Built-in Simple Upscaler: 300 to 1200 PPI
 
-This example increases both pixel dimensions by four using Pillow's Lanczos resampler and writes 1200-DPI metadata for JPEG and PNG files. It does not invent new detail like an AI super-resolution model would.
+The processor shipped with Workbench increases both pixel dimensions by four using Pillow's Lanczos resampler and writes 1200-DPI metadata for JPEG and PNG files. It does not invent new detail like an AI super-resolution model would. Its bundled source is shown below for review.
 
 ```python
 from pathlib import Path
@@ -96,14 +98,12 @@ def process_image(image_path: Path, context: dict) -> None:
 
 Run it as follows:
 
-1. Switch Workbench to **Advanced** mode.
-2. Fetch the deck's Scryfall images normally.
-3. Open **Image post-processing** and choose **New processor**.
-4. Name it `Scryfall 4x upscale`, paste the code, and leave requirements blank.
-5. Save the revision and review the exact source.
-6. Because requirements are blank, the private environment is already ready; trust the exact revision. If the UI does not show **Libraries ready**, choose **Install / update libraries**, wait for that job, and then trust it.
-7. Select **Front and double-sided**, confirm the reported image count, then run the processor.
-8. Wait for validation and transactional publication to finish.
-9. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
+1. Fetch the deck's card images normally.
+2. Open **Image post-processing** and choose **Simple Upscaler (4×)**.
+3. Select **Front and double-sided** (or a narrower scope), confirm the reported image count, then run the processor.
+4. Wait for validation and transactional publication to finish.
+5. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
+
+Advanced mode shows the bundled source as read-only. Choose **Duplicate** there if you want an editable copy, then review and trust the resulting custom revision before running it.
 
 [Scryfall's image documentation](https://scryfall.com/docs/api/images) lists PNGs as 744 × 1040 pixels, while individual files currently returned by the API can be 745 × 1040. The processor scales the actual file dimensions: those examples become 2976 × 4160 or 2980 × 4160 pixels, respectively, close to the 3000 × 4200 pixels needed for a 2.5 × 3.5 inch card at 1200 PPI.

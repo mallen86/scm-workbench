@@ -1509,13 +1509,13 @@ def build_manifest(info: dict) -> dict:
     # Processor summaries are deliberately the only registry data embedded in
     # the manifest; source code never enters the global info payload.
     try:
-        pp = postprocessing.ProcessorStore(DATA_DIR, effective_dirs(load_settings())[0])
+        pp = _postprocessor_store()
         processor_choices = [[p["id"], p["name"]] for p in pp.list()]
     except Exception:
         processor_choices = []
     kinds["postprocess_images"] = {
         "title": "Post-process images", "page": "postprocess", "needs": ["scm"],
-        "advanced_only": True, "cwd": "scm",
+        "cwd": "scm",
         "description": "Apply one trusted processor to fetched front and double-sided images.",
         "groups": [{"title": "Image scope", "options": [
             _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default="", hidden=True),
@@ -5413,16 +5413,13 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["generate_readme_tables.py"]
 
     elif kind == "postprocess_images":
-        if str(settings.get("ui_mode", "advanced")) == "simple":
-            errors.append("image post-processing is available only in Advanced mode")
-            return argv, None, env, title, warnings, errors
         if not require_repo("SCM", scm):
             return argv, None, env, title, warnings, errors
         cwd = scm
         processor_id = str(args.get("processor_id") or "")
         scope = str(args.get("scope") or "both")
         try:
-            store = postprocessing.ProcessorStore(DATA_DIR, cwd)
+            store = _postprocessor_store(scm_root=cwd, interpreter=python)
             item = store.get(processor_id, include_source=False)
             status = store.status(processor_id, interpreter=python,
                           environment_verifier=_verify_dependency_environment)
@@ -5459,8 +5456,10 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             return argv, None, env, title, warnings, errors
         cwd = scm
         try:
-            store = postprocessing.ProcessorStore(DATA_DIR, cwd)
+            store = _postprocessor_store(scm_root=cwd, interpreter=python)
             item = store.get(str(args.get("processor_id") or ""), include_source=False)
+            if item.get("bundled"):
+                errors.append("bundled processors use the Workbench runtime and do not install libraries")
             if str(args.get("revision_hash") or "") != item.get("revision"):
                 errors.append("processor revision is stale")
             submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
@@ -6372,8 +6371,8 @@ def build_preview(kind: str, raw_args: dict) -> dict:
     command: ``write_deck=False`` keeps preview requests side-effect free.
     """
     settings = load_settings()
-    if kind in ("postprocess_images", "postprocess_dependencies") and str(settings.get("ui_mode", "advanced")) == "simple":
-        raise PreviewError(status=403, http_body={"error": "post-processing requires Advanced mode"}, ipc_code="forbidden", message="post-processing requires Advanced mode")
+    if kind == "postprocess_dependencies" and str(settings.get("ui_mode", "advanced")) == "simple":
+        raise PreviewError(status=403, http_body={"error": "processor library installation requires Advanced mode"}, ipc_code="forbidden", message="processor library installation requires Advanced mode")
     manifest = get_manifest()
     if kind not in manifest:
         raise PreviewError(
@@ -11030,12 +11029,27 @@ POSTPROCESS_HTTP_REQUEST_MAX_BYTES = (
 POSTPROCESS_RESPONSE_MAX_BYTES = 512 * 1024
 POSTPROCESS_GUIDE_MAX_BYTES = 256 * 1024
 POSTPROCESS_GUIDE_FILE = _HERE.parent / "docs" / "image-postprocessing.md"
+BUILTIN_SIMPLE_UPSCALER_ID = "9fa8584bb746386bd270990b51784977"
+BUILTIN_SIMPLE_UPSCALER_FILE = _HERE / "builtin_processors" / "simple_upscaler.py"
 _POSTPROCESS_REGISTRY_LOCK = threading.RLock()
 
 
-def _postprocessor_store() -> postprocessing.ProcessorStore:
-    scm, _ = effective_dirs(load_settings())
+def _postprocessor_store(*, scm_root: Optional[Path] = None,
+                         interpreter: Optional[Path] = None) -> postprocessing.ProcessorStore:
+    scm = Path(scm_root) if scm_root is not None else effective_dirs(load_settings())[0]
+    python = Path(interpreter) if interpreter is not None else job_python(load_settings())
     store = postprocessing.ProcessorStore(DATA_DIR, scm)
+    raw = postprocessing._read_regular_bytes(
+        BUILTIN_SIMPLE_UPSCALER_FILE, "bundled Simple Upscaler", POSTPROCESS_SOURCE_MAX_BYTES,
+    )
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise postprocessing.IntegrityError("bundled Simple Upscaler is not valid UTF-8") from exc
+    store.provision_bundled(
+        BUILTIN_SIMPLE_UPSCALER_ID, "Simple Upscaler (4×)", source,
+        interpreter=python,
+    )
     store.cleanup()
     return store
 
@@ -11074,7 +11088,8 @@ def postprocessors_list() -> dict:
         python = job_python(load_settings())
         rows = []
         summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes",
-                        "environment_fingerprint", "environment_ready", "environment_status"}
+                        "environment_fingerprint", "environment_ready", "environment_status",
+                        "ready_to_run", "bundled"}
         for item in store.list():
             try:
                 item = {**item, **store.status(

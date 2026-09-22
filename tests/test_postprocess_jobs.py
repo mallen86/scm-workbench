@@ -136,6 +136,30 @@ class PostprocessJobTests(unittest.TestCase):
         args["scope"] = "both"
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 3)
 
+    def test_simple_mode_can_preview_the_ready_bundled_upscaler(self):
+        image = self.repo / "game" / "front" / "card.png"
+        image.write_bytes(PNG)
+        self.settings["ui_mode"] = "simple"
+        store = server._postprocessor_store()
+        item = store.get(server.BUILTIN_SIMPLE_UPSCALER_ID, include_source=False)
+        status = store.status(item["id"], interpreter=server.job_python(self.settings))
+        self.assertTrue(status["processor"]["bundled"])
+        self.assertTrue(status["processor"]["ready_to_run"])
+        args = {
+            "processor_id": item["id"],
+            "revision_hash": item["revision"],
+            "scope": "front",
+        }
+        preview = server.build_preview("postprocess_images", args)
+        self.assertEqual(preview["errors"], [])
+        self.assertEqual(preview["image_count"], 1)
+        with self.assertRaises(server.PreviewError):
+            server.build_preview("postprocess_dependencies", {
+                "processor_id": item["id"],
+                "revision_hash": item["revision"],
+                "requirements": "",
+            })
+
     def test_preparation_preserves_the_approved_source_bytes(self):
         image = self.repo / "game" / "front" / "card.png"
         image.write_bytes(PNG)

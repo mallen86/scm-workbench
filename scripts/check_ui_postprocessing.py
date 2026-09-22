@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static and Node contracts for Advanced image post-processing UI transport."""
+"""Static and Node contracts for Simple and Advanced image post-processing UI."""
 from pathlib import Path
 import re
 import shutil
@@ -66,10 +66,10 @@ def main() -> int:
         'source.value = d.source',
         'state.dirty',
         'preserveDirty',
-        'const keepDraft = preserveDirty && state.dirty',
+        'const keepDraft = !simple && preserveDirty && state.dirty',
         'const prefillId = S.postprocessPrefill?.processor_id || null',
         'const requested = prefillId || selectId',
-        'The processor used by this job is no longer in the library.',
+        'The processor used by this job is no longer available to run.',
         '? state.selected : null',
         'p.id === state.selected',
         'pp-cursor',
@@ -97,6 +97,13 @@ def main() -> int:
         'host.append(status)',
         'class: "pp-progress"',
         'Go to Create PDF',
+        'function renderSimplePostprocess()',
+        'state.processors.filter(canRun)',
+        'p.ready_to_run === true',
+        'class: "input pp-simple-select"',
+        'Simple mode only shows processors that are already installed and trusted.',
+        'The built-in Simple Upscaler is ready without any downloads.',
+        'Built-in processors are read-only',
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
@@ -106,11 +113,12 @@ def main() -> int:
         if required not in highlighter:
             return fail(f"Python source highlighter is missing {required}")
     if ('import "./pages/postprocess.js";' not in app or 'postprocess: "Image post-processing"' not in nav or
-            'data-page="postprocess"' not in index or 'data-page="postprocess" data-section="workflow" data-simple-hide' not in index):
-        return fail("post-processing route or Advanced-only navigation item is missing")
+            'data-page="postprocess" data-section="workflow"' not in index or
+            'data-page="postprocess" data-section="workflow" data-simple-hide' in index):
+        return fail("post-processing route is not visible in both interface modes")
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
-    if not simple_pages or "postprocess" in simple_pages.group(1):
-        return fail("post-processing was added to Simple-mode routes")
+    if not simple_pages or "postprocess" not in simple_pages.group(1):
+        return fail("post-processing is missing from Simple-mode routes")
     for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
@@ -246,7 +254,7 @@ if (!rejected || fetchCalls.length !== requestsBeforePickerFailure)
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         return fail("post-processing transport contract failed")
-    print("OK: Advanced image post-processing UI and transport contracts are intact")
+    print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 
 

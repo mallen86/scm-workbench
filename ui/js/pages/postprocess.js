@@ -1,4 +1,4 @@
-/* Advanced-only image processor library and run workflow. */
+/* Simple run workflow plus the Advanced processor library and editor. */
 import { PAGES, S, $, confirmModal, el, ico, pageHead, toast } from "../core.js";
 import { afterFormChange, COMMAND_PREVIEW_EVENT, doRun, formArgs, formCard } from "../forms.js";
 import { jobs } from "../jobs.js";
@@ -16,6 +16,7 @@ const normalizeList = result => Array.isArray(result) ? result : (result?.proces
 const isReady = p => p && (p.environment_ready === true || p.dependencies === "ready" || p.environment?.status === "ready");
 const isStale = p => p?.environment_status === "stale" || p?.environment?.status === "stale";
 const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === revision(p));
+const canRun = p => !!p && (p.ready_to_run === true || (isReady(p) && isTrusted(p)));
 const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
 
 function sourceBytes(value) { return new TextEncoder().encode(String(value || "")).length; }
@@ -63,15 +64,17 @@ function markDirty() { state.dirty = true; updateEditorState(); updateLockSummar
 function updateEditorState() {
   const status = document.querySelector(".pp-dirty");
   if (status) { status.textContent = state.dirty ? "Unsaved changes" : "Saved revision"; status.className = `pp-dirty ${state.dirty ? "warn" : "ok"}`; }
+  const bundled = state.loaded?.bundled === true;
   const save = document.querySelector(".pp-save");
-  if (save) save.disabled = state.loadError || !state.draft?.name?.trim() || !state.draft?.source;
+  if (save) { save.disabled = bundled || state.loadError || !state.draft?.name?.trim() || !state.draft?.source; save.title = bundled ? "Built-in processors are read-only; duplicate it to customize" : "Save revision"; }
   const trust = document.querySelector(".pp-trust");
   if (trust) {
-    trust.disabled = state.loadError || !state.loaded || state.dirty || !isReady(state.loaded);
-    trust.title = !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : isStale(state.loaded) ? "Reinstall its libraries for this Python first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
+    trust.disabled = bundled || state.loadError || !state.loaded || state.dirty || !isReady(state.loaded);
+    trust.title = bundled ? "Built-in processors are app-trusted" : !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : isStale(state.loaded) ? "Reinstall its libraries for this Python first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
   }
   const install = document.querySelector(".pp-install");
-  if (install) install.disabled = state.loadError || !state.loaded || state.dirty || state.installing;
+  if (install) { install.disabled = bundled || state.loadError || !state.loaded || state.dirty || state.installing; install.title = bundled ? "Built-in processors use libraries shipped with Workbench" : "Install or update libraries"; }
+  for (const control of [document.querySelector(".pp-name"), document.querySelector(".pp-source"), document.querySelector(".pp-requirements")]) if (control) control.readOnly = bundled;
 }
 function setEditorValue(value) {
   const d = state.draft || (state.draft = { name: "New processor", source: TEMPLATE, requirements: "" });
@@ -103,6 +106,7 @@ async function refreshProcessors(selectId = state.selected, { preserveDirty = tr
     updateEditorState();
     updateLockSummary();
     repaintLibrary();
+    repaintSimplePicker();
     patchRunForm();
     const box = document.querySelector(".pp-library-list");
     if (box) box.replaceChildren(el("div", { class: "empty" }, error.message || "Post-processing is not available yet."));
@@ -110,7 +114,9 @@ async function refreshProcessors(selectId = state.selected, { preserveDirty = tr
   }
   state.processors = normalizeList(result);
   state.loadError = false;
-  const keepDraft = preserveDirty && state.dirty;
+  const simple = uiMode() === "simple";
+  const available = simple ? state.processors.filter(canRun) : state.processors;
+  const keepDraft = !simple && preserveDirty && state.dirty;
   const prefillId = S.postprocessPrefill?.processor_id || null;
   const requested = prefillId || selectId;
   if (keepDraft) {
@@ -118,26 +124,31 @@ async function refreshProcessors(selectId = state.selected, { preserveDirty = tr
     // first saved processor, or silently move an existing draft to a peer.
     state.selected = state.processors.some(p => p.id === state.selected) ? state.selected : null;
   } else {
-    state.selected = state.processors.some(p => p.id === requested)
-      ? requested : (prefillId ? null : state.processors[0]?.id || null);
+    state.selected = available.some(p => p.id === requested)
+      ? requested : (prefillId ? null : available[0]?.id || null);
     if (prefillId && !state.selected)
-      toast("warn", "The processor used by this job is no longer in the library.");
+      toast("warn", "The processor used by this job is no longer available to run.");
   }
   if (state.selected && keepDraft) {
     const summary = selectedProcessor();
     state.loaded = state.loaded ? { ...state.loaded, ...summary } : summary;
     state.loadError = false;
+  } else if (state.selected && simple) {
+    state.loaded = selectedProcessor();
+    state.loadError = false;
+    state.dirty = false;
   } else if (state.selected) await loadProcessor(state.selected);
   else if (keepDraft) {
     state.loaded = null;
   } else {
     state.loaded = null;
     state.loadError = false;
-    setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+    if (!simple) setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
   }
   updateEditorState();
   updateLockSummary();
   repaintLibrary();
+  repaintSimplePicker();
   patchRunForm();
 }
 
@@ -161,18 +172,39 @@ function repaintLibrary() {
   for (const p of state.processors) {
     const active = p.id === state.selected;
     const trust = isTrusted(p), ready = isReady(p);
+    const actions = el("div", { class: "pp-actions" },
+      el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"));
+    if (!p.bundled) actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); deleteProcessor(p); } }, "Delete"));
+    const meta = el("div", { class: "pp-processor-meta" });
+    if (p.bundled) meta.append(el("span", { class: "chip" }, "Built in"));
+    meta.append(el("span", { class: `chip ${trust ? "ok" : "warn"}` }, trust ? "Trusted" : "Untrusted"), el("span", { class: `chip ${ready ? "ok" : "warn"}` }, ready ? "Libraries ready" : isStale(p) ? "Libraries need reinstall" : (p.environment_status || "Libraries not ready")));
     box.append(el("div", { class: `pp-processor ${active ? "active" : ""}`, onclick: async () => {
       if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
       await loadProcessor(p.id); repaintLibrary(); patchRunForm();
     } },
       el("div", { class: "pp-processor-main" }, el("strong", {}, p.name || "Unnamed processor"), el("span", { class: "small faint mono" }, revision(p).slice(0, 12) || "no revision")),
-      el("div", { class: "pp-processor-meta" }, el("span", { class: `chip ${trust ? "ok" : "warn"}` }, trust ? "Trusted" : "Untrusted"), el("span", { class: `chip ${ready ? "ok" : "warn"}` }, ready ? "Libraries ready" : isStale(p) ? "Libraries need reinstall" : (p.environment_status || "Libraries not ready"))),
-      el("div", { class: "pp-actions" },
-        el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"),
-        el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); deleteProcessor(p); } }, "Delete"),
-      ),
+      meta,
+      actions,
     ));
   }
+}
+
+function repaintSimplePicker() {
+  const select = document.querySelector(".pp-simple-select");
+  if (!select) return;
+  const ready = state.processors.filter(canRun);
+  select.replaceChildren();
+  if (!ready.length) {
+    select.append(el("option", { value: "" }, "No ready processors"));
+    select.disabled = true;
+  } else {
+    for (const p of ready) select.append(el("option", { value: p.id }, p.name || "Unnamed processor"));
+    select.disabled = false;
+    select.value = state.selected || ready[0].id;
+  }
+  const detail = document.querySelector(".pp-simple-detail");
+  const selected = selectedProcessor();
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling." : "This processor was installed and trusted in Advanced mode.";
 }
 
 async function showGuide() {
@@ -408,8 +440,39 @@ function attachRunStatus(root) {
   root.__dispose = () => { clearInterval(state.timer); document.removeEventListener(COMMAND_PREVIEW_EVENT, previewListener); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
 }
 
+function renderSimplePostprocess() {
+  const wrap = el("div", {});
+  wrap.append(pageHead("Image post-processing", "Optionally improve fetched card images before creating your PDF."));
+  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Simple mode only shows processors that are already installed and trusted. Processor code, trust, and libraries are managed in Advanced mode.")));
+  wrap.append(el("section", { class: "card pp-simple-picker" },
+    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
+    el("label", {}, "Processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready image processor" })),
+    el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…")));
+  const run = el("section", { class: "card pp-run-card" },
+    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which fetched images to improve. Originals are replaced only after every result passes validation."))),
+    formCard("postprocess_images", { run: false }),
+    el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Checking image inventory…"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
+  wrap.append(run);
+  wrap.__patch = async () => {
+    state.dirty = false;
+    S.pageGuard = null;
+    $(".pp-simple-select", wrap).addEventListener("change", event => {
+      state.selected = event.currentTarget.value || null;
+      state.loaded = selectedProcessor();
+      patchRunForm();
+      repaintSimplePicker();
+    });
+    $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
+    await refreshProcessors(state.selected, { preserveDirty: false });
+    repaintSimplePicker();
+    patchRunForm();
+    attachRunStatus(wrap);
+  };
+  return wrap;
+}
+
 PAGES.postprocess = root => {
-  if (uiMode() === "simple") { go("fetch", null, { push: false }); return el("div", {}); }
+  if (uiMode() === "simple") return renderSimplePostprocess();
   const wrap = el("div", {});
   wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to fetched card images."));
   wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
@@ -436,7 +499,7 @@ PAGES.postprocess = root => {
     source.addEventListener("scroll", () => syncSourceHighlightScroll(source));
     req.oninput = () => { state.draft.requirements = req.value; markDirty(); };
     name.oninput = () => { state.draft.name = name.value; markDirty(); };
-    source.addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); updateCursor(source); paintSourceHighlight(source); } });
+    source.addEventListener("keydown", e => { if (e.key === "Tab" && !e.target.readOnly) { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); updateCursor(source); paintSourceHighlight(source); } });
     $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
     await refreshProcessors(state.selected, { preserveDirty: false }); repaintLibrary(); patchRunForm(); attachRunStatus(wrap);
   };

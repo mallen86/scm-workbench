@@ -1,4 +1,4 @@
-"""Native registry contract for Advanced image post-processors."""
+"""Native registry contract for built-in and user image post-processors."""
 
 import json
 import os
@@ -57,9 +57,14 @@ class IpcPostprocessorTests(unittest.TestCase):
         processor = saved["processor"]
 
         listed = self.call("postprocessors.list")
-        self.assertEqual(len(listed["processors"]), 1)
-        self.assertNotIn("source", listed["processors"][0])
-        self.assertTrue(listed["processors"][0]["environment_ready"])
+        self.assertEqual(len(listed["processors"]), 2)
+        custom = next(item for item in listed["processors"] if item["id"] == processor["id"])
+        bundled = next(item for item in listed["processors"] if item["id"] == server.BUILTIN_SIMPLE_UPSCALER_ID)
+        self.assertNotIn("source", custom)
+        self.assertTrue(custom["environment_ready"])
+        self.assertTrue(bundled["bundled"])
+        self.assertTrue(bundled["trusted"])
+        self.assertTrue(bundled["ready_to_run"])
 
         detail = self.call("postprocessors.get", {"processor_id": processor["id"]})
         self.assertEqual(detail["source"], SOURCE)
@@ -103,7 +108,36 @@ class IpcPostprocessorTests(unittest.TestCase):
             "expected_revision": edited["revision"],
         })
         self.assertTrue(deleted["ok"])
-        self.assertEqual(self.call("postprocessors.list")["processors"], [])
+        remaining = self.call("postprocessors.list")["processors"]
+        self.assertEqual([item["id"] for item in remaining], [server.BUILTIN_SIMPLE_UPSCALER_ID])
+
+    def test_bundled_upscaler_is_read_only_but_can_be_duplicated(self):
+        detail = self.call("postprocessors.get", {
+            "processor_id": server.BUILTIN_SIMPLE_UPSCALER_ID,
+        })
+        self.assertTrue(detail["bundled"])
+        self.assertEqual(detail["requirements"], [])
+        self.assertIn("Image.Resampling.LANCZOS", detail["source"])
+
+        saved = self.call("postprocessors.save", {
+            "name": detail["name"], "source": detail["source"], "requirements": "",
+            "processor_id": detail["id"], "expected_revision": detail["revision"],
+        })
+        self.assertFalse(saved["ok"])
+        self.assertIn("read-only", saved["errors"][0])
+        deleted = self.call("postprocessors.delete", {
+            "processor_id": detail["id"], "expected_revision": detail["revision"],
+        })
+        self.assertFalse(deleted["ok"])
+        self.assertIn("cannot be deleted", deleted["errors"][0])
+
+        duplicate = self.call("postprocessors.duplicate", {
+            "processor_id": detail["id"], "name": "Custom Upscaler",
+            "expected_revision": detail["revision"],
+        })
+        self.assertTrue(duplicate["ok"])
+        self.assertFalse(duplicate["processor"]["bundled"])
+        self.assertFalse(duplicate["processor"]["trusted"])
 
     def test_stale_runtime_environment_does_not_hide_or_block_source_edits(self):
         saved = self.call("postprocessors.save", {
@@ -125,7 +159,8 @@ class IpcPostprocessorTests(unittest.TestCase):
 
         with mock.patch("scm_workbench.postprocessing.environment_fingerprint", return_value="d" * 64):
             detail = self.call("postprocessors.get", {"processor_id": saved["id"]})
-            listed = self.call("postprocessors.list")["processors"][0]
+            listed = next(item for item in self.call("postprocessors.list")["processors"]
+                          if item["id"] == saved["id"])
             edited = self.call("postprocessors.save", {
                 "name": "Libraries", "source": SOURCE + "\n# still editable\n",
                 "requirements": "demo==1.0", "processor_id": saved["id"],
@@ -176,6 +211,26 @@ class IpcPostprocessorTests(unittest.TestCase):
         })
         self.assertFalse(denied["ok"])
         self.assertIn("Advanced", denied["errors"][0])
+        item = imported["processor"]
+        for method, params in (
+            ("postprocessors.duplicate", {
+                "processor_id": item["id"], "name": "Denied copy",
+                "expected_revision": item["revision"],
+            }),
+            ("postprocessors.trust", {
+                "processor_id": item["id"], "revision_hash": item["revision"],
+                "environment_fingerprint": None,
+            }),
+            ("postprocessors.delete", {
+                "processor_id": item["id"], "expected_revision": item["revision"],
+            }),
+        ):
+            result = self.call(method, params)
+            self.assertFalse(result["ok"])
+            self.assertIn("Advanced", result["errors"][0])
+        listed = self.call("postprocessors.list")["processors"]
+        self.assertTrue(next(row for row in listed
+                             if row["id"] == server.BUILTIN_SIMPLE_UPSCALER_ID)["ready_to_run"])
 
     def test_invalid_native_parameters_are_protocol_errors(self):
         response = ipc.dispatch({

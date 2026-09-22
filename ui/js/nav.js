@@ -168,7 +168,7 @@ export function setTheme(theme) {
    paths. Real paths stay in job.cmd for the engine. */
 
 
-export const SIMPLE_PAGES = ["history", "fetch", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
+export const SIMPLE_PAGES = ["history", "fetch", "postprocess", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
 
 
 export function uiMode() {
@@ -217,9 +217,9 @@ export async function setUiMode(mode) {
   const page = S.page || "history";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
-    toast("ok", "Simple: just the essentials. Fetch art, make the PDF, and calibrate your printer.");
+    toast("ok", "Simple: just the essentials. Fetch art, optionally improve it, make the PDF, and calibrate your printer.");
   } else {
-    if (page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
+    if (page === "postprocess" || page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
     toast("ok", mode === "simple" ? "Simple: navigation shows only the essentials." : "Advanced: every page and control is available.");
   }
   // A mode switch changes only local presentation. Pollers already keep jobs

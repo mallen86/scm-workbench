@@ -102,7 +102,7 @@
     - [x] Remove the text "Select Only fronts in the form when a back is not needed." from the step 4 (or step 5 if you've already added the new step above). Only fronts will remove any double-sided cards which are independent of the backs
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
-- [x] Add the Advanced-only managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.
+- [x] Add the managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including a ready-only Simple-mode runner and built-in upscaler, the Advanced processor library, revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.
     - [x] Treat processor libraries bound to a replaced Python runtime as stale and reinstallable without blocking access to the saved processor source.
     - [x] Add a Processor library button that opens the running version's bundled post-processing Markdown guide as rendered in-app documentation.
     - [x] Allow picking a specific revision when clicking Revert button

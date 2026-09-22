@@ -75,6 +75,34 @@ class PostprocessorTests(unittest.TestCase):
             self.assertEqual(store.duplicate(first["id"])["name"], "Example copy")
             store.delete(first["id"], expected_revision=second["revision"])
 
+    def test_bundled_processor_is_ready_read_only_and_refreshable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ProcessorStore(temp)
+            processor_id = "1" * 32
+            first = store.provision_bundled(processor_id, "Built in", SOURCE)
+            status = store.status(processor_id)
+            self.assertTrue(first["bundled"])
+            self.assertTrue(status["processor"]["trusted"])
+            self.assertTrue(status["processor"]["environment_ready"])
+            self.assertTrue(status["processor"]["ready_to_run"])
+            with self.assertRaisesRegex(ConflictError, "read-only"):
+                store.save("Changed", SOURCE, processor_id=processor_id,
+                           expected_revision=first["revision"])
+            with self.assertRaisesRegex(ConflictError, "cannot be deleted"):
+                store.delete(processor_id, expected_revision=first["revision"])
+            with self.assertRaisesRegex(ConflictError, "app-trusted"):
+                store.trust(processor_id, first["revision"])
+
+            revised_source = SOURCE + "\n# shipped update\n"
+            revised = store.provision_bundled(processor_id, "Built in", revised_source)
+            self.assertNotEqual(revised["revision"], first["revision"])
+            self.assertTrue(store.status(processor_id)["processor"]["ready_to_run"])
+            self.assertEqual(store.get(processor_id)["source"], revised_source)
+            self.assertEqual(len(store.revisions(processor_id)), 1)
+            copy = store.duplicate(processor_id)
+            self.assertFalse(copy["bundled"])
+            self.assertFalse(copy["trusted"])
+
     def test_recording_an_unchanged_environment_preserves_trust(self):
         with tempfile.TemporaryDirectory() as temp:
             store = ProcessorStore(temp)

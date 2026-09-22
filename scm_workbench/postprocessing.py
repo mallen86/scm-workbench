@@ -39,6 +39,8 @@ REQUIREMENT_LINE_MAX_BYTES = 256
 REQUIREMENTS_MAX_BYTES = 8 * 1024
 REQUIREMENTS_MAX_COUNT = 32
 PROCESSOR_MAX_COUNT = 64
+BUNDLED_PROCESSOR_MAX_COUNT = 8
+PROCESSOR_STORAGE_MAX_COUNT = PROCESSOR_MAX_COUNT + BUNDLED_PROCESSOR_MAX_COUNT
 REVISIONS_MAX_COUNT = 20
 SAVED_SOURCE_MAX_BYTES = 8 * 1024 * 1024
 SCAN_MAX_ENTRIES = 8192
@@ -1337,9 +1339,28 @@ class ProcessorStore:
             raise ValidationError("invalid processor id")
         return _contained(self.root / "processors", self.root / "processors" / processor_id)
 
+    def _registry_entries(self) -> list[Path]:
+        return _bounded_children(
+            self.root / "processors", PROCESSOR_STORAGE_MAX_COUNT,
+            "processor registry",
+        )
+
+    def _custom_processor_count(self) -> int:
+        count = 0
+        for directory in self._registry_entries():
+            try:
+                if (directory.is_dir() and not directory.is_symlink() and
+                        re.fullmatch(r"[0-9a-f]{32}", directory.name) and
+                        self._metadata(directory.name).get("bundled")):
+                    continue
+            except PostProcessingError:
+                pass
+            count += 1
+        return count
+
     def _saved_source_bytes(self) -> int:
         total = count = 0
-        for processor in _bounded_children(self.root / "processors", PROCESSOR_MAX_COUNT, "processor registry"):
+        for processor in self._registry_entries():
             if processor.is_symlink() or not processor.is_dir():
                 continue
             revisions = processor / "revisions"
@@ -1352,7 +1373,7 @@ class ProcessorStore:
                 if _is_link_or_reparse(observed) or not stat.S_ISREG(observed.st_mode):
                     raise IntegrityError("invalid processor source file")
                 count += 1; total += observed.st_size
-                if count > PROCESSOR_MAX_COUNT * REVISIONS_MAX_COUNT or total > SAVED_SOURCE_MAX_BYTES:
+                if count > PROCESSOR_STORAGE_MAX_COUNT * REVISIONS_MAX_COUNT or total > SAVED_SOURCE_MAX_BYTES:
                     raise IntegrityError("saved processor source limit was exceeded")
         return total
 
@@ -1371,14 +1392,101 @@ class ProcessorStore:
             candidate = value.get(key)
             if candidate is not None and (not isinstance(candidate, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", candidate)):
                 raise IntegrityError("invalid processor metadata")
+        if "bundled" in value and value.get("bundled") is not True:
+            raise IntegrityError("invalid processor metadata")
         return value
+
+    def provision_bundled(self, processor_id: str, name: str, source: str, *,
+                          interpreter: str | Path = sys.executable) -> dict:
+        """Publish one app-owned, dependency-free processor as ready and trusted.
+
+        The deterministic id reserves the registry entry for the application.
+        Provisioning is idempotent and refreshes the immutable revision when an
+        app update changes its shipped source.  Bundled processors deliberately
+        cannot declare separately installed requirements: every imported module
+        must already be part of the Workbench runtime.
+        """
+        directory = self._processor(processor_id)
+        name = normalize_name(name)
+        raw = validate_source(source)
+        revision = revision_digest(source, (), self.contract)
+        environment = self.environment_metadata((), interpreter=interpreter)
+        if not environment["ready"]:
+            raise IntegrityError("bundled processor runtime is not ready")
+        exists = os.path.lexists(directory)
+        if exists:
+            try:
+                observed = os.lstat(directory)
+            except OSError as exc:
+                raise IntegrityError("could not inspect bundled processor storage") from exc
+            if _is_link_or_reparse(observed) or not stat.S_ISDIR(observed.st_mode):
+                raise IntegrityError("invalid bundled processor storage")
+            metadata_path = directory / "metadata.json"
+            if os.path.lexists(metadata_path):
+                metadata = self._metadata(processor_id)
+                if not metadata.get("bundled"):
+                    raise ConflictError("bundled processor id is already in use")
+                if (metadata.get("name") == name and
+                        metadata.get("active_revision") == revision and
+                        metadata.get("trusted") == revision and
+                        metadata.get("environment") == environment["fingerprint"] and
+                        metadata.get("trusted_tree_digest") == environment.get("tree_digest")):
+                    try:
+                        current = self.get(processor_id)
+                        if current.get("source") == source:
+                            return current
+                    except PostProcessingError:
+                        # This reserved app-owned entry is repaired below.
+                        pass
+        else:
+            if len(self._registry_entries()) >= PROCESSOR_STORAGE_MAX_COUNT:
+                raise ValidationError("processor storage limit reached")
+            directory.mkdir(mode=0o700)
+            _private(directory, directory=True)
+
+        revisions = directory / "revisions"
+        revisions.mkdir(exist_ok=True, mode=0o700)
+        _no_links(revisions)
+        _private(revisions, directory=True)
+        source_path = revisions / f"{revision}.py"
+        revision_meta = revisions / f"{revision}.json"
+        if not source_path.exists() and self._saved_source_bytes() + len(raw) > SAVED_SOURCE_MAX_BYTES:
+            raise ValidationError("saved processor source limit reached")
+        # The app owns this reserved entry, so repairing a missing or damaged
+        # shipped revision is safe; user-authored immutable revisions are never
+        # rewritten by this path.
+        _atomic_bytes(source_path, raw)
+        _atomic_json(revision_meta, {
+            "revision": revision,
+            "requirements": [],
+            "contract": self.contract,
+            "source_bytes": len(raw),
+        })
+        _atomic_json(directory / "metadata.json", {
+            "id": processor_id,
+            "name": name,
+            "active_revision": revision,
+            "trusted": revision,
+            "environment": environment["fingerprint"],
+            "trusted_tree_digest": environment.get("tree_digest"),
+            "bundled": True,
+            "updated": time.time(),
+        })
+        # Built-in revisions cannot be reverted or edited. Prune superseded
+        # app versions only after the replacement metadata is durable.
+        for old_path in _bounded_children(revisions, REVISIONS_MAX_COUNT * 2,
+                                          "processor revisions"):
+            if (old_path.stem != revision and old_path.suffix in {".py", ".json"} and
+                    re.fullmatch(r"[0-9a-f]{64}", old_path.stem)):
+                old_path.unlink()
+        return self.get(processor_id)
 
     def save(self, name: str, source: str, requirements: str | Sequence[str] | None = None, *, processor_id: str | None = None, expected_revision: str | None = None) -> dict:
         name = normalize_name(name); raw = validate_source(source); req = normalize_requirements(requirements); revision = revision_digest(source, req, self.contract)
         current_meta = None
         current_requirements: tuple[str, ...] = ()
         if processor_id is None:
-            if len(_bounded_children(self.root / "processors", PROCESSOR_MAX_COUNT, "processor registry")) >= PROCESSOR_MAX_COUNT: raise ValidationError("processor limit reached")
+            if self._custom_processor_count() >= PROCESSOR_MAX_COUNT: raise ValidationError("processor limit reached")
             processor_id = uuid.uuid4().hex
             while self._processor(processor_id).exists(): processor_id = uuid.uuid4().hex
             directory = self._processor(processor_id); directory.mkdir(mode=0o700); _private(directory, directory=True)
@@ -1386,6 +1494,8 @@ class ProcessorStore:
             current = None
         else:
             current_meta = self._metadata(processor_id); current = current_meta.get("active_revision")
+            if current_meta.get("bundled"):
+                raise ConflictError("bundled processors are read-only")
             if expected_revision != current: raise ConflictError("processor revision is stale")
             current_requirements = tuple(self.get(
                 processor_id, revision=current, include_source=False,
@@ -1446,13 +1556,13 @@ class ProcessorStore:
         if (len(raw) != meta.get("source_bytes") or
                 revision_digest(source, requirements, self.contract) != revision):
             raise IntegrityError("processor revision content does not match its digest")
-        result = {"id": metadata["id"], "name": metadata["name"], "active_revision": metadata.get("active_revision"), "revision": revision, "requirements": list(requirements), "trusted": metadata.get("trusted") == revision, "source_bytes": len(raw)}
+        result = {"id": metadata["id"], "name": metadata["name"], "active_revision": metadata.get("active_revision"), "revision": revision, "requirements": list(requirements), "trusted": metadata.get("trusted") == revision, "source_bytes": len(raw), "bundled": bool(metadata.get("bundled"))}
         if include_source: result["source"] = source
         return result
 
     def list(self) -> tuple[dict, ...]:
         result = []
-        directories = sorted(_bounded_children(self.root / "processors", PROCESSOR_MAX_COUNT, "processor registry"))
+        directories = sorted(self._registry_entries())
         for directory in directories:
             if directory.is_dir() and not directory.is_symlink():
                 try: result.append(self.get(directory.name, include_source=False))
@@ -1481,6 +1591,8 @@ class ProcessorStore:
 
     def trust(self, processor_id: str, revision: str, environment: str | None = None, *, interpreter: str | Path = sys.executable) -> dict:
         metadata = self._metadata(processor_id)
+        if metadata.get("bundled"):
+            raise ConflictError("bundled processors are already app-trusted")
         if revision != metadata.get("active_revision"):
             raise ConflictError("processor revision is stale")
         item = self.get(processor_id, revision=revision, include_source=False)
@@ -1500,6 +1612,8 @@ class ProcessorStore:
         return self.get(processor_id, revision=revision, include_source=False)
 
     def record_environment(self, processor_id: str, revision: str, lock_hash: str, *, interpreter: str | Path = sys.executable) -> dict:
+        if self._metadata(processor_id).get("bundled"):
+            raise ConflictError("bundled processors use the app runtime")
         item = self.get(processor_id, include_source=False)
         requirements = tuple(item["requirements"])
         if (not isinstance(lock_hash, str) or
@@ -1530,6 +1644,8 @@ class ProcessorStore:
 
     def invalidate_trust(self, processor_id: str, *, expected_revision: str | None = None) -> dict:
         metadata = self._metadata(processor_id)
+        if metadata.get("bundled"):
+            raise ConflictError("bundled processors are already app-trusted")
         if expected_revision is not None and expected_revision != metadata.get("active_revision"):
             raise ConflictError("processor revision is stale")
         metadata["trusted"] = None
@@ -1540,6 +1656,8 @@ class ProcessorStore:
 
     def delete(self, processor_id: str, *, expected_revision: str | None = None) -> None:
         metadata = self._metadata(processor_id)
+        if metadata.get("bundled"):
+            raise ConflictError("bundled processors cannot be deleted")
         if expected_revision is not None and expected_revision != metadata.get("active_revision"): raise ConflictError("processor revision is stale")
         shutil.rmtree(self._processor(processor_id))
 
@@ -1745,7 +1863,8 @@ class ProcessorStore:
         processor = {**item, "trusted": bool(trusted),
                      "environment_fingerprint": environment["fingerprint"],
                      "environment_ready": environment["ready"],
-                     "environment_status": environment["status"]}
+                     "environment_status": environment["status"],
+                     "ready_to_run": bool(trusted and environment["ready"])}
         return {"processor": processor, "environment": environment}
 
     def cleanup(self, *, max_age: float = 24 * 3600, prune_environments: bool = False) -> None:
@@ -1759,7 +1878,7 @@ class ProcessorStore:
         environments = _bounded_children(self.root / "environments", PROCESSOR_MAX_COUNT * REVISIONS_MAX_COUNT * 2, "processor environments")
         referenced: set[str] = set()
         if prune_environments:
-            processors = _bounded_children(self.root / "processors", PROCESSOR_MAX_COUNT * 2, "processor registry")
+            processors = _bounded_children(self.root / "processors", PROCESSOR_STORAGE_MAX_COUNT * 2, "processor registry")
             for processor in processors:
                 metadata_path = processor / "metadata.json"
                 incomplete = (processor.name.startswith(".new-") or

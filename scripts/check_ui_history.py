@@ -438,7 +438,7 @@ const read = simple => {
 const simple = read(true);
 if (JSON.stringify(simple.separatorSections) !== JSON.stringify(["workflow", "history", "system"]))
   fail(`simple mode shows the wrong section headers: ${JSON.stringify(simple.separatorSections)}`);
-const simpleOrder = ["fetch", "pdf", "offset", "history", "docs", "settings"];
+const simpleOrder = ["fetch", "postprocess", "pdf", "offset", "history", "docs", "settings"];
 if (JSON.stringify(simple.visibleItems) !== JSON.stringify(simpleOrder))
   fail(`simple mode order is ${JSON.stringify(simple.visibleItems)}, expected ${JSON.stringify(simpleOrder)}`);
 if (simple.visibleItems.indexOf("history") <= simple.visibleItems.indexOf("offset"))
