@@ -57,6 +57,12 @@ class NativeJobsTests(unittest.TestCase):
         live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
         self.assertEqual(live["args"], {})
 
+    def test_terminal_jobs_expose_completion_time_for_sidebar_expiry(self):
+        self.assertNotIn("ended", self.call("jobs.list", {})["result"]["jobs"][0])
+        server.JOBS["a"].update(status="ok", ended=1700000000.25)
+        live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
+        self.assertEqual(live["ended"], 1700000000.25)
+
     def test_a_fetch_job_exposes_its_decklists_slot_count(self):
         # The second stage of a prefetching fetch is measured against the
         # decklist's slot count, so a live row must carry it. A job whose

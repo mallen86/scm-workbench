@@ -6,6 +6,7 @@ import { go, uiMode } from "../nav.js";
 import { renderPythonHighlight } from "../python-highlight.js";
 import { postprocessors } from "../postprocess-transport.js";
 import { watchJobDone } from "./utilities.js";
+import { syncJobNotices } from "../job-notices.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
@@ -449,6 +450,7 @@ function attachRunStatus(root) {
   const tick = async () => { try {
     const result = await jobs.list();
     S.jobs = result.jobs || S.jobs;
+    syncJobNotices(S.jobs);
     const processing = (S.jobs || []).find(j => j.kind === "postprocess_images" && j.status === "running");
     if (processing) state.job = processing;
     const dependency = (S.jobs || []).find(j => j.kind === "postprocess_dependencies" && j.status === "running");

@@ -397,8 +397,11 @@ baseline or losing a user save.
 
 * `jobs.list`: params `{}`. Result is `{"jobs":[...]}`. Each live row contains
   `id`, `ts`, `kind`, `title`, `status`, `exit_code`, `cmd`, `warnings`, and
-  `outputs`; `progress` is present while progress is available. Persisted
-  history rows retain the same metadata (and may carry older persisted fields).
+  `outputs`; `progress` is present while progress is available. Terminal
+  live rows include `ended` (Unix seconds) so sidebar notices expire from
+  actual completion even after a window was inactive. Persisted history rows
+  retain the same metadata and `ended` for newly completed jobs (older rows
+  may not have it).
 * `jobs.start`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). Success is `{"ok":true,"job":{"id":"...","title":"...",
   "status":"running","cmd":"...","warnings":[...]}}`. Rejected form

@@ -3789,7 +3789,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3970,6 +3970,8 @@ def list_jobs() -> dict:
     for j in live:
         row = {"id": j["id"], "ts": j["ts"], "kind": j["kind"], "title": j["title"],
                "status": j["status"], "exit_code": j.get("exit_code"), "cmd": j["cmd"]}
+        if j.get("ended") is not None:
+            row["ended"] = j["ended"]
         if j.get("postprocess_outcome"):
             row["postprocess_outcome"] = j["postprocess_outcome"]
         if j.get("progress"):

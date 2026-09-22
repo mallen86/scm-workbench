@@ -22,6 +22,7 @@ def main() -> int:
     notice_state = notice_state_path.read_text(encoding="utf-8")
     pdf = (ROOT / "ui" / "js" / "pages" / "pdf.js").read_text(encoding="utf-8")
     fetch_page = (ROOT / "ui" / "js" / "pages" / "fetch.js").read_text(encoding="utf-8")
+    postprocess_page = (ROOT / "ui" / "js" / "pages" / "postprocess.js").read_text(encoding="utf-8")
     theme = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
     if "j.job?.warnings" not in forms or "catch (error)" not in forms or "startFailed" not in forms:
         print("FAIL: doRun does not preserve nested warnings and start errors")
@@ -70,6 +71,16 @@ def main() -> int:
         if marker not in console:
             print(f"FAIL: canonical job refresh does not drive sidebar notices: {marker}")
             return 1
+    for marker in ('window.addEventListener("focus", onReturn)',
+                   'document.addEventListener("visibilitychange", onReturn)',
+                   'if (!document.hidden) refreshJobs().catch(() => {})'):
+        if marker not in console:
+            print(f"FAIL: returning to the app does not refresh job notices: {marker}")
+            return 1
+    tick = postprocess_page[postprocess_page.find("const tick = async () => {"):]
+    if 'S.jobs = result.jobs || S.jobs;\n    syncJobNotices(S.jobs);' not in tick:
+        print("FAIL: post-processing polling can leave the sidebar notice stale")
+        return 1
     for marker in ('data-job-notice', 'class: "rp-head rp-head-row"',
                    '"aria-label": "Dismiss this job message"',
                    'setTimeout(() => syncJobNotices(S.jobs)',
@@ -506,6 +517,18 @@ view = state.sync([job("a", "ok")], 6999);
 if (view.length !== 1) fail("terminal notice disappeared before five seconds");
 view = state.sync([job("a", "ok")], 7000);
 if (view.length) fail("terminal notice did not expire at five seconds");
+// The worker finished while another window was active. A throttled poll on
+// return must not restart the five-second hold from the return time.
+state = mod.createJobNoticeState();
+state.sync([job("background", "running")], 1000);
+view = state.sync([{ ...job("background", "ok"), ended: 2 }], 10000);
+if (view.length) fail("a job completed in the background reappeared on focus");
+state = mod.createJobNoticeState();
+state.sync([job("recent", "running")], 1000);
+view = state.sync([{ ...job("recent", "ok"), ended: 5 }], 8000);
+if (view[0]?.expiresAt !== 10000) fail("a recent background completion lost its remaining hold");
+view = state.sync([{ ...job("recent", "ok"), ended: 5 }], 10000);
+if (view.length) fail("background completion did not expire from its actual end time");
 state = mod.createJobNoticeState();
 state.sync([job("b", "running")], 1000);
 state.dismiss("b");

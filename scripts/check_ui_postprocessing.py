@@ -266,7 +266,7 @@ const encode = text => `data:text/javascript;base64,${Buffer.from(text).toString
 let source = fs.readFileSync(process.argv[1], "utf8");
 const fail = message => { throw new Error(message); };
 let mode = "simple", killResult, tick;
-const calls = [], toasts = [];
+const calls = [], toasts = [], notices = [];
 const S = { jobs: [{ id: "job-one", kind: "postprocess_images", status: "running", progress: { current: 1, total: 3 } }] };
 const el = (tag, attrs = {}, ...children) => ({
   tag, className: attrs.class || "", hidden: !!attrs.hidden, disabled: !!attrs.disabled,
@@ -279,7 +279,7 @@ const buttons = node => [node, ...(node.children || []).flatMap(child => typeof 
 globalThis.document = { addEventListener() {}, removeEventListener() {}, querySelector() { return null; } };
 globalThis.setInterval = fn => { tick = fn; return 1; };
 globalThis.clearInterval = () => {};
-globalThis.__cancelTest = { S, el, calls, toasts, mode: () => mode, kill: id => { calls.push(id); return killResult(id); } };
+globalThis.__cancelTest = { S, el, calls, toasts, notices, mode: () => mode, kill: id => { calls.push(id); return killResult(id); } };
 const modules = {
   "../core.js": `const x = globalThis.__cancelTest; export const PAGES = {}; export const S = x.S;
     export const $ = (_selector, root) => root; export const el = x.el;
@@ -293,6 +293,7 @@ const modules = {
   "../python-highlight.js": `export const renderPythonHighlight = () => {};`,
   "../postprocess-transport.js": `export const postprocessors = {};`,
   "./utilities.js": `export const watchJobDone = () => {};`,
+  "../job-notices.js": `export const syncJobNotices = jobs => globalThis.__cancelTest.notices.push(jobs.map(job => job.status));`,
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle = `from "${path}"`;
@@ -318,6 +319,7 @@ complete({ ok: true });
 await pending;
 S.jobs[0].status = "killed";
 await tick();
+if (notices.at(-1)?.[0] !== "killed") fail("processor completion left the sidebar notice running");
 if (buttons(root).length || !root.children[0].children[0].children[0].children[0].includes("Original images were not changed."))
   fail("terminal processor job still offers cancellation or lost its safe-outcome message");
 mode = "advanced";
