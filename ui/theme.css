@@ -1652,6 +1652,7 @@ cursor: pointer;
 /* image post-processing workflow */
 .pp-warning { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; margin-bottom: 22px; }
 .pp-warning .ic { flex: 0 0 auto; color: var(--warn); }
+.pp-simple-detail { margin-top: 10px; line-height: 1.5; }
 .pp-library-list { display: grid; gap: 8px; }
 .pp-processor { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
 .pp-processor:hover, .pp-processor.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft)); background: var(--surface-3); }

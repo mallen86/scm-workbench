@@ -120,7 +120,7 @@ def main() -> int:
     simple_pages = re.search(r'export const SIMPLE_PAGES\s*=\s*\[(.*?)\]', nav, re.S)
     if not simple_pages or "postprocess" not in simple_pages.group(1):
         return fail("post-processing is missing from Simple-mode routes")
-    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
+    for marker in (".pp-editor", ".pp-source", ".pp-source-wrap", ".pp-source-highlight", ".py-keyword", ".py-string", ".py-comment", ".pp-run-status", ".pp-progress", ".pp-lock", ".pp-simple-detail", ".pp-guide-modal", ".pp-guide-content", ".pp-library > .card-head {", ".pp-library > .card-head .actions", "@media (max-width: 760px)"):
         if marker not in css:
             return fail(f"responsive post-processing CSS is missing {marker}")
     if ('go("postprocess", { scope: "both" })' not in fetch or "postprocessPrefill" not in nav or
