@@ -434,6 +434,18 @@ def _format_from_header(head: bytes) -> str | None:
     return None
 
 
+def _source_image_format(expected: str, head: bytes) -> str | None:
+    actual = _format_from_header(head)
+    if actual == expected:
+        return actual
+    # Some SCM fetchers save JPEG responses under .png names. Accept only
+    # this observed mismatch, then pin the *real* decoded format throughout
+    # staging and result validation. All other mismatches stay excluded.
+    if expected == "png" and actual == "jpeg":
+        return actual
+    return None
+
+
 def _image_dimensions(stream, fmt: str) -> tuple[int, int]:
     stream.seek(0)
     head = stream.read(64)
@@ -547,8 +559,8 @@ def _stable_image(path: Path, root: Path, role: str, *, cancelled: Callable[[], 
             if identity != (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns):
                 raise IntegrityError("image changed while opening")
             head = stream.read(64)
-            fmt = _format_from_header(head)
-            if fmt != expected_format: return None
+            fmt = _source_image_format(expected_format, head)
+            if fmt is None: return None
             width, height = _decoded_dimensions(stream, fmt)
             if width <= 0 or height <= 0 or width * height > 200_000_000:
                 raise IntegrityError("image dimensions are outside the supported bounds")
@@ -601,7 +613,7 @@ def count_images(scm_root: str | Path, scope: str = "both") -> int:
                 if ((after_read.st_dev, after_read.st_ino, after_read.st_size, after_read.st_mtime_ns) != identity or
                         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity):
                     raise IntegrityError("image changed while counting")
-                if _format_from_header(head) != expected_format: continue
+                if _source_image_format(expected_format, head) is None: continue
                 if observed.st_size > IMAGE_MAX_BYTES: raise ValidationError("image is too large")
             except FileNotFoundError:
                 continue

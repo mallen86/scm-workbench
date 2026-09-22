@@ -34,7 +34,7 @@ Workbench loads the module once, then calls `process_image` once for each staged
 - `index`: the one-based callback number;
 - `total`: the total images in the job.
 
-The callback must return `None`, retain the filename and image format, and save a valid bounded image back to `image_path`. If any callback fails, Workbench leaves the original batch unchanged.
+The callback must return `None`, retain the filename and image format, and save a valid bounded image back to `image_path`. SCM can fetch JPEG data under a `.png` filename; Workbench recognizes these files by their actual JPEG content and requires the processor to preserve that JPEG format. Other mismatched extensions are excluded. If any callback fails, Workbench leaves the original batch unchanged.
 
 ## Optional libraries
 
@@ -104,6 +104,6 @@ Run it as follows:
 4. Wait for validation and transactional publication to finish.
 5. Open **Create PDF**, set **Resolution (PPI)** to `1200`, preview, and create the PDF.
 
-Advanced mode shows the bundled source as read-only. Choose **Duplicate** there if you want an editable copy, then review and trust the resulting custom revision before running it.
+The upscaler scales every selected image each time it runs; it does not detect previous runs. If an older beta processed only some files, restore or re-fetch the original images before running it again, or the previously processed images will be enlarged a second time (16× their original dimensions). Advanced mode shows the bundled source as read-only. Choose **Duplicate** there if you want an editable copy, then review and trust the resulting custom revision before running it.
 
 [Scryfall's image documentation](https://scryfall.com/docs/api/images) lists PNGs as 744 × 1040 pixels, while individual files currently returned by the API can be 745 × 1040. The processor scales the actual file dimensions: those examples become 2976 × 4160 or 2980 × 4160 pixels, respectively, close to the 3000 × 4200 pixels needed for a 2.5 × 3.5 inch card at 1200 PPI.

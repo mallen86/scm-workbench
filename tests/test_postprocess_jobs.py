@@ -12,6 +12,7 @@ from unittest import mock
 
 from scm_workbench import server
 from scm_workbench.postprocessing import ProcessorStore
+from tests.test_postprocessors import JPEG
 
 
 PNG = base64.b64decode(
@@ -159,6 +160,39 @@ class PostprocessJobTests(unittest.TestCase):
                 "revision_hash": item["revision"],
                 "requirements": "",
             })
+
+    def test_scm_jpeg_named_png_is_counted_and_processed_with_its_real_format(self):
+        front = self.repo / "game" / "front" / "scm-image.png"
+        back = self.repo / "game" / "double_sided" / "back.png"
+        front.write_bytes(JPEG)
+        back.write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        args = {"processor_id": item["id"], "revision_hash": item["revision"], "scope": "both"}
+        self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 2)
+        job, errors = server.start_job("postprocess_images", args)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        self.assertEqual(job["status"], "ok", job["log_lines"])
+        self.assertEqual(job["progress"]["total"], 2)
+        self.assertEqual(job["progress"]["current"], 2)
+        self.assertEqual(front.read_bytes(), JPEG)
+        self.assertEqual(back.read_bytes(), PNG)
+
+    def test_mislabeled_jpeg_must_remain_jpeg_after_processing(self):
+        image = self.repo / "game" / "front" / "scm-image.png"
+        image.write_bytes(JPEG)
+        source = (
+            "import base64\n"
+            f"DATA = {base64.b64encode(PNG).decode()!r}\n"
+            "def process_image(image_path, context):\n"
+            "    image_path.write_bytes(base64.b64decode(DATA))\n"
+        )
+        item = self.save_and_trust(source)
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        self.assertEqual(job["status"], "fail", job["log_lines"])
+        self.assertEqual(image.read_bytes(), JPEG)
 
     def test_preparation_preserves_the_approved_source_bytes(self):
         image = self.repo / "game" / "front" / "card.png"
