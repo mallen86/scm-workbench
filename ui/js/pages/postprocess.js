@@ -204,7 +204,7 @@ function repaintSimplePicker() {
   }
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
-  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling." : "This processor was installed and trusted in Advanced mode.";
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
 }
 
 async function showGuide() {

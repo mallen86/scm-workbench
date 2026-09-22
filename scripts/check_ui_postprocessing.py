@@ -103,6 +103,7 @@ def main() -> int:
         'class: "input pp-simple-select"',
         'Simple mode only shows processors that are already installed and trusted.',
         'The built-in Simple Upscaler is ready without any downloads.',
+        'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
         'Built-in processors are read-only',
     ):
         if required not in page:

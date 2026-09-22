@@ -54,7 +54,7 @@ The packaged runtime already includes Pillow, so Pillow-only processors normally
 
 ## Built-in Simple Upscaler: 300 to 1200 PPI
 
-The processor shipped with Workbench increases both pixel dimensions by four using Pillow's Lanczos resampler and writes 1200-DPI metadata for JPEG and PNG files. It does not invent new detail like an AI super-resolution model would. Its bundled source is shown below for review.
+The processor shipped with Workbench increases both pixel dimensions by four using Pillow's Lanczos resampler and always writes 1200-DPI metadata for JPEG and PNG files. It does not multiply the source image's DPI, so a 400-DPI input is still marked as 1200 DPI after scaling—not 1600 DPI. It does not invent new detail like an AI super-resolution model would. Its bundled source is shown below for review.
 
 ```python
 from pathlib import Path
