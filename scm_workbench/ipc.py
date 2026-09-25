@@ -51,7 +51,7 @@ ALLOWED_METHODS = frozenset((
     "offset.set", "offset.delete", "decklists.import_selected",
     "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.save",
     "postprocessors.duplicate", "postprocessors.trust", "postprocessors.delete",
-    "postprocessors.status",
+    "postprocessors.status", "postprocessors.optional.remove",
 )) | PRIVATE_METHODS
 
 
@@ -246,6 +246,11 @@ def dispatch(request: dict) -> dict:
                 if set(params) != {"processor_id", "expected_revision"} or not isinstance(params.get("processor_id"), str) or (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str)):
                     return _bad_params(request_id, "postprocessors.delete requires processor_id and expected_revision")
                 result = server.postprocessor_delete(params["processor_id"], params)
+            elif method == "postprocessors.optional.remove":
+                if (set(params) != {"processor_id", "revision_hash"} or
+                        not all(isinstance(params.get(k), str) for k in ("processor_id", "revision_hash"))):
+                    return _bad_params(request_id, "postprocessors.optional.remove requires processor_id and revision_hash")
+                result = server.postprocessor_optional_remove(params["processor_id"], params)
             elif method == "postprocessors.status":
                 if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
                     return _bad_params(request_id, "postprocessors.status requires exactly processor_id")

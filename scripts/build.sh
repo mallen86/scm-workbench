@@ -53,6 +53,7 @@ if [ "$plat" = "macos" ]; then
     cp -R "$PWD/ui" "$app/Contents/app/ui"
     mkdir -p "$app/Contents/app/docs"
     cp "$PWD/docs/image-postprocessing.md" "$app/Contents/app/docs/image-postprocessing.md"
+    cp -R "$PWD/docs/licenses" "$app/Contents/app/docs/licenses"
     mv "$bundle/runtime" "$app/Contents/runtime"
     rm -rf "$bundle/.bake"
     echo "    built: $app"

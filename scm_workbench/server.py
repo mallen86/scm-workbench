@@ -60,7 +60,7 @@ if __name__ == "__main__":
     sys.modules["scm_workbench.server"] = sys.modules[__name__]
 
 from scm_workbench import repo_sync, updater
-from scm_workbench import postprocessing
+from scm_workbench import advanced_model, postprocessing
 
 # The one version constant the whole app reports (About-card line, banner,
 # and the updater's notion of "what am I running"). It is pinned per build
@@ -1525,7 +1525,7 @@ def build_manifest(info: dict) -> dict:
     }
     kinds["postprocess_dependencies"] = {
         "title": "Install processor libraries", "page": "postprocess", "needs": ["scm"],
-        "advanced_only": True, "internal": True, "cwd": "scm",
+        "internal": True, "cwd": "scm",
         "groups": [{"title": "Processor", "options": [
             _opt("processor_id", "Processor", "text", default=""),
             _opt("revision_hash", "Revision", "text", default=""),
@@ -5423,8 +5423,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         try:
             store = _postprocessor_store(scm_root=cwd, interpreter=python)
             item = store.get(processor_id, include_source=False)
-            status = store.status(processor_id, interpreter=python,
-                          environment_verifier=_verify_dependency_environment)
+            status = _postprocessor_status(store, processor_id, python)
             meta = status["environment"]
             trusted = status["processor"].get("trusted")
             if (item.get("revision") != item.get("active_revision") or
@@ -5451,8 +5450,9 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         argv += ["-I", "-B", "-u", str(_HERE / "postprocess_runner.py"), "--manifest", "<private-manifest>"]
         env["SCM_WORKBENCH_POSTPROCESS"] = "1"
     elif kind == "postprocess_dependencies":
-        if str(settings.get("ui_mode", "advanced")) == "simple":
-            errors.append("processor libraries are available only in Advanced mode")
+        if (str(settings.get("ui_mode", "advanced")) == "simple" and
+                str(args.get("processor_id") or "") != BUILTIN_ADVANCED_UPSCALER_ID):
+            errors.append("only the fixed Advanced Upscaler install is available in Simple mode")
             return argv, None, env, title, warnings, errors
         if not require_repo("SCM", scm):
             return argv, None, env, title, warnings, errors
@@ -5460,8 +5460,8 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         try:
             store = _postprocessor_store(scm_root=cwd, interpreter=python)
             item = store.get(str(args.get("processor_id") or ""), include_source=False)
-            if item.get("bundled"):
-                errors.append("bundled processors use the Workbench runtime and do not install libraries")
+            if item.get("bundled") and not item.get("optional_model"):
+                errors.append("this bundled processor needs no installation")
             if str(args.get("revision_hash") or "") != item.get("revision"):
                 errors.append("processor revision is stale")
             submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
@@ -6373,8 +6373,9 @@ def build_preview(kind: str, raw_args: dict) -> dict:
     command: ``write_deck=False`` keeps preview requests side-effect free.
     """
     settings = load_settings()
-    if kind == "postprocess_dependencies" and str(settings.get("ui_mode", "advanced")) == "simple":
-        raise PreviewError(status=403, http_body={"error": "processor library installation requires Advanced mode"}, ipc_code="forbidden", message="processor library installation requires Advanced mode")
+    if (kind == "postprocess_dependencies" and str(settings.get("ui_mode", "advanced")) == "simple" and
+            (not isinstance(raw_args, dict) or raw_args.get("processor_id") != BUILTIN_ADVANCED_UPSCALER_ID)):
+        raise PreviewError(status=403, http_body={"error": "custom processor libraries require Advanced mode"}, ipc_code="forbidden", message="custom processor libraries require Advanced mode")
     manifest = get_manifest()
     if kind not in manifest:
         raise PreviewError(
@@ -7562,6 +7563,10 @@ def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[s
             "requirements": list(requirements), "resolve_report": str(report),
             "lock_file": str(lock_file), "wheelhouse": str(wheelhouse),
         }
+        if processor_id == BUILTIN_ADVANCED_UPSCALER_ID:
+            if requirements != advanced_model.REQUIREMENTS:
+                raise postprocessing.IntegrityError("bundled model requirements changed")
+            installer_payload["model"] = True
         with installer_manifest.open("x", encoding="utf-8") as stream:
             postprocessing._private(installer_manifest)
             json.dump(installer_payload, stream, separators=(",", ":"))
@@ -7733,6 +7738,9 @@ def _finalize_dependency_job(job: dict) -> bool:
         final = Path(job["dependency_environment"])
         fingerprint = str(job["dependency_fingerprint"])
     files, size, tree_digest = _validate_dependency_tree(target)
+    if (job["dependency_processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID and
+            not advanced_model.verify_model(target / advanced_model.MODEL_NAME)):
+        raise postprocessing.IntegrityError("the installed model does not match its pinned SHA-256")
     # Transient resolver state and wheel archives are not part of the reusable
     # import target.  Publication contains only site-packages and ready.json.
     for transient in ("home", "tmp", "wheels"):
@@ -7847,6 +7855,10 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         job["postprocess_environment"] = dict(status_now["environment"])
     scm_cwd = Path(job["scm_path"])
     cancelled = job["cancel_event"].is_set
+    if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID:
+        site_path = Path(status_now["environment"]["path"]) / "site-packages"
+        if not advanced_model.verify_model(site_path / advanced_model.MODEL_NAME):
+            raise postprocessing.IntegrityError("the installed Advanced Upscaler model changed")
     records = postprocessing.discover_images(scm_cwd, args.get("scope", "both"), cancelled=cancelled)
     if not records:
         raise postprocessing.ValidationError("no recognized images were found in the selected scope")
@@ -7877,10 +7889,13 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     payload = json.dumps({
         "source_path": str(source_path), "run_root": str(run_dir),
         "entries": runner_entries, "environment": site_packages,
+        **({"model_path": str(Path(site_packages) / advanced_model.MODEL_NAME)}
+           if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else {}),
         "environment_root": str(store.root / "environments"),
         "revision": item["revision"], "requirements": item["requirements"],
         "contract": store.contract,
-        "limits": {"cpu_seconds": 900, "address_space": 4 * 1024 * 1024 * 1024,
+        "limits": {"cpu_seconds": 3300 if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else 900,
+                   "address_space": 4 * 1024 * 1024 * 1024,
                    "file_size": 512 * 1024 * 1024, "open_files": 128,
                    "processes": 8},
     }, separators=(",", ":"))
@@ -11033,6 +11048,8 @@ POSTPROCESS_GUIDE_MAX_BYTES = 256 * 1024
 POSTPROCESS_GUIDE_FILE = _HERE.parent / "docs" / "image-postprocessing.md"
 BUILTIN_SIMPLE_UPSCALER_ID = "9fa8584bb746386bd270990b51784977"
 BUILTIN_SIMPLE_UPSCALER_FILE = _HERE / "builtin_processors" / "simple_upscaler.py"
+BUILTIN_ADVANCED_UPSCALER_ID = "629deb7c0e4b48968845537a28354d85"
+BUILTIN_ADVANCED_UPSCALER_FILE = _HERE / "builtin_processors" / "advanced_upscaler.py"
 _POSTPROCESS_REGISTRY_LOCK = threading.RLock()
 
 
@@ -11052,8 +11069,44 @@ def _postprocessor_store(*, scm_root: Optional[Path] = None,
         BUILTIN_SIMPLE_UPSCALER_ID, "Simple Upscaler (4×)", source,
         interpreter=python,
     )
+    advanced_raw = postprocessing._read_regular_bytes(
+        BUILTIN_ADVANCED_UPSCALER_FILE, "bundled Advanced Upscaler", POSTPROCESS_SOURCE_MAX_BYTES,
+    )
+    try:
+        advanced_source = advanced_raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise postprocessing.IntegrityError("bundled Advanced Upscaler is not valid UTF-8") from exc
+    store.provision_bundled(
+        BUILTIN_ADVANCED_UPSCALER_ID, "Advanced Upscaler (AI 4×)", advanced_source,
+        interpreter=python, requirements=advanced_model.REQUIREMENTS, optional_model=True,
+    )
     store.cleanup()
     return store
+
+
+def _postprocessor_status(store: postprocessing.ProcessorStore, processor_id: str, python: Path) -> dict:
+    try:
+        status = store.status(processor_id, interpreter=python,
+                              environment_verifier=_verify_dependency_environment)
+        if processor_id == BUILTIN_ADVANCED_UPSCALER_ID:
+            if status["environment"]["ready"]:
+                model = Path(status["environment"]["path"]) / "site-packages" / advanced_model.MODEL_NAME
+                if not advanced_model.verify_model(model):
+                    raise postprocessing.IntegrityError("Advanced Upscaler model is missing or changed")
+            # App-owned source is trusted even before optional assets are
+            # installed; readiness remains a separate, mandatory run gate.
+            status["processor"]["trusted"] = True
+        return status
+    except postprocessing.IntegrityError:
+        if processor_id != BUILTIN_ADVANCED_UPSCALER_ID:
+            raise
+        # A damaged optional install must still be visible, removable and
+        # reinstallable. Never present the corrupted tree as ready to run.
+        item = store.get(processor_id, include_source=False)
+        return {"processor": {**item, "trusted": True, "environment_ready": False,
+                              "environment_status": "stale", "ready_to_run": False},
+                "environment": {"ready": False, "status": "stale", "stale": True,
+                                "path": None, "fingerprint": None}}
 
 
 def _postprocessor_error(exc: Exception) -> dict:
@@ -11091,13 +11144,10 @@ def postprocessors_list() -> dict:
         rows = []
         summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes",
                         "environment_fingerprint", "environment_ready", "environment_status",
-                        "ready_to_run", "bundled"}
+                        "ready_to_run", "bundled", "optional_model", "requirements"}
         for item in store.list():
             try:
-                item = {**item, **store.status(
-                item["id"], interpreter=python,
-                environment_verifier=_verify_dependency_environment,
-            )["processor"]}
+                item = {**item, **_postprocessor_status(store, item["id"], python)["processor"]}
             except postprocessing.PostProcessingError:
                 pass
             rows.append({key: value for key, value in item.items() if key in summary_keys})
@@ -11110,10 +11160,7 @@ def postprocessor_get(processor_id: str, revision_hash: Optional[str] = None) ->
         item = store.get(processor_id, revision=revision_hash)
         if revision_hash is not None:
             return {**item, "active": item["revision"] == item["active_revision"]}
-        status = store.status(
-            processor_id, interpreter=job_python(load_settings()),
-            environment_verifier=_verify_dependency_environment,
-        )
+        status = _postprocessor_status(store, processor_id, job_python(load_settings()))
         return {
             **item, **status["processor"], "environment": status["environment"],
             "revisions": list(store.revisions(processor_id)),
@@ -11188,12 +11235,37 @@ def postprocessor_delete(processor_id: str, params: dict) -> dict:
     return {"ok": True, "processor_id": processor_id}
 
 
+def postprocessor_optional_remove(processor_id: str, params: dict) -> dict:
+    """Remove only the fixed built-in model, never custom processor assets."""
+    if (processor_id != BUILTIN_ADVANCED_UPSCALER_ID or
+            set(params) != {"processor_id", "revision_hash"} or
+            params.get("processor_id") != processor_id or
+            not isinstance(params.get("revision_hash"), str)):
+        return _postprocessor_error(postprocessing.ValidationError("only the fixed optional upscaler can be removed"))
+    with _IMAGE_JOB_STATE_LOCK:
+        if _POSTPROCESS_USERS or _PACKAGE_INSTALL_USERS:
+            return _postprocessor_error(postprocessing.ConflictError("a processor job is still using the optional upscaler"))
+        with _POSTPROCESS_REGISTRY_LOCK:
+            store = _postprocessor_store()
+            old = store.remove_optional_environment(processor_id, params["revision_hash"])
+            shared = any(p["id"] != processor_id and store._metadata(p["id"]).get("installed_environment") == old
+                         for p in store.list()) if old else False
+            invalidate_manifest_cache()
+            if old and not shared:
+                path = store.root / "environments" / old
+                if os.path.lexists(path):
+                    if path.is_symlink() or not path.is_dir():
+                        return {"ok": True, "removed": True, "space_reclaimed": False}
+                    try:
+                        shutil.rmtree(path)
+                    except OSError:
+                        return {"ok": True, "removed": True, "space_reclaimed": False}
+            return {"ok": True, "removed": True, "space_reclaimed": bool(old and not shared)}
+
+
 def postprocessor_status(processor_id: str) -> dict:
     with _POSTPROCESS_REGISTRY_LOCK:
-        return _postprocessor_store().status(
-            processor_id, interpreter=job_python(load_settings()),
-            environment_verifier=_verify_dependency_environment,
-        )
+        return _postprocessor_status(_postprocessor_store(), processor_id, job_python(load_settings()))
 
 
 def postprocessor_import_selected(source_path: str) -> dict:
@@ -11387,6 +11459,12 @@ class Handler(BaseHTTPRequestHandler):
                     result = postprocessor_save(body)
                     return self._json(result, 200 if result.get("ok") else 400)
                 except Exception as exc: return self._json(_postprocessor_error(exc), 400)
+            m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})/optional-remove", path)
+            if m:
+                body = self._body(strict=True, max_bytes=16 * 1024)
+                if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)
+                result = postprocessor_optional_remove(m.group(1), body)
+                return self._json(result, 200 if result.get("ok") else 400)
             m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})/(duplicate|trust)", path)
             if m:
                 body = self._body(strict=True, max_bytes=16 * 1024)

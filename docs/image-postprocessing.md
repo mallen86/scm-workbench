@@ -1,6 +1,6 @@
 # Image post-processing
 
-Image post-processing runs an approved Python callback against fetched card images before Create PDF. Simple mode can select and run processors that are already trusted and ready, including the built-in **Simple Upscaler (4×)**. Advanced mode also provides the Processor library for creating, editing, reviewing, and installing optional libraries. The **Guide** button in that library opens a rendered copy of this document bundled with the running Workbench version.
+Image post-processing runs an approved Python callback against fetched card images before Create PDF. Simple mode offers the ready, no-download **Simple Upscaler (4×)** and a one-time **Install model & libraries** action for the app-owned **Advanced Upscaler (AI 4×)**. It can also run other processors already trusted and installed in Advanced mode, but cannot install arbitrary libraries or edit/trust custom code. Advanced mode provides the Processor library for creating, editing, reviewing, and installing optional libraries. The **Guide** button opens this document bundled with the running Workbench version.
 
 ## Trust and safety
 
@@ -51,6 +51,14 @@ Save the revision before choosing **Install / update libraries**. Review and con
 The interpreter fingerprint follows wheel compatibility: Python implementation and major/minor version, ABI tags, platform, and architecture. Rebuilding, relocating, or updating the app with a compatible runtime—including a Python patch update—preserves the verified environment and its trust. A genuinely incompatible Python minor version, ABI, platform, or architecture marks the old libraries as needing reinstallation while keeping the processor source available to review and edit.
 
 The packaged runtime already includes Pillow, so Pillow-only processors normally need no additional requirement.
+
+## Optional Advanced Upscaler: AI 4×
+
+The app includes a read-only, app-trusted RealESRGAN_x4plus processor, but **not** its 67 MB model or ONNX Runtime wheels. Select it on Image post-processing in either mode and choose **Install model & libraries**. Workbench asks for confirmation, warns that installation uses roughly **150–250 MB of disk space** (platform-dependent, plus temporary download/staging space), and runs a cancellable job. Installation uses the pinned model URL at an immutable revision, an exact expected length and SHA-256, compatible wheel-only PyPI downloads with hash-locked offline installation, and an atomic ready marker. The model is stored under Workbench data, never inside the app or the managed SCM checkout. It can be removed from either mode. A compatible app replacement can reuse it; a changed Python ABI needs a reinstall.
+
+Once installed, runs never fetch models or packages. The processor invokes the ONNX Runtime CPU backend on Windows/Linux; macOS also tries CoreML and uses CPU for unsupported operations. Inference is tiled to bound memory, retains the real input format even for JPEG data with a `.png` filename, and sets JPEG/PNG output metadata to 1200 DPI. It increases each input dimension by four; reruns multiply it again, so restore or re-fetch the original images before switching upscalers on an already processed deck. For large decks and CPU-only machines AI inference can take considerably longer than the Simple Upscaler. Failure or cancellation leaves the original image batch unchanged.
+
+The model originates with Real-ESRGAN (BSD 3-Clause, Xintao Wang). Its conversion provenance and model hash are linked in [the bundled attribution](licenses/Real-ESRGAN.txt). The app does not use PyTorch, Torchvision, or OpenCV for this built-in. Because only its fixed, app-owned identity receives the verified model path, this processor cannot be duplicated as a runnable custom processor. Custom processors remain user-trusted code; installing the fixed optional assets does not authorize arbitrary custom installations in Simple mode.
 
 ## Built-in Simple Upscaler: 300 to 1200 PPI
 

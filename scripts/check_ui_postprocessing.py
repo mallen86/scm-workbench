@@ -40,6 +40,7 @@ def main() -> int:
         'nativeCall("postprocessors.duplicate", params)',
         'nativeCall("postprocessors.trust", params)',
         'nativeCall("postprocessors.delete", params)',
+        'nativeCall("postprocessors.optional.remove", params)',
         'nativeCall("postprocessors.status", { processor_id: processorId })',
         'invoke("wb_postprocessor_import", {})',
         'file.text()',
@@ -105,8 +106,13 @@ def main() -> int:
         'state.processors.filter(canRun)',
         'p.ready_to_run === true',
         'class: "input pp-simple-select"',
-        'Simple mode only shows processors that are already installed and trusted.',
+        'if (select.dataset.optionsKey !== optionsKey)',
+        'editing code or installing custom libraries still requires Advanced mode.',
         'The built-in Simple Upscaler is ready without any downloads.',
+        'Remove optional files',
+        'Cancel installation',
+        'postprocessors.removeOptional',
+        'const result = await jobs.kill(state.installJob.id)',
         'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
         'Built-in processors are read-only',
     ):
@@ -181,11 +187,12 @@ await facade.get("abc", "f".repeat(64));
 await facade.save({ processor_id: null, name: "Example", source: "def process_image(image_path, context):\n    pass\n", requirements: "" });
 await facade.trust("abc", "f".repeat(64), null);
 await facade.remove("abc", "f".repeat(64));
+await facade.removeOptional("abc", "a".repeat(64));
 await facade.status("abc");
 const methods = nativeCalls.map(call => call.rpc?.method);
 if (JSON.stringify(methods) !== JSON.stringify([
   "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.get",
-  "postprocessors.save", "postprocessors.trust", "postprocessors.delete", "postprocessors.status",
+  "postprocessors.save", "postprocessors.trust", "postprocessors.delete", "postprocessors.optional.remove", "postprocessors.status",
 ])) fail("native post-processing method routing is incorrect");
 if (nativeCalls[3].rpc.params.revision_hash !== "f".repeat(64))
   fail("native historical revision was not bound to the request");
@@ -208,6 +215,7 @@ await facade.save({ name: "Example", source: "def process_image(image_path, cont
 await facade.duplicate("abc", "Copy", "1".repeat(64));
 await facade.trust("abc", "2".repeat(64), "3".repeat(64));
 await facade.remove("abc", "4".repeat(64));
+await facade.removeOptional("abc", "5".repeat(64));
 await facade.status("abc");
 const routes = fetchCalls.map(call => `${call.options?.method || "GET"} ${call.url}`);
 if (JSON.stringify(routes) !== JSON.stringify([
@@ -215,7 +223,7 @@ if (JSON.stringify(routes) !== JSON.stringify([
   `GET /api/postprocessors/abc?revision=${"e".repeat(64)}`,
   "POST /api/postprocessors", "POST /api/postprocessors/abc/duplicate",
   "POST /api/postprocessors/abc/trust", "DELETE /api/postprocessors/abc",
-  "GET /api/postprocessors/abc/status",
+  "POST /api/postprocessors/abc/optional-remove", "GET /api/postprocessors/abc/status",
 ])) fail(`browser post-processing routes are incorrect: ${JSON.stringify(routes)}`);
 
 // Client-side caps reject oversized text before transport.

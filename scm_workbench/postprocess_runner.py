@@ -96,8 +96,14 @@ def _load_manifest(path: Path) -> dict:
         raise RunnerError("manifest is invalid JSON") from exc
     required = {"source_path", "run_root", "entries", "environment", "environment_root",
                 "revision", "requirements", "contract", "limits"}
-    if not isinstance(value, dict) or set(value) != required or not isinstance(value.get("entries"), list):
+    if (not isinstance(value, dict) or set(value) not in (required, required | {"model_path"}) or
+            not isinstance(value.get("entries"), list)):
         raise RunnerError("manifest has invalid shape")
+    if "model_path" in value:
+        path = Path(value["model_path"])
+        if (not path.is_absolute() or path.name != "RealESRGAN_x4plus.onnx" or
+                path.parent != Path(value["environment"]) or path.is_symlink() or not path.is_file()):
+            raise RunnerError("installed model path is invalid")
     for key in ("source_path", "run_root", "environment", "environment_root", "revision", "contract"):
         if not isinstance(value.get(key), str) or len(value[key].encode("utf-8")) > 4096:
             raise RunnerError("manifest has invalid fields")
@@ -298,6 +304,8 @@ def run(manifest_path: str | Path) -> int:
             "role": role, "relative_path": relative,
             "name": name, "index": index, "total": total,
         }
+        if "model_path" in manifest:
+            context["model_path"] = manifest["model_path"]
         result = callback(image, context)
         if result is not None:
             raise RunnerError("process_image must return None")

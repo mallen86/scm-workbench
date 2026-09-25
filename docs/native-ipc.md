@@ -77,7 +77,7 @@ the retained kill-on-close job object). It is not exposed through public
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
 `updates.poll`, `updates.start`, `postprocessors.list`, `postprocessors.guide`, `postprocessors.get`,
 `postprocessors.save`, `postprocessors.duplicate`, `postprocessors.trust`,
-`postprocessors.delete`, `postprocessors.status`, and the virtual Rust facade
+`postprocessors.delete`, `postprocessors.status`, `postprocessors.optional.remove`, and the virtual Rust facade
 `fs.delete_images`. That facade is validated publicly but translates into
 private worker `fs.delete_images_start`/`fs.delete_images_poll` frames; the
 worker rejects a direct public-name frame. The bootstrap read methods take `{}`;
@@ -98,6 +98,7 @@ parameter contracts below.
 | `POST /api/postprocessors/<id>/trust` | `postprocessors.trust` | `server.postprocessor_trust()` |
 | `DELETE /api/postprocessors/<id>` | `postprocessors.delete` | `server.postprocessor_delete()` |
 | `GET /api/postprocessors/<id>/status` | `postprocessors.status` | `server.postprocessor_status()` |
+| `POST /api/postprocessors/<id>/optional-remove` | `postprocessors.optional.remove` | `server.postprocessor_optional_remove()` (only the fixed app-owned upscaler, including Simple mode) |
 | `POST /api/offset` (global/per-size) | `offset.set` | `server.offset_set()` |
 | `POST /api/offset` (per-size delete) | `offset.delete` | `server.offset_delete()` |
 | `GET /api/jobs` | `jobs.list` | `server.list_jobs()` |

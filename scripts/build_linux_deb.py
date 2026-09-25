@@ -147,6 +147,9 @@ def assemble(binary: Path, bundle: Path, version: str) -> Path:
     (payload / "scm-workbench").chmod(0o755)
     copy_source_tree(ROOT / "scm_workbench", payload / "app/scm_workbench")
     copy_source_tree(ROOT / "ui", payload / "app/ui")
+    (payload / "app/docs").mkdir()
+    shutil.copy2(ROOT / "docs/image-postprocessing.md", payload / "app/docs/image-postprocessing.md")
+    copy_source_tree(ROOT / "docs/licenses", payload / "app/docs/licenses")
     copy_source_tree(runtime, payload / "runtime")
 
     launcher = stage / "usr/bin/scm-workbench"

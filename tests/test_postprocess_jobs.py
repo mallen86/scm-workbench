@@ -161,6 +161,26 @@ class PostprocessJobTests(unittest.TestCase):
                 "requirements": "",
             })
 
+    def test_simple_mode_can_preview_only_the_fixed_optional_install(self):
+        self.settings["ui_mode"] = "simple"
+        server.invalidate_manifest_cache()
+        store = server._postprocessor_store()
+        item = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+        args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                "requirements": "\n".join(server.advanced_model.REQUIREMENTS)}
+        preview = server.build_preview("postprocess_dependencies", args)
+        self.assertEqual(preview["errors"], [])
+        self.assertIn("postprocess_installer", str(preview["cmd"]))
+        self.assertFalse(server.postprocessor_status(item["id"])["processor"]["ready_to_run"])
+        custom = self.store.save("Custom", "def process_image(image_path, context):\n    pass\n", "numpy==2.5.3")
+        with self.assertRaises(server.PreviewError):
+            server.build_preview("postprocess_dependencies", {
+                "processor_id": custom["id"], "revision_hash": custom["revision"],
+                "requirements": "numpy==2.5.3",
+            })
+        args["requirements"] = "numpy==2.5.3"
+        self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
+
     def test_scm_jpeg_named_png_is_counted_and_processed_with_its_real_format(self):
         front = self.repo / "game" / "front" / "scm-image.png"
         back = self.repo / "game" / "double_sided" / "back.png"

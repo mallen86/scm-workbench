@@ -1406,24 +1406,28 @@ class ProcessorStore:
                 raise IntegrityError("invalid processor metadata")
         if "bundled" in value and value.get("bundled") is not True:
             raise IntegrityError("invalid processor metadata")
+        if "optional_model" in value and (value.get("optional_model") is not True or not value.get("bundled")):
+            raise IntegrityError("invalid processor metadata")
         return value
 
     def provision_bundled(self, processor_id: str, name: str, source: str, *,
-                          interpreter: str | Path = sys.executable) -> dict:
-        """Publish one app-owned, dependency-free processor as ready and trusted.
+                          interpreter: str | Path = sys.executable,
+                          requirements: Sequence[str] = (), optional_model: bool = False) -> dict:
+        """Publish app-owned source without installing any optional assets.
 
-        The deterministic id reserves the registry entry for the application.
-        Provisioning is idempotent and refreshes the immutable revision when an
-        app update changes its shipped source.  Bundled processors deliberately
-        cannot declare separately installed requirements: every imported module
-        must already be part of the Workbench runtime.
+        Only the caller's fixed, shipped optional model may declare libraries.
+        A compatible verified installation survives app restarts; a changed
+        shipped revision needs a new install before it can run again.
         """
+        if requirements and not optional_model:
+            raise ValidationError("bundled runtime processors cannot request libraries")
+        req = normalize_requirements(requirements)
         directory = self._processor(processor_id)
         name = normalize_name(name)
         raw = validate_source(source)
-        revision = revision_digest(source, (), self.contract)
-        environment = self.environment_metadata((), interpreter=interpreter)
-        if not environment["ready"]:
+        revision = revision_digest(source, req, self.contract)
+        environment = self.environment_metadata(req, interpreter=interpreter)
+        if not optional_model and not environment["ready"]:
             raise IntegrityError("bundled processor runtime is not ready")
         exists = os.path.lexists(directory)
         if exists:
@@ -1440,9 +1444,11 @@ class ProcessorStore:
                     raise ConflictError("bundled processor id is already in use")
                 if (metadata.get("name") == name and
                         metadata.get("active_revision") == revision and
+                        bool(metadata.get("optional_model")) == optional_model and
                         metadata.get("trusted") == revision and
-                        metadata.get("environment") == environment["fingerprint"] and
-                        metadata.get("trusted_tree_digest") == environment.get("tree_digest")):
+                        (optional_model or (
+                            metadata.get("environment") == environment["fingerprint"] and
+                            metadata.get("trusted_tree_digest") == environment.get("tree_digest")))):
                     try:
                         current = self.get(processor_id)
                         if current.get("source") == source:
@@ -1470,7 +1476,7 @@ class ProcessorStore:
         _atomic_bytes(source_path, raw)
         _atomic_json(revision_meta, {
             "revision": revision,
-            "requirements": [],
+            "requirements": list(req),
             "contract": self.contract,
             "source_bytes": len(raw),
         })
@@ -1479,9 +1485,10 @@ class ProcessorStore:
             "name": name,
             "active_revision": revision,
             "trusted": revision,
-            "environment": environment["fingerprint"],
-            "trusted_tree_digest": environment.get("tree_digest"),
+            "environment": environment["fingerprint"] if not optional_model else None,
+            "trusted_tree_digest": environment.get("tree_digest") if not optional_model else None,
             "bundled": True,
+            **({"optional_model": True} if optional_model else {}),
             "updated": time.time(),
         })
         # Built-in revisions cannot be reverted or edited. Prune superseded
@@ -1568,7 +1575,7 @@ class ProcessorStore:
         if (len(raw) != meta.get("source_bytes") or
                 revision_digest(source, requirements, self.contract) != revision):
             raise IntegrityError("processor revision content does not match its digest")
-        result = {"id": metadata["id"], "name": metadata["name"], "active_revision": metadata.get("active_revision"), "revision": revision, "requirements": list(requirements), "trusted": metadata.get("trusted") == revision, "source_bytes": len(raw), "bundled": bool(metadata.get("bundled"))}
+        result = {"id": metadata["id"], "name": metadata["name"], "active_revision": metadata.get("active_revision"), "revision": revision, "requirements": list(requirements), "trusted": metadata.get("trusted") == revision, "source_bytes": len(raw), "bundled": bool(metadata.get("bundled")), "optional_model": bool(metadata.get("optional_model"))}
         if include_source: result["source"] = source
         return result
 
@@ -1624,7 +1631,7 @@ class ProcessorStore:
         return self.get(processor_id, revision=revision, include_source=False)
 
     def record_environment(self, processor_id: str, revision: str, lock_hash: str, *, interpreter: str | Path = sys.executable) -> dict:
-        if self._metadata(processor_id).get("bundled"):
+        if self._metadata(processor_id).get("bundled") and not self._metadata(processor_id).get("optional_model"):
             raise ConflictError("bundled processors use the app runtime")
         item = self.get(processor_id, include_source=False)
         requirements = tuple(item["requirements"])
@@ -1649,10 +1656,27 @@ class ProcessorStore:
             "installed_tree_digest": environment.get("tree_digest"),
             "lock_hash": lock_hash or None,
         })
-        if not trust_still_valid:
+        if metadata.get("optional_model"):
+            metadata.update({"trusted": revision, "environment": environment["fingerprint"],
+                             "trusted_tree_digest": environment.get("tree_digest")})
+        elif not trust_still_valid:
             metadata.update({"trusted": None, "environment": None, "trusted_tree_digest": None})
         _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
         return self.status(processor_id, interpreter=interpreter)
+
+    def remove_optional_environment(self, processor_id: str, revision: str) -> str | None:
+        """Make an app-owned optional processor unavailable without deleting its source."""
+        metadata = self._metadata(processor_id)
+        if not metadata.get("bundled") or not metadata.get("optional_model"):
+            raise ConflictError("only the optional app-owned processor can be uninstalled")
+        if revision != metadata.get("active_revision"):
+            raise ConflictError("processor revision is stale")
+        previous = metadata.get("installed_environment")
+        metadata.update({"trusted": revision, "environment": None, "trusted_tree_digest": None,
+                         "installed_revision": None, "installed_environment": None,
+                         "installed_tree_digest": None, "lock_hash": None})
+        _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
+        return previous
 
     def invalidate_trust(self, processor_id: str, *, expected_revision: str | None = None) -> dict:
         metadata = self._metadata(processor_id)
@@ -1675,6 +1699,8 @@ class ProcessorStore:
 
     def duplicate(self, processor_id: str, *, name: str | None = None, expected_revision: str | None = None) -> dict:
         item = self.get(processor_id)
+        if item.get("optional_model"):
+            raise ConflictError("the fixed optional model cannot be duplicated; create a custom processor instead")
         if expected_revision is not None and expected_revision != item["active_revision"]:
             raise ConflictError("processor revision is stale")
         return self.save(name or (item["name"] + " copy"), item["source"], item["requirements"])

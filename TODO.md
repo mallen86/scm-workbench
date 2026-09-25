@@ -107,6 +107,7 @@
     - [x] Add a Processor library button that opens the running version's bundled post-processing Markdown guide as rendered in-app documentation.
     - [x] Allow picking a specific revision when clicking Revert button
     - [x] Job history should take you to the specific processor used for the job
+    - [x] Add a fixed, optional-install Advanced AI Upscaler in both Simple and Advanced modes, with upfront size estimates, pinned/hash-verified assets, cancellable install, remove/reinstall, offline processing, and original-format preservation.
 - [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
     - [x] Allow downgrading from beta to stable
 - [x] Add and verify the first Debian/Ubuntu x86_64 package with the bundled runtime, native IPC, XDG data, manual package-manager updates, and lifecycle smoke coverage.

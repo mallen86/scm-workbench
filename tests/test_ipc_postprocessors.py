@@ -57,7 +57,7 @@ class IpcPostprocessorTests(unittest.TestCase):
         processor = saved["processor"]
 
         listed = self.call("postprocessors.list")
-        self.assertEqual(len(listed["processors"]), 2)
+        self.assertEqual(len(listed["processors"]), 3)
         custom = next(item for item in listed["processors"] if item["id"] == processor["id"])
         bundled = next(item for item in listed["processors"] if item["id"] == server.BUILTIN_SIMPLE_UPSCALER_ID)
         self.assertNotIn("source", custom)
@@ -65,6 +65,18 @@ class IpcPostprocessorTests(unittest.TestCase):
         self.assertTrue(bundled["bundled"])
         self.assertTrue(bundled["trusted"])
         self.assertTrue(bundled["ready_to_run"])
+        optional = next(item for item in listed["processors"] if item["id"] == server.BUILTIN_ADVANCED_UPSCALER_ID)
+        self.assertTrue(optional["bundled"])
+        self.assertTrue(optional["optional_model"])
+        self.assertTrue(optional["trusted"])
+        self.assertFalse(optional["ready_to_run"])
+        self.assertEqual(optional["requirements"], list(server.advanced_model.REQUIREMENTS))
+        duplicate_optional = self.call("postprocessors.duplicate", {
+            "processor_id": optional["id"], "name": "Cannot copy model",
+            "expected_revision": optional["revision"],
+        })
+        self.assertFalse(duplicate_optional["ok"])
+        self.assertIn("fixed optional model", duplicate_optional["errors"][0])
 
         detail = self.call("postprocessors.get", {"processor_id": processor["id"]})
         self.assertEqual(detail["source"], SOURCE)
@@ -109,7 +121,8 @@ class IpcPostprocessorTests(unittest.TestCase):
         })
         self.assertTrue(deleted["ok"])
         remaining = self.call("postprocessors.list")["processors"]
-        self.assertEqual([item["id"] for item in remaining], [server.BUILTIN_SIMPLE_UPSCALER_ID])
+        self.assertEqual({item["id"] for item in remaining},
+                         {server.BUILTIN_SIMPLE_UPSCALER_ID, server.BUILTIN_ADVANCED_UPSCALER_ID})
 
     def test_bundled_upscaler_is_read_only_but_can_be_duplicated(self):
         detail = self.call("postprocessors.get", {
@@ -232,12 +245,64 @@ class IpcPostprocessorTests(unittest.TestCase):
         self.assertTrue(next(row for row in listed
                              if row["id"] == server.BUILTIN_SIMPLE_UPSCALER_ID)["ready_to_run"])
 
+    def test_only_fixed_optional_asset_can_be_removed_in_simple_mode(self):
+        self.settings["ui_mode"] = "simple"
+        optional = self.call("postprocessors.get", {
+            "processor_id": server.BUILTIN_ADVANCED_UPSCALER_ID,
+        })
+        self.assertTrue(optional["bundled"])
+        self.assertFalse(optional["environment_ready"])
+        rejected = self.call("postprocessors.optional.remove", {
+            "processor_id": server.BUILTIN_SIMPLE_UPSCALER_ID,
+            "revision_hash": optional["revision"],
+        })
+        self.assertFalse(rejected["ok"])
+        stale = self.call("postprocessors.optional.remove", {
+            "processor_id": optional["id"], "revision_hash": "0" * 64,
+        })
+        self.assertFalse(stale["ok"])
+        store = postprocessing.ProcessorStore(self.data, self.repo)
+        installed = "a" * 64
+        environment = store.root / "environments" / installed
+        environment.mkdir(parents=True)
+        (environment / "model.onnx").write_bytes(b"pretend installed asset")
+        metadata = store._metadata(optional["id"])
+        metadata["installed_environment"] = installed
+        (store._processor(optional["id"]) / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        removed = self.call("postprocessors.optional.remove", {
+            "processor_id": optional["id"], "revision_hash": optional["revision"],
+        })
+        self.assertTrue(removed["ok"])
+        self.assertTrue(removed["space_reclaimed"])
+        self.assertFalse(environment.exists())
+        self.assertFalse(self.call("postprocessors.get", {
+            "processor_id": optional["id"],
+        })["ready_to_run"])
+
+    def test_missing_optional_model_downgrades_readiness_without_hiding_source(self):
+        store = server._postprocessor_store()
+        item = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+        forged = {"processor": {**item, "environment_ready": True, "ready_to_run": True},
+                  "environment": {"ready": True, "path": str(self.root), "status": "ready"}}
+        with mock.patch.object(postprocessing.ProcessorStore, "status", return_value=forged):
+            result = server.postprocessor_status(item["id"])
+        self.assertTrue(result["processor"]["trusted"])
+        self.assertFalse(result["processor"]["ready_to_run"])
+        self.assertEqual(result["processor"]["environment_status"], "stale")
+        self.assertTrue(server.postprocessor_get(item["id"])["optional_model"])
+
     def test_invalid_native_parameters_are_protocol_errors(self):
         response = ipc.dispatch({
             "id": "post", "method": "postprocessors.save",
             "params": {"name": "Missing source"},
         })
         self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "bad_request")
+
+        response = ipc.dispatch({
+            "id": "post", "method": "postprocessors.optional.remove",
+            "params": {"processor_id": server.BUILTIN_ADVANCED_UPSCALER_ID},
+        })
         self.assertEqual(response["error"]["code"], "bad_request")
 
         response = ipc.dispatch({

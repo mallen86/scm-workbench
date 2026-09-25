@@ -573,6 +573,7 @@ fn validate_method(method: &str) -> Result<(), String> {
         | "postprocessors.duplicate"
         | "postprocessors.trust"
         | "postprocessors.delete"
+        | "postprocessors.optional.remove"
         | "postprocessors.status" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
@@ -845,6 +846,7 @@ mod tests {
             "postprocessors.duplicate",
             "postprocessors.trust",
             "postprocessors.delete",
+            "postprocessors.optional.remove",
             "postprocessors.status",
         ] {
             assert!(

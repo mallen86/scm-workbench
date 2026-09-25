@@ -100,6 +100,7 @@ jobs:
           cp -R "$ws/ui" "$app/Contents/app/ui"
           mkdir -p "$app/Contents/app/docs"
           cp "$ws/docs/image-postprocessing.md" "$app/Contents/app/docs/image-postprocessing.md"
+          cp -R "$ws/docs/licenses" "$app/Contents/app/docs/licenses"
           mv "$bundle/runtime" "$app/Contents/runtime"
           rm -rf "$bundle/.bake"
           # The icon: one .iconset from the shared 1024px source, iconutil
@@ -467,6 +468,7 @@ jobs:
           Copy-Item (Join-Path $ws "ui") (Join-Path $bundle "app\ui") -Recurse
           New-Item -ItemType Directory -Force (Join-Path $bundle "app\docs") | Out-Null
           Copy-Item (Join-Path $ws "docs\image-postprocessing.md") (Join-Path $bundle "app\docs\image-postprocessing.md")
+          Copy-Item (Join-Path $ws "docs\licenses") (Join-Path $bundle "app\docs\licenses") -Recurse
           # The bake's scratch dir (the requirements clones live there briefly)
           # must not ship inside the bundle:
           Remove-Item -Recurse -Force (Join-Path $bundle ".bake") -ErrorAction SilentlyContinue

@@ -22,7 +22,7 @@ from pathlib import Path
 # trusted Workbench bootstrap, so add only its package parent before importing
 # the shared validators; the later user processor runner does not do this.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scm_workbench import postprocessing  # noqa: E402
+from scm_workbench import advanced_model, postprocessing  # noqa: E402
 
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_REPORT_BYTES = 2 * 1024 * 1024
@@ -132,10 +132,15 @@ def _load_manifest(path: Path) -> dict:
         value = json.loads(_read_regular(path, "installer manifest", MAX_MANIFEST_BYTES).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise InstallerError("installer manifest is invalid") from exc
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or set(value) not in ({
         "stage", "target", "requirements", "resolve_report", "lock_file", "wheelhouse",
-    }:
+    }, {
+        "stage", "target", "requirements", "resolve_report", "lock_file", "wheelhouse", "model",
+    }):
         raise InstallerError("installer manifest has invalid fields")
+    if "model" in value and (value["model"] is not True or
+                             tuple(postprocessing.normalize_requirements(value["requirements"])) != advanced_model.REQUIREMENTS):
+        raise InstallerError("installer model configuration is invalid")
     stage = Path(value["stage"])
     if not stage.is_absolute() or stage.is_symlink() or not stage.is_dir():
         raise InstallerError("installer stage is invalid")
@@ -280,6 +285,11 @@ def install(manifest_path: Path) -> None:
         "-r", str(lock_file),
     ], "Installing the verified wheels offline")
     _regular(install_report, "pip install report", MAX_REPORT_BYTES)
+    if manifest.get("model"):
+        print("[processor libraries] Downloading verified RealESRGAN_x4plus model (67 MB)", flush=True)
+        advanced_model.download_model(target / advanced_model.MODEL_NAME)
+        if not advanced_model.verify_model(target / advanced_model.MODEL_NAME):
+            raise InstallerError("downloaded model changed before installation")
     print("[processor libraries] Offline wheel installation complete", flush=True)
 
 

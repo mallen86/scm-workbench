@@ -1653,6 +1653,9 @@ cursor: pointer;
 .pp-warning { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; margin-bottom: 22px; }
 .pp-warning .ic { flex: 0 0 auto; color: var(--warn); }
 .pp-simple-detail { margin-top: 10px; line-height: 1.5; }
+.pp-model-setup { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
+.pp-model-setup p { flex: 1 1 100%; line-height: 1.5; }
+.pp-model-setup[hidden], .pp-model-setup [hidden], .pp-editor-actions .pp-model-remove[hidden], .pp-editor-actions .pp-model-cancel[hidden], .pp-model-explain[hidden] { display: none !important; }
 .pp-library-list { display: grid; gap: 8px; }
 .pp-processor { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
 .pp-processor:hover, .pp-processor.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft)); background: var(--surface-3); }

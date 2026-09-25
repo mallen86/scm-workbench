@@ -86,6 +86,12 @@ export function remove(processorId, expectedRevision = null) {
   return checked(native.native ? native.value : httpJson(idPath(processorId), jsonOptions("DELETE", params)));
 }
 
+export function removeOptional(processorId, revisionHash) {
+  const params = { processor_id: processorId, revision_hash: revisionHash };
+  const native = nativeCall("postprocessors.optional.remove", params);
+  return checked(native.native ? native.value : httpJson(idPath(processorId, "/optional-remove"), jsonOptions("POST", params)));
+}
+
 export function status(processorId) {
   const native = nativeCall("postprocessors.status", { processor_id: processorId });
   return checked(native.native ? native.value : httpJson(idPath(processorId, "/status")));
@@ -120,5 +126,5 @@ export async function importSource({ saveDraft } = {}) {
   return typeof saveDraft === "function" ? saveDraft(payload) : save(payload);
 }
 
-export const postprocessors = Object.freeze({ list, guide, get, save, duplicate, trust, delete: remove, status, canImport, importSource });
+export const postprocessors = Object.freeze({ list, guide, get, save, duplicate, trust, delete: remove, removeOptional, status, canImport, importSource });
 export { MAX_SOURCE_BYTES, MAX_REQUIREMENTS_BYTES };
