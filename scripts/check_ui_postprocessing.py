@@ -130,6 +130,8 @@ def main() -> int:
             return fail(f"post-processing page is missing {required}")
     if page.count('formCard("postprocess_images", { run: false, preview: "summary" })') != 2:
         return fail("image post-processing must hide technical commands in both modes while keeping preview validation events")
+    if 'with no download during processing' in page or page.count('Processing can take a while depending on your computer.') != 2:
+        return fail("optional AI Upscaler description must describe realistic processing time without obsolete download wording")
     if 'never the app bundle' in page:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:

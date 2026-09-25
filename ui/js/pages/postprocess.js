@@ -262,7 +262,7 @@ function repaintSimplePicker() {
   if (ready.length) select.value = state.selected || ready[0].id;
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
-  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. Its model and inference libraries are optional; 1200-DPI output, with no download during processing." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. Its model and inference libraries are optional; output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
   const summary = document.querySelector(".pp-install-summary");
   if (summary) {
     const optional = state.processors.find(p => p.optional_model);
@@ -656,7 +656,7 @@ PAGES.postprocess = root => {
     el("label", {}, "Python source", sourceEditor),
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
-    el("p", { class: "small faint pp-model-explain" }, "The optional AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. The Simple Upscaler needs no download."),
+    el("p", { class: "small faint pp-model-explain" }, "The optional AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
     el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
     el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
