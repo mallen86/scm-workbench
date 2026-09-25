@@ -109,9 +109,9 @@ def main() -> int:
         'p.ready_to_run === true',
         'class: "input pp-simple-select"',
         'if (select.dataset.optionsKey !== optionsKey)',
-        'You can install the optional AI Upscaler before SCM is ready;',
+        'You can install the Advanced AI Upscaler before SCM is ready;',
         'The built-in Simple Upscaler is ready without any downloads.',
-        'Remove optional files',
+        'Remove AI files',
         'Cancel installation',
         'Follow the installation job in the sidebar.',
         'onError: showStartError',
@@ -131,7 +131,14 @@ def main() -> int:
     if page.count('formCard("postprocess_images", { run: false, preview: "summary" })') != 2:
         return fail("image post-processing must hide technical commands in both modes while keeping preview validation events")
     if 'with no download during processing' in page or page.count('Processing can take a while depending on your computer.') != 2:
-        return fail("optional AI Upscaler description must describe realistic processing time without obsolete download wording")
+        return fail("AI Upscaler description must describe realistic processing time without obsolete download wording")
+    if any(text in page for text in ('model and inference libraries are optional', 'plus optional libraries',
+                                     'One-time optional download:', 'Install optional upscaler')):
+        return fail("AI Upscaler installation copy incorrectly describes required components as optional")
+    for required in ('This upscaler requires its model and inference libraries to be installed before use.',
+                     'plus required inference libraries.', 'Install upscaler'):
+        if required not in page:
+            return fail(f"AI Upscaler installation copy is missing {required}")
     if 'never the app bundle' in page:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:

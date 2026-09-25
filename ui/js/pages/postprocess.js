@@ -262,7 +262,7 @@ function repaintSimplePicker() {
   if (ready.length) select.value = state.selected || ready[0].id;
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
-  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. Its model and inference libraries are optional; output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. This upscaler requires its model and inference libraries to be installed before use. Output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
   const summary = document.querySelector(".pp-install-summary");
   if (summary) {
     const optional = state.processors.find(p => p.optional_model);
@@ -288,7 +288,7 @@ function repaintSimplePicker() {
         label.className = `small pp-model-state ${view.tone}`;
       }
       const cost = setup.querySelector(".pp-model-cost");
-      if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (~150–250 MB). Remove them whenever you like." : "One-time download: a 67 MB AI model plus optional libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.";
+      if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (~150–250 MB). Remove them whenever you like." : "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.";
       const button = setup.querySelector(".pp-model-install");
       if (button) { button.disabled = !!state.installing || canRun(selected); button.hidden = canRun(selected); }
       const remove = setup.querySelector(".pp-model-remove");
@@ -448,21 +448,21 @@ async function trustRevision() {
 async function removeOptionalModel() {
   const p = selectedProcessor();
   if (!p?.optional_model || !isReady(p)) return;
-  if (!await confirmModal({ title: "Remove optional upscaler files?", text: "Remove the downloaded AI model and libraries from Workbench data? The Simple Upscaler remains available. You can install the Advanced Upscaler again later.", okLabel: "Remove files", danger: true })) return;
+  if (!await confirmModal({ title: "Remove upscaler files?", text: "Remove the downloaded AI model and libraries from Workbench data? The Simple Upscaler remains available. You can install the Advanced Upscaler again later.", okLabel: "Remove files", danger: true })) return;
   try {
     const result = await postprocessors.removeOptional(p.id, revision(p));
     state.installStartError = null;
     state.installFailure = null;
     await refreshProcessors(p.id);
-    toast("ok", result.space_reclaimed ? "Optional model and libraries removed." : "Optional upscaler disabled. Shared files may remain in use by another processor.");
-  } catch (error) { toast("err", error.message || "Could not remove optional upscaler files."); }
+    toast("ok", result.space_reclaimed ? "Upscaler model and libraries removed." : "Upscaler disabled. Shared files may remain in use by another processor.");
+  } catch (error) { toast("err", error.message || "Could not remove upscaler files."); }
 }
 
 async function cancelOptionalInstall() {
   if (!state.installJob?.id) return;
   try {
     const result = await jobs.kill(state.installJob.id);
-    if (result?.ok) toast("warn", "Stopping optional installation…");
+    if (result?.ok) toast("warn", "Stopping installation…");
   } catch (error) { toast("err", error.message || "Could not stop installation."); }
 }
 
@@ -474,8 +474,8 @@ async function installLibraries() {
   const requirements = model ? (p.requirements || []).join("\n") : String(state.draft?.requirements || "").trim();
   const approved = await confirmModal({
     title: model ? "Install Advanced Upscaler?" : "Install processor libraries?",
-    text: model ? "One-time optional download: 67 MB RealESRGAN_x4plus model plus ONNX Runtime and verified Python wheels. Allow roughly 150–250 MB of disk space (varies by platform), with additional temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
-    okLabel: model ? "Install optional upscaler" : "Install libraries",
+    text: model ? "One-time download: 67 MB RealESRGAN_x4plus model plus required ONNX Runtime and verified Python wheels. Allow roughly 150–250 MB of disk space (varies by platform), with additional temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    okLabel: model ? "Install upscaler" : "Install libraries",
   });
   if (!approved) return;
   state.installJob = null;
@@ -508,7 +508,7 @@ function paintRunGate() {
   const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
   const p = selectedProcessor();
   const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
-  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the optional model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
   const run = document.querySelector(".pp-run");
   if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
   const note = document.querySelector(".pp-run-note");
@@ -606,7 +606,7 @@ function attachRunStatus(root) {
 function renderSimplePostprocess() {
   const wrap = el("div", {});
   wrap.append(pageHead("Image post-processing", "Optionally improve fetched card images before creating your PDF."));
-  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the optional AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
+  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the Advanced AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
   wrap.append(el("section", { class: "card pp-simple-picker" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
     el("label", {}, "Processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready image processor" })),
@@ -614,10 +614,10 @@ function renderSimplePostprocess() {
     el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
     el("div", { class: "pp-model-setup", hidden: true },
       el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
-      el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus optional libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space."),
+      el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space."),
       el("button", { class: "btn btn-ghost pp-model-install", type: "button", onclick: installLibraries }, "Install model & libraries"),
       el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
-      el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"))));
+      el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files"))));
   const run = el("section", { class: "card pp-run-card" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which fetched images to improve. Originals are replaced only after every result passes validation."))),
     formCard("postprocess_images", { run: false, preview: "summary" }),
@@ -656,10 +656,10 @@ PAGES.postprocess = root => {
     el("label", {}, "Python source", sourceEditor),
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
-    el("p", { class: "small faint pp-model-explain" }, "The optional AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
+    el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
     el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
-    el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
+    el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
   wrap.append(editor);
   const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false, preview: "summary" }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
   wrap.append(run);
