@@ -67,6 +67,9 @@ def main() -> int:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
             return 1
     started = forms[forms.find("export async function doRun("):]
+    if 'opts.onError?.(message)' not in started or 'return rejectStart(error?.message || "Failed to start job")' not in started:
+        print("FAIL: a rejected installation start cannot retain its reason in the page")
+        return 1
     saved = started.find("else S.jobs = [j0, ...(S.jobs || [])];")
     seeded = started.find("syncJobNotices(S.jobs);")
     refresh = started.find('await import("./console.js")')

@@ -5,12 +5,13 @@ import { jobs } from "../jobs.js";
 import { go, uiMode } from "../nav.js";
 import { renderPythonHighlight } from "../python-highlight.js";
 import { postprocessors } from "../postprocess-transport.js";
+import { latestInstallJob, optionalInstallStatus } from "../postprocess-install-state.js";
 import { watchJobDone } from "./utilities.js";
 import { syncJobNotices } from "../job-notices.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
-const state = { processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
+const state = { processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, installFailure: null, installLogLoading: null, installStartError: null, installActivity: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
 const first = value => Array.isArray(value) ? value[0] : value;
 const revision = p => p?.revision_hash || p?.revision || p?.active_revision || "";
 const normalizeList = result => Array.isArray(result) ? result : (result?.processors || []);
@@ -19,6 +20,45 @@ const isStale = p => p?.environment_status === "stale" || p?.environment?.status
 const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === revision(p));
 const canRun = p => !!p && (p.ready_to_run === true || (isReady(p) && isTrusted(p)));
 const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
+const currentInstallJob = p => {
+  if (!p?.optional_model) return null;
+  const saved = latestInstallJob(S.jobs, p.id);
+  const started = state.installJob?.args?.processor_id === p.id ? state.installJob : null;
+  return saved && (!started || saved.id === started.id || saved.ts >= started.ts) ? saved : started;
+};
+
+async function loadInstallProgress(job) {
+  if (job?.status !== "running") return;
+  if (state.installActivity?.id !== job.id) state.installActivity = { id: job.id, after: 0, pollAt: 0, busy: false, step: null };
+  const activity = state.installActivity;
+  if (activity.busy || Date.now() - activity.pollAt < 4000) return;
+  activity.pollAt = Date.now();
+  activity.busy = true;
+  try {
+    const result = await jobs.log(job.id, activity.after, 64);
+    activity.after = Math.max(activity.after, Number(result.next_seq) || 0);
+    const step = (result.lines || []).map(line => String(line).trim()).filter(line => /^\[processor libraries\] /.test(line)).at(-1);
+    if (step) activity.step = step.replace(/^\[processor libraries\]\s*/, "").slice(0, 120);
+  } catch { /* A transient log read must not hide the authoritative running job. */ }
+  finally { activity.busy = false; updateEditorState(); repaintSimplePicker(); }
+}
+
+async function loadInstallFailure(job) {
+  if (job?.status !== "fail" || state.installFailure?.id === job.id || state.installLogLoading === job.id) return;
+  state.installLogLoading = job.id;
+  let message = "No reason was recorded. Retry, or inspect the full log in Advanced mode.";
+  try {
+    // This is a one-time, bounded read for the terminal job, not a log stream.
+    const result = await jobs.log(job.id, 0, 4096);
+    const lines = (result.lines || []).map(line => String(line).trim()).filter(Boolean);
+    const reason = [...lines].reverse().find(line => /processor library installation failed:|^error:|^!\s+|no matching distribution|failed/i.test(line));
+    if (reason) message = reason.replace(/\s+/g, " ").slice(0, 320);
+  } catch { message = "Could not read the job's failure details. Retry, or inspect Job history in Advanced mode."; }
+  state.installFailure = { id: job.id, message };
+  state.installLogLoading = null;
+  updateEditorState();
+  repaintSimplePicker();
+}
 
 function sourceBytes(value) { return new TextEncoder().encode(String(value || "")).length; }
 function updateLockSummary() {
@@ -78,9 +118,16 @@ function updateEditorState() {
   const remove = document.querySelector(".pp-model-remove");
   if (remove) { remove.hidden = !state.loaded?.optional_model || !isReady(state.loaded); remove.disabled = !!state.installing; }
   const cancel = document.querySelector(".pp-editor-actions .pp-model-cancel");
-  if (cancel) { cancel.hidden = !state.loaded?.optional_model || !(S.jobs || []).some(j => j.id === state.installJob?.id && j.status === "running"); cancel.disabled = !state.installing; }
+  if (cancel) { cancel.hidden = currentInstallJob(state.loaded)?.status !== "running"; cancel.disabled = !state.installing; }
   const explanation = document.querySelector(".pp-model-explain");
   if (explanation) explanation.hidden = !state.loaded?.optional_model;
+  const installStatus = document.querySelector(".pp-model-status");
+  if (installStatus) {
+    const view = optionalInstallStatus(state.loaded, currentInstallJob(state.loaded), state.installFailure, state.installStartError, state.installActivity);
+    installStatus.hidden = !state.loaded?.optional_model;
+    installStatus.className = `small pp-model-status ${view.tone}`;
+    installStatus.textContent = view.label;
+  }
   for (const control of [document.querySelector(".pp-name"), document.querySelector(".pp-source"), document.querySelector(".pp-requirements")]) if (control) control.readOnly = bundled;
 }
 function setEditorValue(value) {
@@ -216,13 +263,30 @@ function repaintSimplePicker() {
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
   if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. Its model and inference libraries are optional; 1200-DPI output, with no download during processing." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
+  const summary = document.querySelector(".pp-install-summary");
+  if (summary) {
+    const optional = state.processors.find(p => p.optional_model);
+    const job = optional && latestInstallJob(S.jobs, optional.id);
+    const show = optional && selected?.id !== optional.id &&
+      (job?.status === "running" || job?.status === "fail" || state.installStartError?.processorId === optional.id);
+    summary.hidden = !show;
+    if (show) {
+      const view = optionalInstallStatus(optional, job, state.installFailure, state.installStartError, state.installActivity);
+      summary.textContent = `Advanced Upscaler: ${view.label} Select it above for installation controls.`;
+      summary.className = `small pp-install-summary ${view.tone}`;
+    }
+  }
   const setup = document.querySelector(".pp-model-setup");
   if (setup) {
     setup.hidden = !selected?.optional_model;
     if (selected?.optional_model) {
-      const active = state.installJob && (S.jobs || []).find(j => j.id === state.installJob.id);
+      const active = currentInstallJob(selected);
       const label = setup.querySelector(".pp-model-state");
-      if (label) label.textContent = active?.status === "running" ? "Installing model and libraries…" : active?.status === "fail" ? "Installation failed. Images were not changed; retry when ready." : active?.status === "killed" ? "Installation cancelled. Images were not changed." : canRun(selected) ? "Installed and ready to run offline." : "Not installed. The Simple Upscaler remains available without a download.";
+      if (label) {
+        const view = optionalInstallStatus(selected, active, state.installFailure, state.installStartError, state.installActivity);
+        label.textContent = view.label;
+        label.className = `small pp-model-state ${view.tone}`;
+      }
       const cost = setup.querySelector(".pp-model-cost");
       if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (~150–250 MB). Remove them whenever you like." : "One-time download: a 67 MB AI model plus optional libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.";
       const button = setup.querySelector(".pp-model-install");
@@ -387,6 +451,8 @@ async function removeOptionalModel() {
   if (!await confirmModal({ title: "Remove optional upscaler files?", text: "Remove the downloaded AI model and libraries from Workbench data? The Simple Upscaler remains available. You can install the Advanced Upscaler again later.", okLabel: "Remove files", danger: true })) return;
   try {
     const result = await postprocessors.removeOptional(p.id, revision(p));
+    state.installStartError = null;
+    state.installFailure = null;
     await refreshProcessors(p.id);
     toast("ok", result.space_reclaimed ? "Optional model and libraries removed." : "Optional upscaler disabled. Shared files may remain in use by another processor.");
   } catch (error) { toast("err", error.message || "Could not remove optional upscaler files."); }
@@ -412,10 +478,29 @@ async function installLibraries() {
     okLabel: model ? "Install optional upscaler" : "Install libraries",
   });
   if (!approved) return;
+  state.installJob = null;
+  state.installActivity = null;
+  state.installStartError = null;
+  state.installFailure = null;
+  const showStartError = message => {
+    state.installStartError = { processorId: p.id, at: Date.now(), message };
+    updateEditorState(); repaintSimplePicker();
+  };
   try {
-    const job = await doRun("postprocess_dependencies", null, { args: { processor_id: p.id, revision_hash: revision(p), requirements } });
-    if (job?.id) { state.installJob = job; state.installing = true; updateEditorState(); repaintSimplePicker(); watchJobDone(job.id, () => refreshProcessors(p.id)); }
-  } catch (error) { toast("err", error.message || "Could not start library installation."); }
+    const job = await doRun("postprocess_dependencies", null, {
+      args: { processor_id: p.id, revision_hash: revision(p), requirements }, onError: showStartError,
+    });
+    if (job?.id) {
+      state.installJob = { ...job, kind: "postprocess_dependencies", status: "running", ts: Date.now() / 1000,
+                           args: { processor_id: p.id } };
+      state.installing = true;
+      updateEditorState(); repaintSimplePicker();
+      watchJobDone(job.id, () => refreshProcessors(p.id));
+    } else if (!state.installStartError) showStartError("No installation job was created. Try again.");
+  } catch (error) {
+    showStartError(error?.message || "Could not start the installation job.");
+    toast("err", error?.message || "Could not start the installation job.");
+  }
 }
 
 function paintRunGate() {
@@ -502,7 +587,11 @@ function attachRunStatus(root) {
     if (processing) state.job = processing;
     const dependency = (S.jobs || []).find(j => j.kind === "postprocess_dependencies" && j.status === "running");
     state.installing = !!dependency;
-    if (dependency?.args?.processor_id === state.selected) state.installJob = dependency;
+    const optional = state.processors.find(p => p.optional_model);
+    const selectedInstall = optional && latestInstallJob(S.jobs, optional.id);
+    if (selectedInstall?.status === "running") void loadInstallProgress(selectedInstall);
+    if (selectedInstall?.status === "fail") void loadInstallFailure(selectedInstall);
+    if (selectedInstall && state.selected === optional.id) state.installJob = selectedInstall;
     updateEditorState();
     repaintSimplePicker();
     if (!dependency && lastDependencyStatus === "running") await refreshProcessors(state.selected);
@@ -522,6 +611,7 @@ function renderSimplePostprocess() {
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
     el("label", {}, "Processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready image processor" })),
     el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…"),
+    el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
     el("div", { class: "pp-model-setup", hidden: true },
       el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
       el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus optional libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space."),
@@ -567,6 +657,7 @@ PAGES.postprocess = root => {
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
     el("p", { class: "small faint pp-model-explain" }, "The optional AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. The Simple Upscaler needs no download."),
+    el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
     el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
   wrap.append(editor);

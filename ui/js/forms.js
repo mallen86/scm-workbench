@@ -742,20 +742,20 @@ export function groupInner(opts, kind, args) {
 /* ================================ job control ============================== */
 
 export async function doRun(kind, btn, opts = {}) {
+  const rejectStart = message => { opts.onError?.(message); toast("err", message); return null; };
   const spec = S.manifest?.[kind];
   if (spec?.available === false) {
-    toast("err", spec.unavailable_reason || "The connected repository does not support this workflow.");
-    return null;
+    return rejectStart(spec.unavailable_reason || "The connected repository does not support this workflow.");
   }
   if (!S.info || S.manifest[kind]) {
     for (const need of S.manifest[kind].needs || []) {
       if (need === "scm" && !S.info.scm.found) {
-        return toast("err", (S.info.server.is_packaged && !repoReady("scm"))
+        return rejectStart((S.info.server.is_packaged && !repoReady("scm"))
           ? "silhouette-card-maker is still being prepared. The button unlocks when it is done."
           : "SCM repo not found. Open Settings and choose your silhouette-card-maker folder.");
       }
       if (need === "extras" && !S.info.extras.found) {
-        return toast("err", (S.info.server.is_packaged && !repoReady("extras"))
+        return rejectStart((S.info.server.is_packaged && !repoReady("extras"))
           ? "scm-extras is still being prepared. The button unlocks when it is done."
           : "scm-extras repo not found. Open Settings and choose your scm-extras folder.");
       }
@@ -774,11 +774,10 @@ export async function doRun(kind, btn, opts = {}) {
       j = await jobs.start(kind, runArgs);
     } catch (error) {
       startFailed = true;
-      toast("err", error?.message || "Failed to start job");
-      return null;
+      return rejectStart(error?.message || "Failed to start job");
     }
     if (!j.ok) {
-      toast("err", j.errors?.join("; ") || "Failed to start job");
+      rejectStart(j.errors?.join("; ") || "Failed to start job");
     } else {
       const warnings = j.job?.warnings || j.warnings || [];
       for (const w of warnings) toast("warn", w, 5200);

@@ -11,6 +11,7 @@ UI = ROOT / "ui" / "js"
 FACADE = UI / "postprocess-transport.js"
 HIGHLIGHT = UI / "python-highlight.js"
 PAGE = UI / "pages" / "postprocess.js"
+INSTALL_STATE = UI / "postprocess-install-state.js"
 
 
 def fail(message: str) -> int:
@@ -19,7 +20,7 @@ def fail(message: str) -> int:
 
 
 def main() -> int:
-    if not FACADE.is_file() or not HIGHLIGHT.is_file() or not PAGE.is_file():
+    if not FACADE.is_file() or not HIGHLIGHT.is_file() or not PAGE.is_file() or not INSTALL_STATE.is_file():
         return fail("post-processing transport, highlighter, or page module is missing")
     facade = FACADE.read_text(encoding="utf-8")
     highlighter = HIGHLIGHT.read_text(encoding="utf-8")
@@ -112,6 +113,13 @@ def main() -> int:
         'Remove optional files',
         'Cancel installation',
         'Follow the installation job in the sidebar.',
+        'onError: showStartError',
+        'loadInstallFailure(selectedInstall)',
+        'jobs.log(job.id, 0, 4096)',
+        'jobs.log(job.id, activity.after, 64)',
+        'class: "small pp-model-status"',
+        'class: "small pp-install-summary"',
+        'state.installStartError = { processorId: p.id, at: Date.now(), message }',
         'postprocessors.removeOptional',
         'const result = await jobs.kill(state.installJob.id)',
         'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
@@ -154,7 +162,30 @@ const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8
 const transport = dataUrl(`export function getTauriInvoke() { return globalThis.nativeInvoke ? globalThis.nativeInvoke.bind(globalThis) : null; }`);
 const facade = await import(dataUrl(source.replace('from "./transport.js"', `from "${transport}"`)));
 const highlighter = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
+const installState = await import(dataUrl(fs.readFileSync(process.argv[3], "utf8")));
 const fail = message => { throw new Error(message); };
+const id = "629deb7c0e4b48968845537a28354d85";
+const processor = { id, optional_model: true, ready_to_run: false };
+const job = (status, ts = 1) => ({ id: `install-${ts}`, kind: "postprocess_dependencies", status, ts, args: { processor_id: id } });
+const persisted = installState.latestInstallJob([job("fail", 1), job("running", 2)], id);
+if (persisted?.id !== "install-2" || installState.latestInstallJob([job("ok")], "another-id"))
+  fail("optional install status did not select the latest matching job");
+if (installState.optionalInstallStatus(processor, job("running"), null, null).tone !== "running")
+  fail("running installation is not visible");
+const ongoing = job("running", Math.floor(Date.now() / 1000) - 610);
+const progress = installState.optionalInstallStatus(processor, ongoing, null, null,
+  { id: ongoing.id, step: "Downloading verified model (67 MB)" });
+if (!progress.label.includes("10 min elapsed") || !progress.label.includes("Downloading verified model"))
+  fail("long-running installation did not report elapsed time and the current installer step");
+const failure = installState.optionalInstallStatus(processor, job("fail"), { id: "install-1", message: "Model hash mismatch" }, null);
+if (failure.tone !== "fail" || !failure.label.includes("Model hash mismatch"))
+  fail("a terminal installation failure did not retain its cause");
+const noJob = installState.optionalInstallStatus(processor, null, null,
+  { processorId: id, at: Date.now(), message: "SCM repo is not ready" });
+if (noJob.tone !== "fail" || !noJob.label.includes("did not start") || !noJob.label.includes("SCM repo"))
+  fail("failure before job creation did not remain visible");
+if (installState.optionalInstallStatus({ ...processor, ready_to_run: true }, job("ok"), null, null).tone !== "ok")
+  fail("completed installation is not shown as ready");
 
 const pythonSample = '@cached\nasync def resize(value: int = 0x10):\n    """Docstring"""\n    # note\n    return str(value) + f"{value}"\n';
 const pythonTokens = highlighter.pythonHighlightTokens(pythonSample);
@@ -263,13 +294,59 @@ if (!rejected || fetchCalls.length !== requestsBeforePickerFailure)
   fail("native import rejection retried over HTTP");
 '''
     result = subprocess.run(
-        [node, "--input-type=module", "-e", script, str(FACADE), str(HIGHLIGHT)],
+        [node, "--input-type=module", "-e", script, str(FACADE), str(HIGHLIGHT), str(INSTALL_STATE)],
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         return fail("post-processing transport contract failed")
+
+    start_error_script = r'''
+import fs from "node:fs";
+const encode = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
+let source = fs.readFileSync(process.argv[1], "utf8");
+const errors = [], toasts = [];
+const S = { manifest: { postprocess_dependencies: { needs: ["scm"] } },
+  info: { server: { is_packaged: false }, scm: { found: true } }, forms: {}, jobs: [] };
+globalThis.__installStart = { S, errors, toasts, reject: false };
+const stubs = {
+  "./core.js": `const v=globalThis.__installStart; export const S=v.S; export const $=()=>null;
+    export const $$=()=>[]; export const el=()=>({}); export const ico=()=>"";
+    export const toast=(...args)=>v.toasts.push(args); export const confirmModal=async()=>true;`,
+  "./job-events.js": `export const publishJobsUpdated=()=>{};`,
+  "./job-notices.js": `export const syncJobNotices=()=>{};`,
+  "./jobs.js": `export const jobs={start:async()=>{if(globalThis.__installStart.reject)throw Error("native down");
+    return {ok:false,errors:["could not prepare installation"]};}};`,
+  "./preview.js": `export const preview=()=>{};`,
+  "./prep.js": `export const repoReady=()=>true;`,
+  "./nav.js": `export const uiMode=()=>"simple";`,
+  "./settings-transport.js": `export const canPickDirectory=()=>false; export const pickDirectory=()=>{};`,
+};
+for (const [path, stub] of Object.entries(stubs)) {
+  const needle = `from "${path}"`;
+  if (!source.includes(needle)) throw Error(`missing import ${path}`);
+  source = source.replace(needle, `from "${encode(stub)}"`);
+}
+const { doRun } = await import(encode(source));
+const onError = message => errors.push(message);
+let result = await doRun("postprocess_dependencies", null, { args: {}, onError });
+if (result !== null || errors.at(-1) !== "could not prepare installation" || toasts.at(-1)?.[0] !== "err")
+  throw Error("rejected installer start was not retained for in-page status");
+globalThis.__installStart.reject = true;
+result = await doRun("postprocess_dependencies", null, { args: {}, onError });
+if (result !== null || errors.at(-1) !== "native down")
+  throw Error("native failure before job creation was not retained");
+S.info.scm.found = false;
+result = await doRun("postprocess_dependencies", null, { args: {}, onError });
+if (result !== null || !errors.at(-1)?.includes("SCM repo not found"))
+  throw Error("preflight rejection before job creation was not retained");
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", start_error_script,
+                             str(UI / "forms.js")], cwd=ROOT, text=True, capture_output=True)
+    if result.returncode:
+        sys.stderr.write(result.stderr)
+        return fail("post-processing start rejection contract failed")
 
     cancel_script = r'''
 import fs from "node:fs";
@@ -303,6 +380,7 @@ const modules = {
   "../nav.js": `export const go = () => {}; export const uiMode = () => globalThis.__cancelTest.mode();`,
   "../python-highlight.js": `export const renderPythonHighlight = () => {};`,
   "../postprocess-transport.js": `export const postprocessors = {};`,
+  "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = jobs => globalThis.__cancelTest.notices.push(jobs.map(job => job.status));`,
 };
@@ -347,7 +425,7 @@ if (buttons(root)[0].disabled || !toasts.some(([kind, text]) => kind === "err" &
 root.__dispose();
 '''
     result = subprocess.run(
-        [node, "--input-type=module", "-e", cancel_script, str(PAGE)],
+        [node, "--input-type=module", "-e", cancel_script, str(PAGE), str(INSTALL_STATE)],
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:
