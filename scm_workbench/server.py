@@ -1524,8 +1524,8 @@ def build_manifest(info: dict) -> dict:
         ]}],
     }
     kinds["postprocess_dependencies"] = {
-        "title": "Install processor libraries", "page": "postprocess", "needs": ["scm"],
-        "internal": True, "cwd": "scm",
+        "title": "Install processor libraries", "page": "postprocess", "needs": [],
+        "internal": True, "cwd": "wb",
         "groups": [{"title": "Processor", "options": [
             _opt("processor_id", "Processor", "text", default=""),
             _opt("revision_hash", "Revision", "text", default=""),
@@ -5454,11 +5454,12 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 str(args.get("processor_id") or "") != BUILTIN_ADVANCED_UPSCALER_ID):
             errors.append("only the fixed Advanced Upscaler install is available in Simple mode")
             return argv, None, env, title, warnings, errors
-        if not require_repo("SCM", scm):
-            return argv, None, env, title, warnings, errors
-        cwd = scm
+        # Dependency environments and the fixed model live in Workbench data.
+        # Installation needs the job Python, not an SCM checkout; processing
+        # still requires SCM's image folders in the separate branch above.
+        cwd = DATA_DIR
         try:
-            store = _postprocessor_store(scm_root=cwd, interpreter=python)
+            store = _postprocessor_store(scm_root=scm, interpreter=python)
             item = store.get(str(args.get("processor_id") or ""), include_source=False)
             if item["id"] == BUILTIN_ADVANCED_UPSCALER_ID and item.get("optional_model"):
                 title = "Install Advanced Upscaler"

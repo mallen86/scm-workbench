@@ -185,6 +185,57 @@ class PostprocessJobTests(unittest.TestCase):
         args["requirements"] = "numpy==2.5.3"
         self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
 
+    def test_optional_install_starts_without_an_scm_checkout(self):
+        self.settings["ui_mode"] = "simple"
+        # A partially downloaded managed checkout is not an SCM repo. Its
+        # absence must not block installation into Workbench's own data root.
+        with mock.patch.object(server, "effective_dirs", return_value=(None, None)):
+            server.invalidate_manifest_cache()
+            store = server._postprocessor_store()
+            item = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+            args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                    "requirements": "\n".join(server.advanced_model.REQUIREMENTS)}
+            self.assertEqual(server.get_manifest()["postprocess_dependencies"]["needs"], [])
+            preview = server.build_preview("postprocess_dependencies", args)
+            self.assertEqual(preview["errors"], [])
+            self.assertEqual(preview["cwd"], str(self.data))
+            run_errors = server.build_preview("postprocess_images", {
+                "processor_id": item["id"], "revision_hash": item["revision"],
+                "scope": "front",
+            })["errors"]
+            self.assertTrue(any("SCM repo not found" in error for error in run_errors))
+            # Do not download the real model in this regression: a failed
+            # installer child still proves admission, logging and history.
+            prepare_installer = server._prepare_dependency_job
+
+            def fail_installer(job, install_args, python):
+                _argv, stage, env = prepare_installer(job, install_args, python)
+                return ([str(python), "-I", "-B", "-c",
+                         "import sys; print('fixture installer failed'); sys.exit(1)"],
+                        stage, env)
+
+            with mock.patch.object(server, "_prepare_dependency_job", side_effect=fail_installer):
+                job, errors = server.start_job("postprocess_dependencies", args)
+                self.assertEqual(errors, [])
+                self.assertIsNotNone(job)
+                self.wait(job)
+            self.assertEqual(job["status"], "fail")
+            self.assertEqual(job["title"], "Install Advanced Upscaler")
+            self.assertIn(job["id"], [row["id"] for row in server.list_jobs()["jobs"]])
+            self.assertIn("fixture installer failed", "\n".join(server.get_job_log(job["id"])["lines"]))
+
+            # The same no-checkout path must complete a real, empty
+            # dependency installation; only the model network step is faked.
+            self.settings["ui_mode"] = "advanced"
+            custom = self.store.save("No libraries", "def process_image(image_path, context):\n    pass\n", "")
+            empty_job, errors = server.start_job("postprocess_dependencies", {
+                "processor_id": custom["id"], "revision_hash": custom["revision"],
+                "requirements": "",
+            })
+            self.assertEqual(errors, [])
+            self.wait(empty_job)
+            self.assertEqual(empty_job["status"], "ok", empty_job["log_lines"])
+
     def test_scm_jpeg_named_png_is_counted_and_processed_with_its_real_format(self):
         front = self.repo / "game" / "front" / "scm-image.png"
         back = self.repo / "game" / "double_sided" / "back.png"
