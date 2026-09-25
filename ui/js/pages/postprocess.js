@@ -508,7 +508,7 @@ function paintRunGate() {
   const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
   const p = selectedProcessor();
   const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
-  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : !isReady(p) ? (p.optional_model ? "Install the optional model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the optional model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
   const run = document.querySelector(".pp-run");
   if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
   const note = document.querySelector(".pp-run-note");
@@ -606,7 +606,7 @@ function attachRunStatus(root) {
 function renderSimplePostprocess() {
   const wrap = el("div", {});
   wrap.append(pageHead("Image post-processing", "Optionally improve fetched card images before creating your PDF."));
-  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. The optional built-in AI Upscaler can be installed here once; editing code or installing custom libraries still requires Advanced mode.")));
+  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the optional AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
   wrap.append(el("section", { class: "card pp-simple-picker" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
     el("label", {}, "Processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready image processor" })),
@@ -620,7 +620,7 @@ function renderSimplePostprocess() {
       el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"))));
   const run = el("section", { class: "card pp-run-card" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which fetched images to improve. Originals are replaced only after every result passes validation."))),
-    formCard("postprocess_images", { run: false }),
+    formCard("postprocess_images", { run: false, preview: "summary" }),
     el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Checking image inventory…"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
   wrap.append(run);
   wrap.__patch = async () => {
@@ -661,7 +661,7 @@ PAGES.postprocess = root => {
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
     el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove optional files"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
   wrap.append(editor);
-  const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
+  const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false, preview: "summary" }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
   wrap.append(run);
   wrap.__patch = async () => {
     if (!state.draft) state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };

@@ -95,6 +95,7 @@ def main() -> int:
         'COMMAND_PREVIEW_EVENT',
         'image_count',
         'recognized image',
+        'Connect an SCM checkout before processing images',
         'const host = $(".pp-run-card", root) || root',
         'host.append(status)',
         'class: "pp-progress"',
@@ -108,7 +109,7 @@ def main() -> int:
         'p.ready_to_run === true',
         'class: "input pp-simple-select"',
         'if (select.dataset.optionsKey !== optionsKey)',
-        'editing code or installing custom libraries still requires Advanced mode.',
+        'You can install the optional AI Upscaler before SCM is ready;',
         'The built-in Simple Upscaler is ready without any downloads.',
         'Remove optional files',
         'Cancel installation',
@@ -127,6 +128,8 @@ def main() -> int:
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
+    if page.count('formCard("postprocess_images", { run: false, preview: "summary" })') != 2:
+        return fail("image post-processing must hide technical commands in both modes while keeping preview validation events")
     if 'never the app bundle' in page:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
