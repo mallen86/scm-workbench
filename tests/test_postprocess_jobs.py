@@ -102,6 +102,15 @@ class PostprocessJobTests(unittest.TestCase):
         }))
         self.assertEqual(job["progress"], {"current": 1, "total": 1, "label": "card.png"})
 
+    def test_install_progress_uses_only_known_installer_stages(self):
+        job = {"kind": "postprocess_dependencies", "log_lines": [], "subs": []}
+        server._append_job_line(job, "[processor libraries] Downloading the locked wheel set")
+        self.assertEqual(job["progress"], {"label": "Downloading the locked wheel set"})
+        server._append_job_line(job, "[processor libraries] untrusted arbitrary output")
+        self.assertEqual(job["progress"], {"label": "Downloading the locked wheel set"})
+        server._append_job_line(job, "[processor libraries] Offline wheel installation complete")
+        self.assertEqual(job["progress"], {"label": "Verifying and publishing installed libraries"})
+
     def test_stage_quota_tolerates_disappearing_installer_directories(self):
         root = self.root / "mutable-stage"
         vanished = root / "pip-unpack"
@@ -136,6 +145,18 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 2)
         args["scope"] = "both"
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 3)
+
+    def test_image_job_reports_staged_total_before_first_result(self):
+        (self.repo / "game" / "front" / "card.png").write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        run = self.data / "postprocessing" / "runs" / "initial-progress"
+        job = {"scm_path": str(self.repo), "cancel_event": threading.Event(),
+               "postprocess_run": str(run), "postprocess_manifest": str(run / "manifest.json")}
+        server._prepare_image_postprocess_job(job, {
+            "processor_id": item["id"], "revision_hash": item["revision"], "scope": "front",
+        })
+        self.assertEqual(job["progress"], {"current": 0, "total": 1})
+        self.assertEqual(job["image_total"], 1)
 
     def test_simple_mode_can_preview_the_ready_bundled_upscaler(self):
         image = self.repo / "game" / "front" / "card.png"

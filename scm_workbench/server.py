@@ -3696,6 +3696,15 @@ def _record_fetch_image_warning(job: dict, text: str) -> None:
         job.pop("image_warnings", None)
 
 
+_POSTPROCESS_INSTALL_STAGES = frozenset({
+    "Resolving compatible PyPI wheels",
+    "Downloading the locked wheel set",
+    "Installing the verified wheels offline",
+    "Downloading verified RealESRGAN_x4plus model (67 MB)",
+    "Offline wheel installation complete",
+})
+
+
 def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
     """Append a complete line and wake subscribers without ever blocking."""
     text = str(line)
@@ -3718,6 +3727,11 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
             log_f.flush()
     with JOBS_LOCK:
         _record_fetch_image_warning(job, text)
+        if job.get("kind") == "postprocess_dependencies" and text.startswith("[processor libraries] "):
+            stage = text.removeprefix("[processor libraries] ")
+            if stage in _POSTPROCESS_INSTALL_STAGES:
+                job["progress"] = {"label": ("Verifying and publishing installed libraries"
+                                              if stage == "Offline wheel installation complete" else stage)}
         if text.startswith("WB_POSTPROCESS_PROGRESS "):
             try:
                 progress = json.loads(text.removeprefix("WB_POSTPROCESS_PROGRESS "))
@@ -7908,6 +7922,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         manifest_stream.flush(); os.fsync(manifest_stream.fileno())
     job["postprocess_entries"] = list(entries)
     job["image_total"] = len(entries)
+    job["progress"] = {"current": 0, "total": len(entries)}
     argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_runner.py"),
             "--manifest", str(private_manifest)]
     return argv, run_dir, _postprocess_env(run_dir)

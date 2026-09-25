@@ -20,6 +20,10 @@ def main() -> int:
     notices = (ROOT / "ui" / "js" / "job-notices.js").read_text(encoding="utf-8")
     notice_state_path = ROOT / "ui" / "js" / "job-notice-state.js"
     notice_state = notice_state_path.read_text(encoding="utf-8")
+    notice_progress_path = UI / "job-notice-progress.js"
+    if not notice_progress_path.is_file():
+        print("FAIL: job progress presentation is missing")
+        return 1
     pdf = (ROOT / "ui" / "js" / "pages" / "pdf.js").read_text(encoding="utf-8")
     fetch_page = (ROOT / "ui" / "js" / "pages" / "fetch.js").read_text(encoding="utf-8")
     postprocess_page = (ROOT / "ui" / "js" / "pages" / "postprocess.js").read_text(encoding="utf-8")
@@ -98,6 +102,12 @@ def main() -> int:
                    'class: `repoprog sidebar-note job-notice ${record.status}`'):
         if marker not in notices:
             print(f"FAIL: sidebar job notices are missing {marker}")
+            return 1
+    for marker in ('jobNoticeProgress(record.job, record.status)',
+                   'progress.text', 'progress.fraction',
+                   'fill.style.width = `${progress.fraction * 100}%`'):
+        if marker not in notices:
+            print(f"FAIL: sidebar job notice does not render live processor progress: {marker}")
             return 1
     for marker in ("JOB_NOTICE_HOLD_MS = 5000", "JOB_NOTICE_MAX = 4",
                    'new Set(["repo_init", "repo_update", "update"])'):
@@ -573,7 +583,41 @@ console.log("ok: sidebar job notice lifecycle passed");
     if notice_model.returncode:
         print("FAIL: Node job-notice contract failed: " + (notice_model.stderr or notice_model.stdout).strip())
         return 1
+    progress_model = subprocess.run(
+        ["node", "--input-type=module", "-", str(notice_progress_path)],
+        input=r'''import fs from "node:fs";
+const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
+const { jobNoticeProgress: view } = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
+const fail = text => { throw new Error(text); };
+const image = (status, progress, postprocess_outcome) => ({ kind: "postprocess_images", status, progress, postprocess_outcome });
+let result = view(image("running", { current: 0, total: 4 }));
+if (result.fraction !== 0 || !result.text.includes("0 / 4")) fail("staged image count is not shown before the first image finishes");
+result = view(image("running", { current: 2, total: 4 }));
+if (result.fraction !== 0.5 || !result.text.includes("50%")) fail("validated image progress was not shown");
+result = view(image("running", { current: 4, total: 4 }));
+if (result.fraction !== 1 || !result.text.includes("validating results")) fail("processed images were confused with a completed job");
+for (const progress of [{ current: -1, total: 4 }, { current: 5, total: 4 },
+                        { current: 1, total: 0 }, { current: true, total: 4 },
+                        { current: 1, total: Infinity }]) {
+  if (view(image("running", progress)).fraction !== null) fail("invalid progress became a determinate percentage");
+}
+if (view(image("fail", {}, "needs_attention")).text !== "Rollback could not be verified; inspect image folders.")
+  fail("unsafe rollback did not retain its warning in the notice");
+if (!view(image("killed", {}, "unchanged")).text.includes("originals unchanged"))
+  fail("cancelled processor notice lost its safe outcome");
+result = view({ kind: "postprocess_dependencies", status: "running", progress: { label: "Downloading the locked wheel set" } });
+if (result.fraction !== null || result.text !== "Downloading the locked wheel set")
+  fail("installer stage was not shown without inventing a percentage");
+if (view({ kind: "postprocess_dependencies", status: "running", progress: { label: "x".repeat(121) } }).text !== "Preparing installer…")
+  fail("unbounded installer progress label was displayed");
+console.log("ok: processor job notice progress and terminal states passed");
+''', text=True, capture_output=True,
+    )
+    if progress_model.returncode:
+        print("FAIL: Node processor notice progress contract failed: " + (progress_model.stderr or progress_model.stdout).strip())
+        return 1
     print(stage_model.stdout.strip())
+    print(progress_model.stdout.strip())
     print(notice_model.stdout.strip())
     print(node.stdout.strip())
     return 0
