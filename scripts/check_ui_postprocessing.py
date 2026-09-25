@@ -128,6 +128,9 @@ def main() -> int:
         'const result = await jobs.kill(state.installJob.id)',
         'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
         'Built-in processors are read-only',
+        'Duplicate Advanced Upscaler source?',
+        "It does not inherit Workbench's installed AI model or libraries.",
+        'supply your own model path in the source',
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
@@ -146,6 +149,8 @@ def main() -> int:
             return fail(f"AI Upscaler installation copy is missing {required}")
     if 'never the app bundle' in page:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
+    if 'if (!p.optional_model) actions.append(' in page:
+        return fail("the Advanced Upscaler is missing its source-only Duplicate action")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
         return fail("processor source highlighting uses unsafe HTML insertion")
     for required in ("pythonHighlightTokens", "renderPythonHighlight", "createTextNode", "textContent"):
@@ -449,6 +454,78 @@ root.__dispose();
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         return fail("Simple post-processing cancellation contract failed")
+    duplicate_script = r'''
+import fs from "node:fs";
+const encode = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
+let source = fs.readFileSync(process.argv[1], "utf8");
+const fail = message => { throw new Error(message); };
+let allow = false;
+const confirmations = [], calls = [], toasts = [];
+const original = { id: "advanced", name: "Advanced Upscaler", revision: "a".repeat(64),
+  optional_model: true, bundled: true, trusted: true, requirements: ["onnxruntime==1.30.0"] };
+const copy = { id: "source-copy", name: "Advanced Upscaler copy", revision: "b".repeat(64),
+  optional_model: false, bundled: false, trusted: false, requirements: original.requirements,
+  source: "def process_image(image_path, context):\n    pass\n" };
+const library = { children: [], append(...items) { this.children.push(...items); },
+  replaceChildren(...items) { this.children = items; } };
+const el = (tag, attrs = {}, ...children) => ({
+  tag, onclick: attrs.onclick, children,
+  append(...items) { this.children.push(...items); },
+  replaceChildren(...items) { this.children = items; },
+});
+const buttons = node => [node, ...(node.children || []).flatMap(child => typeof child === "object" && child ? buttons(child) : [])]
+  .filter(child => child.tag === "button" && child.children.includes("Duplicate"));
+globalThis.document = { querySelector: selector => selector === ".pp-library-list" ? library : null };
+const data = { calls, toasts, el, confirm: async spec => { confirmations.push(spec); return allow; },
+  list: async () => ({ processors: calls.length ? [original, copy] : [original] }),
+  get: async id => id === copy.id ? copy : original,
+  duplicate: async (...args) => { calls.push(args); return { ok: true, processor: copy }; } };
+globalThis.__duplicateTest = data;
+const modules = {
+  "../core.js": `const x = globalThis.__duplicateTest; export const PAGES = {}; export const S = {jobs: []};
+    export const $ = () => null; export const el = x.el; export const toast = (...args) => x.toasts.push(args);
+    export const confirmModal = x.confirm; export const ico = () => ""; export const pageHead = () => {};`,
+  "../forms.js": `export const afterFormChange = () => {}; export const COMMAND_PREVIEW_EVENT = "preview";
+    export const doRun = () => {}; export const formArgs = () => null; export const formCard = () => {};`,
+  "../jobs.js": `export const jobs = {};`,
+  "../nav.js": `export const go = () => {}; export const uiMode = () => "advanced";`,
+  "../python-highlight.js": `export const renderPythonHighlight = () => {};`,
+  "../postprocess-transport.js": `const x = globalThis.__duplicateTest;
+    export const postprocessors = { list: x.list, get: x.get, duplicate: x.duplicate };`,
+  "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
+  "./utilities.js": `export const watchJobDone = () => {};`,
+  "../job-notices.js": `export const syncJobNotices = () => {};`,
+};
+for (const [path, stub] of Object.entries(modules)) {
+  const needle = `from "${path}"`;
+  if (!source.includes(needle)) fail(`post-processing import changed: ${path}`);
+  source = source.replace(needle, `from "${encode(stub)}"`);
+}
+const { state, repaintLibrary, duplicateProcessor } = await import(encode(source + "\nexport { state, repaintLibrary, duplicateProcessor };"));
+state.processors = [original]; state.selected = original.id; state.loaded = original;
+repaintLibrary();
+if (buttons(library).length !== 1) fail("Advanced Upscaler has no Duplicate action in the library");
+await duplicateProcessor(original);
+if (calls.length || confirmations.length !== 1 || !confirmations[0].text.includes("does not inherit"))
+  fail("source-only copy needs an explicit warning before creation");
+allow = true;
+await duplicateProcessor(original);
+if (calls.length !== 1 || calls[0][0] !== original.id || calls[0][2] !== original.revision)
+  fail("source-only Duplicate did not use the approved built-in revision");
+if (state.selected !== copy.id || state.loaded?.bundled || state.loaded?.optional_model || buttons(library).length !== 2)
+  fail("the editable source copy was not selected and shown next to the built-in");
+if (!toasts.some(([kind, text]) => kind === "ok" && text.includes("Configure its model and libraries")))
+  fail("source-only duplication did not explain the next steps");
+'''
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", duplicate_script, str(PAGE), str(INSTALL_STATE)],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    if result.returncode:
+        sys.stderr.write(result.stdout[-2000:])
+        stderr = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<postprocess-page>", result.stderr)
+        sys.stderr.write(stderr[-3000:])
+        return fail("Advanced Upscaler source-only duplication contract failed")
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 

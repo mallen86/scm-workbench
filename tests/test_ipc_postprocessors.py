@@ -71,13 +71,6 @@ class IpcPostprocessorTests(unittest.TestCase):
         self.assertTrue(optional["trusted"])
         self.assertFalse(optional["ready_to_run"])
         self.assertEqual(optional["requirements"], list(server.advanced_model.REQUIREMENTS))
-        duplicate_optional = self.call("postprocessors.duplicate", {
-            "processor_id": optional["id"], "name": "Cannot copy model",
-            "expected_revision": optional["revision"],
-        })
-        self.assertFalse(duplicate_optional["ok"])
-        self.assertIn("fixed optional model", duplicate_optional["errors"][0])
-
         detail = self.call("postprocessors.get", {"processor_id": processor["id"]})
         self.assertEqual(detail["source"], SOURCE)
         self.assertEqual(detail["environment"]["status"], "ready")
@@ -151,6 +144,41 @@ class IpcPostprocessorTests(unittest.TestCase):
         self.assertTrue(duplicate["ok"])
         self.assertFalse(duplicate["processor"]["bundled"])
         self.assertFalse(duplicate["processor"]["trusted"])
+
+    def test_advanced_upscaler_can_duplicate_source_without_inheriting_model(self):
+        built_in = self.call("postprocessors.get", {
+            "processor_id": server.BUILTIN_ADVANCED_UPSCALER_ID,
+        })
+        stale = self.call("postprocessors.duplicate", {
+            "processor_id": built_in["id"], "name": "Old revision copy",
+            "expected_revision": "0" * 64,
+        })
+        self.assertFalse(stale["ok"])
+        self.assertIn("stale", stale["errors"][0])
+
+        duplicated = self.call("postprocessors.duplicate", {
+            "processor_id": built_in["id"], "name": "Custom AI source",
+            "expected_revision": built_in["revision"],
+        })
+        self.assertTrue(duplicated["ok"])
+        copy = duplicated["processor"]
+        self.assertNotEqual(copy["id"], built_in["id"])
+        self.assertEqual(copy["source"], built_in["source"])
+        self.assertEqual(copy["requirements"], built_in["requirements"])
+        self.assertFalse(copy["bundled"])
+        self.assertFalse(copy["optional_model"])
+        self.assertFalse(copy["trusted"])
+        detail = self.call("postprocessors.get", {"processor_id": copy["id"]})
+        self.assertFalse(detail["ready_to_run"])
+        self.assertFalse(detail["optional_model"])
+
+        self.settings["ui_mode"] = "simple"
+        forbidden = self.call("postprocessors.duplicate", {
+            "processor_id": built_in["id"], "name": "Not allowed in Simple mode",
+            "expected_revision": built_in["revision"],
+        })
+        self.assertFalse(forbidden["ok"])
+        self.assertIn("Advanced mode", forbidden["errors"][0])
 
     def test_stale_runtime_environment_does_not_hide_or_block_source_edits(self):
         saved = self.call("postprocessors.save", {

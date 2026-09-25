@@ -230,7 +230,7 @@ function repaintLibrary() {
     const active = p.id === state.selected;
     const trust = isTrusted(p), ready = isReady(p);
     const actions = el("div", { class: "pp-actions" });
-    if (!p.optional_model) actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"));
+    actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"));
     if (!p.bundled) actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); deleteProcessor(p); } }, "Delete"));
     const meta = el("div", { class: "pp-processor-meta" });
     if (p.bundled) meta.append(el("span", { class: "chip" }, "Built in"));
@@ -355,8 +355,17 @@ async function newProcessor() {
 }
 
 async function duplicateProcessor(p) {
-  try { await postprocessors.duplicate(p.id, `${p.name || "Processor"} copy`, revision(p)); await refreshProcessors(); toast("ok", "Processor duplicated."); }
-  catch (error) { toast("err", error.message || "Could not duplicate processor."); }
+  if (p.optional_model && !await confirmModal({
+    title: "Duplicate Advanced Upscaler source?",
+    text: "This creates an editable, untrusted source copy. It does not inherit Workbench's installed AI model or libraries. To run it, supply your own model path in the source, install its required libraries, and trust the revision in Advanced mode.",
+    okLabel: "Duplicate source",
+  })) return;
+  try {
+    const result = await postprocessors.duplicate(p.id, `${p.name || "Processor"} copy`, revision(p));
+    const keepDraft = state.dirty;
+    await refreshProcessors(keepDraft ? state.selected : result?.processor?.id || result?.id || p.id, { preserveDirty: keepDraft });
+    toast("ok", p.optional_model ? "Source duplicated. Configure its model and libraries before running." : "Processor duplicated.");
+  } catch (error) { toast("err", error.message || "Could not duplicate processor."); }
 }
 async function deleteProcessor(p) {
   if (!await confirmModal({ title: "Delete processor?", text: `Delete “${p.name || "processor"}” and its saved revisions?`, okLabel: "Delete processor", danger: true })) return;

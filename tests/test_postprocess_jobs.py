@@ -357,6 +357,38 @@ class PostprocessJobTests(unittest.TestCase):
             source.encode("utf-8"),
         )
 
+    def test_advanced_source_copy_does_not_receive_the_app_model_path(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        store = server._postprocessor_store()
+        built_in = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+        copied = store.duplicate(built_in["id"], expected_revision=built_in["revision"])
+        self.assertNotEqual(copied["id"], built_in["id"])
+        site_packages = self.root / "custom-environment/site-packages"
+        site_packages.mkdir(parents=True)
+        run_dir = self.data / "postprocessing/runs/source-only-copy"
+        job = {
+            "id": "source-only-copy", "scm_path": str(self.repo),
+            "postprocess_run": str(run_dir),
+            "postprocess_manifest": str(run_dir / "manifest.json"),
+            "cancel_event": threading.Event(),
+        }
+        # Even a separately installed and trusted custom copy must not be
+        # granted the fixed built-in's verified model capability.
+        ready = {"processor": {"trusted": True},
+                 "environment": {"ready": True, "path": str(site_packages.parent)}}
+        with (mock.patch.object(server, "_postprocessor_store", return_value=store),
+              mock.patch.object(store, "status", return_value=ready),
+              mock.patch.object(server, "_verify_dependency_environment")):
+            server._prepare_image_postprocess_job(job, {
+                "processor_id": copied["id"], "revision_hash": copied["revision"],
+                "scope": "front",
+            })
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("model_path", manifest)
+        self.assertEqual(manifest["environment"], str(site_packages))
+        self.assertEqual(manifest["limits"]["cpu_seconds"], 900)
+
     def test_success_publishes_atomically_and_releases_exclusive_lease(self):
         image = self.repo / "game" / "front" / "card.png"
         image.write_bytes(PNG)

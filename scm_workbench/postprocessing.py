@@ -1704,8 +1704,8 @@ class ProcessorStore:
 
     def duplicate(self, processor_id: str, *, name: str | None = None, expected_revision: str | None = None) -> dict:
         item = self.get(processor_id)
-        if item.get("optional_model"):
-            raise ConflictError("the fixed optional model cannot be duplicated; create a custom processor instead")
+        # The copy is an ordinary untrusted processor: it receives source and
+        # requirements, never the built-in's installed model or environment.
         if expected_revision is not None and expected_revision != item["active_revision"]:
             raise ConflictError("processor revision is stale")
         return self.save(name or (item["name"] + " copy"), item["source"], item["requirements"])
