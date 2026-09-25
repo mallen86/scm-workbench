@@ -63,6 +63,7 @@ _ENVIRONMENT_MIGRATION_LOCK = threading.RLock()
 
 _FORMATS = ("png", "jpeg", "gif", "webp", "bmp")
 _EXT_FORMAT = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".gif": "gif", ".webp": "webp", ".bmp": "bmp"}
+_IMAGE_ROLES = frozenset({"front", "double_sided", "back"})
 
 
 class PostProcessingError(Exception):
@@ -576,11 +577,16 @@ def _stable_image(path: Path, root: Path, role: str, *, cancelled: Callable[[], 
     except FileNotFoundError: return None
 
 
+def _scope_roles(scope: str) -> tuple[str, ...]:
+    if scope == "both": return ("front", "double_sided")
+    if not isinstance(scope, str) or scope not in _IMAGE_ROLES: raise ValidationError("invalid image scope")
+    return (scope,)
+
+
 def count_images(scm_root: str | Path, scope: str = "both") -> int:
     """Return a fast bounded inventory count for previews; execution revalidates fully."""
     root = Path(scm_root).resolve()
-    if scope not in {"both", "front", "double_sided"}: raise ValidationError("invalid image scope")
-    roles = ("front", "double_sided") if scope == "both" else (scope,)
+    roles = _scope_roles(scope)
     count = total = 0
     for role in roles:
         directory = root / "game" / role
@@ -630,8 +636,7 @@ def _natural_name_key(value: str) -> tuple:
 
 def discover_images(scm_root: str | Path, scope: str = "both", *, cancelled: Callable[[], bool] | None = None) -> tuple[ImageRecord, ...]:
     root = Path(scm_root).resolve()
-    if scope not in {"both", "front", "double_sided"}: raise ValidationError("invalid image scope")
-    roles = ("front", "double_sided") if scope == "both" else (scope,)
+    roles = _scope_roles(scope)
     output: list[ImageRecord] = []
     total = 0
     for role in roles:
@@ -816,7 +821,7 @@ class PublicationTransaction:
                 raise IntegrityError("publication paths are invalid")
             _no_links(dest.parent); _no_links(stage)
             candidate_checkout = dest.parent.parent.parent
-            if (dest.parent.name not in {"front", "double_sided"} or
+            if (dest.parent.name not in _IMAGE_ROLES or
                     dest.parent.parent.name != "game"):
                 raise IntegrityError("publication destination is outside an image directory")
             if checkout_root is None:
@@ -1043,7 +1048,7 @@ def _validate_transaction_journal(
                 any(path != Path(os.path.abspath(path)) for path in (destination, staged, quarantine)) or
                 any(len(str(path).encode("utf-8")) > PATH_MAX_BYTES for path in (destination, staged, quarantine))):
             raise IntegrityError("invalid transaction journal")
-        if (destination.parent.name not in {"front", "double_sided"} or
+        if (destination.parent.name not in _IMAGE_ROLES or
                 destination.parent.parent != checkout_root / "game" or
                 quarantine != destination.parent / f".wb-old-{data['id']}-{index}"):
             raise IntegrityError("invalid transaction journal destination")

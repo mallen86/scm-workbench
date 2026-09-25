@@ -302,6 +302,66 @@ class PostprocessorTests(unittest.TestCase):
             self.assertEqual(Path(staged[0]["staged"]).read_bytes(), (root / "game/front/Card 2.png").read_bytes())
             self.assertNotEqual(Path(staged[0]["staged"]).resolve(), (root / "game/front/Card.jpg").resolve())
 
+    def test_back_only_inventory_and_private_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            front = root / "game/front"; front.mkdir(parents=True)
+            back = root / "game/back"; back.mkdir(parents=True)
+            (front / "front.png").write_bytes(png())
+            (back / "card.png").write_bytes(JPEG)  # SCM JPEG with a PNG filename
+            (back / "EMPTY.md").write_text("placeholder", encoding="utf-8")
+            (back / "invalid.png").write_bytes(b"not an image")
+            self.assertEqual(count_images(root, "back"), 1)
+            self.assertEqual(count_images(root, "both"), 1)  # Back is never implicit.
+            records = discover_images(root, "back")
+            self.assertEqual([(item.role, item.relative_path, item.format) for item in records],
+                             [("back", "game/back/card.png", "jpeg")])
+            self.assertEqual([item.role for item in discover_images(root)], ["front"])
+            staged = stage_images(records, root / "runs" / "fixture")
+            self.assertEqual(Path(staged[0]["staged"]), root / "runs/fixture/work/back/card.png")
+            self.assertEqual(Path(staged[0]["staged"]).read_bytes(), JPEG)
+            for scope in ("backs", "back/../front", [], None):
+                with self.assertRaises(ValidationError): count_images(root, scope)
+                with self.assertRaises(ValidationError): discover_images(root, scope)
+
+    def test_back_directory_link_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "game").mkdir()
+            outside = root / "elsewhere"; outside.mkdir()
+            (outside / "card.png").write_bytes(png())
+            try: (root / "game/back").symlink_to(outside, target_is_directory=True)
+            except OSError as exc: self.skipTest(f"symlinks unavailable: {exc}")
+            with self.assertRaises(ValidationError): count_images(root, "back")
+            with self.assertRaises(ValidationError): discover_images(root, "back")
+            self.assertEqual((outside / "card.png").read_bytes(), png())
+
+    def test_back_publication_and_crash_recovery_remain_checkout_scoped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            destination = root / "game/back/card.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(JPEG)
+            stage = root / "runs/fixture/work/back/card.png"
+            stage.parent.mkdir(parents=True); stage.write_bytes(JPEG + b"\n")
+            tx = PublicationTransaction(root / "transactions", "back-publish")
+            tx.publish([(destination, stage)])
+            self.assertEqual(destination.read_bytes(), JPEG + b"\n")
+            self.assertEqual(recover_transactions(root / "transactions", root), ())
+            stage.write_bytes(JPEG + b"!")
+            interrupted = PublicationTransaction(root / "transactions", "back-recovery",
+                fault=lambda phase: (_ for _ in ()).throw(OSError("injected"))
+                if phase == "journal-prepared" else None)
+            with self.assertRaises(Exception): interrupted.publish([(destination, stage)])
+            self.assertEqual(recover_transactions(root / "transactions", root), ("back-recovery",))
+            self.assertEqual(destination.read_bytes(), JPEG + b"\n")
+            self.assertFalse(stage.exists())
+            outside = root / "game/output/not-a-back.png"
+            outside.parent.mkdir(); outside.write_bytes(JPEG)
+            stage.write_bytes(JPEG + b"!")
+            with self.assertRaisesRegex(IntegrityError, "outside an image directory"):
+                PublicationTransaction(root / "transactions", "bad-destination").publish([(outside, stage)])
+            self.assertEqual(outside.read_bytes(), JPEG)
+
     def test_transaction_rollback_and_startup_recovery(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

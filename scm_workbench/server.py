@@ -1516,11 +1516,11 @@ def build_manifest(info: dict) -> dict:
     kinds["postprocess_images"] = {
         "title": "Post-process images", "page": "postprocess", "needs": ["scm"],
         "cwd": "scm",
-        "description": "Apply one trusted processor to fetched front and double-sided images.",
+        "description": "Apply one trusted processor to front, double-sided, or card-back images.",
         "groups": [{"title": "Image scope", "options": [
             _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default="", hidden=True),
             _opt("revision_hash", "Revision", "text", default="", hidden=True),
-            _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"]], default="both"),
+            _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"], ["back", "Back only"]], default="both"),
         ]}],
     }
     kinds["postprocess_dependencies"] = {

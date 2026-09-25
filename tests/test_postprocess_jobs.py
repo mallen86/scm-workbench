@@ -28,6 +28,7 @@ class PostprocessJobTests(unittest.TestCase):
         self.repo = self.root / "scm"
         (self.repo / "game" / "front").mkdir(parents=True)
         (self.repo / "game" / "double_sided").mkdir(parents=True)
+        (self.repo / "game" / "back").mkdir(parents=True)
         self.data.mkdir()
         self.settings = {
             "scm_dir": str(self.repo),
@@ -145,6 +146,44 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 2)
         args["scope"] = "both"
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 3)
+
+    def test_back_only_preview_and_job_in_simple_and_advanced_modes(self):
+        front = self.repo / "game/front/front.png"
+        double = self.repo / "game/double_sided/double.png"
+        back = self.repo / "game/back/card.png"
+        front.write_bytes(PNG); double.write_bytes(PNG)
+        back.write_bytes(JPEG)  # The real JPEG format must survive the PNG filename.
+        placeholder = self.repo / "game/back/EMPTY.md"
+        placeholder.write_text("keep", encoding="utf-8")
+        source = (
+            "def process_image(image_path, context):\n"
+            "    assert context['role'] == 'back'\n"
+            "    with image_path.open('ab') as output:\n"
+            "        output.write(b'\\n')\n"
+        )
+        item = self.save_and_trust(source)
+        args = {"processor_id": item["id"], "revision_hash": item["revision"], "scope": "back"}
+        for mode in ("simple", "advanced"):
+            with self.subTest(mode=mode):
+                self.settings["ui_mode"] = mode
+                server.invalidate_manifest_cache()
+                scope = server.get_manifest()["postprocess_images"]["groups"][0]["options"][2]
+                self.assertIn(["back", "Back only"], scope["choices"])
+                self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 1)
+                self.assertEqual(server.build_preview("postprocess_images", {**args, "scope": "both"})["image_count"], 2)
+                job, errors = server.start_job("postprocess_images", args)
+                self.assertEqual(errors, [])
+                self.wait(job)
+                self.assertEqual(job["status"], "ok", job["log_lines"])
+                self.assertEqual(job["postprocess_outcome"], "committed")
+                self.assertEqual(job["progress"]["total"], 1)
+                self.assertEqual(job["progress"]["current"], 1)
+                self.assertTrue(any('"role":"back"' in line for line in job["log_lines"]))
+                self.assertEqual(back.read_bytes(), JPEG + b"\n")
+                self.assertEqual(front.read_bytes(), PNG)
+                self.assertEqual(double.read_bytes(), PNG)
+                self.assertEqual(placeholder.read_text(encoding="utf-8"), "keep")
+                back.write_bytes(JPEG)
 
     def test_image_job_reports_staged_total_before_first_result(self):
         (self.repo / "game" / "front" / "card.png").write_bytes(PNG)

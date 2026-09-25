@@ -605,7 +605,7 @@ function attachRunStatus(root) {
 
 function renderSimplePostprocess() {
   const wrap = el("div", {});
-  wrap.append(pageHead("Image post-processing", "Optionally improve fetched card images before creating your PDF."));
+  wrap.append(pageHead("Image post-processing", "Optionally improve card images before creating your PDF."));
   wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the Advanced AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
   wrap.append(el("section", { class: "card pp-simple-picker" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
@@ -619,7 +619,7 @@ function renderSimplePostprocess() {
       el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
       el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files"))));
   const run = el("section", { class: "card pp-run-card" },
-    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which fetched images to improve. Originals are replaced only after every result passes validation."))),
+    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which images to improve. Originals are replaced only after every result passes validation."))),
     formCard("postprocess_images", { run: false, preview: "summary" }),
     el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Checking image inventory…"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
   wrap.append(run);
@@ -644,7 +644,7 @@ function renderSimplePostprocess() {
 PAGES.postprocess = root => {
   if (uiMode() === "simple") return renderSimplePostprocess();
   const wrap = el("div", {});
-  wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to fetched card images."));
+  wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to card images."));
   wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
   const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("div", { class: "actions" }, el("button", { class: "btn btn-ghost pp-guide", type: "button", "aria-label": "Open the image post-processing guide", onclick: showGuide }, ico("book"), "Guide"), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor"))), el("div", { class: "pp-library-list" }));
   wrap.append(library);

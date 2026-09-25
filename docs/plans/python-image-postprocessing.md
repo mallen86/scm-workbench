@@ -337,7 +337,7 @@ Only scan the effective managed SCM checkout's immediate:
 - `game/front` directory;
 - `game/double_sided` directory when selected.
 
-Do not include `game/back`, recurse, follow links, or accept arbitrary directories in the first release. Preserve non-image placeholders and unrelated files.
+The first release excluded `game/back`. The later **Back only** scope also scans that directory's immediate entries using the same bounds and path checks; the default **Front and double-sided** scope still excludes it. Never recurse, follow links, or accept arbitrary directories. Preserve non-image placeholders and unrelated files.
 
 Reuse the existing magic-byte image recognition and stable-handle/path-containment patterns. Initial bounds should align with existing image operations unless tests justify lower values:
 

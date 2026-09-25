@@ -31,6 +31,7 @@ def main() -> int:
     forms = (UI / "forms.js").read_text(encoding="utf-8")
     css = (ROOT / "ui" / "theme.css").read_text(encoding="utf-8")
     fetch = (UI / "pages" / "fetch.js").read_text(encoding="utf-8")
+    server = (ROOT / "scm_workbench" / "server.py").read_text(encoding="utf-8")
 
     for required in (
         'nativeCall("postprocessors.list")',
@@ -93,6 +94,8 @@ def main() -> int:
         'doRun("postprocess_images"',
         'Original images were not changed',
         'COMMAND_PREVIEW_EVENT',
+        'state.imageScope = first(detail.args?.scope) || "both"',
+        'if (state.imageScope !== scope) state.imageCount = null',
         'image_count',
         'recognized image',
         'Connect an SCM checkout before processing images',
@@ -130,6 +133,8 @@ def main() -> int:
             return fail(f"post-processing page is missing {required}")
     if page.count('formCard("postprocess_images", { run: false, preview: "summary" })') != 2:
         return fail("image post-processing must hide technical commands in both modes while keeping preview validation events")
+    if '["back", "Back only"]' not in server:
+        return fail("manifest-driven post-processing scope is missing Back only")
     if 'with no download during processing' in page or page.count('Processing can take a while depending on your computer.') != 2:
         return fail("AI Upscaler description must describe realistic processing time without obsolete download wording")
     if any(text in page for text in ('model and inference libraries are optional', 'plus optional libraries',

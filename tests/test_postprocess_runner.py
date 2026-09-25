@@ -54,6 +54,37 @@ def process_image(image_path, context):
             self.assertEqual(len(lines), 2)
             self.assertEqual([json.loads(line.split(" ", 1)[1])["index"] for line in lines], [1, 2])
 
+    def test_back_only_role_is_bounded_to_the_private_back_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            back = root / "game/back"; back.mkdir(parents=True)
+            (back / "card.png").write_bytes(png())
+            entries = stage_images(discover_images(root, "back"), root / "run")
+            source_text = (
+                "def process_image(image_path, context):\n"
+                "    assert context['role'] == 'back'\n"
+                "    assert context['relative_path'] == 'game/back/card.png'\n"
+            )
+            source = root / "run/processor.py"; source.write_text(source_text, encoding="utf-8")
+            manifest = root / "run/manifest.json"
+            payload = {"source_path": str(source), "run_root": str(root / "run"),
+                       "entries": runner_entries(entries), "revision": revision_digest(source_text, []),
+                       "requirements": [], "contract": CONTRACT_VERSION, "environment": "",
+                       "environment_root": str(root / "environments"), "limits": LIMITS}
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            command = [sys.executable, "-I", "-B", "scm_workbench/postprocess_runner.py",
+                       "--manifest", str(manifest)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            progress = [json.loads(line.split(" ", 1)[1]) for line in result.stdout.splitlines()
+                        if line.startswith("WB_POSTPROCESS_PROGRESS ")]
+            self.assertEqual(progress, [{"index": 1, "total": 1, "name": "card.png", "role": "back"}])
+            payload["entries"][0]["relative_path"] = "game/front/card.png"
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("manifest entry is invalid", result.stdout)
+
     def test_private_environment_is_inserted_without_processing_pth_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); (root / "run/work/front").mkdir(parents=True)

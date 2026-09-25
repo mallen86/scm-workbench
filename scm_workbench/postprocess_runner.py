@@ -282,7 +282,7 @@ def run(manifest_path: str | Path) -> int:
         if not isinstance(entry, dict) or set(entry) != entry_keys:
             raise RunnerError("manifest entry is invalid")
         role = entry.get("role"); name = entry.get("name"); relative = entry.get("relative_path")
-        if (role not in {"front", "double_sided"} or not isinstance(name, str) or
+        if (role not in {"front", "double_sided", "back"} or not isinstance(name, str) or
                 not name or name in {".", ".."} or "/" in name or "\\" in name or
                 any(unicodedata.category(character).startswith("C") for character in name) or
                 len(name.encode("utf-8")) > 255 or not isinstance(relative, str) or
