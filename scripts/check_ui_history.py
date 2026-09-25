@@ -210,12 +210,14 @@ const navUrl = dataUrl(`
 `);
 const jobsUrl = dataUrl(`export const jobs = {};`);
 const jobEventsUrl = dataUrl(`export const publishJobsUpdated = () => {};`);
+const jobNoticesUrl = dataUrl(`export const syncJobNotices = () => {};`);
 const previewUrl = dataUrl(`export const preview = () => Promise.resolve({});`);
 const prepUrl = dataUrl(`export const repoReady = () => true;`);
 const settingsTransportUrl = dataUrl(`export const canPickDirectory = () => false; export const pickDirectory = async () => null;`);
 const formsSource = fs.readFileSync(process.argv[2], "utf8")
   .replace('from "./core.js"', `from "${coreUrl}"`)
   .replace('from "./job-events.js"', `from "${jobEventsUrl}"`)
+  .replace('from "./job-notices.js"', `from "${jobNoticesUrl}"`)
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)

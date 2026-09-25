@@ -111,6 +111,7 @@ def main() -> int:
         'The built-in Simple Upscaler is ready without any downloads.',
         'Remove optional files',
         'Cancel installation',
+        'Follow the installation job in the sidebar.',
         'postprocessors.removeOptional',
         'const result = await jobs.kill(state.installJob.id)',
         'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
@@ -118,6 +119,8 @@ def main() -> int:
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
+    if 'never the app bundle' in page:
+        return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
         return fail("processor source highlighting uses unsafe HTML insertion")
     for required in ("pythonHighlightTokens", "renderPythonHighlight", "createTextNode", "textContent"):

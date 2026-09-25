@@ -136,6 +136,7 @@ const jobsUrl = dataUrl("export const jobs = {}; ");
 const prepUrl = dataUrl("export const repoReady = () => true; ");
 const navUrl = dataUrl("export const uiMode = () => \"advanced\"; ");
 const jobEventsUrl = dataUrl("export const publishJobsUpdated = () => {}; ");
+const jobNoticesUrl = dataUrl("export const syncJobNotices = () => {}; ");
 const settingsTransportUrl = dataUrl("export const canPickDirectory = () => false; export const pickDirectory = async () => null; ");
 globalThis.releases = [];
 const previewStubUrl = dataUrl(`
@@ -146,6 +147,7 @@ const previewStubUrl = dataUrl(`
 const formsForTest = formsSource
   .replace('from "./core.js"', `from "${coreUrl}"`)
   .replace('from "./job-events.js"', `from "${jobEventsUrl}"`)
+  .replace('from "./job-notices.js"', `from "${jobNoticesUrl}"`)
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewStubUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)

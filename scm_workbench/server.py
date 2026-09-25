@@ -5460,6 +5460,8 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         try:
             store = _postprocessor_store(scm_root=cwd, interpreter=python)
             item = store.get(str(args.get("processor_id") or ""), include_source=False)
+            if item["id"] == BUILTIN_ADVANCED_UPSCALER_ID and item.get("optional_model"):
+                title = "Install Advanced Upscaler"
             if item.get("bundled") and not item.get("optional_model"):
                 errors.append("this bundled processor needs no installation")
             if str(args.get("revision_hash") or "") != item.get("revision"):

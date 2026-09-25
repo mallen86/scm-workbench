@@ -408,7 +408,7 @@ async function installLibraries() {
   const requirements = model ? (p.requirements || []).join("\n") : String(state.draft?.requirements || "").trim();
   const approved = await confirmModal({
     title: model ? "Install Advanced Upscaler?" : "Install processor libraries?",
-    text: model ? "One-time optional download: 67 MB RealESRGAN_x4plus model plus ONNX Runtime and verified Python wheels. Allow roughly 150–250 MB of disk space (varies by platform), with additional temporary staging space. Workbench will verify the model and install into app data, never the app bundle. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    text: model ? "One-time optional download: 67 MB RealESRGAN_x4plus model plus ONNX Runtime and verified Python wheels. Allow roughly 150–250 MB of disk space (varies by platform), with additional temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
     okLabel: model ? "Install optional upscaler" : "Install libraries",
   });
   if (!approved) return;

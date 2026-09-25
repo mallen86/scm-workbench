@@ -171,6 +171,10 @@ class PostprocessJobTests(unittest.TestCase):
         preview = server.build_preview("postprocess_dependencies", args)
         self.assertEqual(preview["errors"], [])
         self.assertIn("postprocess_installer", str(preview["cmd"]))
+        command = server.build_command("postprocess_dependencies", args, self.settings,
+                                       server.get_info_cached(), write_deck=False)
+        self.assertEqual(command[3], "Install Advanced Upscaler")
+        self.assertEqual(command[5], [])
         self.assertFalse(server.postprocessor_status(item["id"])["processor"]["ready_to_run"])
         custom = self.store.save("Custom", "def process_image(image_path, context):\n    pass\n", "numpy==2.5.3")
         with self.assertRaises(server.PreviewError):

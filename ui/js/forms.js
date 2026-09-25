@@ -2,6 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";import { canPickDirectory, pickDirectory } from "./settings-transport.js";
+import { syncJobNotices } from "./job-notices.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -797,6 +798,9 @@ export async function doRun(kind, btn, opts = {}) {
       if (i >= 0) S.jobs[i] = { ...S.jobs[i], ...j0 };
       else S.jobs = [j0, ...(S.jobs || [])];
       publishJobsUpdated();
+      // Seed the sidebar before the authoritative refresh: a fast installer
+      // may already be terminal by the time jobs.list returns.
+      syncJobNotices(S.jobs);
       const { refreshJobs, openConsole } = await import("./console.js");
       refreshJobs();
       if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over

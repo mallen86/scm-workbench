@@ -66,6 +66,14 @@ def main() -> int:
         if marker not in forms:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
             return 1
+    started = forms[forms.find("export async function doRun("):]
+    saved = started.find("else S.jobs = [j0, ...(S.jobs || [])];")
+    seeded = started.find("syncJobNotices(S.jobs);")
+    refresh = started.find('await import("./console.js")')
+    if ('import { syncJobNotices } from "./job-notices.js";' not in forms or
+            not (0 <= saved < seeded < refresh)):
+        print("FAIL: starting a fast job does not show the sidebar notice before refreshing jobs")
+        return 1
     for marker in ('import { syncJobNotices } from "./job-notices.js";',
                    "syncJobNotices(next);"):
         if marker not in console:
