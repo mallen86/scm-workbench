@@ -85,5 +85,7 @@ def process_image(image_path: Path, context: dict) -> None:
     if image_format == "JPEG":
         options.update(quality=95, subsampling=0, optimize=True)
     elif image_format == "PNG":
-        options["optimize"] = True
+        # Extra PNG size optimization takes nearly as long as inference on
+        # large images; standard lossless compression keeps identical pixels.
+        options["optimize"] = False
     output.save(image_path, format=image_format, **options)
