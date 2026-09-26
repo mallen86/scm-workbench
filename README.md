@@ -57,7 +57,7 @@ Both Linux packages include the same private Python runtime. App files are insta
 
 Workbench downloads the card-making tools and game information it needs. This can take a few minutes, and progress is shown in the app. Keep the window open until it says your workspace is ready.
 
-When setup finishes, choose **Got it. Show me around** for an optional guided tutorial. It walks through fetching card art, choosing card and paper sizes, adding a card back, and creating a PDF. You can stop at any step and replay it later from **Settings > Guided tutorial**.
+When setup finishes, choose **Got it. Show me around** for an optional guided tutorial. It walks through fetching card art, optional image post-processing with the Simple or Advanced AI Upscaler, choosing card and paper sizes, adding a card back, and creating a PDF. You can stop at any step and replay it later from **Settings > Guided tutorial**.
 
 If setup stops early, use **Retry setup**. Workbench only retries the parts that are not ready.
 

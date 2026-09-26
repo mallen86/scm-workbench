@@ -334,7 +334,7 @@ PAGES.settings = (root) => {
   tc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("book")),
     el("div", { class: "grow" }, el("h2", {}, "Guided tutorial"),
-      el("p", {}, "Walk through fetching card art, adding a card back, and generating a PDF. The tutorial never changes a setting or starts a job."))));
+      el("p", {}, "Walk through fetching card art, optional image post-processing, choosing card and paper sizes, adding a card back, and generating a PDF. The tutorial never changes a setting or starts a job."))));
   tc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px; align-items:center" },
     el("button", { class: "btn primary", type: "button", onclick: startGuidedTutorial },
       ico("book"), "Start guided tutorial"),

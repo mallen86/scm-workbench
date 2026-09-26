@@ -21,6 +21,7 @@ def main() -> int:
     tutorial = (JS / "guided-tutorial.js").read_text(encoding="utf-8")
     onboarding = (JS / "onboarding.js").read_text(encoding="utf-8")
     settings = (JS / "pages" / "settings.js").read_text(encoding="utf-8")
+    postprocess = (JS / "pages" / "postprocess.js").read_text(encoding="utf-8")
     css = (UI / "theme.css").read_text(encoding="utf-8")
 
     for marker in (
@@ -29,6 +30,8 @@ def main() -> int:
         'target: ".plugin-sections"',
         "target: '.form-card[data-kind^=\"fetch:\"] .field[data-key=\"deck_source\"]'",
         "target: '.form-card[data-kind^=\"fetch:\"] .runbar'",
+        'page: "postprocess"',
+        'target: ".pp-simple-picker, .pp-library"',
         'page: "pdf"',
         'targets: Object.freeze([',
         "'.form-card[data-kind=\"create_pdf\"] .field[data-key=\"card_size\"]'",
@@ -54,13 +57,17 @@ def main() -> int:
             return fail(f"guided tutorial performs work instead of explaining it: {forbidden}")
 
     step_copy = re.findall(r'^    (?:title|text): "([^"]*)"', tutorial, re.MULTILINE)
-    if len(step_copy) != 12:
-        return fail(f"guided tutorial does not have six titled steps: {step_copy}")
+    if len(step_copy) != 14:
+        return fail(f"guided tutorial does not have seven titled steps: {step_copy}")
     if any(dash in text for text in step_copy for dash in ("\u2014", "\u2013")):
         return fail("guided tutorial user-facing text contains an en or em dash")
-    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Choose card and paper sizes", "Add a card back", "Generate the PDF"):
+    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Optional image post-processing", "Choose card and paper sizes", "Add a card back", "Generate the PDF"):
         if phrase not in step_copy:
             return fail(f"guided tutorial does not cover {phrase}")
+    if not all(phrase in step_copy[7] for phrase in ("skip this step", "Simple Upscaler", "Advanced AI Upscaler", "installing its model and libraries")):
+        return fail("post-processing tutorial does not explain that both upscalers are optional and the AI assets require installation")
+    if 'class: "card pp-simple-picker"' not in postprocess or 'class: "card pp-library"' not in postprocess:
+        return fail("post-processing tutorial must have a target in both Simple and Advanced modes")
     if "Select Only fronts in the form when a back is not needed." in tutorial:
         return fail("the card-back step still gives incorrect Only fronts guidance")
 
@@ -79,6 +86,7 @@ def main() -> int:
     for marker in (
         'import { startGuidedTutorial } from "../guided-tutorial.js";',
         'class: "card guided-tutorial-card"',
+        'optional image post-processing, choosing card and paper sizes',
         '"Start guided tutorial"',
         'onclick: startGuidedTutorial',
         '"You can stop at any step."',
@@ -285,7 +293,7 @@ if (!tutorial.guidedTutorialActive() || globalThis.sharedState.page !== "fetch" 
     !body.classList.contains("guided-tutorial-open")) fail("tutorial did not start with bounded lifecycle state");
 let root = body.querySelector(".guided-tour-root");
 let popover = body.querySelector(".guided-tour-popover");
-if (!root || !popover || !popover.textContent.includes("Step 1 of 6") ||
+if (!root || !popover || !popover.textContent.includes("Step 1 of 7") ||
     !popover.textContent.includes("Choose a game") ||
     globalThis.targets.get(tutorial.GUIDED_TUTORIAL_STEPS[0].target).scrolls !== 1)
   fail("first tutorial step did not point to the game chooser");
@@ -302,16 +310,32 @@ if (globalThis.navigations.length !== 1 || !popover.textContent.includes("Add yo
 next();
 if (!popover.textContent.includes("Fetch card art")) fail("fetch action step did not render");
 next();
-if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.join() !== "fetch,pdf" ||
+const postprocessTarget = globalThis.targets.get(".pp-simple-picker, .pp-library");
+if (globalThis.sharedState.page !== "postprocess" || globalThis.navigations.join() !== "fetch,postprocess" ||
+    !popover.textContent.includes("Step 4 of 7") || !popover.textContent.includes("Optional image post-processing") ||
+    !popover.textContent.includes("Simple Upscaler") || !popover.textContent.includes("Advanced AI Upscaler") ||
+    !postprocessTarget?.isConnected || postprocessTarget.scrolls !== 1)
+  fail("optional post-processing step did not navigate and point to the processor picker");
+next();
+if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.join() !== "fetch,postprocess,pdf" ||
     !popover.textContent.includes("Choose card and paper sizes")) fail("size step did not navigate to Create PDF");
 const spotlight = body.querySelector(".guided-tour-spotlight");
 if (spotlight.style.left !== "293px" || spotlight.style.width !== "564px")
   fail("size step did not spotlight the combined card and paper controls");
+const back = popover.querySelectorAll("button").find(button => button.textContent === "Back");
+if (!back?.onclick) fail("PDF step has no Back action");
+back.onclick();
+flushFrames();
+if (globalThis.sharedState.page !== "postprocess" || !popover.textContent.includes("Optional image post-processing") ||
+    globalThis.navigations.at(-1) !== "postprocess") fail("Back did not return to optional post-processing");
+next();
+if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.at(-1) !== "pdf")
+  fail("Next did not return to Create PDF after visiting post-processing");
 next();
 if (!popover.textContent.includes("Add a card back") || popover.textContent.includes("Only fronts"))
   fail("card-back step is missing or still gives incorrect Only fronts guidance");
 next();
-if (!popover.textContent.includes("Step 6 of 6") || !popover.textContent.includes("Generate the PDF") ||
+if (!popover.textContent.includes("Step 7 of 7") || !popover.textContent.includes("Generate the PDF") ||
     !popover.textContent.includes("Finish")) fail("final PDF action step did not render");
 
 let prevented = false;
@@ -325,7 +349,7 @@ if (!prevented || tutorial.guidedTutorialActive() || body.querySelector(".guided
 
 tutorial.startGuidedTutorial();
 flushFrames();
-for (let index = 0; index < 6; index++) {
+for (let index = 0; index < 7; index++) {
   documentListeners.get("keydown")({key:"ArrowRight", preventDefault() {}});
   flushFrames();
 }
@@ -382,7 +406,7 @@ await buttonNamed(card, "Got it. Show me around").onclick();
 if (done !== 2 || globalThis.tourStarts !== 1 || globalThis.sharedState.info.settings.onboarded ||
     globalThis.welcomeToasts.at(-1)?.kind !== "err") fail("a failed onboarding save still left or started the tutorial");
 
-console.log("ok: optional tutorial covers PDF sizes, gives accurate card-back guidance, returns to fetch, and cleans up on stop or finish");
+console.log("ok: tutorial covers optional post-processing, PDF sizes, card backs, and cleanup on stop or finish");
 ''',
         text=True,
         capture_output=True,

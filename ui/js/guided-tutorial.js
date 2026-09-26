@@ -26,6 +26,12 @@ export const GUIDED_TUTORIAL_STEPS = Object.freeze([
     text: "Review the fetch options, then use the action here. The job runs in the background and this page shows its progress.",
   }),
   Object.freeze({
+    page: "postprocess",
+    target: ".pp-simple-picker, .pp-library",
+    title: "Optional image post-processing",
+    text: "You can skip this step and create a PDF directly. To enlarge fetched images, the Simple Upscaler is ready to use. The Advanced AI Upscaler requires installing its model and libraries first. Run a processor only on original images; another run scales them again.",
+  }),
+  Object.freeze({
     page: "pdf",
     targets: Object.freeze([
       '.form-card[data-kind="create_pdf"] .field[data-key="card_size"]',
