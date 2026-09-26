@@ -7865,6 +7865,15 @@ def _finalize_dependency_job(job: dict) -> bool:
     return trust_preserved
 
 
+def _postprocess_address_space(processor_id: str, *, platform: str | None = None) -> int:
+    # The fixed Linux CUDA runner reserves more than 8 GiB of *virtual*
+    # address space even for one tile. Keep other/custom processors at 4 GiB;
+    # the runner's independently validated maximum remains 16 GiB.
+    platform = sys.platform if platform is None else platform
+    gib = (16 if processor_id == BUILTIN_ADVANCED_UPSCALER_ID and platform.startswith("linux") else 4)
+    return gib * 1024 * 1024 * 1024
+
+
 def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Path, dict]:
     """Snapshot one approved processor and stage its bounded image batch."""
     python = job_python(load_settings())
@@ -7923,7 +7932,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         "revision": item["revision"], "requirements": item["requirements"],
         "contract": store.contract,
         "limits": {"cpu_seconds": 3300 if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else 900,
-                   "address_space": 4 * 1024 * 1024 * 1024,
+                   "address_space": _postprocess_address_space(args["processor_id"]),
                    "file_size": 512 * 1024 * 1024, "open_files": 128,
                    "processes": 8},
     }, separators=(",", ":"))

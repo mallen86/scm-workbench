@@ -82,6 +82,16 @@ class PostprocessJobTests(unittest.TestCase):
             "scope": "front",
         })
 
+    def test_only_fixed_linux_gpu_runner_gets_larger_bounded_address_space(self):
+        advanced = server.BUILTIN_ADVANCED_UPSCALER_ID
+        for platform, expected in (("linux", 16), ("linux2", 16),
+                                   ("darwin", 4), ("win32", 4)):
+            with self.subTest(platform=platform):
+                self.assertEqual(server._postprocess_address_space(advanced, platform=platform),
+                                 expected * 1024 ** 3)
+        self.assertEqual(server._postprocess_address_space("custom-processor", platform="linux"),
+                         4 * 1024 ** 3)
+
     def test_system_cuda_library_paths_only_reach_fixed_linux_runner(self):
         cuda = self.root / "cuda" / "lib64"
         cudnn = self.root / "cudnn" / "lib"
@@ -411,6 +421,27 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertNotIn("model_path", manifest)
         self.assertEqual(manifest["environment"], str(site_packages))
         self.assertEqual(manifest["limits"]["cpu_seconds"], 900)
+        self.assertEqual(manifest["limits"]["address_space"], 4 * 1024 ** 3)
+
+        fixed_run = self.data / "postprocessing/runs/fixed-linux-gpu"
+        fixed_job = {
+            "id": "fixed-linux-gpu", "scm_path": str(self.repo),
+            "postprocess_run": str(fixed_run),
+            "postprocess_manifest": str(fixed_run / "manifest.json"),
+            "cancel_event": threading.Event(),
+        }
+        with (mock.patch.object(server, "_postprocessor_store", return_value=store),
+              mock.patch.object(store, "status", return_value=ready),
+              mock.patch.object(server, "_verify_dependency_environment"),
+              mock.patch.object(server.advanced_model, "verify_model", return_value=True),
+              mock.patch.object(server.sys, "platform", "linux")):
+            server._prepare_image_postprocess_job(fixed_job, {
+                "processor_id": built_in["id"], "revision_hash": built_in["revision"],
+                "scope": "front",
+            })
+        fixed_manifest = json.loads((fixed_run / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("model_path", fixed_manifest)
+        self.assertEqual(fixed_manifest["limits"]["address_space"], 16 * 1024 ** 3)
 
     def test_success_publishes_atomically_and_releases_exclusive_lease(self):
         image = self.repo / "game" / "front" / "card.png"
