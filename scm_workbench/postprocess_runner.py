@@ -309,7 +309,11 @@ def run(manifest_path: str | Path) -> int:
         result = callback(image, context)
         if result is not None:
             raise RunnerError("process_image must return None")
-        _emit(PROGRESS_PREFIX, {"index": index, "total": total, "name": _bounded_text(entry.get("name", "")), "role": _bounded_text(entry.get("role", ""))})
+        # The validated filename is the progress frame's identity. Collapsing
+        # whitespace here changes Unicode spaces (and repeated ordinary spaces),
+        # so the parent rejects this and every subsequent sequential frame.
+        _emit(PROGRESS_PREFIX, {"index": index, "total": total,
+                                "name": name, "role": role})
     if source_identity is not None:
         path = Path(str(manifest["source_path"]))
         _raw, now_identity = _read_regular(path, "processor source", 256 * 1024)

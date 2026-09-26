@@ -7943,8 +7943,10 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     job["postprocess_entries"] = list(entries)
     job["image_total"] = len(entries)
     job["progress"] = {"current": 0, "total": len(entries)}
-    argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_runner.py"),
-            "--manifest", str(private_manifest)]
+    # Isolated mode ignores PYTHONIOENCODING. On Windows a redirected stdout
+    # otherwise uses the ANSI codepage, corrupting non-ASCII progress names.
+    argv = [str(python), "-I", "-B", "-u", "-X", "utf8",
+            str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
     return argv, run_dir, _postprocess_env(
         run_dir, system_gpu_libraries=args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID,
     )

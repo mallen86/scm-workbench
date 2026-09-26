@@ -136,6 +136,46 @@ class PostprocessJobTests(unittest.TestCase):
         }))
         self.assertEqual(job["progress"], {"current": 1, "total": 1, "label": "card.png"})
 
+    def test_unicode_and_spaced_filenames_keep_image_progress_sequential(self):
+        names = ("01-before.png", "02-A\u00a0B-\U0001f0a1.png",
+                 "03-after.png", "04-double  space.png")
+        for name in names:
+            (self.repo / "game" / "front" / name).write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        frames = [json.loads(line.removeprefix("WB_POSTPROCESS_PROGRESS "))
+                  for line in job["log_lines"] if line.startswith("WB_POSTPROCESS_PROGRESS ")]
+        self.assertEqual([frame["name"] for frame in frames], list(names))
+        self.assertEqual(job["status"], "ok", job["log_lines"])
+        self.assertEqual(job["progress"], {"current": len(names), "total": len(names),
+                                           "label": names[-1]})
+
+    def test_accented_filename_runner_forces_utf8_in_isolated_mode(self):
+        names = ("01-before.png", "02-Pok\u00e9 Pad1.png", "03-after.png")
+        for name in names:
+            (self.repo / "game" / "front" / name).write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                "scope": "front"}
+        run = self.data / "postprocessing" / "runs" / "accented-progress"
+        prepared = {"scm_path": str(self.repo), "cancel_event": threading.Event(),
+                    "postprocess_run": str(run), "postprocess_manifest": str(run / "manifest.json")}
+        argv, _cwd, env = server._prepare_image_postprocess_job(prepared, args)
+        # -I ignores PYTHONIOENCODING and PYTHONUTF8. Windows pipe output
+        # otherwise uses a locale codepage, corrupting the name on UTF-8 decode.
+        self.assertIn(("-X", "utf8"), list(zip(argv, argv[1:])))
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        self.assertEqual(job["status"], "ok", job["log_lines"])
+        self.assertEqual(job["progress"], {"current": 3, "total": 3, "label": names[-1]})
+        frames = [json.loads(line.removeprefix("WB_POSTPROCESS_PROGRESS "))
+                  for line in job["log_lines"] if line.startswith("WB_POSTPROCESS_PROGRESS ")]
+        self.assertEqual([frame["name"] for frame in frames], list(names))
+
     def test_install_progress_uses_only_known_installer_stages(self):
         job = {"kind": "postprocess_dependencies", "log_lines": [], "subs": []}
         server._append_job_line(job, "[processor libraries] Downloading the locked wheel set")

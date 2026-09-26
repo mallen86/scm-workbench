@@ -1,4 +1,6 @@
 # Bugs
+- [x] Force UTF-8 mode for isolated Windows image processors so accented card filenames do not stall job progress.
+- [x] Preserve Unicode whitespace and repeated spaces in image post-processing progress filenames so Windows jobs advance past those images.
 - [x] Preserve approved postprocessor source and dependency-lock bytes on Windows instead of invalidating their revision digests through newline translation.
 - [x] Return a structured validation error for oversized processor source payloads instead of resetting the browser HTTP connection.
 - [x] Preserve verified postprocessor libraries and trust across compatible app/runtime replacement without binding Python compatibility to bundle paths, inodes, or timestamps.
