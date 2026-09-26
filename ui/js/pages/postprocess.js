@@ -622,11 +622,13 @@ function renderSimplePostprocess() {
     el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…"),
     el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
     el("div", { class: "pp-model-setup", hidden: true },
-      el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
-      el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space."),
-      el("button", { class: "btn btn-ghost pp-model-install", type: "button", onclick: installLibraries }, "Install model & libraries"),
-      el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
-      el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files"))));
+      el("div", { class: "pp-model-copy" },
+        el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
+        el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.")),
+      el("div", { class: "pp-model-actions" },
+        el("button", { class: "btn btn-ghost pp-model-install", type: "button", onclick: installLibraries }, "Install model & libraries"),
+        el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
+        el("button", { class: "btn btn-ghost pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files")))));
   const run = el("section", { class: "card pp-run-card" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which images to improve. Originals are replaced only after every result passes validation."))),
     formCard("postprocess_images", { run: false, preview: "summary" }),

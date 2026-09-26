@@ -1657,8 +1657,11 @@ cursor: pointer;
 .pp-install-summary.fail { color: var(--err); }
 .pp-install-summary.running { color: var(--info); }
 .pp-install-summary[hidden] { display: none; }
-.pp-model-setup { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
-.pp-model-setup p { flex: 1 1 100%; line-height: 1.5; }
+.pp-model-setup { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 14px; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
+.pp-model-copy { flex: 1 1 250px; min-width: 0; }
+.pp-model-copy p { line-height: 1.5; }
+.pp-model-cost { margin-top: 4px; }
+.pp-model-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
 .pp-model-status { line-height: 1.5; overflow-wrap: anywhere; }
 .pp-model-state.fail, .pp-model-status.fail { color: var(--err); overflow-wrap: anywhere; }
 .pp-model-state.running, .pp-model-status.running { color: var(--info); }

@@ -151,6 +151,12 @@ def main() -> int:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if 'if (!p.optional_model) actions.append(' in page:
         return fail("the Advanced Upscaler is missing its source-only Duplicate action")
+    simple_setup = page.split('el("div", { class: "pp-model-setup", hidden: true },', 1)[-1].split('const run = el("section",', 1)[0]
+    if not re.search(r'class: "pp-model-copy".*class: "[^"]*pp-model-state".*class: "[^"]*pp-model-cost".*class: "pp-model-actions".*class: "[^"]*pp-model-install".*class: "[^"]*pp-model-remove"', simple_setup, re.S):
+        return fail("Simple-mode model status and installation actions must share one row")
+    if (not re.search(r'\.pp-model-copy\s*\{[^}]*flex:\s*1[^}]*\}', css) or
+            not re.search(r'\.pp-model-actions\s*\{[^}]*justify-content:\s*flex-end;[^}]*margin-left:\s*auto;', css)):
+        return fail("Simple-mode model actions must align to the right of their status text")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
         return fail("processor source highlighting uses unsafe HTML insertion")
     for required in ("pythonHighlightTokens", "renderPythonHighlight", "createTextNode", "textContent"):
