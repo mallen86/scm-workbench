@@ -19,20 +19,43 @@ _session = None
 _input_name = None
 
 
+def _providers(available, platform: str) -> list[str]:
+    if platform == "darwin":
+        gpu = "CoreMLExecutionProvider"
+    elif platform == "win32":
+        gpu = "DmlExecutionProvider"
+    elif platform.startswith("linux"):
+        gpu = "CUDAExecutionProvider"
+    else:
+        gpu = None
+    return [gpu, "CPUExecutionProvider"] if gpu in available else ["CPUExecutionProvider"]
+
+
 def _model(path: str):
     global _session, _input_name
     if _session is None:
         options = ort.SessionOptions()
         options.intra_op_num_threads = min(4, os.cpu_count() or 1)
         options.inter_op_num_threads = 1
-        providers = (["CoreMLExecutionProvider", "CPUExecutionProvider"]
-                     if sys.platform == "darwin" and "CoreMLExecutionProvider" in ort.get_available_providers()
-                     else ["CPUExecutionProvider"])
-        _session = ort.InferenceSession(path, sess_options=options, providers=providers)
-        inputs = _session.get_inputs()
-        if len(inputs) != 1 or len(_session.get_outputs()) != 1:
+        providers = _providers(ort.get_available_providers(), sys.platform)
+        if providers[0] == "DmlExecutionProvider":
+            # DirectML requires sequential execution with memory patterns off.
+            options.enable_mem_pattern = False
+            options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        try:
+            session = ort.InferenceSession(path, sess_options=options, providers=providers)
+        except Exception:
+            if len(providers) == 1:
+                raise
+            # An advertised GPU provider may still lack a usable driver or
+            # compatible system libraries. Keep offline CPU inference usable.
+            session = ort.InferenceSession(path, sess_options=options,
+                                           providers=["CPUExecutionProvider"])
+        inputs = session.get_inputs()
+        if len(inputs) != 1 or len(session.get_outputs()) != 1:
             raise ValueError("advanced upscaler model has unexpected inputs or outputs")
         _input_name = inputs[0].name
+        _session = session
     return _session
 
 

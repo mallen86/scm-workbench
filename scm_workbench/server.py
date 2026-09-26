@@ -4895,7 +4895,8 @@ def _utf8_env() -> dict:
     return env
 
 
-def _postprocess_env(work_dir: Path, *, installing: bool = False) -> dict:
+def _postprocess_env(work_dir: Path, *, installing: bool = False,
+                     system_gpu_libraries: bool = False) -> dict:
     """Minimal environment for trusted processor and dependency children.
 
     This is defense in depth, not a sandbox: approved Python still runs with
@@ -4904,6 +4905,16 @@ def _postprocess_env(work_dir: Path, *, installing: bool = False) -> dict:
     """
     keep = ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL")
     env = {name: os.environ[name] for name in keep if name in os.environ}
+    if system_gpu_libraries and sys.platform.startswith("linux"):
+        # Only the fixed, app-owned AI processor may inherit library search
+        # paths for a user's system CUDA/cuDNN install. Do not forward empty
+        # (current-directory) or relative entries, or pass this to custom code.
+        raw_paths = os.environ.get("LD_LIBRARY_PATH", "")
+        if len(raw_paths) <= 4096:
+            paths = [path for path in raw_paths.split(":")
+                     if path and os.path.isabs(path) and os.path.isdir(path)]
+            if 0 < len(paths) <= 32:
+                env["LD_LIBRARY_PATH"] = ":".join(paths)
     private_home = work_dir / "home"
     private_tmp = work_dir / "tmp"
     private_home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -7925,7 +7936,9 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     job["progress"] = {"current": 0, "total": len(entries)}
     argv = [str(python), "-I", "-B", "-u", str(_HERE / "postprocess_runner.py"),
             "--manifest", str(private_manifest)]
-    return argv, run_dir, _postprocess_env(run_dir)
+    return argv, run_dir, _postprocess_env(
+        run_dir, system_gpu_libraries=args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID,
+    )
 
 
 def _postprocess_stage_limit_reason(root: Path, max_bytes: int, max_entries: int) -> str | None:

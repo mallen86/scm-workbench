@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import time
@@ -80,6 +81,28 @@ class PostprocessJobTests(unittest.TestCase):
             "revision_hash": item["revision"],
             "scope": "front",
         })
+
+    def test_system_cuda_library_paths_only_reach_fixed_linux_runner(self):
+        cuda = self.root / "cuda" / "lib64"
+        cudnn = self.root / "cudnn" / "lib"
+        cuda.mkdir(parents=True)
+        cudnn.mkdir(parents=True)
+        inherited = f"{cuda}::relative:{self.root / 'missing'}:{cudnn}"
+        run_dir = self.root / "run"
+        run_dir.mkdir()
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": inherited}), mock.patch.object(
+                server.sys, "platform", "linux"):
+            self.assertNotIn("LD_LIBRARY_PATH", server._postprocess_env(run_dir))
+            self.assertNotIn("LD_LIBRARY_PATH", server._postprocess_env(run_dir, installing=True))
+            env = server._postprocess_env(run_dir, system_gpu_libraries=True)
+            self.assertEqual(env["LD_LIBRARY_PATH"], f"{cuda}:{cudnn}")
+            with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "x" * 4097}):
+                self.assertNotIn("LD_LIBRARY_PATH", server._postprocess_env(
+                    run_dir, system_gpu_libraries=True))
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": inherited}), mock.patch.object(
+                server.sys, "platform", "darwin"):
+            self.assertNotIn("LD_LIBRARY_PATH", server._postprocess_env(
+                run_dir, system_gpu_libraries=True))
 
     def test_progress_frames_require_exact_sequential_entry_identity(self):
         job = {

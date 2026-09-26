@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scm_workbench import postprocess_installer
+from scm_workbench import advanced_model, postprocess_installer
 
 
 class InstallerTests(unittest.TestCase):
@@ -59,6 +59,33 @@ class InstallerTests(unittest.TestCase):
                 lock.read_text(encoding="utf-8"),
                 f"demo==1.0 --hash=sha256:{digest}\n",
             )
+
+    def test_fixed_model_manifest_rejects_other_platforms_wheels(self):
+        with tempfile.TemporaryDirectory(prefix="postprocess-model-manifest-") as temp:
+            stage = Path(temp) / "stage"
+            stage.mkdir()
+            manifest = stage / "installer-manifest.json"
+            payload = {
+                "stage": str(stage), "target": str(stage / "site-packages"),
+                "resolve_report": str(stage / "resolve-report.json"),
+                "lock_file": str(stage / "requirements.lock"),
+                "wheelhouse": str(stage / "wheels"), "model": True,
+            }
+            for platform in ("darwin", "win32", "linux"):
+                with self.subTest(platform=platform), mock.patch.object(
+                        advanced_model, "REQUIREMENTS",
+                        advanced_model.requirements_for_platform(platform)):
+                    payload["requirements"] = list(advanced_model.REQUIREMENTS)
+                    manifest.write_text(json.dumps(payload), encoding="utf-8")
+                    self.assertEqual(postprocess_installer._load_manifest(manifest)["requirements"],
+                                     list(advanced_model.REQUIREMENTS))
+                    payload["requirements"] = [r for r in advanced_model.REQUIREMENTS
+                                                if not r.startswith("onnxruntime")]
+                    payload["requirements"].append("onnxruntime==1.30.0" if platform != "darwin"
+                                                   else "onnxruntime-gpu==1.26.0")
+                    manifest.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(postprocess_installer.InstallerError):
+                        postprocess_installer._load_manifest(manifest)
 
     def test_download_hash_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="postprocess-wheel-") as temp:

@@ -288,7 +288,7 @@ function repaintSimplePicker() {
         label.className = `small pp-model-state ${view.tone}`;
       }
       const cost = setup.querySelector(".pp-model-cost");
-      if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (~150–250 MB). Remove them whenever you like." : "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.";
+      if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (size varies by system). Remove them whenever you like." : "One-time download: a 67 MB AI model plus inference libraries. Leave at least 2 GB free during installation.";
       const button = setup.querySelector(".pp-model-install");
       if (button) { button.disabled = !!state.installing || canRun(selected); button.hidden = canRun(selected); }
       const remove = setup.querySelector(".pp-model-remove");
@@ -483,7 +483,7 @@ async function installLibraries() {
   const requirements = model ? (p.requirements || []).join("\n") : String(state.draft?.requirements || "").trim();
   const approved = await confirmModal({
     title: model ? "Install Advanced Upscaler?" : "Install processor libraries?",
-    text: model ? "One-time download: 67 MB RealESRGAN_x4plus model plus required ONNX Runtime and verified Python wheels. Allow roughly 150–250 MB of disk space (varies by platform), with additional temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    text: model ? "One-time download: 67 MB RealESRGAN_x4plus model plus compatible ONNX Runtime and verified Python wheels. Leave at least 2 GB free for the libraries and temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
     okLabel: model ? "Install upscaler" : "Install libraries",
   });
   if (!approved) return;
@@ -624,7 +624,7 @@ function renderSimplePostprocess() {
     el("div", { class: "pp-model-setup", hidden: true },
       el("div", { class: "pp-model-copy" },
         el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
-        el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus required inference libraries. Allow roughly 150–250 MB of disk space, plus temporary staging space.")),
+        el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus inference libraries. Leave at least 2 GB free during installation.")),
       el("div", { class: "pp-model-actions" },
         el("button", { class: "btn btn-ghost pp-model-install", type: "button", onclick: installLibraries }, "Install model & libraries"),
         el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
@@ -667,7 +667,7 @@ PAGES.postprocess = root => {
     el("label", {}, "Python source", sourceEditor),
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
-    el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; allow roughly 150–250 MB of disk space plus temporary staging space. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
+    el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; leave at least 2 GB free during installation. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
     el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
     el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn danger pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove model & libraries"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));

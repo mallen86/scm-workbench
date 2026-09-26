@@ -469,8 +469,9 @@ if (!fetchHelp.includes("Clear card images") || !fetchHelp.includes("duplicate i
   fail("fetch help suggests retrying will fill gaps without duplicating images");
 const aiHelp = section("postprocess", "Advanced AI Upscaler");
 if (!aiHelp.includes("GPU") || !aiHelp.includes("CPU") ||
-    !aiHelp.includes("On Macs") || !aiHelp.includes("Windows and Linux"))
-  fail("AI upscaler help is missing platform-specific GPU and CPU guidance");
+    !aiHelp.includes("hardware, drivers, and libraries") ||
+    /On Macs|Windows and Linux|macOS only/i.test(aiHelp))
+  fail("AI upscaler help must give platform-neutral GPU and CPU guidance");
 const pdfHelp = section("pdf", "Print and image options");
 if (!pdfHelp.includes("registration issues") || !pdfHelp.includes("MPCFill automatically adds 3 mm of bleed") ||
     !pdfHelp.includes("removes that extra bleed") || !pdfHelp.includes("leave it on"))

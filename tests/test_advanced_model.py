@@ -39,6 +39,22 @@ class AdvancedModelTests(unittest.TestCase):
         op.open.return_value = response
         return mock.patch.object(advanced_model.urllib.request, "build_opener", return_value=op)
 
+    def test_pinned_runtime_wheels_match_each_supported_platform(self):
+        for platform, wheel in (
+            ("darwin", "onnxruntime==1.30.0"),
+            ("win32", "onnxruntime-directml==1.24.4"),
+            ("linux", "onnxruntime-gpu==1.26.0"),
+        ):
+            with self.subTest(platform=platform):
+                requirements = advanced_model.requirements_for_platform(platform)
+                self.assertEqual([r for r in requirements if r.startswith("onnxruntime")], [wheel])
+                self.assertEqual(requirements, tuple(sorted(requirements)))
+                self.assertTrue(all("==" in requirement for requirement in requirements))
+                self.assertEqual("sympy==1.14.0" in requirements, platform == "win32")
+                self.assertEqual("mpmath==1.3.0" in requirements, platform == "win32")
+        self.assertEqual(advanced_model.REQUIREMENTS,
+                         advanced_model.requirements_for_platform(advanced_model.sys.platform))
+
     def test_verified_download_and_modified_asset_rejected(self):
         with self.opener(Response(self.body, declared=str(len(self.body)))):
             advanced_model.download_model(self.destination)

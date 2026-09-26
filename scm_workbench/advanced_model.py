@@ -8,16 +8,35 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 # Exact roots *and* transitive dependencies; the installer additionally locks
 # each platform-specific wheel by SHA-256 before the offline installation.
-REQUIREMENTS = (
-    "flatbuffers==25.12.19", "numpy==2.5.3", "onnxruntime==1.30.0",
+# The Linux GPU wheel supports CUDA 12.x / cuDNN 9 with system libraries; it
+# includes the CPU provider for systems without compatible NVIDIA hardware.
+_COMMON_REQUIREMENTS = (
+    "flatbuffers==25.12.19", "numpy==2.5.3",
     "packaging==26.3", "protobuf==7.36.2",
 )
+
+
+def requirements_for_platform(platform: str) -> tuple[str, ...]:
+    if platform == "win32":
+        # DirectML supports Windows GPUs and includes a CPU provider. SymPy
+        # depends on mpmath; both must be pinned for the trusted installer.
+        runtime = ("onnxruntime-directml==1.24.4", "sympy==1.14.0", "mpmath==1.3.0")
+    elif platform.startswith("linux"):
+        runtime = ("onnxruntime-gpu==1.26.0",)
+    else:
+        # The macOS wheel includes CoreML and CPU execution providers.
+        runtime = ("onnxruntime==1.30.0",)
+    return tuple(sorted((*_COMMON_REQUIREMENTS, *runtime)))
+
+
+REQUIREMENTS = requirements_for_platform(sys.platform)
 MODEL_NAME = "RealESRGAN_x4plus.onnx"
 MODEL_SHA256 = "4851ec156207d271f5328605d0582eeb851e656227da8aca093ced9e60789291"
 MODEL_BYTES = 67_051_650

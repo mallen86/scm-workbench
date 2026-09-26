@@ -144,9 +144,11 @@ def main() -> int:
                                      'One-time optional download:', 'Install optional upscaler')):
         return fail("AI Upscaler installation copy incorrectly describes required components as optional")
     for required in ('This upscaler requires its model and inference libraries to be installed before use.',
-                     'plus required inference libraries.', 'Install upscaler'):
+                     'plus inference libraries.', 'at least 2 GB free', 'Install upscaler'):
         if required not in page:
             return fail(f"AI Upscaler installation copy is missing {required}")
+    if '150–250 MB' in page:
+        return fail("AI Upscaler installation estimate must account for the Linux GPU wheel")
     if 'never the app bundle' in page:
         return fail("optional installation confirmation uses platform-specific app bundle jargon")
     if 'if (!p.optional_model) actions.append(' in page:
