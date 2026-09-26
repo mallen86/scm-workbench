@@ -157,6 +157,9 @@ def main() -> int:
     if (not re.search(r'\.pp-model-copy\s*\{[^}]*flex:\s*1[^}]*\}', css) or
             not re.search(r'\.pp-model-actions\s*\{[^}]*justify-content:\s*flex-end;[^}]*margin-left:\s*auto;', css)):
         return fail("Simple-mode model actions must align to the right of their status text")
+    remove_action = 'el("button", { class: "btn danger pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove AI files")'
+    if page.count(remove_action) != 2 or '.btn.danger {' not in css:
+        return fail("Remove AI files must use the danger style in Simple and Advanced modes")
     if ".innerHTML = d.source" in page or "innerHTML: d.source" in page or "innerHTML" in highlighter:
         return fail("processor source highlighting uses unsafe HTML insertion")
     for required in ("pythonHighlightTokens", "renderPythonHighlight", "createTextNode", "textContent"):
