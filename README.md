@@ -61,6 +61,8 @@ When setup finishes, choose **Got it. Show me around** for an optional guided tu
 
 If setup stops early, use **Retry setup**. Workbench only retries the parts that are not ready.
 
+For help with the page you are on, click **?** at the far right of the app's top bar. The explanation opens inside Workbench. Close it with **Close**, **Escape**, or a click outside the window; your settings stay as you left them.
+
 ## Make your first PDF
 
 1. Open **Fetch card art**.

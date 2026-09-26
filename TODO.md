@@ -63,6 +63,7 @@
 - [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
+- [x] Add plain-English help for every current page, opened with a ? button at the far right of the app's top bar. Keep help inside the app and match the controls available in Simple and Advanced modes.
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.
 - [x] Detect the options supported by each connected SCM Python script, disable unavailable workflows and form controls with an explanation, and reject stale unsupported settings before launch.
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.

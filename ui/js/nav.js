@@ -3,12 +3,19 @@
 
 import { toggleConsole, refreshJobs } from "./console.js";import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
+  if (page !== S.page) $(".page-help-dialog")?.close();
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
     preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", postprocess: "Image post-processing", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
+  const help = $("#btn-page-help");
+  if (help) {
+    help.disabled = false;
+    help.title = `Help: ${$("#topbar-title").textContent}`;
+    help.setAttribute("aria-label", `Help for ${$("#topbar-title").textContent}`);
+  }
   // The welcome card asks for the app chrome to stand back so the screen it
   // belongs to is the whole view. This runs on every navigation and before the
   // page renders, so leaving that screen restores the top bar without the page
@@ -126,6 +133,19 @@ export function bindNav() {
   });
   $$(".mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
   $("#btn-console").onclick = toggleConsole;
+  $("#btn-page-help").onclick = async event => {
+    const button = event.currentTarget;
+    const page = S.page;
+    button.disabled = true;
+    try {
+      const { showPageHelp } = await import("./page-help.js");
+      if (button.isConnected && S.page === page) showPageHelp(page, button);
+    } catch {
+      toast("err", "Could not open page help. Please try again.");
+    } finally {
+      button.disabled = false;
+    }
+  };
   $$("#theme-switch .ts-btn").forEach(b => b.onclick = () => setTheme(b.dataset.theme));
 }
 

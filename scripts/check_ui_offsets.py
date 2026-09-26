@@ -25,6 +25,7 @@ def main() -> int:
     if not PAGE.is_file():
         return fail("offset page is missing")
     page = PAGE.read_text(encoding="utf-8")
+    manifest = (ROOT / "scm_workbench" / "server.py").read_text(encoding="utf-8")
     forms = (UI / "forms.js").read_text(encoding="utf-8")
     nav = (UI / "nav.js").read_text(encoding="utf-8")
     index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
@@ -52,6 +53,12 @@ def main() -> int:
             return fail(f"offset page is missing {marker}")
     if 'kind === "calibration" || kind === "dxf_batch"' in forms:
         return fail("calibration still uses the fixed-delay inventory refresh")
+    for key, label in (("x_offset", "Back X (1/300 in, right +)"),
+                       ("y_offset", "Back Y (1/300 in, up +)")):
+        if page.count(f'"{label}"') != 2 or f'_opt("{key}", "{label}"' not in manifest:
+            return fail(f"{key} must identify back-page direction and 1/300-inch units everywhere")
+    if 'X (px, right +)' in page or 'Y (px, up +)' in page or 'offset (px,' in manifest:
+        return fail("offset labels still incorrectly claim to use pixels")
     for marker in (
         'import { go, uiMode } from "../nav.js";',
         'if (uiMode() !== "simple") wrap.append(formCard("offset_pdf"',
