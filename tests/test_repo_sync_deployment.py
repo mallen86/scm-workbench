@@ -220,6 +220,81 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("apply", [row["stage"] for row in progress])
         self.assert_no_transaction_artifacts()
 
+    def test_diff_update_preserves_locally_deleted_unchanged_tracked_file(self):
+        self.init_repo({"README.md": b"old", "game/front/README.md": b"placeholder"})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game/front/README.md").unlink()
+        before = self.metadata_bytes()
+        target = self.target(SHA2)
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "new.txt", "status": "added", "previous": None}]}
+
+        def fetch(_key, _sha, path, dest, log=print):
+            self.assertEqual(path, "new.txt")
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        with patch.object(repo_sync, "resolve_target", return_value=target), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            result = repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((repo / "new.txt").read_bytes(), b"new")
+        self.assertFalse((repo / "game/front/README.md").exists())
+        self.assertNotIn("game/front/README.md", repo_sync.load_manifest("scm")["files"])
+        self.assertEqual(repo_sync.load_manifest("scm")["sha"], SHA2)
+        self.assertTrue(repo_sync.verify_deployed("scm"))
+        self.assertNotEqual(self.metadata_bytes(), before)
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_update_restores_missing_file_if_upstream_changed_it(self):
+        self.init_repo({"README.md": b"old", "game/front/README.md": b"placeholder"})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game/front/README.md").unlink()
+        target = self.target(SHA2)
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "game/front/README.md", "status": "modified", "previous": None}]}
+
+        def fetch(_key, _sha, path, dest, log=print):
+            repo_sync._secure_write_bytes(dest, b"upstream changed")
+            return len(b"upstream changed")
+
+        with patch.object(repo_sync, "resolve_target", return_value=target), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual((repo / "game/front/README.md").read_bytes(), b"upstream changed")
+        self.assertEqual(repo_sync.load_manifest("scm")["files"]["game/front/README.md"],
+                         digest(b"upstream changed"))
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_update_rejects_file_lost_only_in_candidate(self):
+        self.init_repo({"README.md": b"old"})
+        repo = repo_sync.repo_dir("scm")
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "new.txt", "status": "added", "previous": None}]}
+        real_apply = repo_sync.apply_changes
+
+        def lose_file(*args, **kwargs):
+            result = real_apply(*args, **kwargs)
+            (kwargs["repo_root"] / "README.md").unlink()
+            return result
+
+        def fetch(_key, _sha, path, dest, log=print):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch), \
+                patch.object(repo_sync, "apply_changes", side_effect=lose_file), \
+                self.assertRaisesRegex(repo_sync.RepoError, "candidate is missing a manifest file"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual(self.tree_bytes(repo), before_tree)
+        self.assertEqual(self.metadata_bytes(), before_meta)
+        self.assert_no_transaction_artifacts()
+
     def test_full_update_keeps_authorized_and_untracked_files(self):
         old = {"tracked.txt": b"old", "data/README.md": b"placeholder"}
         self.init_repo(old)

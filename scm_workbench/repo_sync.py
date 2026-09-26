@@ -3291,7 +3291,20 @@ def _cmd_update_locked(key, force_full=False, log=print):
     if not deployed:
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
     repo = safe_destination(repo_dir(key))
-    _validate_tree(repo)
+    live_files = {os.path.normcase(rel) for rel in _validate_tree(repo)}
+    # A user may delete a tracked file without changing the stored pristine
+    # manifest. Diff updates only visit paths changed upstream, so an unchanged
+    # missing file would otherwise survive in the candidate manifest and make
+    # the entire update fail at the final presence check. Remember only actual
+    # local absences; a file lost while building the candidate must still fail.
+    missing_before = set()
+    if man is not None:
+        for rel in man["files"]:
+            if os.path.normcase(rel) not in live_files:
+                # A directory in a manifest file slot is not a local deletion.
+                if safe_path(repo, rel).exists():
+                    raise RepoError("tracked local file is not a regular file")
+                missing_before.add(rel)
     old_paper_sizes = _configured_paper_sizes(repo) if key == "scm" else None
     target = resolve_target(key, source)
     if deployed["sha"] == target["sha"]:
@@ -3362,6 +3375,10 @@ def _cmd_update_locked(key, force_full=False, log=print):
                 tx["candidate"], old_paper_sizes,
                 _configured_paper_sizes(tx["candidate"]), result["manifest"]["files"], log)
         _validate_tree(tx["candidate"])
+        for rel in missing_before:
+            if rel in result["manifest"]["files"] and not safe_path(tx["candidate"], rel).exists():
+                result["manifest"]["files"].pop(rel)
+                log(f"[update {key}] kept your deletion of {_brief(rel)}")
         result["manifest"] = _with_local_edits(tx["candidate"], result["manifest"])
         _validate_final_manifest(tx["candidate"], result["manifest"])
         new_state = _new_state_for_update(st, key, source, target, started, result)

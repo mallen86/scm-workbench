@@ -1,4 +1,5 @@
 # Bugs
+- [x] Let Windows managed-repository diff updates preserve locally deleted tracked files without rejecting the candidate manifest, while still rejecting files lost during staging.
 - [x] Force UTF-8 mode for isolated Windows image processors so accented card filenames do not stall job progress.
 - [x] Preserve Unicode whitespace and repeated spaces in image post-processing progress filenames so Windows jobs advance past those images.
 - [x] Preserve approved postprocessor source and dependency-lock bytes on Windows instead of invalidating their revision digests through newline translation.
