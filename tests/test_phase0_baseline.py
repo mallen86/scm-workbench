@@ -614,6 +614,21 @@ class HttpContractTests(unittest.TestCase):
                 with mock.patch.object(repo_sync, "repo_dir", return_value=root):
                     self.assertIn("do not save through a link", server._managed_output_error(
                         root, "game/output/linked/deck.pdf", "game/output", "Output PDF"))
+                # A canonical root need not share the caller's path spelling
+                # (e.g. /var versus /private/var on macOS). Still reject links
+                # below that root when reached through an alias parent.
+                alias = self.fixture.data / "managed-root-alias"
+                try:
+                    alias.symlink_to(root, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    pass
+                else:
+                    try:
+                        with mock.patch.object(repo_sync, "repo_dir", return_value=alias):
+                            self.assertIn("do not save through a link", server._managed_output_error(
+                                alias, "game/output/linked/deck.pdf", "game/output", "Output PDF"))
+                    finally:
+                        alias.unlink()
             finally:
                 link.unlink()
 

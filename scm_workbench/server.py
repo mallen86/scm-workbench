@@ -5125,14 +5125,20 @@ def _managed_output_error(cwd: Path, raw: str, allowed_dir: str, label: str) -> 
             if not managed.is_dir():
                 continue
             root = managed.resolve(strict=False)
-            # Links inside a managed tree are unsafe even when they point at
-            # an allowed folder: the updater rejects links in its checkout.
-            if root == lexical or root in lexical.parents:
-                component = root
-                for part in lexical.relative_to(root).parts:
+            # Find the earliest path spelling that resolves to the managed
+            # root. macOS /var -> /private/var and Windows 8.3 names can make
+            # the lexical spelling differ from root without being an unsafe
+            # link *inside* the checkout. Walk only components after that
+            # root, rejecting any symlink/junction there before publication.
+            for prefix in reversed((lexical, *lexical.parents)):
+                if prefix.resolve(strict=False) != root:
+                    continue
+                component = prefix
+                for part in lexical.relative_to(prefix).parts:
                     component /= part
                     if component.is_symlink() or (hasattr(component, "is_junction") and component.is_junction()):
                         return f"{label}: do not save through a link inside a managed repo."
+                break
             if target == root or root in target.parents:
                 if key == "extras":
                     return f"{label}: choose a folder outside the managed scm-extras repo."
