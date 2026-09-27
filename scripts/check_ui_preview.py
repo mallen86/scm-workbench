@@ -206,6 +206,27 @@ if (forms.directorySelectionValue({}, "/picked/fronts") !== "/picked/fronts" ||
     forms.directorySelectionValue({ browse_filename: "game.pdf" }, "C:\\picked\\output\\") !== "C:\\picked\\output\\game.pdf") {
   fail("directory selections were not converted to form path values");
 }
+const outputOption = { managed_output_dir: "game/output" };
+const managedInfo = { repos: [
+  { key: "scm", mode: "managed", path: "/work/repos/scm" },
+  { key: "extras", mode: "managed", path: "/work/repos/extras" },
+], server: { is_windows: false } };
+if (forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/other", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/extras/game/output", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output/../front", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output/decks", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/scm-elsewhere", managedInfo) ||
+    !forms.managedOutputFolderAllowed({}, "/work/repos/scm/other", managedInfo)) {
+  fail("managed output picker did not keep non-default repo folders out");
+}
+const windowsManaged = { repos: [{ key: "scm", mode: "managed", path: "C:\\Work\\repos\\scm" }], server: { is_windows: true } };
+if (forms.managedOutputFolderAllowed(outputOption, "c:\\work\\repos\\scm\\GAME\\front", windowsManaged) ||
+    !forms.managedOutputFolderAllowed(outputOption, "C:\\WORK\\repos\\scm\\game\\output", windowsManaged) ||
+    !forms.managedOutputFolderAllowed(outputOption, "C:\\work\\repos\\scm-other", windowsManaged)) {
+  fail("Windows managed output picker path checks did not match canonical folder boundaries");
+}
 
 // Saved Create PDF preferences replace hard-coded manifest defaults for a
 // fresh form. A later save updates an untouched field but preserves a field

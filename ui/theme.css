@@ -1863,6 +1863,8 @@ body.setup-welcome #btn-console { display: none; }
    notice needs the error colour and its own action row. */
 .rp-fail .rp-label { color: var(--err); }
 .rp-fail .rp-meta { color: var(--muted); }
+.rp-fail-detail summary { cursor: pointer; margin-top: 4px; }
+.rp-fail-detail div { margin-top: 4px; overflow-wrap: anywhere; }
 .rp-actions { margin-top: 7px; display: flex; gap: 6px; align-items: center; }
 .rp-actions .btn.ghost { padding-left: 8px; padding-right: 8px; }
 /* A notice whose heading carries its close control on the right. */

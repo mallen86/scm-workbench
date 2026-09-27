@@ -310,7 +310,13 @@ export function renderOption(o, args, kind) {
               browse.disabled = true;
               try {
                 const selected = await pickDirectory();
-                if (selected !== null) setValue(directorySelectionValue(o, selected));
+                if (selected !== null) {
+                  if (managedOutputFolderAllowed(o, selected, S.info)) {
+                    setValue(directorySelectionValue(o, selected));
+                  } else {
+                    toast("err", `Inside a managed SCM repo, choose ${o.managed_output_dir}/ or a folder outside the managed repo.`);
+                  }
+                }
               } catch (error) {
                 toast("err", error?.message || "Could not open the folder picker");
               } finally {
@@ -504,6 +510,32 @@ export function renderOption(o, args, kind) {
 
 export function strVal(v) { return v === null || v === undefined ? "" : String(v); }
 
+
+export function managedOutputFolderAllowed(option, directory, info) {
+  const allowed = strVal(option?.managed_output_dir);
+  if (!allowed) return true;
+  const windows = !!info?.server?.is_windows;
+  const normalize = value => {
+    const parts = [];
+    for (const part of strVal(value).replace(/\\/g, "/").split("/")) {
+      if (part === "..") parts.pop();
+      else if (part && part !== ".") parts.push(windows ? part.toLowerCase() : part);
+    }
+    return parts.join("/");
+  };
+  const selected = normalize(directory);
+  // The picker returns an absolute directory. This is immediate feedback, not
+  // an authorization check: the command builder validates typed paths, links,
+  // traversal and every native/browser job start on the backend.
+  for (const row of info?.repos || []) {
+    if (row.mode !== "managed" || !row.path) continue;
+    const root = normalize(row.path);
+    if (selected !== root && !selected.startsWith(`${root}/`)) continue;
+    const target = `${root}/${allowed}`;
+    if (row.key !== "scm" || (selected !== target && !selected.startsWith(`${target}/`))) return false;
+  }
+  return true;
+}
 
 export function directorySelectionValue(option, directory) {
   const selected = strVal(directory);

@@ -550,6 +550,78 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(options["output_path"]["width"], "half")
         self.assertEqual(options["output_path"]["browse_filename"], "game.pdf")
 
+    def test_managed_repo_output_paths_are_validated_by_preview_and_run(self):
+        create = server.get_manifest()["create_pdf"]
+        option = next(o for group in create["groups"] for o in group["options"]
+                      if o["key"] == "output_path")
+        self.assertEqual(option["managed_output_dir"], "game/output")
+        root = self.fixture.scm
+        cases = [
+            ("game/output/game.pdf", True),
+            (str(root / "game/output/nested/game.pdf"), True),
+            (str(self.fixture.outside / "deck.pdf"), True),
+            ("../outside/deck.pdf", True),
+            ("custom/deck.pdf", False),
+            ("game/front/deck.pdf", False),
+            ("game/output/../front/deck.pdf", False),
+            (str(root / "custom/deck.pdf"), False),
+        ]
+        managed_extras = self.fixture.data / "repos/scm-extras"
+        managed_extras.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: managed_extras.rmdir())
+        with mock.patch.object(repo_sync, "repo_dir", side_effect=lambda key: root if key == "scm" else managed_extras):
+            for path, valid in cases:
+                with self.subTest(path=path):
+                    preview = server.build_preview("create_pdf", {"output_path": path})
+                    self.assertEqual(not preview["errors"], valid, preview["errors"])
+                    if not valid:
+                        self.assertIn("game/output/", " ".join(preview["errors"]))
+                        job, errors = server.start_job("create_pdf", {"output_path": path})
+                        self.assertIsNone(job)
+                        self.assertIn("game/output/", " ".join(errors))
+            extras_output = server.build_preview("create_pdf", {
+                "output_path": str(managed_extras / "output/deck.pdf")})
+            self.assertIn("outside the managed scm-extras repo", " ".join(extras_output["errors"]))
+            offset = server.build_preview("offset_pdf", {
+                "pdf_path": "game/output/game.pdf", "output_pdf_path": "game/front/offset.pdf", "x_offset": 1,
+            })
+            self.assertIn("game/output/", " ".join(offset["errors"]))
+            _argv, _cwd, _env, _title, _warnings, auto_errors = server.build_command(
+                "offset_pdf", {"pdf_path": "game/front/deck.pdf", "x_offset": 1},
+                server.load_settings(), server.get_info_cached(), write_deck=False)
+            self.assertIn("game/output/", " ".join(auto_errors))
+            self.assertFalse(server.build_preview("offset_pdf", {
+                "pdf_path": "game/output/game.pdf", "x_offset": 1,
+            })["errors"])
+            dxf_args = {"card_mode": "named", "card_size": "standard",
+                        "paper_mode": "named", "paper_size": "letter", "save": False}
+            self.assertFalse(server.build_preview("dxf_single", dxf_args)["errors"])
+            self.assertIn("cutting_templates/dxf/", " ".join(server.build_preview(
+                "dxf_single", {**dxf_args, "output_path": "game/front/template.dxf"})["errors"]))
+            self.assertFalse(server.build_preview("dxf_single", {
+                **dxf_args, "output_path": str(self.fixture.outside / "template.dxf")})["errors"])
+
+        # A symlink inside the managed output directory cannot redirect the
+        # run to another repo folder or outside it. It would poison updates.
+        link = root / "game/output/linked"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(self.fixture.outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pass  # Windows without Developer Mode cannot create this fixture.
+        else:
+            try:
+                with mock.patch.object(repo_sync, "repo_dir", return_value=root):
+                    self.assertIn("do not save through a link", server._managed_output_error(
+                        root, "game/output/linked/deck.pdf", "game/output", "Output PDF"))
+            finally:
+                link.unlink()
+
+        # A configured source checkout is not a managed copy; existing custom
+        # output locations in that checkout keep working.
+        with mock.patch.object(repo_sync, "repo_dir", return_value=self.fixture.data / "repos/missing"):
+            self.assertFalse(server.build_preview("create_pdf", {"output_path": "custom/deck.pdf"})["errors"])
+
     def test_skip_indexes_are_a_plain_comma_separated_input(self):
         create = server.get_manifest()["create_pdf"]
         options = {option["key"]: option for group in create["groups"] for option in group["options"]}

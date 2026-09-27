@@ -65,7 +65,8 @@ def process_image(image_path, context):
                 "    assert context['role'] == 'back'\n"
                 "    assert context['relative_path'] == 'game/back/card.png'\n"
             )
-            source = root / "run/processor.py"; source.write_text(source_text, encoding="utf-8")
+            source = root / "run/processor.py"; source.write_bytes(source_text.encode("utf-8"))
+            self.assertEqual(source.read_bytes(), source_text.encode("utf-8"))
             manifest = root / "run/manifest.json"
             payload = {"source_path": str(source), "run_root": str(root / "run"),
                        "entries": runner_entries(entries), "revision": revision_digest(source_text, []),

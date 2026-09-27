@@ -493,6 +493,75 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(state["extras"]["marker"], "concurrent")
         self.assert_no_transaction_artifacts()
 
+    def test_windows_rename_retries_temporary_sharing_errors_without_fallback(self):
+        parent = self.data / "rename-parent"
+        parent.mkdir(parents=True)
+        blocked = repo_sync._WindowsRenameBlocked(32)
+        with patch.object(repo_sync, "_windows_rename_sibling",
+                          side_effect=[blocked, blocked, None]) as rename, \
+                patch.object(repo_sync.time, "sleep") as sleep, \
+                patch.object(repo_sync.os, "name", "nt"):
+            repo_sync._secure_rename_sibling(parent, "source", "destination")
+        self.assertEqual(rename.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.15, 0.3])
+
+        with patch.object(repo_sync, "_windows_rename_sibling",
+                          side_effect=repo_sync._WindowsRenameBlocked(5)) as rename, \
+                patch.object(repo_sync.time, "sleep") as sleep, \
+                patch.object(repo_sync.os, "name", "nt"), \
+                self.assertRaisesRegex(repo_sync.RepoError, "Close File Explorer windows"):
+            repo_sync._secure_rename_sibling(parent, "source", "destination")
+        self.assertEqual(rename.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.15, 0.3, 0.6])
+
+    @unittest.skipUnless(os.name == "nt", "real Windows directory handle")
+    def test_windows_explorer_style_folder_lock_preserves_live_repo_and_can_retry(self):
+        from ctypes import wintypes
+        import ctypes
+
+        self.init_repo({"README.md": b"old", "game/front/card.txt": b"card"})
+        repo = repo_sync.repo_dir("scm")
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                          wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                          wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        # Explorer can hold a folder inside the checkout without DELETE sharing.
+        handle = kernel32.CreateFileW(str(repo / "game/front"), 0x80000000, 1 | 2,
+                                      None, 3, 0x02000000, None)
+        value = handle.value if hasattr(handle, "value") else handle
+        self.assertNotIn(value, (None, ctypes.c_void_p(-1).value))
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "README.md", "status": "modified", "previous": None}]}
+
+        def fetch(_key, _sha, _path, dest, log=print):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        try:
+            with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                    patch.object(repo_sync, "compare", return_value=comparison), \
+                    patch.object(repo_sync, "download_to", side_effect=fetch), \
+                    patch.object(repo_sync.time, "sleep"), \
+                    self.assertRaisesRegex(repo_sync.RepoError, "Close File Explorer windows"):
+                repo_sync.cmd_update("scm", log=lambda *_: None)
+            self.assertEqual(self.tree_bytes(repo), before_tree)
+            self.assertEqual(self.metadata_bytes(), before_meta)
+            self.assert_no_transaction_artifacts()
+        finally:
+            kernel32.CloseHandle(handle)
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            result = repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((repo / "README.md").read_bytes(), b"new")
+        self.assert_no_transaction_artifacts()
+
     def test_f016_windows_rename_uses_handle_safe_seam(self):
         parent = self.data / "rename-parent"
         parent.mkdir(parents=True)
@@ -776,6 +845,88 @@ class DeploymentTests(unittest.TestCase):
         # still upstream content.
         self.assertFalse(repo_sync._is_user_data_rel("game/frontline/x.png"))
         self.assertFalse(repo_sync._is_user_data_rel("database/x.png"))
+
+    def test_tree_size_error_reports_only_unrecorded_files_and_cumulative_folders(self):
+        tree = Path(self.temp.name) / "oversized"
+        (tree / "extra" / "pdfs").mkdir(parents=True)
+        (tree / "game" / "output").mkdir(parents=True)
+        (tree / "test" / "expected_pdfs").mkdir(parents=True)
+        (tree / "test" / "expected_pdfs" / "page1.png").write_bytes(b"u" * 8)
+        (tree / "extra" / "pdfs" / "deck1.pdf").write_bytes(b"1" * 12)
+        (tree / "extra" / "pdfs" / "deck2.pdf").write_bytes(b"2" * 11)
+        (tree / "game" / "output" / "safe.pdf").write_bytes(b"3" * 100)
+        recorded = {"test/expected_pdfs/page1.png"}
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync._validate_tree(tree, expected_paths=recorded)
+        message = str(caught.exception)
+        self.assertIn("31 bytes outside user-data folders (limit 30 bytes)", message)
+        self.assertIn("Unrecorded files account for 23 bytes", message)
+        self.assertIn("recorded files account for 8 bytes", message)
+        self.assertIn("Unexpected folders: extra/pdfs/ (23 bytes)", message)
+        self.assertIn("extra/pdfs/deck1.pdf (12 bytes)", message)
+        self.assertIn("extra/pdfs/deck2.pdf (11 bytes)", message)
+        self.assertNotIn("test/expected_pdfs/", message)
+        self.assertNotIn("page1.png", message)
+        self.assertNotIn("safe.pdf", message)
+        self.assertLess(len(message), 1200)
+
+        for index in range(5):
+            folder = tree / f"custom{index}"
+            folder.mkdir()
+            (folder / "extra.pdf").write_bytes(bytes([index]) * 10)
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync._validate_tree(tree, expected_paths=recorded)
+        message = str(caught.exception)
+        self.assertIn("81 bytes outside user-data folders", message)
+        self.assertIn("other folders (", message)
+        self.assertIn("other files (", message)
+        self.assertNotIn("test/expected_pdfs/", message)
+        self.assertNotIn("safe.pdf", message)
+        self.assertLess(len(message), 1300)
+
+        # A downloaded archive has no deployed baseline. Never call upstream
+        # fixtures "unexpected" just because this walk has no manifest yet.
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync._validate_tree(tree)
+        self.assertIn("No source baseline is available", str(caught.exception))
+        self.assertNotIn("page1.png", str(caught.exception))
+        self.assertNotIn("deck1.pdf", str(caught.exception))
+
+        known_tree = Path(self.temp.name) / "recorded-only"
+        known_tree.mkdir()
+        (known_tree / "known.bin").write_bytes(b"k" * 8)
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 7), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync._validate_tree(known_tree, expected_paths={"known.bin"})
+        self.assertIn("No unexpected files were found", str(caught.exception))
+        self.assertNotIn("known.bin", str(caught.exception))
+        (known_tree / "extra.bin").write_bytes(b"e")
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 7), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync._validate_tree(known_tree, expected_paths={"known.bin"})
+        self.assertIn("extra.bin", str(caught.exception))
+        self.assertNotIn("known.bin", str(caught.exception))
+        self.assertIn("Recorded files alone exceed the limit", str(caught.exception))
+
+    def test_oversized_update_names_only_files_absent_from_the_deployed_manifest(self):
+        self.init_repo({"README.md": b"readme", "test/expected_pdfs/page1.png": b"p" * 15})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game").mkdir(exist_ok=True)
+        (repo / "game/extra.pdf").write_bytes(b"e" * 21)
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30), \
+                patch.object(repo_sync, "resolve_target", side_effect=AssertionError("no network before preflight")), \
+                self.assertRaises(repo_sync.RepoError) as caught:
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        message = str(caught.exception)
+        self.assertIn("game/extra.pdf", message)
+        self.assertNotIn("test/expected_pdfs/", message)
+        self.assertEqual(self.tree_bytes(repo), before_tree)
+        self.assertEqual(self.metadata_bytes(), before_meta)
+        self.assert_no_transaction_artifacts()
 
     def test_upstream_and_user_caps_are_each_still_enforced(self):
         """Exempting user data from the upstream cap must not remove bounds."""

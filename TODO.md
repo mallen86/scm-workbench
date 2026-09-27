@@ -1,4 +1,8 @@
 # Bugs
+- [x] List only unrecorded, non-user files/folders in oversized managed-repository update errors without hiding their recorded upstream contribution or weakening the 1 GiB limit.
+- [x] Write the back-only processor test source as exact UTF-8 bytes so Windows newline translation cannot invalidate its approved revision.
+- [x] Reject app-generated PDF and DXF output paths outside their designated folders within a managed SCM checkout while permitting external output locations; identify cumulative oversized non-user folders and files in repo-update failures.
+- [x] Explain Windows managed-repository rename failures caused by open Explorer folders and retry transient locks without weakening atomic deployment.
 - [x] Let Windows managed-repository diff updates preserve locally deleted tracked files without rejecting the candidate manifest, while still rejecting files lost during staging.
 - [x] Force UTF-8 mode for isolated Windows image processors so accented card filenames do not stall job progress.
 - [x] Preserve Unicode whitespace and repeated spaces in image post-processing progress filenames so Windows jobs advance past those images.

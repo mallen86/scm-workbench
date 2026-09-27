@@ -184,10 +184,13 @@ async function loadFailureDetail(job) {
   try {
     const result = await jobs.log(job.id, { maxLines: 200 });
     const lines = (result?.lines || []).map(line => String(line).trim()).filter(Boolean);
-    const picked = [...lines].reverse().find(line => /^!\s+/.test(line)) ||
-                   [...lines].reverse().find(line => /^error/i.test(line)) ||
+    const picked = [...lines].reverse().find(line => /^error/i.test(line)) ||
+                   [...lines].reverse().find(line => /^!\s+/.test(line)) ||
                    [...lines].reverse().find(line => !/^\$\s/.test(line));
-    if (picked) detail = picked.replace(/^!\s+/, "").slice(0, 180);
+    if (picked) {
+      const text = picked.replace(/^!\s+/, "");
+      detail = text.slice(0, /^error: managed repository tree is too large/.test(text) ? 1400 : 180);
+    }
   } catch { /* the notice still names the repo without the reason */ }
   _failureDetail.set(job.id, detail);
   return detail;
@@ -239,7 +242,13 @@ function renderRepoFailures(container, failures) {
       container.append(row);
       loadFailureDetail(failure.job).then(detail => {
         if (!row.isConnected) return;
-        row.children[1].textContent = detail;
+        const message = row.children[1];
+        message.textContent = detail.slice(0, 180);
+        if (detail.length > 180) {
+          message.append(el("details", { class: "rp-fail-detail" },
+            el("summary", {}, "Show unexpected files and folders"),
+            el("div", {}, detail)));
+        }
       });
     }
   }

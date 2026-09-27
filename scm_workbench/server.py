@@ -1146,7 +1146,8 @@ def build_manifest(info: dict) -> dict:
                          help="Folder containing cards with different front and back art."),
                     _opt("output_path", "Output PDF", "path", default="game/output/game.pdf", width="half",
                          browse_directory=True, browse_filename="game.pdf",
-                         requires_flags=["--output_path"]),
+                         managed_output_dir="game/output", requires_flags=["--output_path"],
+                         help="Inside a managed SCM repo, save PDFs under game/output/. Other locations outside the managed repo are allowed."),
                     _opt("output_images", "Output images instead of a PDF", "toggle", default=False, width="third",
                          requires_flags=["--output_images"]),
                     _opt("only_fronts", "Front pages only", "toggle", default=False, width="third", simple=True,
@@ -1263,7 +1264,7 @@ def build_manifest(info: dict) -> dict:
                                + [["game/output/game.pdf", "game/output/game.pdf (default)"]],
                          default="game/output/game.pdf", width="half", requires_flags=["--pdf_path"]),
                     _opt("output_pdf_path", "Output PDF (blank = auto)", "path", width="half",
-                         requires_flags=["--output_pdf_path"], help="Defaults to <input>_offset.pdf beside the input file."),
+                         requires_flags=["--output_pdf_path"], help="Defaults to <input>_offset.pdf beside the input file. Inside a managed SCM repo, save under game/output/; outside the managed repos, choose any location."),
                 ],
             },
             {
@@ -5106,6 +5107,44 @@ def _bottom_left_skip_index(info: dict, paper: Any, card: Any, borderless: bool)
     return (rows - 1) * columns
 
 
+def _managed_output_error(cwd: Path, raw: str, allowed_dir: str, label: str) -> Optional[str]:
+    """Keep app-generated outputs out of non-user slots in the managed SCM tree.
+
+    A configured external SCM checkout is not the managed copy. Resolve both
+    roots and the output (including nonexistent leaves) so relative traversal,
+    absolute paths and symlinked parents cannot sidestep this validation.
+    """
+    try:
+        output = Path(raw)
+        if not output.is_absolute():
+            output = cwd / output
+        lexical = Path(os.path.abspath(output))
+        target = output.resolve(strict=False)
+        for key in ("scm", "extras"):
+            managed = repo_sync.repo_dir(key)
+            if not managed.is_dir():
+                continue
+            root = managed.resolve(strict=False)
+            # Links inside a managed tree are unsafe even when they point at
+            # an allowed folder: the updater rejects links in its checkout.
+            if root == lexical or root in lexical.parents:
+                component = root
+                for part in lexical.relative_to(root).parts:
+                    component /= part
+                    if component.is_symlink() or (hasattr(component, "is_junction") and component.is_junction()):
+                        return f"{label}: do not save through a link inside a managed repo."
+            if target == root or root in target.parents:
+                if key == "extras":
+                    return f"{label}: choose a folder outside the managed scm-extras repo."
+                allowed = (root / allowed_dir).resolve(strict=False)
+                if allowed not in target.parents:
+                    return (f"{label}: inside the managed SCM repo, save under {allowed_dir}/ "
+                            "or choose a folder outside the managed repo.")
+    except (OSError, RuntimeError, ValueError):
+        return f"{label}: could not validate the output location."
+    return None
+
+
 def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck: bool = True) -> Tuple[list, Optional[Path], dict, str, list, list]:
     """Assemble (argv, cwd, env, title, warnings, errors) for a job kind.
 
@@ -5205,7 +5244,11 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                     f"Card back folder “{back_dir}” contains {len(back_images)} recognized images. "
                     "Keep one recognized image in that folder or remove the extras before creating the PDF.")
         emit("double_sided_dir", "--double_sided_dir_path", default="game/double_sided")
-        argv += ["--output_path", str(a.get("output_path") or "game/output/game.pdf")]
+        output_path = str(a.get("output_path") or "game/output/game.pdf")
+        output_error = _managed_output_error(cwd, output_path, "game/output", "Output PDF")
+        if output_error:
+            errors.append(output_error)
+        argv += ["--output_path", output_path]
         if a.get("output_images"): argv += ["--output_images"]
         card = str(a.get("card_size") or d.get("card_size") or "standard")
         paper = str(a.get("paper_size") or d.get("paper_size") or "letter")
@@ -5309,6 +5352,13 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         a = args
         src = a.get("pdf_path") or "game/output/game.pdf"
         argv += ["offset_pdf.py", "--pdf_path", str(src)]
+        output_path = str(a.get("output_pdf_path") or "")
+        if not output_path:
+            source = Path(str(src))
+            output_path = str(source.with_name(source.stem + "_offset.pdf"))
+        output_error = _managed_output_error(cwd, output_path, "game/output", "Output PDF")
+        if output_error:
+            errors.append(output_error)
         if a.get("output_pdf_path"):
             argv += ["--output_pdf_path", str(a["output_pdf_path"])]
         gave_any = False
@@ -5385,6 +5435,10 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
         # A second template for the same size takes the next version rather than
         # replacing the first one.
         out = _dxf_output_without_overwriting(cwd, str(out))
+        template_dir = "cutting_templates/borderless/dxf" if variant == "borderless" else "cutting_templates/dxf"
+        output_error = _managed_output_error(cwd, str(out), template_dir, "Output DXF")
+        if output_error:
+            errors.append(output_error)
         argv += [str(out)]
         if a.get("save"):
             argv += ["--save"]

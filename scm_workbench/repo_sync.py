@@ -39,6 +39,7 @@ import contextlib
 import copy
 import errno
 import hashlib
+import heapq
 import json
 import os
 import re
@@ -107,6 +108,14 @@ REPOS = {
 
 class RepoError(Exception):
     pass
+
+
+class _WindowsRenameBlocked(RepoError):
+    """A Windows sharing/permission error while moving a verified directory."""
+
+    def __init__(self, error):
+        self.error = error
+        super().__init__(f"Windows directory rename blocked (error {error})")
 
 
 def _text(value, label, limit=256, allow_empty=False):
@@ -1764,8 +1773,13 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
     _fsync_tree_dirs(dest)
 
 
-def _validate_tree(tree_dir: Path, require_dir=True):
-    """Walk a managed tree without following links or special files."""
+def _validate_tree(tree_dir: Path, require_dir=True, expected_paths=None):
+    """Walk a managed tree without following links or special files.
+
+    An optional validated manifest path set separates unrecorded, non-user
+    files from the full size total. Archive staging has no deployed baseline
+    and must never label its legitimate upstream files as unexpected.
+    """
     tree_dir = Path(tree_dir)
     _ensure_no_symlink_components(tree_dir)
     if not tree_dir.exists():
@@ -1775,6 +1789,14 @@ def _validate_tree(tree_dir: Path, require_dir=True):
     if tree_dir.is_symlink() or not tree_dir.is_dir():
         raise RepoError("managed repository tree is not a directory")
     files, upstream_bytes, upstream_files, user_bytes, user_files = [], 0, 0, 0, 0
+    # The upstream byte limit counts *all* non-user files. Report contributors
+    # only when a deployed manifest can distinguish unrecorded paths from the
+    # upstream snapshot; otherwise an archive's own fixtures look like user
+    # files. Continue the count-bounded walk to get a complete total.
+    expected = ({os.path.normcase(path) for path in expected_paths
+                 if not _is_user_data_rel(path)} if expected_paths is not None else None)
+    unexpected_bytes, unexpected_files = 0, 0
+    unexpected_folders, largest_unexpected = {}, []
     stack = [(tree_dir, "")]
     while stack:
         current, prefix = stack.pop()
@@ -1801,12 +1823,47 @@ def _validate_tree(tree_dir: Path, require_dir=True):
                     else:
                         upstream_bytes += info.st_size
                         upstream_files += 1
-                        if upstream_bytes > TREE_BYTES_CAP:
-                            raise RepoError("managed repository tree is too large")
                         if upstream_files > TREE_FILE_CAP:
                             raise RepoError("managed repository tree has too many files")
+                        if expected is not None and os.path.normcase(rel) not in expected:
+                            unexpected_bytes += info.st_size
+                            unexpected_files += 1
+                            parts = rel.split("/")
+                            folder = "/".join(parts[:min(2, len(parts) - 1)]) + "/" if len(parts) > 1 else "(repo root)"
+                            unexpected_folders[folder] = unexpected_folders.get(folder, 0) + info.st_size
+                            if len(largest_unexpected) < 4:
+                                heapq.heappush(largest_unexpected, (info.st_size, rel))
+                            elif (info.st_size, rel) > largest_unexpected[0]:
+                                heapq.heapreplace(largest_unexpected, (info.st_size, rel))
                 else:
                     raise RepoError("refusing a special file in repository tree")
+    if upstream_bytes > TREE_BYTES_CAP:
+        def size(n):
+            return f"{n / (1024 ** 3):.2f} GiB" if n >= 1024 ** 3 else f"{n / (1024 ** 2):.1f} MiB" if n >= 1024 ** 2 else f"{n} bytes"
+        summary = (f"managed repository tree is too large: {size(upstream_bytes)} outside user-data folders "
+                   f"(limit {size(TREE_BYTES_CAP)}).")
+        if unexpected_files:
+            folders = sorted(unexpected_folders.items(), key=lambda item: (-item[1], item[0]))[:4]
+            largest_unexpected.sort(key=lambda item: (-item[0], item[1]))
+            folder_text = ", ".join(f"{_brief(p, 72)} ({size(n)})" for p, n in folders)
+            if len(unexpected_folders) > len(folders):
+                remainder = unexpected_bytes - sum(n for _, n in folders)
+                folder_text += f", {len(unexpected_folders) - len(folders)} other folders ({size(remainder)})"
+            file_text = ", ".join(f"{_brief(p, 72)} ({size(n)})" for n, p in largest_unexpected)
+            if unexpected_files > len(largest_unexpected):
+                remainder = unexpected_bytes - sum(n for n, _ in largest_unexpected)
+                file_text += f", {unexpected_files - len(largest_unexpected)} other files ({size(remainder)})"
+            recorded_bytes = upstream_bytes - unexpected_bytes
+            advice = ("Recorded files alone exceed the limit; do not delete upstream files to make it fit."
+                      if recorded_bytes > TREE_BYTES_CAP else
+                      "Move your extra files to a recognized user-data folder or outside the managed repo.")
+            raise RepoError(
+                f"{summary} Unrecorded files account for {size(unexpected_bytes)}; "
+                f"recorded files account for {size(recorded_bytes)}. "
+                f"Unexpected folders: {folder_text}. Unexpected files: {file_text}. {advice}")
+        if expected is None:
+            raise RepoError(f"{summary} No source baseline is available here to identify unexpected files.")
+        raise RepoError(f"{summary} No unexpected files were found; recorded files alone exceed the limit.")
     return sorted(files)
 
 
@@ -1932,7 +1989,7 @@ def apply_changes(key: str, man: dict, target: dict,
         raise RepoError("conflicting update paths")
 
     repo = safe_destination(repo_root if repo_root is not None else repo_dir(key))
-    _validate_tree(repo)
+    _validate_tree(repo, expected_paths=man["files"])
     # Resolve every local path before asking for staging content.  This makes
     # malformed later entries fail before any repository mutation is possible.
     for path in apply_paths | previous_paths | delete_set:
@@ -2686,6 +2743,11 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
             return None, ctypes.get_last_error()
         return handle, 0
 
+    def blocked(error, message):
+        if error in (5, 32, 33):  # access denied, sharing/lock violation
+            raise _WindowsRenameBlocked(error)
+        raise RepoError(f"{message} (Windows error {error})")
+
     def validate(handle, expected, require_dir):
         info = _Info()
         if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -2700,20 +2762,20 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
     safe_destination(parent)
     parent_handle, error = create(parent, GENERIC_READ, SHARE_WITHOUT_DELETE)
     if parent_handle is None:
-        raise RepoError("could not open Windows rename parent")
+        blocked(error, "could not open Windows rename parent")
     source_handle = None
     try:
         validate(parent_handle, parent, True)
         source_handle, error = create(parent / src_name, GENERIC_READ | DELETE)
         if source_handle is None:
-            raise RepoError("could not open Windows rename source")
+            blocked(error, "could not open Windows rename source")
         validate(source_handle, parent / src_name, True)
         destination_handle, destination_error = create(parent / dst_name, GENERIC_READ)
         if destination_handle is not None:
             kernel32.CloseHandle(destination_handle)
             raise RepoError("deployment destination already exists")
         if destination_error not in (2, 3):
-            raise RepoError("could not verify Windows rename destination")
+            blocked(destination_error, "could not verify Windows rename destination")
         encoded = str(parent / dst_name).encode("utf-16-le")
         class _RenameHeader(ctypes.Structure):
             _fields_ = [("replace", wintypes.BOOL), ("root", HANDLE),
@@ -2727,7 +2789,7 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
         ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
         if not kernel32.SetFileInformationByHandle(source_handle, FILE_RENAME_INFO,
                                                    buffer, ctypes.sizeof(buffer)):
-            raise RepoError("Windows handle rename failed")
+            blocked(ctypes.get_last_error(), "Windows handle rename failed")
         if not kernel32.FlushFileBuffers(parent_handle):
             # FlushFileBuffers can be unsupported for some filesystem handles;
             # publication remains process-crash safe, not power-loss absolute.
@@ -2741,7 +2803,20 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
 def _secure_rename_sibling(parent: Path, src_name: str, dst_name: str):
     """Rename one generated directory beside another without path races."""
     if os.name == "nt":
-        return _windows_rename_sibling(parent, src_name, dst_name)
+        # Explorer, antivirus and image tools can briefly hold descendants
+        # without FILE_SHARE_DELETE. Recheck handles on each bounded attempt;
+        # never fall back to a path rename or publish a partial tree.
+        for delay in (0.15, 0.3, 0.6, None):
+            try:
+                return _windows_rename_sibling(parent, src_name, dst_name)
+            except _WindowsRenameBlocked as exc:
+                if delay is None:
+                    raise RepoError(
+                        f"Windows could not move the managed repository (error {exc.error}). "
+                        "Close File Explorer windows and other programs using files or folders "
+                        "inside this repository, then retry. If it persists, check folder "
+                        "permissions or antivirus exclusions.") from exc
+                time.sleep(delay)
     parent = safe_destination(Path(parent))
     if not parent.is_dir() or any(x in src_name + dst_name for x in ("/", "\\")):
         raise RepoError("invalid sibling rename")
@@ -3064,7 +3139,7 @@ def _with_local_edits(tree, man):
 def _validate_final_manifest(tree, man):
     """Validate presence while retaining pristine hashes for local edits."""
     _validate_manifest_shape(man)
-    _validate_tree(tree)
+    _validate_tree(tree, expected_paths=man["files"])
     for rel in man["files"]:
         path = safe_path(tree, rel)
         if not path.is_file() or path.is_symlink():
@@ -3213,7 +3288,7 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
     if entry.get("deployed") and not tarball and not force_redeploy:
         if old_manifest is None:
             raise RepoError("repository manifest is missing")
-        _validate_tree(repo)
+        _validate_tree(repo, expected_paths=old_manifest["files"])
         log(f"[init {key}] already deployed at {entry['deployed']['ref']} — nothing to do.")
         return {"ok": True, "noop": True}
     target = resolve_target(key, source)
@@ -3235,7 +3310,7 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
         pristine = _fingerprint_tree(key, target, tx["candidate"], progress=True)
         old_paper_sizes = None
         if repo.exists():
-            _validate_tree(repo)
+            _validate_tree(repo, expected_paths=old_manifest["files"] if old_manifest else None)
             if key == "scm":
                 old_paper_sizes = _configured_paper_sizes(repo)
             _copy_authorized_user_data(repo, tx["candidate"], log)
@@ -3291,7 +3366,8 @@ def _cmd_update_locked(key, force_full=False, log=print):
     if not deployed:
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
     repo = safe_destination(repo_dir(key))
-    live_files = {os.path.normcase(rel) for rel in _validate_tree(repo)}
+    live_files = {os.path.normcase(rel) for rel in _validate_tree(
+        repo, expected_paths=man["files"] if man else None)}
     # A user may delete a tracked file without changing the stored pristine
     # manifest. Diff updates only visit paths changed upstream, so an unchanged
     # missing file would otherwise survive in the candidate manifest and make
@@ -3374,7 +3450,7 @@ def _cmd_update_locked(key, force_full=False, log=print):
             result["deleted"] += _remove_obsolete_generated_calibrations(
                 tx["candidate"], old_paper_sizes,
                 _configured_paper_sizes(tx["candidate"]), result["manifest"]["files"], log)
-        _validate_tree(tx["candidate"])
+        _validate_tree(tx["candidate"], expected_paths=result["manifest"]["files"])
         for rel in missing_before:
             if rel in result["manifest"]["files"] and not safe_path(tx["candidate"], rel).exists():
                 result["manifest"]["files"].pop(rel)

@@ -134,6 +134,9 @@ def main() -> int:
     # prep.js, so the import has to stay dynamic) and offer a way to dismiss.
     if 'class: "rp-actions"' not in prep or '"aria-label": "Dismiss this message"' not in prep:
         return fail("the repo failure notice has no retry and dismiss actions")
+    if ('managed repository tree is too large' not in prep or
+            '"Show unexpected files and folders"' not in prep or 'el("details"' not in prep):
+        return fail("the simple-mode repo failure notice hides oversized file details")
     if "repoReady" not in (JS / "forms.js").read_text(encoding="utf-8"):
         return fail("forms.js no longer owns the repo runner the retry reuses")
     for path in sorted(JS.rglob("*.js")):
