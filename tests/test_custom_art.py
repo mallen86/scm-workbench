@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import threading
 import time
@@ -190,7 +191,6 @@ class CustomArtTests(unittest.TestCase):
         self.assertTrue((self.scm / "game" / "double_sided").is_dir())
         self.assertFalse(custom_art.open_folder("other", server, self.settings)["ok"])
 
-    @unittest.skipIf(os.name == "nt", "POSIX ctime tracks metadata changes")
     def test_metadata_only_temporary_change_keeps_valid_import_and_collision_safety(self):
         source = self.source("metadata.png")
         for destination in ("front", "double_sided"):
@@ -199,23 +199,31 @@ class CustomArtTests(unittest.TestCase):
                 folder.mkdir(parents=True)
                 (folder / "metadata.png").write_bytes(JPEG)
                 changed = []
-                real_verify = custom_art._verify_destination
-                def update_metadata(directory, dirfd, module):
-                    real_verify(directory, dirfd, module)
-                    if changed:
-                        return
-                    temporary = next(directory.glob(custom_art.PREFIX + "*"))
-                    before = temporary.stat()
-                    temporary.chmod(0o400)
-                    after = temporary.stat()
+                real_stat = custom_art._entry_stat
+                def update_metadata(directory, dirfd, entry, module):
+                    before = real_stat(directory, dirfd, entry, module)
+                    if changed or not entry.startswith(custom_art.PREFIX):
+                        return before
+                    # Inject one metadata-only observation. Immediate chmods
+                    # can share a ctime tick on Linux; waiting for the clock
+                    # would make this regression timing-dependent again.
+                    after = SimpleNamespace(**{field: getattr(before, field) for field in (
+                        "st_mode", "st_dev", "st_ino", "st_size", "st_mtime", "st_mtime_ns",
+                        "st_ctime", "st_ctime_ns")})
+                    after.st_ctime += 1
+                    after.st_ctime_ns += 1_000_000_000
                     self.assertEqual(custom_art._content_identity(before), custom_art._content_identity(after))
-                    self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                    self.assertNotEqual(custom_art._identity(before), custom_art._identity(after))
                     changed.append(True)
-                with mock.patch.object(custom_art, "_verify_destination", side_effect=update_metadata):
+                    return after
+                with mock.patch.object(custom_art, "_entry_stat", side_effect=update_metadata), \
+                        mock.patch.object(custom_art, "_verify_temporary_bytes", wraps=custom_art._verify_temporary_bytes) as verify_bytes:
                     if destination == "front":
                         result = custom_art.import_selected(destination, [source], server, self.settings)
                     else:
                         result = custom_art.import_bytes(destination, "metadata.png", io.BytesIO(PNG), len(PNG), server, self.settings)
+                self.assertEqual(changed, [True])
+                self.assertGreaterEqual(verify_bytes.call_count, 2, "verify both metadata recovery and publication")
                 self.assertEqual(result["names"], ["metadata (2).png"], result)
                 self.assertEqual(result["failed"], [])
                 self.assertEqual((folder / "metadata.png").read_bytes(), JPEG)

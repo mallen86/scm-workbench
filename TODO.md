@@ -1,4 +1,5 @@
 # Bugs
+- [x] Make temporary-image metadata regression coverage independent of filesystem timestamp resolution, without weakening byte verification.
 - [x] Replace the managed repo's local non-user 1 GiB size gate with staging-space checks and bounded, cancellable copying/verification while retaining incoming-data limits, user-data budgets, and transactional recovery.
 - [x] Avoid false Custom import failures from temporary-file metadata changes by verifying copied bytes, verify every publication against the copied-source digest, and reject content edits/replacements within the import deadline.
 - [x] Keep Custom import results concise without successful filename lists, right-align and separate the next-step buttons, and preserve spacing between image areas across responsive layouts.
