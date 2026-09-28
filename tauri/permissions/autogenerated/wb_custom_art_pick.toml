@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wb-custom-art-pick"
+description = "Enables the wb_custom_art_pick command without any pre-configured scope."
+commands.allow = ["wb_custom_art_pick"]
+
+[[permission]]
+identifier = "deny-wb-custom-art-pick"
+description = "Denies the wb_custom_art_pick command without any pre-configured scope."
+commands.deny = ["wb_custom_art_pick"]

@@ -4,9 +4,10 @@
 export const PAGE_HELP = {
   fetch: {
     title: "Fetch card art",
-    intro: "Download the card images for your deck before making a PDF.",
+    intro: "Download card images or import your own files before making a PDF.",
     sections: [
       { title: "Choose a game and decklist", text: "Choose your game, then use the decklist controls below it. You can choose a saved decklist or paste text. Some games also accept a URL. Choose the format that matches your decklist; the available choices depend on the game." },
+      { title: "Use your own images", text: "Choose Custom in All games for Front images, Double-sided images, and Card back. Drop images into a box or click it to choose files; Open folder opens that destination. Front and double-sided imports keep originals and rename collisions (up to 256 files, 32 MiB each, 512 MiB total). Card back takes exactly one image up to 32 MiB and replaces the recognized image in the shared game/back folder after confirmation; placeholders and non-image files stay. Check the import result for errors. Starting a different deck? and Clear card images remain below the boxes and do not clear the back." },
       { title: "Fetch the images", text: "Check the options, then start the fetch. Watch the progress and any warnings about missing images. If images are missing, check the warnings and your decklist. Before starting a full fetch again, use Clear card images. Fetching again does not fill only the gaps; it can duplicate images that were already fetched." },
       { title: "What comes next?", text: "Go to Create PDF when the images are ready. Image post-processing is optional: use it first if you want to enlarge the images with an upscaler." },
       { title: "Starting a different deck", text: "Fetching does not clear old images. Use Clear card images before fetching a different deck, or old cards can end up in your new PDF. This permanently deletes the front and double-sided images. Your shared card back stays." },

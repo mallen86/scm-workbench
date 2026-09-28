@@ -39,12 +39,13 @@ PRIVATE_METHODS = frozenset((
     "files.export_selected", "files.export_poll", "files.export_cancel",
     "fs.delete_images_start", "fs.delete_images_poll",
     "back_images.import_selected", "postprocessors.import_selected",
+    "custom_art.import_selected", "custom_art.import_poll",
 ))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview",
     "pdf_preview.start", "pdf_preview.poll", "pdf_preview.cancel",
     "template.resolve", "template.delete", "file.list",
-    "file.open", "file.reveal", "url.open",
+    "file.open", "file.reveal", "url.open", "custom_art.open_folder",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
@@ -192,6 +193,33 @@ def dispatch(request: dict) -> dict:
                 result = server.import_decklist(params["source_path"])
             except server.DecklistImportError as error:
                 result = {"ok": False, "errors": [error.message]}
+        elif method.startswith("custom_art."):
+            from scm_workbench import custom_art
+            if method == "custom_art.open_folder":
+                if set(params) != {"destination"} or not isinstance(params.get("destination"), str) or params["destination"] not in custom_art.DESTINATIONS:
+                    return _bad_params(request_id, "custom_art.open_folder requires exactly destination")
+                result = custom_art.open_folder(params["destination"], server)
+            elif method == "custom_art.import_selected":
+                if (set(params) != {"destination", "source_paths"} or
+                        not isinstance(params.get("destination"), str) or
+                        params["destination"] not in custom_art.DESTINATIONS or
+                        not isinstance(params.get("source_paths"), list) or
+                        not 1 <= len(params["source_paths"]) <= (1 if params.get("destination") == "back" else custom_art.MAX_FILES)):
+                    return _bad_params(request_id, "custom_art.import_selected requires destination and 1 to 256 source_paths")
+                try:
+                    for source in params["source_paths"]:
+                        custom_art.source_path(source)
+                except custom_art.ImportError as exc:
+                    return _bad_params(request_id, exc.message)
+                result = custom_art.start(params["destination"], params["source_paths"], server)
+            else:
+                if (set(params) != {"operation_id"} or not isinstance(params.get("operation_id"), str)
+                        or re.fullmatch(r"[0-9a-f]{32}", params["operation_id"]) is None):
+                    return _bad_params(request_id, "custom_art.import_poll requires a valid operation_id")
+                try:
+                    result = custom_art.poll(params["operation_id"])
+                except custom_art.ImportError as exc:
+                    return _bad_params(request_id, exc.message)
         elif method == "back_images.import_selected":
             if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
                 return _bad_params(request_id, "back_images.import_selected requires exactly source_path string")
@@ -541,6 +569,13 @@ def dispatch(request: dict) -> dict:
             return _error(request_id, "internal", "request handler failed")
         if result_size > server.POSTPROCESS_RESPONSE_MAX_BYTES:
             return _error(request_id, "result_too_large", "post-processor result exceeds 512 KiB")
+    if method.startswith("custom_art."):
+        try:
+            result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > 256 * 1024:
+            return _error(request_id, "result_too_large", "custom art result exceeds 256 KiB")
     if method == "back_images.import_selected":
         try:
             result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

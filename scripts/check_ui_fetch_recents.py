@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -101,7 +102,7 @@ console.log("ok: Fetch recents derive a bounded MRU list from canonical job hist
         return node.returncode
     print(node.stdout.strip())
     print("ok: initial all-games and used-game disclosure wiring is present")
-    return 0
+    return subprocess.run([sys.executable, str(ROOT / "scripts" / "check_ui_custom_art.py")], timeout=40).returncode
 
 
 if __name__ == "__main__":

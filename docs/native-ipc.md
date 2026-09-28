@@ -69,11 +69,11 @@ with `{}` parameters and an exact
 `{"ready":true,"process_group":true}` result; the worker emits that result
 only after POSIX process-group containment is established (Windows relies on
 the retained kill-on-close job object). It is not exposed through public
-`wb_rpc`. The exact public `wb_rpc` allowlist contains thirty-nine methods: `info`, `manifest`, `settings.get`, `settings.set`,
+`wb_rpc`. The exact public `wb_rpc` allowlist includes: `info`, `manifest`, `settings.get`, `settings.set`,
 `offset.set`, `offset.delete`, `jobs.list`, `jobs.start`, `jobs.log`,
 `jobs.kill`, `jobs.poll`, `preview`, `pdf_preview.start`, `pdf_preview.poll`,
 `pdf_preview.cancel`, `template.resolve`, `template.delete`, `file.list`,
-`file.open`, `file.reveal`, `url.open`, `repos.refs`, `repos.source.set`,
+`file.open`, `file.reveal`, `url.open`, `custom_art.open_folder`, `repos.refs`, `repos.source.set`,
 `repos.check`, `repos.poll`, `updates.get`, `updates.check`, `updates.notes`,
 `updates.poll`, `updates.start`, `postprocessors.list`, `postprocessors.guide`, `postprocessors.get`,
 `postprocessors.save`, `postprocessors.duplicate`, `postprocessors.trust`,
@@ -126,6 +126,8 @@ parameter contracts below.
 | `POST /api/updates/start` | `updates.start` (packaged Tauri) | `server.start_update_job()` |
 | `POST /api/decklists/import` | `wb_decklist_import` (packaged Tauri command) | `server.import_decklist()` |
 | `POST /api/back-images/import` | `wb_back_image_import` (packaged Tauri command) | `server.import_back_image()` |
+| `POST /api/custom-art/open-folder` | `custom_art.open_folder` | fixed SCM image folder OS action |
+| `POST /api/custom-art/import` (raw bytes) | dedicated Rust drop/picker commands with private `custom_art.import_selected` / `custom_art.import_poll` | bounded image copies |
 
 Those HTTP routes remain served as standalone-browser compatibility endpoints;
 all `/api/file` requests are rejected in IPC mode before action, metadata, or
@@ -260,7 +262,79 @@ failures reject the native invocation. A native failure is final and is never
 retried through HTTP. The selected path is not returned to JavaScript before
 the private worker call.
 
-The worker accepts paths up to 4096 UTF-8 bytes and opens the selected final object as a stable regular-file handle. It rejects controls, symlinks/reparse points, non-files, files larger than 8 MiB, and files whose magic bytes are not one of the image formats recognized by Workbench. Import holds the SCM repository lock and the image/job exclusion fence, preserves placeholders and unrelated user files, and publishes one copied image through a bounded temporary-file transaction. POSIX keeps no-follow directory handles throughout the transaction. Windows revalidates destination components and moved files while retaining the platform's existing path-based component-swap limitation. Existing recognized back images are moved into an unpredictable nested quarantine directory and validated again before publication. They are removed only after publication succeeds; cleanup is best effort so a cleanup failure leaves recoverable hidden backups while pre-publication failures restore every original name. The result is bounded and includes the deterministic current `back_images` state. Browser compatibility uses `POST /api/back-images/import` only with an explicit `{path}` body. A create PDF command counts recognized images the way upstream does, resolving links rather than refusing them, and rejects more than one image or a scan that exceeds its bounds. Child jobs receive no stdin, so an upstream prompt outside that guard fails without hanging or consuming native protocol input.
+The worker accepts paths up to 4096 UTF-8 bytes and opens the selected final object as a stable regular-file handle. It rejects controls, symlinks/reparse points, non-files, files larger than 32 MiB, and files whose magic bytes are not one of the image formats recognized by Workbench. Import holds the SCM repository lock and the image/job exclusion fence, preserves placeholders and unrelated user files, and publishes one copied image through a bounded temporary-file transaction. POSIX keeps no-follow directory handles throughout the transaction. Windows revalidates destination components and moved files while retaining the platform's existing path-based component-swap limitation. Existing recognized back images are moved into an unpredictable nested quarantine directory and validated again before publication. They are removed only after publication succeeds; cleanup is best effort so a cleanup failure leaves recoverable hidden backups while pre-publication failures restore every original name. The result is bounded and includes the deterministic current `back_images` state. Browser compatibility uses `POST /api/back-images/import` only with an explicit `{path}` body. A create PDF command counts recognized images the way upstream does, resolving links rather than refusing them, and rejects more than one image or a scan that exceeds its bounds. Child jobs receive no stdin, so an upstream prompt outside that guard fails without hanging or consuming native protocol input.
+
+### Custom card art import (Python worker and browser boundary)
+
+Custom art uses three fixed SCM destinations: `front` maps to
+`<effective SCM>/game/front`, `double_sided` maps to
+`<effective SCM>/game/double_sided`, and `back` maps to the shared
+`<effective SCM>/game/back`. No request may provide a destination
+path. Public `custom_art.open_folder` accepts exactly `{"destination":"front"}`,
+`{"destination":"double_sided"}`, or `{"destination":"back"}`, safely ensures that fixed directory exists,
+and invokes the existing OS folder action. It returns `{"ok":true,"errors":[]}`
+or a bounded `{"ok":false,"errors":[...]}`. Browser compatibility is exact
+JSON `POST /api/custom-art/open-folder` with the same body. Packaged HTTP
+rejects it before accessing the filesystem.
+
+The native import worker methods are **private**: `custom_art.import_selected`
+accepts exactly `{"destination":"front"|"double_sided"|"back","source_paths":["<absolute path>",...]}`;
+`custom_art.import_poll` accepts exactly `{"operation_id":"<32 lowercase hex>"}`.
+Only a dedicated Rust command may call them; public `wb_rpc` must reject both.
+Each path is a valid UTF-8 absolute path of at most 4096 bytes without C0 or
+DEL controls, and the list contains 1–256 entries for front/double-sided but
+exactly one for back. Native multi-file back drops are rejected before mutation,
+and the back picker selects one file. Start returns immediately
+with `{"ok":true,"operation_id":"<32 lowercase hex>"}` or an application
+rejection. Poll is immediate: `{"ok":true,"status":"running","completed":N,"total":N}`
+or `{"ok":true,"status":"done","result":<terminal result>}`. Unknown or
+expired IDs are `bad_request`. At most two operations run concurrently, 34
+records exist, and completed records expire after 600 seconds; active work has
+a 600-second cooperative deadline. No copy occupies the serialized IPC reader.
+The Rust command must poll within its own 600-second bound and must not expose
+private methods through its public allowlist.
+
+Standalone-browser import is **one raw image per request**: `POST
+/api/custom-art/import?destination=front|double_sided|back&name=<percent-encoded
+basename>` with `Content-Type: application/octet-stream`, one bounded
+`Content-Length` and raw bytes (not JSON or source paths). Unknown or repeated
+query keys, unsafe names, unbounded or incomplete bodies, and non-image magic
+are rejected; packaged HTTP rejects before reading the body. Upload staging
+has a hard 120-second wall-clock deadline and at most five seconds per socket
+read (the socket timeout is restored afterward); a timeout or truncation
+closes the connection and discards the staged file. File size is at
+most 32 MiB for every destination; back still accepts exactly one image.
+Native front/double-sided batches contain at most 256 files and 512 MiB cumulative
+source data. Back imports (including browser raw uploads) use the existing
+card-back stable-handle quarantine/rollback transaction instead of collision
+accumulation; the UI confirms replacement if a recognized back exists.
+The source and published destination must be stable regular files,
+not final symlinks or reparse points; every destination component is checked
+without following links (POSIX directory handles, Windows component checks).
+The image extension and recognized image magic are both required. Front and
+double-sided publication copies rather than moves, uses exclusive temporary files and atomic no-replace
+hard links with bounded collision suffixes, and never overwrites another file.
+The temporary descriptor stays open while its named entry and the published
+entry are checked against the copied object's identity; a failed check removes
+only an entry still belonging to that object. A temporary-file ctime-only change
+is accepted only after a bounded readback matches the SHA-256 digest of the copied
+source bytes; identity, size, and mtime checks still apply. This tolerates metadata
+updates without accepting same-size content edits that restore mtime. Every
+publication also verifies the linked object's bytes against that digest, with
+named-entry identity checks before and after readback. Readback uses the existing
+import deadline and does not retry or reopen the source.
+Windows also pins the destination
+directory during copying and verifies named entries through reopened handles.
+The image/job/repository exclusion fence covers publication; subsequent
+per-file errors retain already copied files. Invalid original source names are
+rejected before truncation; failure labels are sanitized to safe basenames.
+
+A terminal success is exactly `{"ok":true,"destination":"front"|"double_sided"|"back",
+"imported":N,"names":["<published basename>",...],"failed":[{"name":"<basename>",
+"error":"<bounded message>"},...]}`. `ok:true` means the operation finished,
+**not** that every entry succeeded. Infrastructure and busy errors return
+`{"ok":false,"errors":["<bounded message>",...]}`. No source paths appear in
+the result; the complete encoded result is limited to 256 KiB.
 
 ### Artifact export
 
@@ -764,6 +838,7 @@ The current migration ledger is (31 native methods):
 | Raw binary file reads | Standalone browser HTTP compatibility only | **Unavailable in packaged mode because there is no caller**; any future access must be a purpose-specific native grant, not a generic read capability |
 | Artifact export (`files.export_*` / `/api/files/save`) | Native grant + parented dialog; standalone HTTP compatibility only | Packaged IPC rejects the HTTP route. Grants are 64-hex, one-use after success, TTL 300 s, max 32; source is a successful create/offset/calibration PDF snapshot below that job's pinned SCM root (regular, stable, <=4 GiB). Copies use 64 KiB chunks, 2 workers, 8 active operations, 32 retained results, no overwrite/mkdir, and bounded collision suffixes. Browser mode has no picker; its explicit compatibility route requires an existing destination parent. |
 | Image deletion (`fs.delete_images` / `/api/fs`) | Tauri JSON-lines in packaged windows; POST `/api/fs` in standalone browsers | SCM-only, bounded preflight, stable POSIX dirfds or Windows handles; packaged HTTP rejects before path work |
+| Custom art (`custom_art.open_folder`, private import start/poll, `/api/custom-art/*`) | Fixed-folder public action, private native import worker operations, standalone raw-byte upload | Python worker and standalone HTTP contracts defined above; dedicated Rust grant/picker and UI wiring are separate integration work |
 | Settings bootstrap reads and bounded `settings.set` writes | Tauri → worker JSON-lines | **`settings.set` migrated for packaged Tauri**; browser HTTP GET/POST fallback remains; `repos` and unknown schema keys are excluded |
 | Directory selection | Rust-owned parented folder dialog | Packaged Advanced Settings and opted-in manifest path fields use `wb_pick_repo_directory`; cancellation is `null`, selected paths remain bounded field values, and standalone browsers keep manual path entry plus reset controls |
 | Repo refs, source selection, check, and poll | Tauri → worker JSON-lines | **Migrated for packaged Tauri**; browser HTTP fallback remains; remote work is backgrounded and `repo_init`/`repo_update` remain jobs |

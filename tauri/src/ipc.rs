@@ -158,6 +158,14 @@ impl WorkerRpc {
         if method == "fs.delete_images" {
             return self.delete_images(params);
         }
+        if method == "custom_art.open_folder" {
+            crate::custom_art::validate_open_folder(&params)?;
+            let value = self.call_unchecked(method, params)?;
+            if !crate::custom_art::valid_open_folder_result(&value) {
+                return Err("malformed custom art folder response".into());
+            }
+            return Ok(value);
+        }
         self.call_unchecked(method, params)
     }
 
@@ -199,6 +207,93 @@ impl WorkerRpc {
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Start and poll custom-art work over private worker methods. Source paths
+    /// are supplied only by a native drop grant or the parented picker.
+    pub(crate) fn start_custom_art_import(
+        &self,
+        destination: &str,
+        source_paths: &[String],
+    ) -> Result<Value, String> {
+        if !crate::custom_art::validate_destination(destination)
+            || source_paths.is_empty()
+            || source_paths.len()
+                > if destination == "back" {
+                    1
+                } else {
+                    crate::custom_art::MAX_PATHS
+                }
+        {
+            return Err("invalid custom art import".into());
+        }
+        for path in source_paths {
+            crate::custom_art::validate_path(path)?;
+            if !std::path::Path::new(path).is_absolute() {
+                return Err("invalid custom art import".into());
+            }
+        }
+        let value = self.call_unchecked(
+            "custom_art.import_selected",
+            json!({"destination":destination,"source_paths":source_paths}),
+        )?;
+        let Some(object) = value.as_object() else {
+            return Err("malformed custom art import response".into());
+        };
+        let valid_start = object.len() == 2
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(valid_operation_id);
+        let valid_rejection = crate::custom_art::valid_terminal_result(&value)
+            && value.get("ok").and_then(Value::as_bool) == Some(false);
+        if !valid_start && !valid_rejection {
+            return Err("malformed custom art import response".into());
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn poll_custom_art_import(&self, operation_id: &str) -> Result<Value, String> {
+        if !valid_operation_id(operation_id) {
+            return Err("invalid custom art operation".into());
+        }
+        let value = self.call_unchecked(
+            "custom_art.import_poll",
+            json!({"operation_id":operation_id}),
+        )?;
+        let Some(object) = value.as_object() else {
+            return Err("malformed custom art import response".into());
+        };
+        let valid_running = object.len() == 4
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object.get("status").and_then(Value::as_str) == Some("running")
+            && object
+                .get("completed")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n <= crate::custom_art::MAX_PATHS as u64)
+            && object
+                .get("total")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n <= crate::custom_art::MAX_PATHS as u64)
+            && object["completed"].as_u64() <= object["total"].as_u64();
+        if valid_running {
+            return Ok(value);
+        }
+        let terminal = object.len() == 3
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object.get("status").and_then(Value::as_str) == Some("done")
+            && object
+                .get("result")
+                .is_some_and(crate::custom_art::valid_terminal_result);
+        if terminal {
+            let encoded = serde_json::to_vec(&value)
+                .map_err(|_| "malformed custom art import response".to_string())?;
+            if encoded.len() <= 256 * 1024 {
+                return Ok(value);
+            }
+        }
+        Err("malformed custom art import response".into())
     }
 
     /// Private protocol edge owned by the native picker command. The caller
@@ -533,6 +628,13 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
     state.call(&method, params)
 }
 
+fn valid_operation_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
         "info"
@@ -574,7 +676,8 @@ fn validate_method(method: &str) -> Result<(), String> {
         | "postprocessors.trust"
         | "postprocessors.delete"
         | "postprocessors.optional.remove"
-        | "postprocessors.status" => Ok(()),
+        | "postprocessors.status"
+        | "custom_art.open_folder" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -848,6 +951,7 @@ mod tests {
             "postprocessors.delete",
             "postprocessors.optional.remove",
             "postprocessors.status",
+            "custom_art.open_folder",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -909,6 +1013,8 @@ mod tests {
             "decklists.import_selected",
             "back_images.import_selected",
             "postprocessors.import_selected",
+            "custom_art.import_selected",
+            "custom_art.import_poll",
             "files.export_selected",
             "files.export_poll",
             "files.export_cancel",
@@ -920,6 +1026,31 @@ mod tests {
         ] {
             assert_eq!(validate_method(method), Err("unknown method".into()));
         }
+    }
+
+    #[test]
+    fn private_custom_art_methods_are_not_public_and_folder_is_exact() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "custom_art.import_selected",
+                json!({"destination":"front","source_paths":["/tmp/a.png"]})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.call("custom_art.import_poll", json!({"operation_id":"a"})),
+            Err("unknown method".into())
+        );
+        assert!(rpc
+            .call(
+                "custom_art.open_folder",
+                json!({"destination":"front","path":"/tmp"})
+            )
+            .is_err());
+        assert!(rpc
+            .call("custom_art.open_folder", json!({"destination":"/tmp"}))
+            .is_err());
     }
 
     #[test]

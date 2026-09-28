@@ -1,4 +1,7 @@
 # Bugs
+- [x] Avoid false Custom import failures from temporary-file metadata changes by verifying copied bytes, verify every publication against the copied-source digest, and reject content edits/replacements within the import deadline.
+- [x] Keep Custom import results concise without successful filename lists, right-align and separate the next-step buttons, and preserve spacing between image areas across responsive layouts.
+- [x] Accept card-back images up to 32 MiB in every import path, including Custom drops/uploads and the Create PDF picker, with matching UI guidance and boundary regression tests.
 - [x] List only unrecorded, non-user files/folders in oversized managed-repository update errors without hiding their recorded upstream contribution or weakening the 1 GiB limit.
 - [x] Write the back-only processor test source as exact UTF-8 bytes so Windows newline translation cannot invalidate its approved revision.
 - [x] Reject app-generated PDF and DXF output paths outside their designated folders within a managed SCM checkout while permitting external output locations; identify cumulative oversized non-user folders and files in repo-update failures.
@@ -70,6 +73,9 @@
 - [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
+- [x] Add a Custom Fetch Card Art game with front/double-sided image drop zones, per-folder open buttons, safe native/browser imports, and the existing deck cleanup section.
+- [x] Add a single-image card-back zone to Custom Fetch Card Art, replacing the shared back transactionally while retaining two-column front/double-sided layout and stacked narrow layout.
+- [x] Use clickable built-in processor blocks in Simple mode, plus a Custom Processor block that reveals a ready-only dropdown when selected.
 - [x] Add plain-English help for every current page, opened with a ? button at the far right of the app's top bar. Keep help inside the app and match the controls available in Simple and Advanced modes.
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.
 - [x] Detect the options supported by each connected SCM Python script, disable unavailable workflows and form controls with an explanation, and reject stale unsupported settings before launch.

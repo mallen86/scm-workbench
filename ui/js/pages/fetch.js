@@ -2,21 +2,28 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, PAGES, S, api, confirmModal, el, fmtBytes, ico, pageHead, toast } from "../core.js";
+import { CUSTOM_ART_CHANGED, CUSTOM_ART_PLUGIN, clearCustomArtStatus, customArtState, renderCustomArt } from "../custom-art.js";
 import { canImportDecklist, importDecklist } from "../decklist-transport.js";import { recentFetchLayout } from "../fetch-recents.js";import { afterFormChange, defaultArgs, doRun, formCard } from "../forms.js";import { JOBS_UPDATED_EVENT } from "../job-events.js";import { go, uiMode } from "../nav.js";import { clearJobCompletion, jobStrip } from "../jobstrip.js";import { watchJobDone } from "./utilities.js";/* ================================ fetch page =============================== */
 
 PAGES.fetch = (root) => {
   const wrap = el("div", {});
-  wrap.append(pageHead("Fetch card art", "Choose a game, decklist, and format. Decklists can come from the list, a file, or pasted text. The plugin saves images to game/front/ and, when applicable, game/double_sided/ for the PDF step."));
+  wrap.append(pageHead("Fetch card art", "Choose a game and decklist, or choose Custom to add your own images. Images go to game/front/ and game/double_sided/ for the PDF step."));
   const picker = el("div", { class: "card" },
     el("div", { class: "card-head" },
       el("div", { class: "card-ico" }, ico("download")),
-      el("div", { class: "grow" }, el("h2", {}, "Game"), el("p", {}, "Each game has one plugin. Formats and options match your selection.")),
+      el("div", { class: "grow" }, el("h2", {}, "Game"), el("p", {}, "Choose a game's plugin, or use Custom for image files from your computer.")),
     ),
   );
   const pickerBody = el("div", { class: "plugin-sections" });
   const slugs = Object.keys(S.manifest).filter(k => k.startsWith("fetch:"))
     .map(kind => kind.slice(6)).sort();
+  slugs.push(CUSTOM_ART_PLUGIN);
   const pluginCard = slug => {
+    if (slug === CUSTOM_ART_PLUGIN) return el("button", {
+      class: `plugin-card custom-art-game ${S.plugin === slug ? "active" : ""}`,
+      type: "button", "aria-pressed": S.plugin === slug ? "true" : "false",
+      onclick: () => go("fetch", { plugin: slug }),
+    }, el("div", { class: "pc-t" }, "Custom"), el("div", { class: "pc-f" }, "Add your own images"));
     const kind = `fetch:${slug}`;
     const choices = S.manifest[kind].groups
       .find(group => group.title === "Format")?.options[0].choices || [];
@@ -53,23 +60,36 @@ PAGES.fetch = (root) => {
         el("span", { class: "plugin-summary-meta" }, `${layout.all.length} games`,
           el("span", { class: "plugin-summary-arrow", "aria-hidden": "true" }, ico("arrow")))),
       pluginGrid(layout.all));
-    allGames.open = layout.allOpen;
+    allGames.open = layout.allOpen || S.plugin === CUSTOM_ART_PLUGIN;
     pickerBody.append(allGames);
   };
   const onJobsUpdated = () => renderPluginPicker();
   document.addEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
-  wrap.__dispose = () => document.removeEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+  let customSource = null;
+  let cleanupChanged = null;
+  wrap.__dispose = () => {
+    document.removeEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+    if (cleanupChanged) document.removeEventListener(CUSTOM_ART_CHANGED, cleanupChanged);
+    customSource?.__dispose?.();
+  };
   picker.append(pickerBody);
   renderPluginPicker();
   wrap.append(picker);
 
-  const kind = "fetch:" + S.plugin;
+  const custom = S.plugin === CUSTOM_ART_PLUGIN;
+  const kind = custom ? null : "fetch:" + S.plugin;
   if (!S.info.scm.found) {
-    wrap.append(el("div", { class: "banner err" }, el("span", { class: "b-ico" }, ico("alert")), el("span", { class: "grow" }, "SCM repo is not connected. Plugins are stored there. Fix this in Settings.")));
+    wrap.append(el("div", { class: "banner err" }, el("span", { class: "b-ico" }, ico("alert")), el("span", { class: "grow" }, custom ? "Connect an SCM repo in Settings before adding card images." : "SCM repo is not connected. Plugins are stored there. Fix this in Settings.")));
     return wrap;
   }
-  wrap.append(formCard(kind, { icon: "download", flat: uiMode() === "simple", head: uiMode() !== "simple" }));
-  wrap.__patch = () => patchFetchForm(kind);
+  if (custom) {
+    customSource = renderCustomArt();
+    wrap.append(customSource);
+    wrap.__patch = () => customSource.__patch();
+  } else {
+    wrap.append(formCard(kind, { icon: "download", flat: uiMode() === "simple", head: uiMode() !== "simple" }));
+    wrap.__patch = () => patchFetchForm(kind);
+  }
 
   // The plugins never delete existing images: fetching a *different* deck
   // leaves the old art in game/front/ and the next PDF mixes it in. Keep a
@@ -89,11 +109,17 @@ PAGES.fetch = (root) => {
         // Cleanup has begun, so the prior fetch can no longer promise that its
         // images are ready. Hide it now and suppress both ways a rebuilt strip
         // could resurrect it; the cleanup job itself remains in job history.
-        clearJobCompletion(kind);
-        watchJobDone(job.id, () => afterFormChange(kind));   // the preview re-queries, so the stale-images warning clears
+        clearCustomArtStatus();
+        if (!custom) clearJobCompletion(kind);
+        watchJobDone(job.id, () => { if (!custom) afterFormChange(kind); });   // the preview re-queries, so the stale-images warning clears
       }
     } }, ico("trash"), "Clear card images")));
   wrap.append(cc);
+  const cleanup = $("button", cc);
+  cleanupChanged = () => { cleanup.disabled = customArtState().busy; };
+  document.addEventListener(CUSTOM_ART_CHANGED, cleanupChanged);
+  cleanupChanged();
+  if (custom) return wrap;
   // simple mode: the console is hidden, so the page shows its own compact
   // status for the job — a progress bar while it runs, then the result with
   // the next step (create the PDF) one click away.

@@ -10,6 +10,8 @@ fn main() {
             "wb_decklist_import",
             "wb_back_image_import",
             "wb_postprocessor_import",
+            "wb_custom_art_import",
+            "wb_custom_art_pick",
             "wb_save_artifact",
         ]),
     ))

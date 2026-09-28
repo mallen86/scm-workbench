@@ -19,7 +19,16 @@ const isReady = p => p && (p.environment_ready === true || p.dependencies === "r
 const isStale = p => p?.environment_status === "stale" || p?.environment?.status === "stale";
 const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === revision(p));
 const canRun = p => !!p && (p.ready_to_run === true || (isReady(p) && isTrusted(p)));
+export function simpleProcessorChoices(processors, selectedId, previousCustomId = null) {
+  const builtins = processors.filter(p => p.bundled && (canRun(p) || p.optional_model))
+    .sort((a, b) => Number(!!a.optional_model) - Number(!!b.optional_model));
+  const custom = processors.filter(p => !p.bundled && canRun(p));
+  const customSelected = custom.some(p => p.id === selectedId);
+  const remembered = customSelected ? selectedId : previousCustomId;
+  return { builtins, custom, customSelected, rememberedCustomId: remembered, customSelection: custom.find(p => p.id === remembered)?.id || custom[0]?.id || null };
+}
 const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
+let lastCustomProcessorId = null;
 const currentInstallJob = p => {
   if (!p?.optional_model) return null;
   const saved = latestInstallJob(S.jobs, p.id);
@@ -248,18 +257,48 @@ function repaintLibrary() {
 
 function repaintSimplePicker() {
   const select = document.querySelector(".pp-simple-select");
-  if (!select) return;
-  const ready = [...state.processors.filter(canRun),
-    ...state.processors.filter(p => p.optional_model && !canRun(p))];
-  const optionsKey = JSON.stringify(ready.map(p => [p.id, p.name]));
+  const grid = document.querySelector(".pp-simple-builtins");
+  const customPicker = document.querySelector(".pp-custom-picker");
+  if (!select || !grid || !customPicker) return;
+  const choices = simpleProcessorChoices(state.processors, state.selected, lastCustomProcessorId);
+  const { builtins, custom } = choices;
+  lastCustomProcessorId = choices.rememberedCustomId;
+  const optionsKey = JSON.stringify(custom.map(p => [p.id, p.name]));
+  const tilesKey = JSON.stringify([...builtins.map(p => [p.id, p.name, p.optional_model]), ["__custom", custom.length]]);
   if (select.dataset.optionsKey !== optionsKey) {
-    select.replaceChildren();
-    if (!ready.length) select.append(el("option", { value: "" }, "No ready processors"));
-    else for (const p of ready) select.append(el("option", { value: p.id }, p.name || "Unnamed processor"));
+    select.replaceChildren(el("option", { value: "" }, "Choose a custom processor…"));
+    for (const p of custom) select.append(el("option", { value: p.id }, p.name || "Unnamed processor"));
     select.dataset.optionsKey = optionsKey;
   }
-  select.disabled = !ready.length;
-  if (ready.length) select.value = state.selected || ready[0].id;
+  select.disabled = !custom.length;
+  if (grid.dataset.tilesKey !== tilesKey) {
+    grid.replaceChildren(...builtins.map(p => el("button", { class: "plugin-card pp-simple-processor", type: "button", "data-processor-id": p.id }, el("div", { class: "pc-t" }, p.name || "Unnamed processor"), el("div", { class: "pc-f" }))));
+    grid.append(el("button", { class: "plugin-card pp-simple-processor pp-custom-tile", type: "button", "data-processor-id": "__custom" }, el("div", { class: "pc-t" }, "Custom Processor"), el("div", { class: "pc-f" })));
+    for (const tile of grid.querySelectorAll(".pp-simple-processor")) tile.onclick = () => {
+      const id = tile.dataset.processorId;
+      if (id === "__custom") {
+        const current = simpleProcessorChoices(state.processors, state.selected, lastCustomProcessorId);
+        const chosen = current.custom.find(p => p.id === current.customSelection);
+        if (!chosen) return;
+        state.selected = chosen.id; lastCustomProcessorId = chosen.id; state.loaded = chosen;
+      } else { state.selected = id; state.loaded = selectedProcessor(); }
+      patchRunForm(); repaintSimplePicker();
+    };
+    grid.dataset.tilesKey = tilesKey;
+  }
+  const customSelected = custom.some(p => p.id === state.selected);
+  for (const tile of grid.querySelectorAll(".pp-simple-processor")) {
+    const isCustom = tile.dataset.processorId === "__custom";
+    const p = builtins.find(item => item.id === tile.dataset.processorId);
+    const active = isCustom ? customSelected : p?.id === state.selected;
+    tile.classList.toggle("active", !!active);
+    tile.setAttribute("aria-pressed", active ? "true" : "false");
+    tile.disabled = isCustom && !custom.length;
+    const note = tile.querySelector(".pc-f");
+    if (note) note.textContent = isCustom ? (custom.length ? `${custom.length} ready custom processor${custom.length === 1 ? "" : "s"}` : "No ready custom processors") : p.optional_model ? (canRun(p) ? "Ready · AI upscaler" : "Install model & libraries") : "Built in · Ready";
+  }
+  customPicker.hidden = !customSelected;
+  select.value = customSelected ? state.selected : "";
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
   if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. This upscaler requires its model and inference libraries to be installed before use. Output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
@@ -618,7 +657,8 @@ function renderSimplePostprocess() {
   wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the Advanced AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
   wrap.append(el("section", { class: "card pp-simple-picker" },
     el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
-    el("label", {}, "Processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready image processor" })),
+    el("div", { class: "plugin-grid pp-simple-builtins", "aria-label": "Built-in image processors" }),
+    el("label", { class: "pp-custom-picker", hidden: true }, "Custom processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready custom processor" })),
     el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…"),
     el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
     el("div", { class: "pp-model-setup", hidden: true },
@@ -638,7 +678,8 @@ function renderSimplePostprocess() {
     state.dirty = false;
     S.pageGuard = null;
     $(".pp-simple-select", wrap).addEventListener("change", event => {
-      state.selected = event.currentTarget.value || null;
+      if (!event.currentTarget.value) return;
+      state.selected = event.currentTarget.value;
       state.loaded = selectedProcessor();
       patchRunForm();
       repaintSimplePicker();

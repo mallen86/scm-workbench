@@ -186,7 +186,7 @@ DECKLIST_TEMP_PREFIX = ".wb-decklist-import-"
 # it has its own limits and transaction names.  A back folder may contain
 # upstream placeholders and user files, so import never treats the directory
 # as an empty staging area.
-BACK_IMAGE_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+BACK_IMAGE_SOURCE_MAX_BYTES = 32 * 1024 * 1024
 BACK_IMAGE_PATH_MAX_BYTES = 4096
 BACK_IMAGE_NAME_MAX_BYTES = 255
 BACK_IMAGE_SCAN_MAX_SCANNED = 8192
@@ -10084,8 +10084,9 @@ def _import_back_image_windows(source_fd: int, source_stat: os.stat_result,
         raise BackImageImportError("card-back import failed") from exc
 
 
-def import_back_image(source_path: str, settings: Optional[dict] = None) -> dict:
-    source_fd, source_stat, source_name = _open_back_image_source(source_path)
+def import_back_image_opened(source_fd: int, source_stat: os.stat_result, source_name: str,
+                             settings: Optional[dict] = None) -> dict:
+    """Consume an already-open stable image (including staged browser bytes)."""
     directory_fd = None
     try:
         settings = settings if settings is not None else load_settings()
@@ -10120,6 +10121,11 @@ def import_back_image(source_path: str, settings: Optional[dict] = None) -> dict
                 os.close(directory_fd)
             except OSError:
                 pass
+
+
+def import_back_image(source_path: str, settings: Optional[dict] = None) -> dict:
+    source_fd, source_stat, source_name = _open_back_image_source(source_path)
+    return import_back_image_opened(source_fd, source_stat, source_name, settings)
 
 
 def _image_delete_result_size(directory: Path, names: list) -> int:
@@ -11554,6 +11560,53 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path = url.path
         try:
+            if path == "/api/custom-art/import":
+                from scm_workbench import custom_art
+                if _IPC_MODE:
+                    self.close_connection = True
+                    return self._json(custom_art.rejection("native custom art import is required"), 403)
+                from urllib.parse import parse_qsl
+                try:
+                    if re.search(r"%(?![0-9A-Fa-f]{2})", url.query):
+                        raise custom_art.ImportError("invalid percent encoding")
+                    pairs = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True,
+                                      errors="strict")
+                    if len(pairs) != 2 or {key for key, _ in pairs} != {"destination", "name"}:
+                        raise custom_art.ImportError("import requires exactly destination and name")
+                    query = dict(pairs)
+                    custom_art.destination(query["destination"])
+                    custom_art.name(query["name"])
+                    lengths = self.headers.get_all("Content-Length") or []
+                    if (len(lengths) != 1 or not lengths[0].isascii() or
+                            not lengths[0].isdecimal()):
+                        raise custom_art.ImportError("bounded Content-Length is required")
+                    length = int(lengths[0])
+                    limit = BACK_IMAGE_SOURCE_MAX_BYTES if query["destination"] == "back" else custom_art.MAX_FILE
+                    if not 0 < length <= limit:
+                        raise custom_art.ImportError("card back must be between 1 byte and 32 MiB" if query["destination"] == "back" else "image size must be between 1 byte and 32 MiB")
+                    if self.headers.get("Content-Type") != "application/octet-stream" or self.headers.get("Transfer-Encoding"):
+                        raise custom_art.ImportError("raw application/octet-stream is required")
+                    result = custom_art.import_bytes(query["destination"], query["name"],
+                                                     self.rfile, length, sys.modules[__name__],
+                                                     load_settings(), socket=self.connection)
+                    return self._json(result, 200 if result.get("ok") else 400)
+                except (custom_art.ImportError, UnicodeError, ValueError) as exc:
+                    self.close_connection = True
+                    message = exc.message if isinstance(exc, custom_art.ImportError) else "invalid import query"
+                    return self._json(custom_art.rejection(message), 400)
+            if path == "/api/custom-art/open-folder":
+                from scm_workbench import custom_art
+                if _IPC_MODE:
+                    self.close_connection = True
+                    return self._json(custom_art.rejection("native custom art action is required"), 403)
+                if self.headers.get("Content-Type") != "application/json":
+                    self.close_connection = True
+                    return self._json(custom_art.rejection("JSON body is required"), 400)
+                body = self._body(strict=True, max_bytes=4096)
+                if not isinstance(body, dict) or set(body) != {"destination"}:
+                    return self._json(custom_art.rejection("open folder requires exactly destination"), 400)
+                result = custom_art.open_folder(body["destination"], sys.modules[__name__])
+                return self._json(result, 200 if result.get("ok") else 400)
             if path == "/api/postprocessors":
                 body = self._body(strict=True, max_bytes=POSTPROCESS_HTTP_REQUEST_MAX_BYTES)
                 if not isinstance(body, dict): return self._json(_postprocessor_error(postprocessing.ValidationError("request body must be a bounded object")), 400)

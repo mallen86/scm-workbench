@@ -111,6 +111,13 @@ def main() -> int:
         'state.processors.filter(canRun)',
         'p.ready_to_run === true',
         'class: "input pp-simple-select"',
+        'class: "plugin-grid pp-simple-builtins"',
+        'simpleProcessorChoices(state.processors, state.selected, lastCustomProcessorId)',
+        'const { builtins, custom } = choices',
+        'pp-custom-tile',
+        'customPicker.hidden = !customSelected',
+        'tile.disabled = isCustom && !custom.length',
+        'if (grid.dataset.tilesKey !== tilesKey)',
         'if (select.dataset.optionsKey !== optionsKey)',
         'You can install the Advanced AI Upscaler before SCM is ready;',
         'The built-in Simple Upscaler is ready without any downloads.',
@@ -134,6 +141,14 @@ def main() -> int:
     ):
         if required not in page:
             return fail(f"post-processing page is missing {required}")
+    if 'pp-custom-picker' not in page or 'Choose a custom processor…' not in page:
+        return fail("Simple mode must show the dropdown only for the Custom tile")
+    if 'No custom processors are ready. Create, install, and trust one in Advanced mode.' in page:
+        return fail("Simple mode must not show the removed custom-processor setup hint")
+    if not re.search(r'\.pp-custom-picker\[hidden\]\s*\{\s*display:\s*none;', css):
+        return fail("Custom picker styling must not override its hidden state")
+    if 'export function simpleProcessorChoices' not in page:
+        return fail("Simple-mode processor selection helper is missing")
     if page.count('formCard("postprocess_images", { run: false, preview: "summary" })') != 2:
         return fail("image post-processing must hide technical commands in both modes while keeping preview validation events")
     if '["back", "Back only"]' not in server:
@@ -188,6 +203,82 @@ def main() -> int:
     node = shutil.which("node")
     if not node:
         return fail("Node.js is required to execute the post-processing transport contract")
+    helper_match = re.search(r"export function simpleProcessorChoices\(.*?\n}\n(?=const selectedProcessor)", page, re.S)
+    if not helper_match:
+        return fail("could not extract the Simple-mode selection helper for behavioral coverage")
+    predicates = page[page.index('const revision ='):page.index('export function simpleProcessorChoices')]
+    helper = predicates + helper_match.group(0).replace("export function", "function", 1)
+    behavior = helper + r'''
+const ready = (id, bundled = false) => ({ id, bundled, ready_to_run: true });
+const processors = [ready("builtin", true), ready("custom-a"), ready("custom-b"), { id: "untrusted", ready_to_run: false }];
+let selection = simpleProcessorChoices(processors, "builtin");
+if (selection.customSelected || selection.builtins.length !== 1 || selection.custom.map(p => p.id).join(",") !== "custom-a,custom-b") throw Error("initial built-in selection/filter failed");
+selection = simpleProcessorChoices(processors, "custom-b", selection.rememberedCustomId);
+if (!selection.customSelected || selection.rememberedCustomId !== "custom-b") throw Error("history-prefilled custom selection failed");
+selection = simpleProcessorChoices(processors, "builtin", selection.rememberedCustomId);
+if (selection.customSelected || selection.customSelection !== "custom-b") throw Error("built-in selection did not retain previous custom choice");
+for (const installed of [false, true]) {
+  const source = [{ id: "ai", bundled: true, optional_model: true, ready_to_run: installed }, ready("simple", true)];
+  const ordered = simpleProcessorChoices(source, "ai");
+  if (ordered.builtins.map(p => p.id).join(",") !== "simple,ai") throw Error("Simple Upscaler must precede the AI upscaler regardless of installation state");
+  if (source[0].id !== "ai") throw Error("Simple-mode ordering must not mutate the processor library");
+}
+const empty = simpleProcessorChoices([ready("builtin", true)], "builtin");
+if (empty.custom.length || empty.customSelection !== null) throw Error("empty custom list was not filtered");
+'''
+    repaint = page[page.index('function repaintSimplePicker()'):page.index('async function showGuide()')]
+    behavior += r'''
+// Exercise the actual tile handlers, not just the pure selection helper.
+class Element {
+  constructor(tag, attrs = {}, ...children) {
+    this.tag = tag; this.children = children; this.dataset = {}; this.attrs = attrs;
+    this.classList = { toggle: (name, enabled) => { this[name] = enabled; } };
+    for (const [key, value] of Object.entries(attrs)) {
+      if (key === "data-processor-id") this.dataset.processorId = value;
+      else this[key] = value;
+    }
+  }
+  replaceChildren(...children) { this.children = children; }
+  append(...children) { this.children.push(...children); }
+  querySelectorAll() { return this.children; }
+  querySelector(selector) { return this.children.find(child => child.class === selector.slice(1)); }
+  setAttribute(key, value) { this.attrs[key] = value; }
+}
+const el = (...args) => new Element(...args);
+const grid = el("div"), select = el("select"), customPicker = el("label");
+const document = { querySelector: selector => ({
+  ".pp-simple-builtins": grid, ".pp-simple-select": select, ".pp-custom-picker": customPicker,
+}[selector] || null) };
+const state = { processors, selected: "builtin" };
+const selectedProcessor = () => state.processors.find(p => p.id === state.selected);
+let lastCustomProcessorId = null, patched = null;
+const patchRunForm = () => { patched = state.selected; };
+''' + repaint + r'''
+repaintSimplePicker();
+const builtinTile = grid.children[0], customTile = grid.children.at(-1);
+if (!customPicker.hidden || builtinTile.attrs["aria-pressed"] !== "true") throw Error("built-in must hide custom dropdown");
+customTile.onclick();
+if (state.selected !== "custom-a" || patched !== "custom-a" || customPicker.hidden) throw Error("Custom tile must reveal dropdown and select a ready processor");
+state.selected = "custom-b"; // dropdown or history selection
+repaintSimplePicker();
+if (select.value !== "custom-b" || !customTile.active) throw Error("custom prefill must activate Custom tile");
+builtinTile.onclick();
+if (!customPicker.hidden) throw Error("built-in must hide dropdown again");
+customTile.onclick();
+if (state.selected !== "custom-b") throw Error("tile handler captured a stale custom selection");
+if (grid.children.at(-1) !== customTile || grid.children[0] !== builtinTile) throw Error("repaint replaced focused tiles");
+state.processors = [ready("builtin", true), ready("custom-c"), ready("custom-d")];
+state.selected = "builtin";
+repaintSimplePicker();
+customTile.onclick();
+if (state.selected !== "custom-c" || state.loaded.id !== "custom-c") throw Error("tile handler captured a stale processor list");
+state.processors = [ready("builtin", true)]; state.selected = "builtin";
+repaintSimplePicker();
+if (!grid.children.at(-1).disabled || !customPicker.hidden) throw Error("empty Custom tile must be disabled with dropdown hidden");
+'''
+    behavior_result = subprocess.run([node, "-e", behavior], text=True, capture_output=True)
+    if behavior_result.returncode:
+        return fail(f"Simple-mode selection behavior failed: {behavior_result.stderr.strip()}")
     script = r'''
 import fs from "node:fs";
 const source = fs.readFileSync(process.argv[1], "utf8");
