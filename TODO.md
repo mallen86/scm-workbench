@@ -1,4 +1,5 @@
 # Bugs
+- [x] Replace the managed repo's local non-user 1 GiB size gate with staging-space checks and bounded, cancellable copying/verification while retaining incoming-data limits, user-data budgets, and transactional recovery.
 - [x] Avoid false Custom import failures from temporary-file metadata changes by verifying copied bytes, verify every publication against the copied-source digest, and reject content edits/replacements within the import deadline.
 - [x] Keep Custom import results concise without successful filename lists, right-align and separate the next-step buttons, and preserve spacing between image areas across responsive layouts.
 - [x] Accept card-back images up to 32 MiB in every import path, including Custom drops/uploads and the Create PDF picker, with matching UI guidance and boundary regression tests.

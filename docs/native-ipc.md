@@ -432,6 +432,28 @@ locks, stale-source checks, and transactional deployment journals. Metadata IPC
 never accepts a local path or arbitrary remote URL and never bypasses the
 transactional init/update publication boundary.
 
+Repository deployment uses explicit local and upstream validation policies.
+Existing local files, preserved edits, deployment candidates, and backups are
+not charged against the 1 GiB network byte limit. Downloaded archives retain
+compressed, expanded, member-size, and member-count bounds; changed-file
+batches have a cumulative 1 GiB download bound in addition to per-file limits.
+An empty file is still permitted when the batch has exactly exhausted its byte
+budget. Recognized local user-data folders retain their separate 32 GiB budget;
+file-count, path-containment, symlink, and special-file checks still apply.
+
+Staging checks the destination volume's available space for new copies and
+expanded snapshots, with a small reserve. Moving the live tree to its backup is
+a rename, not another full copy. Free-space query failures stop the operation;
+ENOSPC during staging or publication leaves the original tree intact or invokes
+transactional rollback. Space checks are advisory because other applications
+can consume space afterward. Local copies and hashes use fixed-size chunks,
+reject source changes, and check an operation-scoped cancellation callback and
+cooperative deadline (six hours by default). Startup verification is also
+scoped. A cancellation cannot be treated as a failed diff check and start a
+full download instead. Cleanup and journal recovery are not blocked by an
+expired operation budget. The normal Stop action still terminates the managed
+job subprocess; journal recovery handles interrupted publication.
+
 ### Offset state, projection, and jobs
 
 Offsets have one canonical Workbench state and one disposable upstream
