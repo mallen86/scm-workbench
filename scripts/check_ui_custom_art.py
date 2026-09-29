@@ -65,11 +65,22 @@ assert.equal(calls[0][1].body,file,"browser must upload selected bytes, not path
 calls.length=0;
 await assert.rejects(transport.importCustomArtFiles("front",Array(257).fill(file)),/256/);
 await assert.rejects(transport.importCustomArtFiles("front",[{size:33*1024*1024}]),/32 MiB/);
-await assert.rejects(transport.importCustomArtFiles("front",Array(17).fill({size:32*1024*1024})),/512 MiB/);
 assert.equal(calls.length,0);
 await assert.rejects(transport.importCustomArtFiles("back",[file,file]),/exactly one/);
 await assert.rejects(transport.importCustomArtFiles("back",[{size:32*1024*1024+1}]),/32 MiB/);
 assert.equal(calls.length,0,"invalid back batches cannot mutate");
+for (const destination of ["front", "double_sided"]) {
+  for (const [count, size] of [[100,10*1024*1024],[256,32*1024*1024]]) {
+    // Metadata-only files and mocked uploads avoid allocating GiB in this contract.
+    const files = Array.from({length:count}, (_,index) => ({name:`card-${index}.png`,size}));
+    globalThis.fetch = async (...args) => {calls.push(args);return response({...imported(),destination});};
+    const batch = await transport.importCustomArtFiles(destination,files);
+    assert.equal(batch.imported,count,"valid batches above 512 MiB must import fully");
+    assert.deepEqual(batch.failed,[]);
+    assert.equal(calls.length,count);
+    calls.length=0;
+  }
+}
 assert.equal(transport.CUSTOM_BACK_MAX_FILE_BYTES,32*1024*1024);
 assert.equal(transport.CUSTOM_BACK_MAX_FILE_BYTES,transport.CUSTOM_ART_MAX_FILE_BYTES);
 const largeBack = new File([new Uint8Array(32*1024*1024)], "Large back.png", {type:"image/png"});
@@ -158,7 +169,9 @@ const zones=all(panel).filter(n=>n.attrs?.['data-destination']);
 assert.deepEqual(zones.map(n=>n.dataset.destination),["front","double_sided","back"]);
 assert.match(text(zones[2]),/Drop one image here/);
 assert.match(text(zones[2]),/32 MiB/);
-assert.doesNotMatch(text(panel),/8 MiB/);
+assert.doesNotMatch(text(panel),/8 MiB|512 MiB/);
+assert.match(text(panel),/256 images per import, 32 MiB each/);
+assert.doesNotMatch(source("ui/js/page-help-content.js"),/512 MiB/);
 await all(zones[2]).find(n=>n.tag==="button"&&n.attrs.class==="custom-art-drop").onclick();
 assert.equal(confirmations,1);assert.deepEqual(selections,[],"declining back replacement must not open picker");
 await all(zones[2]).find(n=>n.tag==="button"&&n.attrs.class==="custom-art-drop").onclick();

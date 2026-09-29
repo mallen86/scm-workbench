@@ -306,8 +306,8 @@ has a hard 120-second wall-clock deadline and at most five seconds per socket
 read (the socket timeout is restored afterward); a timeout or truncation
 closes the connection and discards the staged file. File size is at
 most 32 MiB for every destination; back still accepts exactly one image.
-Native front/double-sided batches contain at most 256 files and 512 MiB cumulative
-source data. Back imports (including browser raw uploads) use the existing
+Native front/double-sided batches contain at most 256 files, with no separate
+cumulative source-data limit. Back imports (including browser raw uploads) use the existing
 card-back stable-handle quarantine/rollback transaction instead of collision
 accumulation; the UI confirms replacement if a recognized back exists.
 The source and published destination must be stable regular files,

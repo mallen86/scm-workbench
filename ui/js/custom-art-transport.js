@@ -5,7 +5,6 @@ import { getTauriInvoke } from "./transport.js";
 export const CUSTOM_ART_MAX_FILES = 256;
 export const CUSTOM_ART_MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const CUSTOM_BACK_MAX_FILE_BYTES = CUSTOM_ART_MAX_FILE_BYTES;
-export const CUSTOM_ART_MAX_BATCH_BYTES = 512 * 1024 * 1024;
 export const CUSTOM_ART_ACCEPT = ".jpg,.jpeg,.jpe,.jfif,.png,.apng,.gif,.webp,.tif,.tiff,.bmp,.dib,.avif,.heif,.heic,.qoi,.dds,.jp2,.j2k";
 const destinations = new Set(["front", "double_sided", "back"]);
 const destinationValue = value => {
@@ -67,8 +66,6 @@ export async function importCustomArtFiles(destination, suppliedFiles, onProgres
   const limit = destination === "back" ? CUSTOM_BACK_MAX_FILE_BYTES : CUSTOM_ART_MAX_FILE_BYTES;
   if (files.some(file => !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > limit))
     throw new Error(destination === "back" ? "Card back must be non-empty and no larger than 32 MiB." : "Each image must be non-empty and no larger than 32 MiB.");
-  if (files.reduce((total, file) => total + file.size, 0) > CUSTOM_ART_MAX_BATCH_BYTES)
-    throw new Error("One import can contain at most 512 MiB of images.");
   const result = { ok: true, destination, imported: 0, names: [], failed: [] };
   const deadline = Date.now() + 600000;
   for (let index = 0; index < files.length; index++) {

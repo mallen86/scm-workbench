@@ -94,7 +94,7 @@ export function renderCustomArt() {
     });
     zones.append(zone);
   }
-  wrap.append(zones, el("p", { class: "small faint custom-art-limits" }, "Front and double-sided: up to 256 images per import, 32 MiB each, 512 MiB total. Card back: exactly one image, up to 32 MiB; replaces the existing back."), status, actions);
+  wrap.append(zones, el("p", { class: "small faint custom-art-limits" }, "Front and double-sided: up to 256 images per import, 32 MiB each. Card back: exactly one image, up to 32 MiB; replaces the existing back."), status, actions);
   let highlightedZone = null;
   const setDropHighlight = target => {
     if (target === highlightedZone) return;

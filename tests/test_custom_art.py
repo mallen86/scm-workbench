@@ -74,6 +74,26 @@ class CustomArtTests(unittest.TestCase):
         self.assertEqual(Path(src).read_bytes(), PNG)
         self.assertFalse((self.scm / "game" / "double_sided").exists())
 
+    def test_large_batches_have_only_per_image_and_count_limits(self):
+        # Sparse sources exercise real size admission without copying GiB in CI.
+        for dest in ("front", "double_sided"):
+            for count, size in ((100, 10 * 1024 * 1024), (256, custom_art.MAX_FILE)):
+                with self.subTest(destination=dest, count=count, size=size):
+                    src = self.source("large.png")
+                    with open(src, "r+b") as file:
+                        file.truncate(size)
+                    with mock.patch.object(custom_art, "_copy", return_value="large.png") as copy:
+                        result = custom_art.import_selected(dest, [src] * count, server, self.settings)
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["imported"], count)
+                    self.assertEqual(result["failed"], [])
+                    self.assertEqual(copy.call_count, count)
+                    self.assertTrue(all(call.args[1].st_size == size for call in copy.call_args_list))
+            with mock.patch.object(custom_art, "_open_source") as opened:
+                with self.assertRaisesRegex(custom_art.ImportError, "1 to 256"):
+                    custom_art.import_selected(dest, [src] * 257, server, self.settings)
+                opened.assert_not_called()
+
     def test_full_length_unicode_name_can_receive_collision_suffix(self):
         long_name = "é" * 125 + ".png"
         src = self.source(long_name)

@@ -96,7 +96,7 @@ class CustomArtTransportTests(unittest.TestCase):
         with custom_art._lock:
             for i in range(2):
                 custom_art._operations[str(i) * 32] = {"ended": None, "total": 1, "completed": 0, "result": None}
-        response = self.dispatch("custom_art.import_selected", {"destination": "front", "source_paths": ["/tmp/image.png"]})
+        response = self.dispatch("custom_art.import_selected", {"destination": "front", "source_paths": [str(self.root / "image.png")]})
         self.assertEqual(response["result"]["ok"], False)
         self.assertIn("busy", response["result"]["errors"][0])
         with custom_art._lock:

@@ -19,7 +19,6 @@ import unicodedata
 
 MAX_FILES = 256
 MAX_FILE = 32 * 1024 * 1024
-MAX_BATCH = 512 * 1024 * 1024
 MAX_RESULT = 256 * 1024
 CHUNK = 64 * 1024
 TTL = 600.0
@@ -430,7 +429,6 @@ def _run(dest, entries, server, settings, deadline, progress=None):
         return _run_back(entries, server, settings, deadline, progress)
 
     names, failed = [], []
-    total_bytes = 0
     scm, _ = server.effective_dirs(settings)
     if not scm:
         return rejection("no copy of silhouette-card-maker is connected yet")
@@ -452,9 +450,6 @@ def _run(dest, entries, server, settings, deadline, progress=None):
                         if (server._is_reparse_or_symlink(observed) or not stat.S_ISREG(observed.st_mode)
                                 or observed.st_size > MAX_FILE):
                             raise ImportError("selected image is not a bounded regular file")
-                        total_bytes += observed.st_size
-                        if total_bytes > MAX_BATCH:
-                            raise ImportError("batch exceeds 512 MiB")
                         if not server._image_header_is_image(os.read(handle, 16)):
                             raise ImportError("selected file is not a recognized image")
                         os.lseek(handle, 0, os.SEEK_SET)

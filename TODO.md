@@ -1,4 +1,5 @@
 # Bugs
+- [x] Remove the Custom card-art import total-size limit while retaining 32 MiB per image and 256 images per import.
 - [x] Remove the overall app-update asset download deadline while retaining network inactivity detection, metadata deadlines, and verified atomic publication.
 - [x] Highlight the targeted Custom image drop zone during native file drags and clear it on leave, drop, busy state, or page disposal.
 - [x] Preserve macOS logical drop coordinates on Retina displays so Custom card-art drops hit the intended image zone.
