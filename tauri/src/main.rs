@@ -788,12 +788,28 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event {
+            if let WindowEvent::DragDrop(drop_event) = event {
                 if window.label() == "main" {
                     let scale = window.scale_factor().unwrap_or(1.0);
-                    let x = position.x / scale;
-                    let y = position.y / scale;
-                    let payload = if x.is_finite() && y.is_finite() {
+                    // Hover notifications never authorize imports or expose paths.
+                    let hover = match drop_event {
+                        tauri::DragDropEvent::Enter { position, .. } |
+                        tauri::DragDropEvent::Over { position } => Some(Some(position)),
+                        tauri::DragDropEvent::Leave => Some(None),
+                        _ => None,
+                    };
+                    if let Some(position) = hover {
+                        let payload = position.and_then(|position| custom_art::logical_drop_position(
+                            position.x, position.y, scale, cfg!(target_os = "macos"),
+                        )).map(|(x, y)| serde_json::json!({"phase":"over","x":x,"y":y}))
+                          .unwrap_or_else(|| serde_json::json!({"phase":"leave"}));
+                        let _ = window.emit_to(tauri::EventTarget::webview_window("main"), "custom-art-drop", payload);
+                    }
+                    if let tauri::DragDropEvent::Drop { paths, position } = drop_event {
+                    let position = custom_art::logical_drop_position(
+                        position.x, position.y, scale, cfg!(target_os = "macos"),
+                    );
+                    let payload = if let Some((x, y)) = position {
                         match window.app_handle().state::<custom_art::DropGrants>().issue(window.label(), paths) {
                             Ok(token) => serde_json::json!({"token":token,"x":x,"y":y}),
                             Err(error) => serde_json::json!({"error":error.chars().take(256).collect::<String>(),"x":x,"y":y}),
@@ -802,6 +818,7 @@ fn main() {
                         serde_json::json!({"error":"invalid drop position","x":0,"y":0})
                     };
                     let _ = window.emit_to(tauri::EventTarget::webview_window("main"), "custom-art-drop", payload);
+                    }
                 }
             }
             // The window goes, protocol EOF first gives Python a bounded

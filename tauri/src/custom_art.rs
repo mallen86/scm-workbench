@@ -13,6 +13,22 @@ pub(crate) const MAX_PATH_BYTES: usize = 4096;
 const MAX_GRANTS: usize = 8;
 const GRANT_TTL: Duration = Duration::from_secs(60);
 
+/// Wry 0.55 reports Cocoa points on macOS, but physical pixels on other
+/// platforms. DOM hit testing always uses logical viewport coordinates.
+/// Keep this conversion at the native boundary, not in page heuristics.
+pub(crate) fn logical_drop_position(
+    x: f64,
+    y: f64,
+    scale: f64,
+    cocoa_points: bool,
+) -> Option<(f64, f64)> {
+    if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let divisor = if cocoa_points { 1.0 } else { scale };
+    Some((x / divisor, y / divisor))
+}
+
 #[derive(Debug)]
 struct Grant {
     window: String,
@@ -242,6 +258,26 @@ fn safe_basename(value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn drop_coordinates_preserve_cocoa_points_and_scale_physical_pixels() {
+        for scale in [1.0, 1.5, 2.0, 3.0] {
+            // The same drop in the front zone must stay there on Retina.
+            assert_eq!(
+                logical_drop_position(720.0, 540.0, scale, true),
+                Some((720.0, 540.0))
+            );
+            assert_eq!(
+                logical_drop_position(720.0 * scale, 540.0 * scale, scale, false),
+                Some((720.0, 540.0))
+            );
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(logical_drop_position(720.0, 540.0, scale, false), None);
+        }
+        assert_eq!(logical_drop_position(f64::NAN, 540.0, 2.0, true), None);
+        assert_eq!(logical_drop_position(720.0, f64::INFINITY, 2.0, true), None);
+    }
 
     #[test]
     fn grants_are_random_one_use_and_bound_to_main() {

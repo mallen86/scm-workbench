@@ -95,8 +95,20 @@ export function renderCustomArt() {
     zones.append(zone);
   }
   wrap.append(zones, el("p", { class: "small faint custom-art-limits" }, "Front and double-sided: up to 256 images per import, 32 MiB each, 512 MiB total. Card back: exactly one image, up to 32 MiB; replaces the existing back."), status, actions);
+  let highlightedZone = null;
+  const setDropHighlight = target => {
+    if (target === highlightedZone) return;
+    highlightedZone?.classList.remove("drag-over");
+    highlightedZone = target;
+    highlightedZone?.classList.add("drag-over");
+  };
+  const clearDropHighlight = () => {
+    setDropHighlight(null);
+    for (const zone of zones.children) zone.classList.remove("drag-over");
+  };
   const repaint = () => {
     const state = customArtState();
+    if (state.busy) clearDropHighlight();
     wrap.setAttribute("aria-busy", state.busy ? "true" : "false");
     chooseButtons.forEach(button => { button.disabled = state.busy; });
     status.replaceChildren();
@@ -123,12 +135,17 @@ export function renderCustomArt() {
     document.addEventListener(CUSTOM_ART_CHANGED, repaint);
     repaint();
     listenCustomArtDrops(payload => {
-      if (disposed || !wrap.isConnected || customArtState().busy || !Number.isFinite(payload?.x) || !Number.isFinite(payload?.y)) return;
+      if (disposed || !wrap.isConnected || customArtState().busy || payload?.phase === "leave" || !Number.isFinite(payload?.x) || !Number.isFinite(payload?.y)) {
+        clearDropHighlight();
+        return;
+      }
       const target = [...zones.children].find(zone => {
         const rect = zone.getBoundingClientRect();
         return payload.x >= rect.left && payload.x <= rect.right && payload.y >= rect.top && payload.y <= rect.bottom;
       });
-      if (!target) return;
+      if (payload.phase === "over") { setDropHighlight(target || null); return; }
+      clearDropHighlight();
+      if (!target || payload.phase !== undefined) return;
       if (payload.error) { customArtState().error = payload.error; changed(); return; }
       if (typeof payload.token === "string") runImport(target.dataset.destination, () => importCustomArtDrop(target.dataset.destination, payload.token));
     }).then(off => {
@@ -140,6 +157,7 @@ export function renderCustomArt() {
   };
   wrap.__dispose = () => {
     disposed = true;
+    clearDropHighlight();
     document.removeEventListener(CUSTOM_ART_CHANGED, repaint);
     if (unlisten) Promise.resolve(unlisten()).catch(() => {});
   };

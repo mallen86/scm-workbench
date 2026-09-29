@@ -1,4 +1,6 @@
 # Bugs
+- [x] Highlight the targeted Custom image drop zone during native file drags and clear it on leave, drop, busy state, or page disposal.
+- [x] Preserve macOS logical drop coordinates on Retina displays so Custom card-art drops hit the intended image zone.
 - [x] Preserve verified Advanced Upscaler libraries and the installed CUDA profile across bundled source-only updates; require reinstallation only for changed requirements or incompatible/damaged assets or runtime.
 - [x] Retry a failed CUDA inference tile once on a verified CPU-only session when cuDNN is missing, retaining bounded progress and truthful warnings without changing originals on failure.
 - [x] Space the Linux CUDA profile label, selector, and explanation consistently in both Image post-processing modes.

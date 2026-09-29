@@ -100,7 +100,7 @@ try {
 // Render the actual fetch page with a small DOM stand-in. Custom is not a
 // manifest job, must stay selected with recent games, and keeps shared cleanup.
 class Element {
-  constructor(tag,attrs={},...kids) {this.tag=tag;this.attrs=attrs;this.children=[];this.dataset={destination:attrs['data-destination']};this.handlers={};this.classList={add(){},remove(){}};this.open=false;Object.assign(this,attrs);this.append(...kids);}
+  constructor(tag,attrs={},...kids) {this.tag=tag;this.attrs=attrs;this.children=[];this.dataset={destination:attrs['data-destination']};this.handlers={};this.classes=new Set();this.classList={add:value=>this.classes.add(value),remove:value=>this.classes.delete(value),contains:value=>this.classes.has(value)};this.open=false;Object.assign(this,attrs);this.append(...kids);}
   append(...kids) {this.children.push(...kids.flat(Infinity).filter(v=>v!==null&&v!==undefined&&v!==false));}
   addEventListener(name,handler) {this.handlers[name]=handler;}
   setAttribute(key,value) {this.attrs[key]=value;}
@@ -146,11 +146,11 @@ assert.match(css,/\.custom-art-zones\s*\{[^}]*gap: 16px/,'image areas must remai
 for(const marker of ['grid-template-columns: repeat(2, minmax(0, 1fr))','grid-template-rows: repeat(2, minmax(0, 1fr))','[data-destination="front"] { grid-column: 1; grid-row: 1 / 3; }','[data-destination="double_sided"] { grid-column: 2; grid-row: 1; }','[data-destination="back"] { grid-column: 2; grid-row: 2; }','grid-template-columns: 1fr; grid-template-rows: none;']) assert.ok(css.includes(marker),`Missing responsive zone layout: ${marker}`);
 assert.ok(source("ui/js/custom-art-transport.js").includes('input.multiple = destination !== "back";'));
 assert.ok(source("ui/js/custom-art-transport.js").includes('const destinations = new Set(["front", "double_sided", "back"])'));
-let selections=[], confirmations=0;
+let selections=[], confirmations=0, nativeDropHandler=null, nativeImports=[];
 S.info.scm.back_images=[{name:"old.png"}];
 const artDeps={S,el,ico:()=>el("i"),toast:()=>{},confirmModal:async()=>{confirmations++;return confirmations>1;},go:()=>{},
   chooseCustomArt:async dest=>{selections.push(dest);return null;},hasNativeCustomArt:()=>false,
-  importCustomArtDrop:()=>{},importCustomArtFiles:()=>{},listenCustomArtDrops:async()=>()=>{},openCustomArtFolder:async()=>{}};
+  importCustomArtDrop:async(destination,token)=>{nativeImports.push([destination,token]);return {imported:0,names:[],failed:[]};},importCustomArtFiles:()=>{},listenCustomArtDrops:async handler=>{nativeDropHandler=handler;return ()=>{};},openCustomArtFolder:async()=>{}};
 const artSource=ui.replace(/import\s+[^;]+?\s+from\s+["'][^"']+["'];/g,"").replace(/export (const|function) /g,"$1 ");
 const art=new Function(...Object.keys(artDeps),`${artSource}; return {renderCustomArt};`)(...Object.values(artDeps));
 const panel=art.renderCustomArt();
@@ -179,7 +179,44 @@ assert.match(text(status),/Files needing attention/);
 assert.match(text(status),/broken.png: not an image/,'failed filenames remain actionable');
 assert.doesNotMatch(text(status),/successful-one|successful-two/);
 S.customArt.busy=true;listeners.get("workbench:custom-art-changed")();assert.equal(actions.hidden,true);
+S.customArt.busy=false;S.info.scm.back_images=[];
+panel.isConnected=true;
+zones.forEach((zone,index)=>zone.getBoundingClientRect=()=>({left:600+index*300,right:880+index*300,top:400,bottom:700}));
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+for (let index=0;index<3;index++) {
+  nativeDropHandler({phase:"over",x:720+index*300,y:540,token:"not-authorized"});
+  assert.deepEqual(zones.map(zone=>zone.classList.contains("drag-over")),zones.map((_,i)=>i===index));
+  assert.equal(nativeImports.length,0,"hover never authorizes an import");
+}
+let highlightMutations=0;
+const originalAdd=zones[2].classList.add,originalRemove=zones[2].classList.remove;
+zones[2].classList.add=value=>{highlightMutations++;originalAdd(value);};
+zones[2].classList.remove=value=>{highlightMutations++;originalRemove(value);};
+for (let i=0;i<100;i++) nativeDropHandler({phase:"over",x:1320,y:540});
+assert.equal(highlightMutations,0,"repeated hover must not clear/reapply the class and restart painting");
+assert.ok(zones[2].classList.contains("drag-over"));
+assert.ok(css.includes('.custom-art-zone.drag-over .custom-art-drop { transition: none; }'),"drag feedback must paint immediately without animation");
+nativeDropHandler({phase:"leave"});
+assert.ok(zones.every(zone=>!zone.classList.contains("drag-over")));
+nativeDropHandler({phase:"over",x:720,y:540});
+nativeDropHandler({phase:"over",x:360,y:270});
+assert.ok(zones.every(zone=>!zone.classList.contains("drag-over")),"outside clears target");
+S.customArt.busy=true;
+nativeDropHandler({phase:"over",x:720,y:540});
+assert.ok(zones.every(zone=>!zone.classList.contains("drag-over")),"busy zones must not highlight");
+S.customArt.busy=false;
+for (let index=0;index<3;index++) {
+  nativeDropHandler({phase:"over",x:720+index*300,y:540});
+  nativeDropHandler({x:720+index*300,y:540,token:`grant-${index}`});
+  await tick();
+  assert.ok(zones.every(zone=>!zone.classList.contains("drag-over")),"drop clears highlight");
+}
+assert.deepEqual(nativeImports,[["front","grant-0"],["double_sided","grant-1"],["back","grant-2"]],"logical macOS Retina drop coordinates must select the intended zone");
+nativeDropHandler({x:360,y:270,token:"wrong-scale"});await tick();
+assert.equal(nativeImports.length,3,"a drop outside the zones must not import");
 panel.__dispose();
+nativeDropHandler({x:720,y:540,token:"disposed"});await tick();
+assert.equal(nativeImports.length,3,"disposed page must not import dropped files");
 console.log("ok: Custom source keeps cleanup, native grants never fall back, browser uploads are bounded, and partial results remain visible");
 ''', text=True, capture_output=True, timeout=30,
     )

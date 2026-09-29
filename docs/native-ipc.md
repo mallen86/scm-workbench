@@ -129,6 +129,8 @@ parameter contracts below.
 | `POST /api/custom-art/open-folder` | `custom_art.open_folder` | fixed SCM image folder OS action |
 | `POST /api/custom-art/import` (raw bytes) | dedicated Rust drop/picker commands with private `custom_art.import_selected` / `custom_art.import_poll` | bounded image copies |
 
+Custom art native drops use one-use shell grants; file paths are never supplied by page code. The `custom-art-drop` notification carries logical viewport coordinates for DOM zone hit testing. With the pinned Wry 0.55 backend, macOS already supplies Cocoa points (including on Retina displays), while Windows/Linux positions need division by the window scale factor. Do not divide macOS positions again or guess a destination from physical pixels. Native drag enter/over notifications use `{phase:"over",x,y}` and leave uses `{phase:"leave"}` on the same event; these carry no paths or grants and only update the drop-zone highlight. Only a final drop notification with a one-use token can start an import. Highlighting clears outside the zones, on drop/leave, while importing, and when the page is disposed.
+
 Those HTTP routes remain served as standalone-browser compatibility endpoints;
 all `/api/file` requests are rejected in IPC mode before action, metadata, or
 raw-file handling. The packaged UI has native callers for every file surface;

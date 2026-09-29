@@ -1675,6 +1675,7 @@ cursor: pointer;
 .custom-art-drop > .ic svg { width: 30px; height: 30px; }
 .custom-art-drop strong { color: var(--text); }
 .custom-art-drop:hover:not(:disabled), .custom-art-zone.drag-over .custom-art-drop { border-color: var(--accent); background: var(--accent-soft); }
+.custom-art-zone.drag-over .custom-art-drop { transition: none; }
 .custom-art-drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .custom-art-drop:disabled { opacity: .6; cursor: wait; }
 .custom-art-folder { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
