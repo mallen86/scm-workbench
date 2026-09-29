@@ -1,4 +1,7 @@
 # Bugs
+- [x] Preserve verified Advanced Upscaler libraries and the installed CUDA profile across bundled source-only updates; require reinstallation only for changed requirements or incompatible/damaged assets or runtime.
+- [x] Retry a failed CUDA inference tile once on a verified CPU-only session when cuDNN is missing, retaining bounded progress and truthful warnings without changing originals on failure.
+- [x] Space the Linux CUDA profile label, selector, and explanation consistently in both Image post-processing modes.
 - [x] Support automatic detection and manual CUDA 12/CUDA 13 installation profiles for the Linux Advanced Upscaler without switching existing installations on read; retain verified CPU fallback and transactional install rollback.
 - [x] Remove Workbench CPU-time and wall/idle time limits for the fixed Advanced Upscaler while using all process-available CPU cores; retain cancellation, custom/install time limits, and other safety bounds.
 - [x] Keep automatic Advanced Upscaler CPU fallback visible in both modes, detect silent GPU initialization fallback, and show bounded tile progress without advancing completed-image counts.

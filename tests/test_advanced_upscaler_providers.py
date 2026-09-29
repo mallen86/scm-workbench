@@ -240,6 +240,137 @@ class AdvancedUpscalerProviderTests(unittest.TestCase):
             namespace["process_image"](Path("staged.png"), {"model_path": "model.onnx"})
         self.assertNotIn("saved", events)
 
+    def test_runtime_inference_failure_retries_once_on_cpu_and_reuses_session(self):
+        # Exercise the shipped callback, not a reimplementation: GPU session
+        # construction succeeds, then ORT fails lazily at session.run.
+        source = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        functions = [node for node in source.body if isinstance(node, ast.FunctionDef)]
+        events, sessions, failures = [], [], {1}
+        missing = ("ONNXRuntimeError: Conv /conv_first/Conv RequireCudnnHandle: "
+                   "cuDNN is unavailable or disabled: dlopen failed for libcudnn.so: "
+                   "libcudnn.so: cannot open shared object file: No such file or directory")
+
+        class Array:
+            shape = (3, 512, 512)
+            def __getitem__(self, key): return self
+            def __truediv__(self, other): return self
+            def __mul__(self, other): return self
+            def __add__(self, other): return self
+            def transpose(self, *args): return self
+
+        class Image:
+            width, height = 128, 128
+            size = (128, 128)
+            format = "PNG"
+            info = {}
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def load(self): pass
+            def getexif(self): return {}
+            def getbands(self): return ("R", "G", "B")
+            def convert(self, mode): return self
+            def crop(self, box): return self
+            def paste(self, *args): pass
+            def save(self, *args, **kwargs): events.append("saved")
+
+        class Session:
+            def __init__(self, providers):
+                self.providers, self.calls = providers, 0
+                sessions.append(self)
+            def get_providers(self): return self.providers
+            def get_inputs(self): return [SimpleNamespace(name="input")]
+            def get_outputs(self): return [SimpleNamespace(name="output")]
+            def run(self, *_args):
+                self.calls += 1
+                events.append(("run", self.providers[0], self.calls))
+                if self.providers[0] == "CUDAExecutionProvider" and self.calls in failures:
+                    raise RuntimeError(missing if self.calls == 1 else "unrelated GPU failure")
+                if self.providers[0] == "CPUExecutionProvider" and cpu_failure[0]:
+                    raise RuntimeError("CPU inference failed")
+                return [Array()]
+
+        cpu_failure, fail_cpu_setup = [False], [None]
+        class Options:
+            pass
+        def inference_session(path, *, sess_options, providers):
+            if providers == ["CPUExecutionProvider"] and fail_cpu_setup[0] == "constructor":
+                raise RuntimeError("CPU session construction failed")
+            session = Session(providers)
+            if providers == ["CPUExecutionProvider"] and fail_cpu_setup[0] == "inputs":
+                session.get_inputs = lambda: (_ for _ in ()).throw(RuntimeError("CPU inputs failed"))
+            if providers == ["CPUExecutionProvider"] and fail_cpu_setup[0] == "providers":
+                session.get_providers = lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            return session
+        ort = SimpleNamespace(SessionOptions=Options, InferenceSession=inference_session,
+                              get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+        image = Image()
+        namespace = {"Path": Path, "_session": None, "_input_name": None,
+                     "_provider": None, "_fallback": False, "ACTIVITY_PREFIX": "WB_ADVANCED_UPSCALER_ACTIVITY ",
+                     "SCALE": 4, "TILE": 128, "PAD": 24, "DPI": (1200, 1200),
+                     "json": json, "os": SimpleNamespace(process_cpu_count=lambda: 2),
+                     "sys": SimpleNamespace(platform="linux"), "ort": ort,
+                     "print": lambda line, **kwargs: events.append(json.loads(line.split(" ", 1)[1])),
+                     "Image": SimpleNamespace(open=lambda path: image, new=lambda *args: image,
+                                              fromarray=lambda *args: image),
+                     "ImageOps": SimpleNamespace(exif_transpose=lambda value: value),
+                     "np": SimpleNamespace(asarray=lambda *args, **kwargs: Array(), float32=float,
+                                           ascontiguousarray=lambda value: value,
+                                           pad=lambda value, *args, **kwargs: value,
+                                           clip=lambda value, *args: value, uint8=lambda value: value)}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), "exec"), namespace)
+        def process(index=1, total=1):
+            namespace["process_image"](Path("staged.png"), {"model_path": "model.onnx",
+                "index": index, "total": total, "name": f"{index}.png", "role": "front"})
+        def frames(): return [event for event in events if isinstance(event, dict)]
+
+        process(1, 2)
+        self.assertEqual([s.providers for s in sessions],
+                         [["CUDAExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]])
+        self.assertEqual([(s.calls) for s in sessions], [1, 1])
+        self.assertEqual([f["phase"] for f in frames()], ["initializing", "tile", "fallback", "tile"])
+        self.assertEqual(frames()[2]["reason"], "missing_cudnn")
+        self.assertEqual(frames()[2]["tile"], 0)
+        self.assertEqual(events[-1], "saved")
+        self.assertEqual(namespace["_provider"], "CPUExecutionProvider")
+        process(2, 2)
+        self.assertEqual(len(sessions), 2)  # remaining images reuse the CPU-only session
+        self.assertEqual(sessions[1].calls, 2)
+        self.assertEqual([f["phase"] for f in frames() if f["index"] == 2],
+                         ["initializing", "tile", "tile"])
+        self.assertEqual(events.count("saved"), 2)
+
+        # A later tile failure must refer to the last *reported* checkpoint.
+        events.clear(); sessions.clear(); failures.clear(); failures.add(5)
+        namespace["_session"] = None; namespace["_provider"] = None
+        image.width = 128 * 96; image.size = (image.width, image.height)
+        process()
+        fallback = [f for f in frames() if f["phase"] == "fallback"]
+        self.assertEqual([(f["tile"], f.get("reason")) for f in fallback], [(3, None)])
+        self.assertEqual([s.calls for s in sessions], [5, 92])
+        self.assertLessEqual(len(frames()), 36)
+        self.assertEqual(events[-1], "saved")
+
+        # An unsuccessful CPU retry is terminal; no new session or save.
+        events.clear(); sessions.clear(); failures.clear(); failures.add(1)
+        namespace["_session"] = None; namespace["_provider"] = None
+        image.width = 128; image.size = (128, 128)
+        cpu_failure[0] = True
+        with self.assertRaisesRegex(RuntimeError, "CPU inference failed"):
+            process()
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual([s.calls for s in sessions], [1, 1])
+        self.assertNotIn("saved", events)
+        cpu_failure[0] = False
+
+        # CPU construction/input validation failure must not claim CPU work.
+        for failure in ("constructor", "inputs", "providers"):
+            events.clear(); sessions.clear(); fail_cpu_setup[0] = failure
+            namespace["_session"] = None; namespace["_provider"] = None
+            with self.subTest(failure=failure), self.assertRaisesRegex((RuntimeError, ValueError), "CPU"):
+                process()
+            self.assertNotIn("fallback", [f["phase"] for f in frames()])
+            self.assertNotIn("saved", events)
+
     def test_cpu_failure_is_not_silenced(self):
         namespace, _ = _namespace("linux", ["CPUExecutionProvider"])
         with mock.patch.dict(namespace, {"ort": SimpleNamespace(

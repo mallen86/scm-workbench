@@ -639,6 +639,17 @@ if (!toasts.some(([kind, text]) => kind === "ok" && text.includes("Configure its
             'syncJobNotices(S.jobs)' not in page or
             'if (uiMode() === "simple") panel.append(' not in page):
         return fail("Simple and Advanced processing status must share the job notice progress view")
+    # The same install selector is rendered in both modes. Ensure its label,
+    # select and helper have explicit vertical rhythm instead of touching.
+    cuda_rule = re.search(r'\.pp-cuda-install\s*\{([^}]+)\}', css)
+    if (page.count('cudaInstallControl(),') != 2 or not cuda_rule or
+            not re.search(r'display:\s*grid', cuda_rule.group(1)) or
+            not re.search(r'gap:\s*(?:[6-9]|1[0-9])px', cuda_rule.group(1)) or
+            not re.search(r'margin:\s*(?:1[0-9]|2[0-9])px\s+0', cuda_rule.group(1)) or
+            '.pp-cuda-install, .pp-editor .pp-cuda-install {' not in css or
+            '.pp-cuda-install[hidden] { display: none; }' not in css or
+            '.pp-cuda-profile { width: 100%; min-width: 0; }' not in css):
+        return fail("Simple and Advanced CUDA install labels/selectors/helpers need responsive spacing")
     activity_script = r'''import fs from "node:fs";
 const url = `data:text/javascript;base64,${Buffer.from(fs.readFileSync(process.argv[1])).toString("base64")}`;
 const {jobNoticeProgress: view} = await import(url);
@@ -663,6 +674,22 @@ if (!view(job).text.includes("CUDA 13.x and cuDNN 9") || view(job).text.includes
 job.postprocess_cpu_warning = "cuda";
 if (!view(job).text.includes("CUDA 12.x and cuDNN 9"))
   throw new Error("legacy CUDA history lost its CUDA 12 meaning");
+job.postprocess_cpu_warning = "cuda13";
+job.postprocess_cpu_reason = "missing_cudnn";
+job.progress.current = 0;
+if (!view(job).text.includes("cuDNN 9 (libcudnn.so) is missing") ||
+    !view(job).text.includes("using CPU instead of CUDA 13") ||
+    view(job).text.includes("CUDA 12.x"))
+  throw new Error("missing cuDNN at lazy CUDA inference was not reported in the running notice");
+job.status = "ok";
+if (!view(job).text.includes("cuDNN 9 (libcudnn.so) missing; CPU fallback used"))
+  throw new Error("missing cuDNN was lost on successful terminal notice");
+job.status = "fail";
+if (!view(job).text.includes("cuDNN 9 (libcudnn.so) missing; CPU fallback attempted"))
+  throw new Error("failed CPU retry was mislabeled successful or lost missing cuDNN reason");
+job.postprocess_cpu_reason = "unrelated";
+if (view(job).text.includes("libcudnn.so"))
+  throw new Error("unrelated failure was mislabeled missing cuDNN");
 '''
     result = subprocess.run([node, "--input-type=module", "-e", activity_script,
                              str(UI / "job-notice-progress.js")], cwd=ROOT,
@@ -741,7 +768,8 @@ for (const candidateMode of ["simple", "advanced"]) {
             'state.cudaChoice === "auto" ? detected.recommended' not in page or
             'Current installed profile:' not in page or
             'cuda_profile: cudaProfile' not in page or
-            'Matching system CUDA, cuDNN 9' not in page):
+            'Matching system CUDA, cuDNN 9' not in page or
+            'running.postprocess_cpu_reason === "missing_cudnn"' not in page):
         return fail("both modes must offer backend-driven CUDA profiles with an explicit resolved switch")
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0

@@ -3712,8 +3712,11 @@ def _record_advanced_activity(job: dict, text: str) -> None:
         return
     try:
         frame = json.loads(text.removeprefix(_ADVANCED_ACTIVITY_PREFIX))
-        if not isinstance(frame, dict) or set(frame) != {
-                "index", "total", "name", "role", "phase", "provider", "tile", "tiles"}:
+        required = {"index", "total", "name", "role", "phase", "provider", "tile", "tiles"}
+        if not isinstance(frame, dict) or set(frame) not in (required, required | {"reason"}):
+            return
+        reason = frame.get("reason")
+        if "reason" in frame and (frame.get("phase") != "fallback" or reason != "missing_cudnn"):
             return
         index, total, tile, tiles = (frame[key] for key in ("index", "total", "tile", "tiles"))
         if any(type(value) is not int for value in (index, total, tile, tiles)):
@@ -3742,7 +3745,8 @@ def _record_advanced_activity(job: dict, text: str) -> None:
             if (provider != "CPUExecutionProvider" or previous is None or
                     previous["phase"] == "fallback" or
                     (previous["provider"] == "CPUExecutionProvider" and not sys.platform.startswith("linux")) or
-                    (tiles != previous["tiles"] or tile != previous["tile"])):
+                    (tiles != previous["tiles"] or tile != previous["tile"]) or
+                    (reason is not None and previous["provider"] != "CUDAExecutionProvider")):
                 return
         elif phase == "tile":
             if (previous is None or not 1 <= tiles <= 1_000_000 or
@@ -3758,6 +3762,8 @@ def _record_advanced_activity(job: dict, text: str) -> None:
         job["progress"] = {**progress, "activity": frame}
         if phase == "fallback":
             job["postprocess_cpu_warning"] = ("cuda13" if job.get("postprocess_cuda_profile") == "cuda13" else "cuda") if sys.platform.startswith("linux") else "gpu"
+            if reason == "missing_cudnn" and gpu == "CUDAExecutionProvider":
+                job["postprocess_cpu_reason"] = reason
     except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError):
         return
 
@@ -3871,7 +3877,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning", "postprocess_cuda_profile")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning", "postprocess_cpu_reason", "postprocess_cuda_profile")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -4058,6 +4064,8 @@ def list_jobs() -> dict:
             row["postprocess_outcome"] = j["postprocess_outcome"]
         if j.get("postprocess_cpu_warning"):
             row["postprocess_cpu_warning"] = j["postprocess_cpu_warning"]
+        if j.get("postprocess_cpu_reason") == "missing_cudnn":
+            row["postprocess_cpu_reason"] = "missing_cudnn"
         if j.get("postprocess_cuda_profile") in advanced_model.CUDA_PROFILES:
             row["postprocess_cuda_profile"] = j["postprocess_cuda_profile"]
         if j.get("progress"):
@@ -11313,6 +11321,13 @@ def _existing_advanced_requirements(store: postprocessing.ProcessorStore,
     return advanced_model.REQUIREMENTS
 
 
+def _verify_advanced_environment_for_reuse(environment: dict) -> None:
+    _verify_dependency_environment(environment)
+    model = Path(environment["path"]) / "site-packages" / advanced_model.MODEL_NAME
+    if not advanced_model.verify_model(model):
+        raise postprocessing.IntegrityError("Advanced Upscaler model is missing or changed")
+
+
 def _postprocessor_store(*, scm_root: Optional[Path] = None,
                          interpreter: Optional[Path] = None) -> postprocessing.ProcessorStore:
     scm = Path(scm_root) if scm_root is not None else effective_dirs(load_settings())[0]
@@ -11339,6 +11354,7 @@ def _postprocessor_store(*, scm_root: Optional[Path] = None,
     store.provision_bundled(
         BUILTIN_ADVANCED_UPSCALER_ID, "Advanced Upscaler (AI 4×)", advanced_source,
         interpreter=python, requirements=_existing_advanced_requirements(store, advanced_source), optional_model=True,
+        environment_verifier=_verify_advanced_environment_for_reuse,
     )
     store.cleanup()
     return store

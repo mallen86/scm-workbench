@@ -19,7 +19,9 @@ export function jobNoticeProgress(job, status = job?.status) {
         ["initializing", "fallback", "tile"].includes(activity.phase) &&
         Number.isSafeInteger(activity.tile) && Number.isSafeInteger(activity.tiles) &&
         activity.tile >= 0 && activity.tile <= activity.tiles && activity.tiles <= 1000000;
-      const warning = job.postprocess_cpu_warning === "cuda" || job.postprocess_cpu_warning === "cuda13"
+      const warning = job.postprocess_cpu_reason === "missing_cudnn" && ["cuda", "cuda13"].includes(job.postprocess_cpu_warning)
+        ? `CPU fallback: cuDNN 9 (libcudnn.so) is missing; using CPU instead of CUDA ${job.postprocess_cpu_warning === "cuda13" ? "13" : "12"}. AI processing may be slow. `
+        : job.postprocess_cpu_warning === "cuda" || job.postprocess_cpu_warning === "cuda13"
         ? `CPU fallback: NVIDIA CUDA needs CUDA ${job.postprocess_cpu_warning === "cuda13" ? "13" : "12"}.x and cuDNN 9. AI processing may be slow. `
         : job.postprocess_cpu_warning === "gpu" ? "GPU unavailable; using CPU. AI processing may be slow. " : "";
       const detail = current === total ? "Validating results…" : validActivity
@@ -38,15 +40,17 @@ export function jobNoticeProgress(job, status = job?.status) {
       ? stage : "Preparing installer…", fraction: null };
   }
   if (job?.kind === "postprocess_images") {
-    if (status === "ok") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
+    const fallback = job.postprocess_cpu_reason === "missing_cudnn" && ["cuda", "cuda13"].includes(job.postprocess_cpu_warning)
+      ? "cuDNN 9 (libcudnn.so) missing; CPU fallback " : job.postprocess_cpu_warning ? "CPU fallback " : "";
+    if (status === "ok") return { text: (fallback ? fallback + "used. " : "") + (job.postprocess_outcome === "unchanged"
       ? "Processing complete; originals unchanged."
       : job.postprocess_outcome === "committed" ? "Images processed and saved." : "Processing complete."), fraction: null };
     if (job.postprocess_outcome === "needs_attention") return {
       text: "Rollback could not be verified; inspect image folders.", fraction: null,
     };
-    if (status === "killed") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
+    if (status === "killed") return { text: (fallback ? fallback + "attempted. " : "") + (job.postprocess_outcome === "unchanged"
       ? "Stopped; originals unchanged." : "Processing stopped."), fraction: null };
-    if (status === "fail") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
+    if (status === "fail") return { text: (fallback ? fallback + "attempted. " : "") + (job.postprocess_outcome === "unchanged"
       ? "Processing failed; originals unchanged." : "Processing failed; check Job history."), fraction: null };
   }
   if (job?.kind === "postprocess_dependencies") {

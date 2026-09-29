@@ -23,13 +23,43 @@ _fallback = False
 ACTIVITY_PREFIX = "WB_ADVANCED_UPSCALER_ACTIVITY "
 
 
-def _activity(context, phase, provider, tile=0, tiles=0):
+def _activity(context, phase, provider, tile=0, tiles=0, reason=None):
     # Only the fixed built-in emits this bounded status; the runner retains
     # sole ownership of completed-image progress and the callback contract.
     frame = {"index": context["index"], "total": context["total"],
              "name": context["name"], "role": context["role"],
              "phase": phase, "provider": provider, "tile": tile, "tiles": tiles}
+    if reason is not None:
+        frame["reason"] = reason
     print(ACTIVITY_PREFIX + json.dumps(frame, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def _inference_fallback_reason(error, provider):
+    # Never forward ORT's unbounded exception text into the activity protocol.
+    # Identify only the specific lazy CUDA/cuDNN loader failure, not arbitrary
+    # Conv errors or unrelated GPU inference failures.
+    message = str(error)[:4096] if provider == "CUDAExecutionProvider" else ""
+    if ("RequireCudnnHandle" in message and "libcudnn.so" in message and
+            "cannot open shared object file" in message):
+        return "missing_cudnn"
+    return None
+
+
+def _cpu_session(path):
+    # A separate CPU-only session is essential: a CUDA+CPU session can keep
+    # selecting CUDA for every tile, even after its first inference failed.
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = _available_cpus()
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(path, sess_options=options,
+                                   providers=["CPUExecutionProvider"])
+    active = session.get_providers()
+    if not isinstance(active, (tuple, list)) or tuple(active) != ("CPUExecutionProvider",):
+        raise ValueError("advanced upscaler has no CPU-only execution provider")
+    inputs = session.get_inputs()
+    if len(inputs) != 1 or len(session.get_outputs()) != 1:
+        raise ValueError("advanced upscaler CPU model has unexpected inputs or outputs")
+    return session, inputs[0].name
 
 
 def _providers(available, platform: str) -> list[str]:
@@ -101,12 +131,11 @@ def _model(path: str, context: dict | None = None):
             raise ValueError("advanced upscaler has no active execution provider")
         gpu = providers[0] if len(providers) > 1 else None
         if gpu in active:
-            _provider = gpu
+            provider = gpu
+            fallback = False
         elif "CPUExecutionProvider" in active:
-            _provider = "CPUExecutionProvider"
-            _fallback = bool(gpu or sys.platform.startswith("linux"))
-            if _fallback and context is not None:
-                _activity(context, "fallback", _provider)
+            provider = "CPUExecutionProvider"
+            fallback = bool(gpu or sys.platform.startswith("linux"))
         else:
             raise ValueError("advanced upscaler has no usable execution provider")
         inputs = session.get_inputs()
@@ -114,11 +143,15 @@ def _model(path: str, context: dict | None = None):
             raise ValueError("advanced upscaler model has unexpected inputs or outputs")
         _input_name = inputs[0].name
         _session = session
+        _provider = provider
+        _fallback = fallback
+        if fallback and context is not None:
+            _activity(context, "fallback", provider)
     return _session
 
 
 def process_image(image_path: Path, context: dict) -> None:
-    global _provider, _fallback
+    global _session, _input_name, _provider, _fallback
     model_path = context.get("model_path")
     if not isinstance(model_path, str) or not model_path:
         raise ValueError("the Advanced Upscaler model is not installed")
@@ -151,7 +184,21 @@ def process_image(image_path: Path, context: dict) -> None:
                 edge = "reflect" if pixels.shape[0] > 1 and pixels.shape[1] > 1 else "edge"
                 pixels = np.pad(pixels, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode=edge)
             tensor = np.ascontiguousarray(pixels.transpose(2, 0, 1)[None])
-            predicted = session.run(None, {_input_name: tensor})[0]
+            try:
+                predicted = session.run(None, {_input_name: tensor})[0]
+            except Exception as error:
+                if _provider == "CPUExecutionProvider":
+                    raise  # One CPU retry at most; a CPU inference error is terminal.
+                reason = _inference_fallback_reason(error, _provider)
+                # Validate the CPU session and its inputs *before* reporting a
+                # fallback. A failure here leaves the staged job unsuccessful.
+                cpu_session, cpu_input = _cpu_session(model_path)
+                session = _session = cpu_session
+                _input_name = cpu_input
+                _provider = "CPUExecutionProvider"
+                _fallback = True
+                _activity(context, "fallback", _provider, reported, tiles, reason=reason)
+                predicted = session.run(None, {_input_name: tensor})[0]
             # Some ORT builds switch providers after a runtime inference fault.
             active = session.get_providers()
             if (_provider != "CPUExecutionProvider" and

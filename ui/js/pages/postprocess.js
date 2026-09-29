@@ -636,7 +636,9 @@ function attachRunStatus(root) {
     const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
     const panel = el("div", { class: `pp-status ${running.status}` }, el("div", {}, message));
     if (running.status !== "running" && running.postprocess_cpu_warning)
-      panel.append(el("div", { class: "small warn" }, "CPU fallback was used during this run."));
+      panel.append(el("div", { class: "small warn" },
+        running.postprocess_cpu_reason === "missing_cudnn" ? `cuDNN 9 (libcudnn.so) is missing. CPU fallback was ${running.status === "ok" ? "used" : "attempted"} during this run.` :
+        running.status === "ok" ? "CPU fallback was used during this run." : "CPU fallback was attempted during this run."));
     status.replaceChildren(panel);
     if (running.status === "running") {
       const progress = jobNoticeProgress(running);

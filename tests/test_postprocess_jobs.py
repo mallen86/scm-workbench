@@ -157,8 +157,16 @@ class PostprocessJobTests(unittest.TestCase):
             self.assertNotIn("activity", job["progress"])
             send(first)
             self.assertEqual(job["progress"]["current"], 0)
-            send({**first, "phase": "fallback", "provider": "CPUExecutionProvider"})
+            for invalid in ({**first, "reason": "missing_cudnn"},
+                            {**first, "phase": "fallback", "provider": "CPUExecutionProvider", "reason": "other"},
+                            {**first, "phase": "fallback", "provider": "CPUExecutionProvider", "reason": None},
+                            {**first, "phase": "fallback", "provider": "CPUExecutionProvider", "reason": "x" * 5000}):
+                send(invalid)
+                self.assertEqual(job["progress"]["activity"], first)
+                self.assertNotIn("postprocess_cpu_reason", job)
+            send({**first, "phase": "fallback", "provider": "CPUExecutionProvider", "reason": "missing_cudnn"})
             self.assertEqual(job["postprocess_cpu_warning"], "cuda")
+            self.assertEqual(job["postprocess_cpu_reason"], "missing_cudnn")
             send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tiles": 4})
             send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 2, "tiles": 4})
             self.assertEqual(job["progress"]["activity"]["tile"], 2)
@@ -178,11 +186,33 @@ class PostprocessJobTests(unittest.TestCase):
             server._append_job_line(job, "WB_POSTPROCESS_PROGRESS " + json.dumps(
                 {"index": 1, "total": 2, "name": "Card  A.png", "role": "front"}))
             self.assertEqual(job["progress"]["current"], 1)
+            self.assertEqual(job["postprocess_cpu_reason"], "missing_cudnn")
             send(first)  # stale activity for a completed image
             self.assertNotIn("activity", job["progress"])
             job["kind"] = "postprocess_dependencies"
             send({**first, "index": 2, "name": "B.png"})
             self.assertNotIn("activity", job["progress"])
+
+    def test_advanced_reason_requires_cuda_transition_and_legacy_frames_remain_valid(self):
+        base = {"index": 1, "total": 1, "name": "card.png", "role": "front",
+                "phase": "initializing", "provider": "CPUExecutionProvider", "tile": 0, "tiles": 0}
+        job = {"kind": "postprocess_images", "postprocess_builtin_activity": True,
+               "postprocess_cuda_profile": "cuda13", "image_total": 1,
+               "postprocess_entries": [{"name": "card.png", "role": "front"}],
+               "progress": {"current": 0, "total": 1}, "log_lines": [], "subs": []}
+        def send(frame):
+            server._append_job_line(job, server._ADVANCED_ACTIVITY_PREFIX + json.dumps(frame))
+        with mock.patch.object(server.sys, "platform", "linux"):
+            send(base)
+            send({**base, "phase": "fallback", "reason": "missing_cudnn"})
+            self.assertNotIn("postprocess_cpu_warning", job)
+            send({**base, "phase": "fallback"})  # legacy CPU-only fallback
+            self.assertEqual(job["postprocess_cpu_warning"], "cuda13")
+            self.assertNotIn("postprocess_cpu_reason", job)
+            send({**base, "phase": "tile", "tiles": 1, "reason": "missing_cudnn"})
+            self.assertEqual(job["progress"]["activity"]["phase"], "fallback")
+            send({**base, "phase": "tile", "tiles": 1})
+            self.assertEqual(job["progress"]["activity"]["phase"], "tile")
 
     def test_unicode_and_spaced_filenames_keep_image_progress_sequential(self):
         names = ("01-before.png", "02-A\u00a0B-\U0001f0a1.png",
@@ -776,7 +806,7 @@ class PostprocessJobTests(unittest.TestCase):
         image.write_bytes(PNG)
         frame = json.dumps({"index": 1, "total": 1, "name": "card.png", "role": "front",
                             "phase": "fallback", "provider": "CPUExecutionProvider",
-                            "tile": 0, "tiles": 0})
+                            "tile": 0, "tiles": 0, "reason": "missing_cudnn"})
         item = self.save_and_trust(
             "def process_image(image_path, context):\n"
             f"    print({(server._ADVANCED_ACTIVITY_PREFIX + frame)!r}, flush=True)\n"
@@ -789,6 +819,7 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(job["postprocess_outcome"], "unchanged")
         self.assertEqual(image.read_bytes(), PNG)
         self.assertNotIn("postprocess_cpu_warning", job)
+        self.assertNotIn("postprocess_cpu_reason", job)
         self.assertEqual(job["progress"]["current"], 0)
 
     def test_invalid_result_never_replaces_original(self):

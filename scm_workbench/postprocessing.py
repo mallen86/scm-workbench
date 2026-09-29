@@ -1419,14 +1419,58 @@ class ProcessorStore:
             raise IntegrityError("invalid processor metadata")
         return value
 
+    def _reusable_bundled_installation(self, metadata: dict, requirements: Sequence[str],
+                                      interpreter: str | Path,
+                                      verifier: Callable[[dict], None] | None) -> dict | None:
+        """Verify an opted-in installation before transferring app-owned source trust."""
+        revision = metadata.get("active_revision")
+        if (verifier is None or not requirements or not metadata.get("optional_model") or
+                not metadata.get("bundled") or metadata.get("trusted") != revision or
+                metadata.get("installed_revision") != revision or
+                not metadata.get("installed_environment") or not metadata.get("lock_hash") or
+                not metadata.get("installed_tree_digest") or
+                metadata.get("environment") != metadata.get("installed_environment") or
+                metadata.get("trusted_tree_digest") != metadata.get("installed_tree_digest")):
+            return None
+        try:
+            current = self.get(metadata["id"], include_source=False)
+            if tuple(current["requirements"]) != tuple(requirements):
+                return None
+            # Keep the existing ABI-proven legacy migration path. Normal app
+            # replacement already has an unchanged compatibility fingerprint.
+            status = self.status(metadata["id"], interpreter=interpreter,
+                                 environment_verifier=verifier)
+            if not status["processor"]["ready_to_run"]:
+                return None
+            approved = self._metadata(metadata["id"])
+            if (approved.get("active_revision") != revision or
+                    approved.get("installed_revision") != revision or
+                    approved.get("trusted") != revision or
+                    approved.get("installed_environment") != status["environment"]["fingerprint"] or
+                    approved.get("environment") != status["environment"]["fingerprint"] or
+                    approved.get("installed_tree_digest") != status["environment"]["tree_digest"] or
+                    approved.get("trusted_tree_digest") != status["environment"]["tree_digest"] or
+                    approved.get("lock_hash") != metadata.get("lock_hash")):
+                return None
+            # A marker alone is not verification: validate the actual immutable
+            # library tree and the currently shipped model, without importing it.
+            verifier(status["environment"])
+        except (OSError, IntegrityError, NotFoundError, ValidationError):
+            return None
+        if self._metadata(metadata["id"]) != approved:
+            raise ConflictError("bundled installation changed during verification")
+        return approved
+
     def provision_bundled(self, processor_id: str, name: str, source: str, *,
                           interpreter: str | Path = sys.executable,
-                          requirements: Sequence[str] = (), optional_model: bool = False) -> dict:
+                          requirements: Sequence[str] = (), optional_model: bool = False,
+                          environment_verifier: Callable[[dict], None] | None = None) -> dict:
         """Publish app-owned source without installing any optional assets.
 
         Only the caller's fixed, shipped optional model may declare libraries.
-        A compatible verified installation survives app restarts; a changed
-        shipped revision needs a new install before it can run again.
+        A compatible verified installation survives app restarts and source-only
+        updates. Library/model verification is required before transferring the
+        installation to a new app-owned revision; custom source trust is separate.
         """
         if requirements and not optional_model:
             raise ValidationError("bundled runtime processors cannot request libraries")
@@ -1439,6 +1483,7 @@ class ProcessorStore:
         if not optional_model and not environment["ready"]:
             raise IntegrityError("bundled processor runtime is not ready")
         repair_metadata = None
+        reusable_installation = None
         exists = os.path.lexists(directory)
         if exists:
             try:
@@ -1472,6 +1517,9 @@ class ProcessorStore:
                         # discarding a previously verified environment pointer;
                         # readiness is still rechecked against the tree/model.
                         repair_metadata = metadata
+                if optional_model and repair_metadata is None:
+                    reusable_installation = self._reusable_bundled_installation(
+                        metadata, req, interpreter, environment_verifier)
         else:
             if len(self._registry_entries()) >= PROCESSOR_STORAGE_MAX_COUNT:
                 raise ValidationError("processor storage limit reached")
@@ -1496,7 +1544,7 @@ class ProcessorStore:
             "contract": self.contract,
             "source_bytes": len(raw),
         })
-        _atomic_json(directory / "metadata.json", repair_metadata or {
+        replacement = {
             "id": processor_id,
             "name": name,
             "active_revision": revision,
@@ -1506,7 +1554,15 @@ class ProcessorStore:
             "bundled": True,
             **({"optional_model": True} if optional_model else {}),
             "updated": time.time(),
-        })
+        }
+        if reusable_installation is not None:
+            replacement.update({
+                "installed_revision": revision,
+                **{key: reusable_installation[key] for key in (
+                    "installed_environment", "installed_tree_digest", "lock_hash",
+                    "environment", "trusted_tree_digest")},
+            })
+        _atomic_json(directory / "metadata.json", repair_metadata or replacement)
         # Built-in revisions cannot be reverted or edited. Prune superseded
         # app versions only after the replacement metadata is durable.
         for old_path in _bounded_children(revisions, REVISIONS_MAX_COUNT * 2,

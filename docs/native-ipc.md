@@ -498,7 +498,15 @@ baseline or losing a user save.
   live rows include `ended` (Unix seconds) so sidebar notices expire from
   actual completion even after a window was inactive. Persisted history rows
   retain the same metadata and `ended` for newly completed jobs (older rows
-  may not have it).
+  may not have it). Fixed Advanced Upscaler jobs may include a bounded
+  `progress.activity` checkpoint (`index`, `total`, staged `name`/`role`,
+  `phase`, `provider`, `tile`, `tiles`), while completed-image progress remains
+  separate. Only a CPU `fallback` checkpoint following a CUDA provider may
+  add the exact `reason:"missing_cudnn"`; arbitrary exception text is not a
+  status field. The optional job-level `postprocess_cpu_reason` retains this
+  fixed enum through later checkpoints, terminal notices, and persisted
+  history; older frames/jobs without a reason remain valid. Both native and
+  browser job views share these validated shapes.
 * `jobs.start`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). Success is `{"ok":true,"job":{"id":"...","title":"...",
   "status":"running","cmd":"...","warnings":[...]}}`. Rejected form
