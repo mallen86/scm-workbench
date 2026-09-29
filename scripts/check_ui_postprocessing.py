@@ -304,6 +304,9 @@ if (!progress.label.includes("10 min elapsed") || !progress.label.includes("Down
 const failure = installState.optionalInstallStatus(processor, job("fail"), { id: "install-1", message: "Model hash mismatch" }, null);
 if (failure.tone !== "fail" || !failure.label.includes("Model hash mismatch"))
   fail("a terminal installation failure did not retain its cause");
+if (!installState.optionalInstallStatus({ ...processor, ready_to_run: true }, job("fail"), null, null).label.includes("Previous installed profile remains ready") ||
+    !installState.optionalInstallStatus({ ...processor, ready_to_run: true }, job("killed"), null, null).label.includes("Previous installed profile remains ready"))
+  fail("a failed/cancelled CUDA switch hid the old ready installation");
 const noJob = installState.optionalInstallStatus(processor, null, null,
   { processorId: id, at: Date.now(), message: "SCM repo is not ready" });
 if (noJob.tone !== "fail" || !noJob.label.includes("did not start") || !noJob.label.includes("SCM repo"))
@@ -654,12 +657,92 @@ if (result.fraction !== 0.5 || !result.text.includes("Initializing Second.png on
   throw new Error("second image initialization lost monotonic image progress");
 job.progress.activity = {index:1,total:2,name:"stale",phase:"tile",provider:"CPUExecutionProvider",tile:12,tiles:12};
 if (view(job).text.includes("stale")) throw new Error("stale activity displayed");
+job.postprocess_cpu_warning = "cuda13";
+if (!view(job).text.includes("CUDA 13.x and cuDNN 9") || view(job).text.includes("CUDA 12.x"))
+  throw new Error("CUDA 13 CPU fallback used CUDA 12 requirements");
+job.postprocess_cpu_warning = "cuda";
+if (!view(job).text.includes("CUDA 12.x and cuDNN 9"))
+  throw new Error("legacy CUDA history lost its CUDA 12 meaning");
 '''
     result = subprocess.run([node, "--input-type=module", "-e", activity_script,
                              str(UI / "job-notice-progress.js")], cwd=ROOT,
                             text=True, capture_output=True)
     if result.returncode:
         return fail("shared CPU/tile progress contract failed: " + result.stderr[-1200:])
+    profile_confirmation_script = r'''import fs from "node:fs";
+const encode = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
+let source = fs.readFileSync(process.argv[1], "utf8");
+const confirmations = [], launches = [];
+let mode = "simple", allow = false;
+const S = {jobs: []};
+globalThis.document = {querySelector: () => null, querySelectorAll: () => []};
+globalThis.__profileTest = {S, confirmations, launches, getMode: () => mode, confirm: async value => {
+  confirmations.push(value); return allow;
+}, run: async (_kind, _button, options) => { launches.push(options.args); return {id: "fixture"}; }};
+const modules = {
+  "../core.js": `const x=globalThis.__profileTest; export const PAGES={}; export const S=x.S;
+    export const $=()=>null; export const confirmModal=x.confirm; export const el=()=>({});
+    export const ico=()=>""; export const pageHead=()=>{}; export const toast=()=>{};`,
+  "../forms.js": `export const afterFormChange=()=>{}; export const COMMAND_PREVIEW_EVENT="preview";
+    export const doRun=(...args)=>globalThis.__profileTest.run(...args);
+    export const formArgs=()=>null; export const formCard=()=>{};`,
+  "../jobs.js": `export const jobs={};`,
+  "../nav.js": `export const go=()=>{}; export const uiMode=()=>globalThis.__profileTest.getMode();`,
+  "../python-highlight.js": `export const renderPythonHighlight=()=>{};`,
+  "../postprocess-transport.js": `export const postprocessors={};`,
+  "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
+  "./utilities.js": `export const watchJobDone=()=>{};`,
+  "../job-notices.js": `export const syncJobNotices=()=>{};`,
+  "../job-notice-progress.js": `export const jobNoticeProgress=()=>({});`,
+};
+for (const [path, stub] of Object.entries(modules)) {
+  const needle=`from "${path}"`;
+  if (!source.includes(needle)) throw new Error(`missing import ${path}`);
+  source=source.replace(needle, `from "${encode(stub)}"`);
+}
+const {state, installLibraries} = await import(encode(source+"\nexport {state, installLibraries};"));
+const id="629deb7c0e4b48968845537a28354d85";
+const installed={id,revision:"a".repeat(64),optional_model:true,ready_to_run:true,cuda_profile:"cuda12"};
+for (const candidateMode of ["simple", "advanced"]) {
+  mode=candidateMode;
+  state.loaded={...installed,cuda_detection:{recommended:"cuda13",reason:"CUDA 13 runtime visible"}};
+  state.selected=id; state.processors=[state.loaded]; state.dirty=false; state.installing=false;
+  state.cudaChoice="auto";
+  allow=false;
+  await installLibraries();
+  const linux=confirmations.at(-1).text;
+  if (!linux.includes("Install CUDA 13 profile") || !linux.includes("Current installed profile: CUDA 12") ||
+      !linux.includes("cuDNN 9") || !linux.includes("CPU fallback"))
+    throw new Error(`${candidateMode} mode did not explain the resolved Linux switch`);
+  state.cudaChoice="cuda12";
+  allow=true;
+  await installLibraries();
+  if (launches.at(-1)?.cuda_profile!=="cuda12" || launches.at(-1)?.requirements!=="")
+    throw new Error(`${candidateMode} mode failed to submit its manual override`);
+  state.loaded={...installed}; state.processors=[state.loaded]; state.installing=false;
+  allow=false;
+  await installLibraries();
+  const other=confirmations.at(-1).text;
+  if (!other.includes("compatible ONNX Runtime") || /CUDA|cuDNN|NVIDIA/.test(other))
+    throw new Error(`${candidateMode} mode leaked Linux requirements into other platforms`);
+  allow=true;
+  await installLibraries();
+  if (Object.hasOwn(launches.at(-1), "cuda_profile"))
+    throw new Error(`${candidateMode} mode submitted a CUDA override outside Linux`);
+}
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", profile_confirmation_script,
+                             str(PAGE), str(INSTALL_STATE)], cwd=ROOT, text=True, capture_output=True)
+    if result.returncode:
+        sys.stderr.write(re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<postprocess-page>", result.stderr)[-2500:])
+        return fail("Linux and non-Linux install confirmation behavior diverged")
+    if (page.count('cudaInstallControl(),') != 2 or
+            'option?.choices || []' not in page or
+            'state.cudaChoice === "auto" ? detected.recommended' not in page or
+            'Current installed profile:' not in page or
+            'cuda_profile: cudaProfile' not in page or
+            'Matching system CUDA, cuDNN 9' not in page):
+        return fail("both modes must offer backend-driven CUDA profiles with an explicit resolved switch")
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 

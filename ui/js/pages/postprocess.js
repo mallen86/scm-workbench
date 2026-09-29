@@ -12,7 +12,7 @@ import { jobNoticeProgress } from "../job-notice-progress.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
-const state = { processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, installFailure: null, installLogLoading: null, installStartError: null, installActivity: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
+const state = { cudaChoice: "auto", processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, installFailure: null, installLogLoading: null, installStartError: null, installActivity: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
 const first = value => Array.isArray(value) ? value[0] : value;
 const revision = p => p?.revision_hash || p?.revision || p?.active_revision || "";
 const normalizeList = result => Array.isArray(result) ? result : (result?.processors || []);
@@ -70,6 +70,28 @@ async function loadInstallFailure(job) {
   repaintSimplePicker();
 }
 
+function cudaInstallControl() {
+  const option = S.manifest?.postprocess_dependencies?.groups?.flatMap(group => group.options || [])
+    .find(item => item.key === "cuda_profile");
+  const select = el("select", { class: "input pp-cuda-profile", "aria-label": "Linux CUDA install profile" });
+  for (const [value, label] of option?.choices || []) select.append(el("option", { value }, label));
+  select.value = state.cudaChoice;
+  select.onchange = () => { state.cudaChoice = select.value; updateCudaInstallInfo(); };
+  return el("label", { class: "pp-cuda-install", hidden: !option }, "Linux CUDA install profile", select,
+    el("span", { class: "small faint pp-cuda-info" }));
+}
+function updateCudaInstallInfo() {
+  const p = selectedProcessor();
+  const detected = p?.cuda_detection;
+  for (const control of document.querySelectorAll?.(".pp-cuda-install") || []) {
+    control.hidden = !p?.optional_model || !detected;
+    const select = control.querySelector("select");
+    if (select) select.value = state.cudaChoice;
+    const resolved = state.cudaChoice === "auto" ? detected?.recommended : state.cudaChoice;
+    const text = control.querySelector(".pp-cuda-info");
+    if (text && detected) text.textContent = `Installed: ${p.cuda_profile === "cuda13" ? "CUDA 13" : p.cuda_profile === "cuda12" ? "CUDA 12" : "none"}. Auto: ${detected.reason}. Selected: ${resolved === "cuda13" ? "CUDA 13" : "CUDA 12"}. Matching system CUDA, cuDNN 9 and an NVIDIA GPU/driver are needed for GPU inference; CPU fallback remains available. Detection does not guarantee GPU compatibility.`;
+  }
+}
 function sourceBytes(value) { return new TextEncoder().encode(String(value || "")).length; }
 function updateLockSummary() {
   const box = document.querySelector(".pp-lock");
@@ -138,6 +160,7 @@ function updateEditorState() {
     installStatus.className = `small pp-model-status ${view.tone}`;
     installStatus.textContent = view.label;
   }
+  updateCudaInstallInfo();
   for (const control of [document.querySelector(".pp-name"), document.querySelector(".pp-source"), document.querySelector(".pp-requirements")]) if (control) control.readOnly = bundled;
 }
 function setEditorValue(value) {
@@ -330,7 +353,7 @@ function repaintSimplePicker() {
       const cost = setup.querySelector(".pp-model-cost");
       if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (size varies by system). Remove them whenever you like." : "One-time download: a 67 MB AI model plus inference libraries. Leave at least 2 GB free during installation.";
       const button = setup.querySelector(".pp-model-install");
-      if (button) { button.disabled = !!state.installing || canRun(selected); button.hidden = canRun(selected); }
+      if (button) { button.disabled = !!state.installing; button.hidden = false; button.textContent = canRun(selected) ? (selected.cuda_detection ? "Reinstall / switch CUDA profile" : "Reinstall model & libraries") : "Install model & libraries"; }
       const remove = setup.querySelector(".pp-model-remove");
       if (remove) { remove.hidden = !canRun(selected); remove.disabled = !!state.installing; }
       const cancel = setup.querySelector(".pp-model-cancel");
@@ -520,10 +543,14 @@ async function installLibraries() {
   if (!p) return toast("warn", "Save a processor first.");
   if (state.dirty) return toast("warn", "Save the requirements as a new revision before installing them.");
   const model = p.optional_model === true;
-  const requirements = model ? (p.requirements || []).join("\n") : String(state.draft?.requirements || "").trim();
+  const requirements = model ? "" : String(state.draft?.requirements || "").trim();
+  const detected = p.cuda_detection;
+  // Freeze the displayed auto recommendation for this explicit install.
+  const cudaProfile = model && detected ? (state.cudaChoice === "auto" ? detected.recommended : state.cudaChoice) : undefined;
+  const resolved = cudaProfile;
   const approved = await confirmModal({
     title: model ? "Install Advanced Upscaler?" : "Install processor libraries?",
-    text: model ? "One-time download: 67 MB RealESRGAN_x4plus model plus compatible ONNX Runtime and verified Python wheels. Leave at least 2 GB free for the libraries and temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?" : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    text: model ? (resolved ? `Install ${resolved === "cuda13" ? "CUDA 13" : "CUDA 12"} profile? Current installed profile: ${p.cuda_profile === "cuda13" ? "CUDA 13" : p.cuda_profile === "cuda12" ? "CUDA 12" : "none"}. This explicit install may switch the active profile only after verification; failed or cancelled installs leave the current one available. Download: 67 MB model plus verified wheels. Leave at least 2 GB free. Follow the installation job in the sidebar. GPU inference also needs matching system CUDA, cuDNN 9 and NVIDIA driver; CPU fallback is available. Continue?` : "One-time download: 67 MB RealESRGAN_x4plus model plus compatible ONNX Runtime and verified Python wheels. Leave at least 2 GB free for the libraries and temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?") : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
     okLabel: model ? "Install upscaler" : "Install libraries",
   });
   if (!approved) return;
@@ -537,7 +564,7 @@ async function installLibraries() {
   };
   try {
     const job = await doRun("postprocess_dependencies", null, {
-      args: { processor_id: p.id, revision_hash: revision(p), requirements }, onError: showStartError,
+      args: { processor_id: p.id, revision_hash: revision(p), requirements, ...(cudaProfile ? { cuda_profile: cudaProfile } : {}) }, onError: showStartError,
     });
     if (job?.id) {
       state.installJob = { ...job, kind: "postprocess_dependencies", status: "running", ts: Date.now() / 1000,
@@ -664,6 +691,7 @@ function renderSimplePostprocess() {
     el("label", { class: "pp-custom-picker", hidden: true }, "Custom processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready custom processor" })),
     el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…"),
     el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
+    cudaInstallControl(),
     el("div", { class: "pp-model-setup", hidden: true },
       el("div", { class: "pp-model-copy" },
         el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
@@ -713,6 +741,7 @@ PAGES.postprocess = root => {
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
     el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; leave at least 2 GB free during installation. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
     el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
+    cudaInstallControl(),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
     el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn danger pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove model & libraries"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
   wrap.append(editor);

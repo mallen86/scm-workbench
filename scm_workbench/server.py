@@ -60,7 +60,7 @@ if __name__ == "__main__":
     sys.modules["scm_workbench.server"] = sys.modules[__name__]
 
 from scm_workbench import repo_sync, updater
-from scm_workbench import advanced_model, postprocessing
+from scm_workbench import advanced_model, cuda_detection, postprocessing
 
 # The one version constant the whole app reports (About-card line, banner,
 # and the updater's notion of "what am I running"). It is pinned per build
@@ -1531,6 +1531,9 @@ def build_manifest(info: dict) -> dict:
             _opt("processor_id", "Processor", "text", default=""),
             _opt("revision_hash", "Revision", "text", default=""),
             _opt("requirements", "Requirements", "textarea", default=""),
+            *([_opt("cuda_profile", "Linux CUDA profile", "select",
+                    choices=[["auto", "Auto (detect runtime)"], ["cuda12", "CUDA 12"], ["cuda13", "CUDA 13"]],
+                    default="auto")] if sys.platform.startswith("linux") else []),
         ]}],
     }
     return kinds
@@ -3754,7 +3757,7 @@ def _record_advanced_activity(job: dict, text: str) -> None:
             return
         job["progress"] = {**progress, "activity": frame}
         if phase == "fallback":
-            job["postprocess_cpu_warning"] = "cuda" if sys.platform.startswith("linux") else "gpu"
+            job["postprocess_cpu_warning"] = ("cuda13" if job.get("postprocess_cuda_profile") == "cuda13" else "cuda") if sys.platform.startswith("linux") else "gpu"
     except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError):
         return
 
@@ -3868,7 +3871,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning", "postprocess_cuda_profile")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -4055,6 +4058,8 @@ def list_jobs() -> dict:
             row["postprocess_outcome"] = j["postprocess_outcome"]
         if j.get("postprocess_cpu_warning"):
             row["postprocess_cpu_warning"] = j["postprocess_cpu_warning"]
+        if j.get("postprocess_cuda_profile") in advanced_model.CUDA_PROFILES:
+            row["postprocess_cuda_profile"] = j["postprocess_cuda_profile"]
         if j.get("progress"):
             row["progress"] = j["progress"]
         # The job history page rebuilds a job's settings from the exact args it
@@ -4976,12 +4981,9 @@ def _postprocess_env(work_dir: Path, *, installing: bool = False,
         # Only the fixed, app-owned AI processor may inherit library search
         # paths for a user's system CUDA/cuDNN install. Do not forward empty
         # (current-directory) or relative entries, or pass this to custom code.
-        raw_paths = os.environ.get("LD_LIBRARY_PATH", "")
-        if len(raw_paths) <= 4096:
-            paths = [path for path in raw_paths.split(":")
-                     if path and os.path.isabs(path) and os.path.isdir(path)]
-            if 0 < len(paths) <= 32:
-                env["LD_LIBRARY_PATH"] = ":".join(paths)
+        paths = cuda_detection.inherited_library_dirs()
+        if paths:
+            env["LD_LIBRARY_PATH"] = ":".join(paths)
     private_home = work_dir / "home"
     private_tmp = work_dir / "tmp"
     private_home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -5619,7 +5621,17 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
             if str(args.get("revision_hash") or "") != item.get("revision"):
                 errors.append("processor revision is stale")
             submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
-            if tuple(item.get("requirements") or ()) != submitted:
+            if item["id"] == BUILTIN_ADVANCED_UPSCALER_ID:
+                if not item.get("bundled") or not item.get("optional_model"):
+                    errors.append("invalid bundled upscaler")
+                elif sys.platform.startswith("linux"):
+                    profile = args.get("cuda_profile", "auto")
+                    profile = cuda_detection.detect_cuda_profile()["recommended"] if profile == "auto" else profile
+                    if submitted and submitted != advanced_model.requirements_for_platform(sys.platform, profile):
+                        errors.append("selected CUDA profile and requirements do not match")
+                elif submitted and submitted != advanced_model.REQUIREMENTS:
+                    errors.append("processor requirements are stale")
+            elif tuple(item.get("requirements") or ()) != submitted or args.get("cuda_profile", "auto") != "auto":
                 errors.append("processor requirements are stale")
         except Exception as exc:
             errors.append(str(exc))
@@ -7694,8 +7706,20 @@ def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[s
             raise postprocessing.ConflictError("processor revision is stale")
         submitted = postprocessing.normalize_requirements(args.get("requirements") or "")
         requirements = tuple(item.get("requirements") or ())
-        if submitted != requirements:
-            raise postprocessing.ConflictError("processor requirements are stale")
+        profile = None
+        if processor_id == BUILTIN_ADVANCED_UPSCALER_ID:
+            if not item.get("bundled") or not item.get("optional_model"):
+                raise postprocessing.IntegrityError("invalid bundled upscaler")
+            if sys.platform.startswith("linux"):
+                profile = args.get("cuda_profile", "auto")
+                profile = cuda_detection.detect_cuda_profile()["recommended"] if profile == "auto" else profile
+                requirements = advanced_model.requirements_for_platform(sys.platform, profile)
+            else:
+                requirements = advanced_model.REQUIREMENTS
+        elif args.get("cuda_profile", "auto") != "auto":
+            raise postprocessing.ValidationError("CUDA profiles are only for the built-in upscaler")
+        if submitted != requirements and not (processor_id == BUILTIN_ADVANCED_UPSCALER_ID and not submitted):
+            raise postprocessing.ConflictError("selected profile and requirements do not match")
         metadata = store.environment_metadata(requirements, interpreter=python)
     environments = store.root / "environments"
     if shutil.disk_usage(environments).free < POSTPROCESS_FREE_SPACE_RESERVE_BYTES:
@@ -7718,9 +7742,11 @@ def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[s
             "lock_file": str(lock_file), "wheelhouse": str(wheelhouse),
         }
         if processor_id == BUILTIN_ADVANCED_UPSCALER_ID:
-            if requirements != advanced_model.REQUIREMENTS:
+            if (profile is not None and requirements != advanced_model.requirements_for_platform(sys.platform, profile)) or (profile is None and requirements != advanced_model.REQUIREMENTS):
                 raise postprocessing.IntegrityError("bundled model requirements changed")
             installer_payload["model"] = True
+            if profile is not None:
+                installer_payload["cuda_profile"] = profile
         with installer_manifest.open("x", encoding="utf-8") as stream:
             postprocessing._private(installer_manifest)
             json.dump(installer_payload, stream, separators=(",", ":"))
@@ -7742,6 +7768,8 @@ def _prepare_dependency_job(job: dict, args: dict, python: Path) -> Tuple[List[s
         "dependency_processor_id": processor_id,
         "dependency_revision": item["revision"],
         "dependency_python": str(python),
+        "dependency_cuda_profile": profile,
+        "dependency_resolved_profile": profile or ("system" if processor_id == BUILTIN_ADVANCED_UPSCALER_ID else None),
     })
     return argv, stage, _postprocess_env(stage, installing=True)
 
@@ -7854,6 +7882,14 @@ def _declared_dependency_cache_bytes(root: Path, *, exclude: Path | None = None)
     return total
 
 
+def _activate_installed_model(store: postprocessing.ProcessorStore, job: dict,
+                              requirements: list[str], lock_hash: str) -> dict:
+    return store.activate_optional_environment(
+        job["dependency_processor_id"], job["dependency_revision"], requirements, lock_hash,
+        interpreter=Path(job["dependency_python"]),
+    )
+
+
 def _finalize_dependency_job(job: dict) -> bool:
     stage = Path(job["dependency_stage"])
     target = Path(job["dependency_target"])
@@ -7938,6 +7974,13 @@ def _finalize_dependency_job(job: dict) -> bool:
             current = store.get(job["dependency_processor_id"], include_source=False)
             if current["revision"] != job["dependency_revision"]:
                 raise postprocessing.ConflictError("processor revision changed during installation")
+            if job["dependency_processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID:
+                profile = job.get("dependency_cuda_profile")
+                approved = advanced_model.requirements_for_platform(sys.platform, profile) if profile else advanced_model.REQUIREMENTS
+                if tuple(requirements) != approved:
+                    raise postprocessing.IntegrityError("bundled model profile changed during installation")
+            if processor_running and job["dependency_processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID and tuple(current["requirements"]) != tuple(requirements):
+                raise postprocessing.ConflictError("an image processor is running; wait before switching CUDA profiles")
             existing_ready = False
             if os.path.lexists(final):
                 existing = store.environment_metadata(requirements, lock_hash, interpreter=Path(job["dependency_python"]))
@@ -7955,11 +7998,11 @@ def _finalize_dependency_job(job: dict) -> bool:
                 # Fingerprint environments are immutable and shareable. Never
                 # replace an identical ready tree that a live runner may import.
                 shutil.rmtree(stage, ignore_errors=True)
-                recorded = store.record_environment(
-                    job["dependency_processor_id"], job["dependency_revision"], lock_hash,
-                    interpreter=Path(job["dependency_python"]),
-                )
                 invalidate_manifest_cache()
+                recorded = (_activate_installed_model(store, job, requirements, lock_hash)
+                            if job["dependency_processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else
+                            store.record_environment(job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                                                     interpreter=Path(job["dependency_python"])))
                 return bool(recorded["processor"].get("trusted"))
             if processor_running and os.path.lexists(final):
                 raise postprocessing.ConflictError("the dependency environment is in use by a processor run")
@@ -7974,12 +8017,17 @@ def _finalize_dependency_job(job: dict) -> bool:
                     moved_old = True
                 os.replace(stage, final)
                 published = True
-                recorded = store.record_environment(
-                    job["dependency_processor_id"], job["dependency_revision"], lock_hash,
-                    interpreter=Path(job["dependency_python"]),
-                )
-                trust_preserved = bool(recorded["processor"].get("trusted"))
                 invalidate_manifest_cache()
+                recorded = (_activate_installed_model(store, job, requirements, lock_hash)
+                            if job["dependency_processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else
+                            store.record_environment(job["dependency_processor_id"], job["dependency_revision"], lock_hash,
+                                                     interpreter=Path(job["dependency_python"])))
+                trust_preserved = bool(recorded["processor"].get("trusted"))
+            except postprocessing.OptionalActivationUncertain:
+                # The metadata rename may have committed even if its result
+                # could not be read. Preserve the published tree it may name;
+                # cleanup can reclaim unreferenced backups later.
+                raise
             except Exception:
                 if published and os.path.lexists(final):
                     shutil.rmtree(final, ignore_errors=True)
@@ -8070,6 +8118,8 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         manifest_stream.write(payload)
         manifest_stream.flush(); os.fsync(manifest_stream.fileno())
     job["postprocess_builtin_activity"] = fixed_advanced
+    if fixed_advanced and sys.platform.startswith("linux"):
+        job["postprocess_cuda_profile"] = advanced_model.profile_for_requirements(tuple(item["requirements"]), sys.platform) or "cuda12"
     job["postprocess_entries"] = list(entries)
     job["image_total"] = len(entries)
     job["progress"] = {"current": 0, "total": len(entries)}
@@ -11236,6 +11286,33 @@ BUILTIN_ADVANCED_UPSCALER_FILE = _HERE / "builtin_processors" / "advanced_upscal
 _POSTPROCESS_REGISTRY_LOCK = threading.RLock()
 
 
+def _existing_advanced_requirements(store: postprocessing.ProcessorStore,
+                                    shipped_source: str) -> tuple[str, ...]:
+    """Keep exact approved installed profiles even if shipped source needs repair."""
+    if not (store.root / "processors" / BUILTIN_ADVANCED_UPSCALER_ID).exists():
+        return advanced_model.REQUIREMENTS
+    try:
+        item = store.get(BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+        req = tuple(item["requirements"])
+        if item["bundled"] and item["optional_model"] and (
+                req == advanced_model.REQUIREMENTS or
+                (sys.platform.startswith("linux") and advanced_model.profile_for_requirements(req, sys.platform))):
+            return req
+    except (postprocessing.IntegrityError, postprocessing.NotFoundError):
+        # A missing/modified bundled revision used to be repaired by
+        # provision_bundled. Infer its approved profile only when the intact
+        # app-owned metadata's revision digest matches *this shipped source*;
+        # never accept arbitrary requirements from corrupted revision files.
+        metadata = store._metadata(BUILTIN_ADVANCED_UPSCALER_ID)
+        if metadata.get("bundled") and metadata.get("optional_model"):
+            profiles = (advanced_model.CUDA_PROFILES if sys.platform.startswith("linux") else ("cuda12",))
+            for profile in profiles:
+                req = advanced_model.requirements_for_platform(sys.platform, profile)
+                if metadata.get("active_revision") == postprocessing.revision_digest(shipped_source, req, store.contract):
+                    return req
+    return advanced_model.REQUIREMENTS
+
+
 def _postprocessor_store(*, scm_root: Optional[Path] = None,
                          interpreter: Optional[Path] = None) -> postprocessing.ProcessorStore:
     scm = Path(scm_root) if scm_root is not None else effective_dirs(load_settings())[0]
@@ -11261,7 +11338,7 @@ def _postprocessor_store(*, scm_root: Optional[Path] = None,
         raise postprocessing.IntegrityError("bundled Advanced Upscaler is not valid UTF-8") from exc
     store.provision_bundled(
         BUILTIN_ADVANCED_UPSCALER_ID, "Advanced Upscaler (AI 4×)", advanced_source,
-        interpreter=python, requirements=advanced_model.REQUIREMENTS, optional_model=True,
+        interpreter=python, requirements=_existing_advanced_requirements(store, advanced_source), optional_model=True,
     )
     store.cleanup()
     return store
@@ -11279,6 +11356,11 @@ def _postprocessor_status(store: postprocessing.ProcessorStore, processor_id: st
             # App-owned source is trusted even before optional assets are
             # installed; readiness remains a separate, mandatory run gate.
             status["processor"]["trusted"] = True
+            if sys.platform.startswith("linux"):
+                installed = store._metadata(processor_id)
+                status["processor"]["cuda_profile"] = (advanced_model.profile_for_requirements(tuple(status["processor"]["requirements"]), sys.platform)
+                                                         if installed.get("installed_revision") == status["processor"]["revision"] and installed.get("installed_environment") else None)
+                status["processor"]["cuda_detection"] = cuda_detection.detect_cuda_profile()
         return status
     except postprocessing.IntegrityError:
         if processor_id != BUILTIN_ADVANCED_UPSCALER_ID:
@@ -11287,7 +11369,11 @@ def _postprocessor_status(store: postprocessing.ProcessorStore, processor_id: st
         # reinstallable. Never present the corrupted tree as ready to run.
         item = store.get(processor_id, include_source=False)
         return {"processor": {**item, "trusted": True, "environment_ready": False,
-                              "environment_status": "stale", "ready_to_run": False},
+                              "environment_status": "stale", "ready_to_run": False,
+                              **({"cuda_profile": (advanced_model.profile_for_requirements(tuple(item["requirements"]), sys.platform)
+                                                    if store._metadata(processor_id).get("installed_environment") else None),
+                                  "cuda_detection": cuda_detection.detect_cuda_profile()}
+                                 if sys.platform.startswith("linux") else {})},
                 "environment": {"ready": False, "status": "stale", "stale": True,
                                 "path": None, "fingerprint": None}}
 
@@ -11325,7 +11411,7 @@ def postprocessors_list() -> dict:
         store = _postprocessor_store()
         python = job_python(load_settings())
         rows = []
-        summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes",
+        summary_keys = {"id", "name", "active_revision", "revision", "trusted", "source_bytes", "cuda_profile", "cuda_detection",
                         "environment_fingerprint", "environment_ready", "environment_status",
                         "ready_to_run", "bundled", "optional_model", "requirements"}
         for item in store.list():

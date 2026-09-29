@@ -1,4 +1,5 @@
 # Bugs
+- [x] Support automatic detection and manual CUDA 12/CUDA 13 installation profiles for the Linux Advanced Upscaler without switching existing installations on read; retain verified CPU fallback and transactional install rollback.
 - [x] Remove Workbench CPU-time and wall/idle time limits for the fixed Advanced Upscaler while using all process-available CPU cores; retain cancellation, custom/install time limits, and other safety bounds.
 - [x] Keep automatic Advanced Upscaler CPU fallback visible in both modes, detect silent GPU initialization fallback, and show bounded tile progress without advancing completed-image counts.
 - [x] Make temporary-image metadata regression coverage independent of filesystem timestamp resolution, without weakening byte verification.

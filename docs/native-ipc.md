@@ -503,6 +503,15 @@ baseline or losing a user save.
   keys). Success is `{"ok":true,"job":{"id":"...","title":"...",
   "status":"running","cmd":"...","warnings":[...]}}`. Rejected form
   arguments are a successful RPC containing `{"ok":false,"errors":["..."]}`.
+  On Linux, the fixed `postprocess_dependencies` kind also accepts the
+  manifest-defined `args.cuda_profile` (`auto`, `cuda12`, or `cuda13`). The
+  default is `auto`; it selects a pinned wheel profile from bounded visible
+  CUDA runtime libraries. `args.requirements` may be empty for this fixed
+  processor (the worker supplies the exact approved pins), or must match the
+  selected profile exactly. Custom processors cannot select CUDA profiles.
+  An existing installation never switches from a status/read call; only an
+  explicit installation can activate a newly verified profile. This adds no
+  public RPC method or longer native transport deadline.
 * `jobs.log`: params `{"job_id":"<string>"}` with optional non-negative
   `after` (default `0`) and `max_lines` (default `4096`, range `1..4096`).
   Result is `{"lines":["..."],"status":"...","exit_code":...,

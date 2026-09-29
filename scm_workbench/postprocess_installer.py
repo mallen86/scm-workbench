@@ -136,10 +136,19 @@ def _load_manifest(path: Path) -> dict:
         "stage", "target", "requirements", "resolve_report", "lock_file", "wheelhouse",
     }, {
         "stage", "target", "requirements", "resolve_report", "lock_file", "wheelhouse", "model",
+    }, {
+        "stage", "target", "requirements", "resolve_report", "lock_file", "wheelhouse", "model", "cuda_profile",
     }):
         raise InstallerError("installer manifest has invalid fields")
+    if "cuda_profile" in value and ("model" not in value or
+                                    not isinstance(value["cuda_profile"], str) or
+                                    value["cuda_profile"] not in advanced_model.CUDA_PROFILES or
+                                    not sys.platform.startswith("linux")):
+        raise InstallerError("installer CUDA profile is invalid")
     if "model" in value and (value["model"] is not True or
-                             tuple(postprocessing.normalize_requirements(value["requirements"])) != advanced_model.REQUIREMENTS):
+                             tuple(postprocessing.normalize_requirements(value["requirements"])) !=
+                             (advanced_model.requirements_for_platform(sys.platform, value["cuda_profile"])
+                              if "cuda_profile" in value else advanced_model.REQUIREMENTS)):
         raise InstallerError("installer model configuration is invalid")
     stage = Path(value["stage"])
     if not stage.is_absolute() or stage.is_symlink() or not stage.is_dir():

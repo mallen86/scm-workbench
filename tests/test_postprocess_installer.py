@@ -87,6 +87,32 @@ class InstallerTests(unittest.TestCase):
                     with self.assertRaises(postprocess_installer.InstallerError):
                         postprocess_installer._load_manifest(manifest)
 
+    def test_cuda_profile_manifest_must_match_approved_exact_requirements(self):
+        with tempfile.TemporaryDirectory() as temp:
+            stage = Path(temp)
+            manifest = stage / "installer-manifest.json"
+            payload = {"stage": str(stage), "target": str(stage / "site-packages"),
+                       "resolve_report": str(stage / "resolve-report.json"),
+                       "lock_file": str(stage / "requirements.lock"),
+                       "wheelhouse": str(stage / "wheels"), "model": True,
+                       "cuda_profile": "cuda13",
+                       "requirements": list(advanced_model.requirements_for_platform("linux", "cuda13"))}
+            with mock.patch.object(postprocess_installer.sys, "platform", "linux"):
+                manifest.write_text(json.dumps(payload))
+                self.assertEqual(postprocess_installer._load_manifest(manifest)["cuda_profile"], "cuda13")
+                payload["requirements"] = list(advanced_model.requirements_for_platform("linux", "cuda12"))
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+                payload["cuda_profile"] = "amd"
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+                payload.pop("model")
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+
     def test_download_hash_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="postprocess-wheel-") as temp:
             wheelhouse = Path(temp)

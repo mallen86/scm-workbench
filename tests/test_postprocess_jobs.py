@@ -366,6 +366,72 @@ class PostprocessJobTests(unittest.TestCase):
         args["requirements"] = "numpy==2.5.3"
         self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
 
+    def test_linux_profile_override_only_for_fixed_model(self):
+        with mock.patch.object(server.sys, "platform", "linux"), mock.patch.object(
+                server.advanced_model, "REQUIREMENTS",
+                server.advanced_model.requirements_for_platform("linux", "cuda12")), mock.patch.object(
+                server.cuda_detection, "detect_cuda_profile", return_value={
+                    "recommended": "cuda13", "reason": "CUDA 13 runtime visible"}):
+            server.invalidate_manifest_cache()
+            item = server._postprocessor_store().get(server.BUILTIN_ADVANCED_UPSCALER_ID)
+            args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                    "requirements": "", "cuda_profile": "cuda13"}
+            self.assertEqual(server.build_preview("postprocess_dependencies", args)["errors"], [])
+            stage_job = {"id": "1" * 32}
+            argv, stage, env = server._prepare_dependency_job(stage_job, args, server.job_python(self.settings))
+            try:
+                payload = json.loads((stage / "installer-manifest.json").read_text())
+                self.assertEqual(payload["cuda_profile"], "cuda13")
+                self.assertEqual(tuple(payload["requirements"]), server.advanced_model.requirements_for_platform("linux", "cuda13"))
+                self.assertEqual(stage_job["dependency_revision"], item["revision"])
+                self.assertEqual(server._postprocessor_store().get(item["id"])["revision"], item["revision"])
+            finally:
+                import shutil
+                shutil.rmtree(stage)
+            args["requirements"] = "\n".join(server.advanced_model.requirements_for_platform("linux", "cuda12"))
+            self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
+            args["requirements"] = ""
+            args["cuda_profile"] = "amd"
+            self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
+            custom = self.store.save("Custom", "def process_image(image_path, context):\n    pass\n", "numpy==2.5.3")
+            args.update(processor_id=custom["id"], revision_hash=custom["revision"],
+                        requirements="numpy==2.5.3", cuda_profile="cuda13")
+            server.invalidate_manifest_cache()
+            self.assertTrue(server.build_preview("postprocess_dependencies", args)["errors"])
+
+    def test_failed_or_cancelled_profile_switch_keeps_previous_metadata(self):
+        with mock.patch.object(server.sys, "platform", "linux"), mock.patch.object(
+                server.advanced_model, "REQUIREMENTS",
+                server.advanced_model.requirements_for_platform("linux", "cuda12")):
+            server.invalidate_manifest_cache()
+            store = server._postprocessor_store()
+            item = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID)
+            metadata = store._metadata(item["id"])
+            metadata.update(installed_revision=item["revision"], installed_environment="a" * 64,
+                            installed_tree_digest="b" * 64, environment="a" * 64,
+                            trusted_tree_digest="b" * 64, lock_hash="c" * 64)
+            server.postprocessing._atomic_json(store._processor(item["id"]) / "metadata.json", metadata)
+            args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                    "requirements": "", "cuda_profile": "cuda13"}
+            prepare = server._prepare_dependency_job
+            cancel_current = False
+            def fake_child(job, install_args, python):
+                _argv, stage, env = prepare(job, install_args, python)
+                code = ("import time; time.sleep(5)" if cancel_current else
+                        "import sys; print('fixture failure'); sys.exit(1)")
+                return ([str(python), "-I", "-B", "-c", code], stage, env)
+            with mock.patch.object(server, "_prepare_dependency_job", side_effect=fake_child):
+                for cancel in (True, False):
+                    cancel_current = cancel
+                    job, errors = server.start_job("postprocess_dependencies", args)
+                    self.assertEqual(errors, [])
+                    if cancel:
+                        server.kill_job(job["id"])
+                    self.wait(job)
+                    self.assertEqual(job["status"], "killed" if cancel else "fail")
+                    self.assertEqual(store._metadata(item["id"]), metadata)
+                    self.assertEqual(store.get(item["id"])["revision"], item["revision"])
+
     def test_optional_install_starts_without_an_scm_checkout(self):
         self.settings["ui_mode"] = "simple"
         # A partially downloaded managed checkout is not an SCM repo. Its
@@ -740,6 +806,116 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(image.read_bytes(), PNG)
         self.assertEqual(server._POSTPROCESS_USERS, 0)
         self.assertTrue(any("originals were not changed" in line for line in job["log_lines"]))
+
+    def _staged_fixed_profile(self, profile, label):
+        """A verified-tree fixture; the real installer is covered separately."""
+        stage = self.data / "postprocessing" / "environments" / f".install-{label}"
+        target = stage / "site-packages"
+        target.mkdir(parents=True)
+        (target / server.advanced_model.MODEL_NAME).write_bytes(b"fixture model")
+        report = {"install": [{"metadata": {"name": "fixture", "version": "1.0"},
+                 "download_info": {"url": "https://files.pythonhosted.org/packages/fixture-1.0-py3-none-any.whl",
+                                   "archive_info": {"hashes": {"sha256": "a" * 64}}}}]}
+        (stage / "resolve-report.json").write_text(json.dumps(report), encoding="utf-8")
+        (stage / "requirements.lock").write_text(f"fixture==1.0 --hash=sha256:{'a' * 64}\n", encoding="utf-8")
+        item = server._postprocessor_store().get(server.BUILTIN_ADVANCED_UPSCALER_ID)
+        return {"id": label, "dependency_stage": str(stage), "dependency_target": str(target),
+                "dependency_report": str(stage / "resolve-report.json"),
+                "dependency_lock": str(stage / "requirements.lock"),
+                "dependency_environment": None, "dependency_fingerprint": None,
+                "dependency_requirements": list(server.advanced_model.requirements_for_platform("linux", profile)),
+                "dependency_processor_id": item["id"], "dependency_revision": item["revision"],
+                "dependency_python": str(server.job_python(self.settings)),
+                "dependency_cuda_profile": profile}
+
+    def test_switch_publication_failure_keeps_old_profile_in_both_cache_branches(self):
+        with mock.patch.object(server.sys, "platform", "linux"), mock.patch.object(
+                server.advanced_model, "REQUIREMENTS",
+                server.advanced_model.requirements_for_platform("linux", "cuda12")), mock.patch.object(
+                server.advanced_model, "verify_model", return_value=True):
+            store = server._postprocessor_store()
+            self.assertTrue(server._finalize_dependency_job(self._staged_fixed_profile("cuda12", "seed-12")))
+            ident = server.BUILTIN_ADVANCED_UPSCALER_ID
+            old = store._metadata(ident)
+            original_atomic = server.postprocessing._atomic_json
+            def reject_commit(path, value, **kwargs):
+                if path.name == "metadata.json" and path.parent.name == ident:
+                    raise OSError("metadata publication failed")
+                return original_atomic(path, value, **kwargs)
+            # A new fingerprint is published first; a failed pointer commit
+            # must remove only that new tree, never the ready CUDA 12 tree.
+            new_job = self._staged_fixed_profile("cuda13", "reject-new")
+            with mock.patch.object(server.postprocessing, "_atomic_json", side_effect=reject_commit):
+                with self.assertRaisesRegex(OSError, "metadata publication failed"):
+                    server._finalize_dependency_job(new_job)
+            self.assertEqual(store._metadata(ident), old)
+            self.assertFalse(Path(store.environment_metadata(
+                server.advanced_model.requirements_for_platform("linux", "cuda13"),
+                hashlib.sha256(b"fixture==1.0 --hash=sha256:" + b"a" * 64 + b"\n").hexdigest(),
+                interpreter=server.job_python(self.settings))["path"]).exists())
+            self.assertTrue(server._postprocessor_status(store, ident, server.job_python(self.settings))["processor"]["ready_to_run"])
+            # Cache CUDA 13, then switch back to 12 so CUDA 13 exists as a
+            # verified, reusable tree. A failed reuse must leave both trees.
+            self.assertTrue(server._finalize_dependency_job(self._staged_fixed_profile("cuda13", "seed-13")))
+            self.assertTrue(server._finalize_dependency_job(self._staged_fixed_profile("cuda12", "back-12")))
+            old = store._metadata(ident)
+            cached = store.environment_metadata(
+                server.advanced_model.requirements_for_platform("linux", "cuda13"),
+                hashlib.sha256(b"fixture==1.0 --hash=sha256:" + b"a" * 64 + b"\n").hexdigest(),
+                interpreter=server.job_python(self.settings))["path"]
+            with mock.patch.object(server.postprocessing, "_atomic_json", side_effect=reject_commit):
+                with self.assertRaisesRegex(OSError, "metadata publication failed"):
+                    server._finalize_dependency_job(self._staged_fixed_profile("cuda13", "reject-cached"))
+            self.assertEqual(store._metadata(ident), old)
+            self.assertTrue(Path(cached).exists())
+            self.assertTrue(server._postprocessor_status(store, ident, server.job_python(self.settings))["processor"]["ready_to_run"])
+
+    def test_ambiguous_postcommit_error_does_not_delete_active_profile(self):
+        with mock.patch.object(server.sys, "platform", "linux"), mock.patch.object(
+                server.advanced_model, "REQUIREMENTS",
+                server.advanced_model.requirements_for_platform("linux", "cuda12")), mock.patch.object(
+                server.advanced_model, "verify_model", return_value=True):
+            server._postprocessor_store()
+            original_atomic = server.postprocessing._atomic_json
+            ident = server.BUILTIN_ADVANCED_UPSCALER_ID
+            def raise_after_commit(path, value, **kwargs):
+                original_atomic(path, value, **kwargs)
+                if path.name == "metadata.json" and path.parent.name == ident:
+                    raise OSError("directory sync failed after metadata rename")
+            with mock.patch.object(server.postprocessing, "_atomic_json", side_effect=raise_after_commit):
+                self.assertTrue(server._finalize_dependency_job(
+                    self._staged_fixed_profile("cuda13", "postcommit-new")))
+            store = server._postprocessor_store()
+            current = server._postprocessor_status(store, ident, server.job_python(self.settings))
+            self.assertTrue(current["processor"]["ready_to_run"])
+            self.assertEqual(current["processor"]["cuda_profile"], "cuda13")
+            self.assertTrue(Path(current["environment"]["path"]).exists())
+            self.assertTrue(server._finalize_dependency_job(self._staged_fixed_profile("cuda12", "postcommit-back")))
+            with mock.patch.object(server.postprocessing, "_atomic_json", side_effect=raise_after_commit):
+                self.assertTrue(server._finalize_dependency_job(
+                    self._staged_fixed_profile("cuda13", "postcommit-cached")))
+            current = server._postprocessor_status(store, ident, server.job_python(self.settings))
+            self.assertTrue(current["processor"]["ready_to_run"])
+            self.assertEqual(current["processor"]["cuda_profile"], "cuda13")
+
+    def test_status_failure_after_optional_activation_cannot_rollback_published_tree(self):
+        with mock.patch.object(server.sys, "platform", "linux"), mock.patch.object(
+                server.advanced_model, "REQUIREMENTS",
+                server.advanced_model.requirements_for_platform("linux", "cuda12")), mock.patch.object(
+                server.advanced_model, "verify_model", return_value=True):
+            server._postprocessor_store()
+            for profile, label in (("cuda13", "status-new"), ("cuda12", "status-cached"),
+                                   ("cuda13", "status-reuse")):
+                job = self._staged_fixed_profile(profile, label)
+                with mock.patch.object(server.postprocessing.ProcessorStore, "status", side_effect=OSError("read failed after publication")):
+                    self.assertTrue(server._finalize_dependency_job(job))
+                store = server._postprocessor_store()
+                item = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID)
+                self.assertEqual(tuple(item["requirements"]),
+                                 server.advanced_model.requirements_for_platform("linux", profile))
+                current = server._postprocessor_status(store, item["id"], server.job_python(self.settings))
+                self.assertTrue(current["processor"]["ready_to_run"])
+                self.assertTrue(Path(current["environment"]["path"]).exists())
 
     def test_locked_dependency_environment_binds_trust_to_resolved_hashes(self):
         item = self.store.save(

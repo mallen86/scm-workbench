@@ -15,28 +15,42 @@ from pathlib import Path
 
 # Exact roots *and* transitive dependencies; the installer additionally locks
 # each platform-specific wheel by SHA-256 before the offline installation.
-# The Linux GPU wheel supports CUDA 12.x / cuDNN 9 with system libraries; it
-# includes the CPU provider for systems without compatible NVIDIA hardware.
+# Linux variants include the CPU provider and require matching system CUDA
+# runtime libraries and cuDNN 9 for GPU inference.
 _COMMON_REQUIREMENTS = (
     "flatbuffers==25.12.19", "numpy==2.5.3",
     "packaging==26.3", "protobuf==7.36.2",
 )
 
 
-def requirements_for_platform(platform: str) -> tuple[str, ...]:
+CUDA_PROFILES = ("cuda12", "cuda13")
+
+
+def requirements_for_platform(platform: str, profile: str = "cuda12") -> tuple[str, ...]:
+    if profile not in CUDA_PROFILES:
+        raise ValueError("invalid CUDA profile")
     if platform == "win32":
         # DirectML supports Windows GPUs and includes a CPU provider. SymPy
         # depends on mpmath; both must be pinned for the trusted installer.
         runtime = ("onnxruntime-directml==1.24.4", "sympy==1.14.0", "mpmath==1.3.0")
     elif platform.startswith("linux"):
-        runtime = ("onnxruntime-gpu==1.26.0",)
+        runtime = ("onnxruntime-gpu==1.26.0" if profile == "cuda12" else "onnxruntime-gpu==1.30.0",)
     else:
         # The macOS wheel includes CoreML and CPU execution providers.
         runtime = ("onnxruntime==1.30.0",)
     return tuple(sorted((*_COMMON_REQUIREMENTS, *runtime)))
 
 
-REQUIREMENTS = requirements_for_platform(sys.platform)
+REQUIREMENTS = requirements_for_platform(sys.platform)  # Legacy Linux installations use CUDA 12.
+
+
+def profile_for_requirements(requirements: tuple[str, ...], platform: str = sys.platform) -> str | None:
+    if not platform.startswith("linux"):
+        return None
+    for profile in CUDA_PROFILES:
+        if tuple(requirements) == requirements_for_platform(platform, profile):
+            return profile
+    return None
 MODEL_NAME = "RealESRGAN_x4plus.onnx"
 MODEL_SHA256 = "4851ec156207d271f5328605d0582eeb851e656227da8aca093ced9e60789291"
 MODEL_BYTES = 67_051_650

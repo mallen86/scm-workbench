@@ -19,8 +19,8 @@ export function jobNoticeProgress(job, status = job?.status) {
         ["initializing", "fallback", "tile"].includes(activity.phase) &&
         Number.isSafeInteger(activity.tile) && Number.isSafeInteger(activity.tiles) &&
         activity.tile >= 0 && activity.tile <= activity.tiles && activity.tiles <= 1000000;
-      const warning = job.postprocess_cpu_warning === "cuda"
-        ? "CPU fallback: NVIDIA CUDA needs CUDA 12.x and cuDNN 9. AI processing may be slow. "
+      const warning = job.postprocess_cpu_warning === "cuda" || job.postprocess_cpu_warning === "cuda13"
+        ? `CPU fallback: NVIDIA CUDA needs CUDA ${job.postprocess_cpu_warning === "cuda13" ? "13" : "12"}.x and cuDNN 9. AI processing may be slow. `
         : job.postprocess_cpu_warning === "gpu" ? "GPU unavailable; using CPU. AI processing may be slow. " : "";
       const detail = current === total ? "Validating results…" : validActivity
         ? `${activity.phase === "initializing" ? "Initializing" : "Processing"} ${activity.name.slice(0, 64)} on ${providerName[activity.provider]}${activity.tiles ? `, tile ${activity.tile} / ${activity.tiles}` : ""}`

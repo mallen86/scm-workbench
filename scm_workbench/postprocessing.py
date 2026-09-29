@@ -86,6 +86,10 @@ class IntegrityError(PostProcessingError):
     pass
 
 
+class OptionalActivationUncertain(IntegrityError):
+    """Metadata replacement may have committed; keep its published environment."""
+
+
 class CancelledError(PostProcessingError):
     pass
 
@@ -1434,6 +1438,7 @@ class ProcessorStore:
         environment = self.environment_metadata(req, interpreter=interpreter)
         if not optional_model and not environment["ready"]:
             raise IntegrityError("bundled processor runtime is not ready")
+        repair_metadata = None
         exists = os.path.lexists(directory)
         if exists:
             try:
@@ -1461,6 +1466,12 @@ class ProcessorStore:
                     except PostProcessingError:
                         # This reserved app-owned entry is repaired below.
                         pass
+                    if optional_model:
+                        # The exact shipped revision and approved requirements
+                        # have not changed. Repair its source bytes without
+                        # discarding a previously verified environment pointer;
+                        # readiness is still rechecked against the tree/model.
+                        repair_metadata = metadata
         else:
             if len(self._registry_entries()) >= PROCESSOR_STORAGE_MAX_COUNT:
                 raise ValidationError("processor storage limit reached")
@@ -1485,7 +1496,7 @@ class ProcessorStore:
             "contract": self.contract,
             "source_bytes": len(raw),
         })
-        _atomic_json(directory / "metadata.json", {
+        _atomic_json(directory / "metadata.json", repair_metadata or {
             "id": processor_id,
             "name": name,
             "active_revision": revision,
@@ -1668,6 +1679,71 @@ class ProcessorStore:
             metadata.update({"trusted": None, "environment": None, "trusted_tree_digest": None})
         _atomic_json(self._processor(processor_id) / "metadata.json", metadata)
         return self.status(processor_id, interpreter=interpreter)
+
+    def activate_optional_environment(self, processor_id: str, old_revision: str,
+                                      requirements: Sequence[str], lock_hash: str, *,
+                                      interpreter: str | Path = sys.executable) -> dict:
+        """Switch a bundled optional profile only after its complete tree is ready.
+
+        The metadata pointer is the final atomic write. An interrupted install
+        or failed verification never changes the active revision or trust.
+        """
+        metadata = self._metadata(processor_id)
+        if not metadata.get("bundled") or not metadata.get("optional_model") or metadata.get("active_revision") != old_revision:
+            raise ConflictError("optional processor revision is stale")
+        current = self.get(processor_id)
+        req = normalize_requirements(requirements)
+        environment = self.environment_metadata(req, lock_hash, interpreter=interpreter)
+        if not environment["ready"]:
+            raise IntegrityError("selected optional environment is not ready")
+        source = current["source"]
+        raw = source.encode("utf-8")
+        revision = revision_digest(source, req, self.contract)
+        revisions = self._processor(processor_id) / "revisions"
+        source_path = revisions / f"{revision}.py"
+        revision_meta = revisions / f"{revision}.json"
+        if not source_path.exists() and self._saved_source_bytes() + len(raw) > SAVED_SOURCE_MAX_BYTES:
+            raise ValidationError("saved processor source limit reached")
+        if source_path.exists() and _read_regular_bytes(source_path, "processor source", SOURCE_MAX_BYTES) != raw:
+            raise IntegrityError("optional processor revision changed")
+        _atomic_bytes(source_path, raw)
+        _atomic_json(revision_meta, {"revision": revision, "requirements": list(req),
+                                     "contract": self.contract, "source_bytes": len(raw)})
+        # Validate the newly written immutable revision while the old pointer
+        # is still active. No read, status probe or verifier may fail after the
+        # atomic metadata commit: the publisher would otherwise roll back the
+        # environment while leaving the new pointer installed.
+        new_item = self.get(processor_id, revision=revision, include_source=False)
+        if tuple(new_item["requirements"]) != req:
+            raise IntegrityError("optional processor revision changed")
+        result = {"processor": {**new_item, "active_revision": revision,
+                                "trusted": True, "environment_fingerprint": environment["fingerprint"],
+                                "environment_ready": True, "environment_status": "ready",
+                                "ready_to_run": True},
+                  "environment": environment}
+        updated = {**metadata, "active_revision": revision, "trusted": revision,
+                   "environment": environment["fingerprint"],
+                   "trusted_tree_digest": environment["tree_digest"],
+                   "installed_revision": revision,
+                   "installed_environment": environment["fingerprint"],
+                   "installed_tree_digest": environment["tree_digest"],
+                   "lock_hash": lock_hash, "updated": time.time()}
+        try:
+            _atomic_json(self._processor(processor_id) / "metadata.json", updated)
+        except OSError as exc:
+            # _atomic_bytes fsyncs the parent *after* os.replace. If that
+            # fsync fails, the pointer may already be visible. Never let the
+            # publisher delete an environment which that pointer now names.
+            try:
+                observed = self._metadata(processor_id)
+            except (OSError, PostProcessingError) as read_exc:
+                raise OptionalActivationUncertain("optional profile commit could not be confirmed") from read_exc
+            if observed == updated:
+                return result
+            if observed != metadata:
+                raise OptionalActivationUncertain("optional profile commit changed unexpectedly") from exc
+            raise
+        return result
 
     def remove_optional_environment(self, processor_id: str, revision: str) -> str | None:
         """Make an app-owned optional processor unavailable without deleting its source."""

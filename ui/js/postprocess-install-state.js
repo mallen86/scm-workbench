@@ -21,10 +21,10 @@ export function optionalInstallStatus(processor, job, failure, startError, activ
     return { label: `Installing model and libraries… Job ${job.id} is running.${elapsed}${step}`, tone: "running" };
   }
   if (job?.status === "fail") return {
-    label: `Installation failed (job ${job.id}). ${failure?.id === job.id ? failure.message : "Loading the job's failure details…"}`,
+    label: `Installation failed (job ${job.id}). ${processor.ready_to_run === true ? "Previous installed profile remains ready. " : ""}${failure?.id === job.id ? failure.message : "Loading the job's failure details…"}`,
     tone: "fail",
   };
-  if (job?.status === "killed") return { label: "Installation cancelled. Images were not changed.", tone: "killed" };
+  if (job?.status === "killed") return { label: `Installation cancelled. Images were not changed.${processor.ready_to_run === true ? " Previous installed profile remains ready." : ""}`, tone: "killed" };
   if (processor.ready_to_run === true) return { label: "Installed and ready to run offline.", tone: "ok" };
   if (job?.status === "ok") return { label: "The previous installation is no longer ready. Install again for this Python runtime.", tone: "fail" };
   return { label: "Not installed. The Simple Upscaler remains available without a download.", tone: "missing" };
