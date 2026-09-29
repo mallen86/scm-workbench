@@ -44,7 +44,7 @@ PAGES.fetch = (root) => {
     el("h3", { class: "plugin-section-title" }, title), pluginGrid(plugins));
   let recentSignature = null;
   const renderPluginPicker = () => {
-    const layout = recentFetchLayout(S.jobs, slugs);
+    const layout = recentFetchLayout(S.jobs, slugs, S.info.custom_art_used === true);
     const signature = layout.recent.join("\u0000");
     if (signature === recentSignature && pickerBody.childElementCount) return;
     recentSignature = signature;
@@ -60,15 +60,17 @@ PAGES.fetch = (root) => {
         el("span", { class: "plugin-summary-meta" }, `${layout.all.length} games`,
           el("span", { class: "plugin-summary-arrow", "aria-hidden": "true" }, ico("arrow")))),
       pluginGrid(layout.all));
-    allGames.open = layout.allOpen || S.plugin === CUSTOM_ART_PLUGIN;
+    allGames.open = layout.allOpen;
     pickerBody.append(allGames);
   };
   const onJobsUpdated = () => renderPluginPicker();
   document.addEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+  document.addEventListener(CUSTOM_ART_CHANGED, onJobsUpdated);
   let customSource = null;
   let cleanupChanged = null;
   wrap.__dispose = () => {
     document.removeEventListener(JOBS_UPDATED_EVENT, onJobsUpdated);
+    document.removeEventListener(CUSTOM_ART_CHANGED, onJobsUpdated);
     if (cleanupChanged) document.removeEventListener(CUSTOM_ART_CHANGED, cleanupChanged);
     customSource?.__dispose?.();
   };

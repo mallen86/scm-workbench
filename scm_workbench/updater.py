@@ -57,7 +57,7 @@ USER_AGENT = "scm-workbench-updater/0.1"
 METADATA_MAX_BYTES = 2 * 1024 * 1024
 RELEASE_LIST_MAX = 100
 TOTAL_DEADLINE_SECONDS = 30
-DOWNLOAD_DEADLINE_SECONDS = 60
+DOWNLOAD_IDLE_TIMEOUT_SECONDS = 30
 ASSET_MAX_BYTES = 1 << 30
 
 ARCHIVE_MEMBER_MAX = 20_000
@@ -779,14 +779,13 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
     os.close(fd)
     headers = {"User-Agent": USER_AGENT}
     req = urllib.request.Request(url, headers=headers)
-    deadline = time.monotonic() + min(max(float(timeout), 0.0), DOWNLOAD_DEADLINE_SECONDS)
+    # ``timeout`` remains API-compatible, but is now the per-connection/read
+    # inactivity limit; a progressing large asset has no overall deadline.
+    idle_timeout = min(max(float(timeout), 0.001), DOWNLOAD_IDLE_TIMEOUT_SECONDS)
     r = None
     try:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise UpdateError("download timed out")
         try:
-            r = urllib.request.urlopen(req, timeout=remaining)
+            r = urllib.request.urlopen(req, timeout=idle_timeout)
         except urllib.error.HTTPError as e:
             try:
                 e.close()
@@ -821,9 +820,17 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
             progress(0, progress_total)
         with open(part_name, "wb") as f:
             while True:
-                remaining = deadline - time.monotonic()
                 read_size = min(1 << 20, expected_size - done + 1)
-                b = _response_read(r, read_size, deadline, label="download")
+                _set_response_timeout(r, idle_timeout)
+                try:
+                    # read1 returns available socket data instead of waiting to
+                    # fill a large buffer, so the timeout detects actual stalls.
+                    read = getattr(r, "read1", r.read)
+                    b = read(read_size)
+                except Exception as exc:
+                    if isinstance(exc, (TimeoutError, OSError, urllib.error.URLError)):
+                        raise UpdateError("GitHub download stalled or timed out") from exc
+                    raise
                 if not b:
                     break
                 done += len(b)

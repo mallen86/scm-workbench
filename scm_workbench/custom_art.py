@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -365,6 +366,30 @@ def _size(result):
     return len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def custom_art_used(server):
+    """Return whether any custom image import has succeeded on this install."""
+    from scm_workbench import postprocessing
+    try:
+        raw = postprocessing._read_regular_bytes(
+            server.DATA_DIR / "custom-art-use.json", "custom art usage", 256)
+        value = json.loads(raw)
+        return (isinstance(value, dict) and set(value) == {"used_at"} and
+                type(value.get("used_at")) in (int, float) and
+                math.isfinite(value["used_at"]) and value["used_at"] > 0)
+    except (OSError, ValueError, TypeError, postprocessing.PostProcessingError):
+        return False
+
+
+def _mark_used(server):
+    from scm_workbench import postprocessing
+    try:
+        postprocessing._atomic_json(server.DATA_DIR / "custom-art-use.json", {"used_at": time.time()})
+    except (OSError, postprocessing.PostProcessingError):
+        # Import publication already succeeded; a recents failure must not
+        # misreport the copied images as failed or roll them back.
+        pass
+
+
 def _run_back(entries, server, settings, deadline, progress=None):
     """Use the existing single-card-back quarantine/rollback transaction."""
     display_name, open_file = entries[0]
@@ -385,7 +410,10 @@ def _run_back(entries, server, settings, deadline, progress=None):
         back = server.import_back_image_opened(owned, observed, source_name, settings)
         result = {"ok": True, "destination": "back", "imported": 1,
                   "names": [back["name"]], "failed": []}
-        return result if _size(result) <= MAX_RESULT else rejection("custom art result exceeds 256 KiB")
+        if _size(result) <= MAX_RESULT:
+            _mark_used(server)
+            return result
+        return rejection("custom art result exceeds 256 KiB")
     except (ImportError, server.BackImageImportError) as exc:
         return rejection(str(exc))
     except (OSError, ValueError):
@@ -453,6 +481,7 @@ def _run(dest, entries, server, settings, deadline, progress=None):
         # 256 names of <=255 UTF-8 bytes plus 256 bounded errors fit comfortably.
         return rejection("custom art result exceeds 256 KiB")
     if names:
+        _mark_used(server)
         server.invalidate_manifest_cache()
     return result
 

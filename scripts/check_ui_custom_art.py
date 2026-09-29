@@ -131,7 +131,7 @@ assert.match(text(page),/CUSTOM DROP BOXES/);
 assert.match(text(page),/Starting a different deck\?/);
 assert.match(text(page),/Clear card images/);
 assert.equal(formCount,0);assert.equal(strips,0,"Custom must not launch or render a fake fetch job");
-assert.equal(all(page).find(n=>n.tag==="details").open,true,"Custom stays visible with recent games");
+assert.equal(all(page).find(n=>n.tag==="details").open,false,"selecting Custom must not force All games open");
 page.__patch();assert.equal(customMounted,1);
 await all(page).find(n=>n.tag==="button"&&text(n).includes("Clear card images")).onclick();
 assert.equal(cleared,1);assert.equal(after,0,"Custom cleanup must not preview a missing manifest kind");

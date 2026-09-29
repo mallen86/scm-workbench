@@ -3586,6 +3586,7 @@ def get_info() -> dict:
         scm_info["saved_offset"] = offset_state.get("global")
     elif offset_state.get("global") is not None:
         scm_info["saved_offset"] = offset_state["global"]
+    from scm_workbench import custom_art
     return {
         "server": {
             "version": SERVER_VERSION,
@@ -3602,6 +3603,7 @@ def get_info() -> dict:
         # (browser fallback): <data>/window.json, written by the launcher
         "window": _try_read_json(DATA_DIR / "window.json") or {},
         "scm": scm_info,
+        "custom_art_used": custom_art.custom_art_used(sys.modules[__name__]),
         "extras": read_extras_info(extras),
         "per_size_offsets": load_per_size_offsets(),
         "repos": repos_view(settings),

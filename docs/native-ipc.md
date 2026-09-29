@@ -334,7 +334,12 @@ rejected before truncation; failure labels are sanitized to safe basenames.
 A terminal success is exactly `{"ok":true,"destination":"front"|"double_sided"|"back",
 "imported":N,"names":["<published basename>",...],"failed":[{"name":"<basename>",
 "error":"<bounded message>"},...]}`. `ok:true` means the operation finished,
-**not** that every entry succeeded. Infrastructure and busy errors return
+**not** that every entry succeeded. Any successful publication (including a partial batch)
+updates the Workbench-owned `custom-art-use.json` timestamp in the app data directory;
+failed, cancelled, empty, and picker-only operations do not. `info` exposes only the
+bounded `custom_art_used` boolean, shared by native and browser imports. The Fetch UI
+pins Custom beside the five newest available game plugins, for a maximum of six entries.
+Infrastructure and busy errors return
 `{"ok":false,"errors":["<bounded message>",...]}`. No source paths appear in
 the result; the complete encoded result is limited to 256 KiB.
 
@@ -743,7 +748,10 @@ ordinary worker startup does not wait for a helper result: the bounded reconcili
 poll runs only when a valid update token still matches a durable handoff job. Release
 notes are tag-bound, size-limited, HTML-escaped Markdown;
 the WebView treats that renderer as its sole remote HTML boundary and renders all other
-release metadata as text nodes. Downloads have a 60-second total deadline, a 1 GiB
+release metadata as text nodes. Asset downloads have no total wall-clock deadline;
+connections and stalled reads retain a 30-second inactivity timeout. Available-data
+reads allow continuously progressing transfers to finish on slow connections.
+Release metadata lookup deadlines remain unchanged. Downloads retain a 1 GiB
 ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
 and SHA-256 verification when GitHub supplies a digest. A completed download is
 published from a unique temporary file only after validation. On macOS the updater

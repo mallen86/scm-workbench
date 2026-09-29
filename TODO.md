@@ -1,4 +1,5 @@
 # Bugs
+- [x] Remove the overall app-update asset download deadline while retaining network inactivity detection, metadata deadlines, and verified atomic publication.
 - [x] Highlight the targeted Custom image drop zone during native file drags and clear it on leave, drop, busy state, or page disposal.
 - [x] Preserve macOS logical drop coordinates on Retina displays so Custom card-art drops hit the intended image zone.
 - [x] Preserve verified Advanced Upscaler libraries and the installed CUDA profile across bundled source-only updates; require reinstallation only for changed requirements or incompatible/damaged assets or runtime.
@@ -121,6 +122,7 @@
     - Debounce and cancel stale renders, keep native and browser behavior equivalent, never retry native failures over HTTP, and never modify source folders, real PDF output, job history, or artifact grants.
     - Follow the detailed design, security bounds, lifecycle requirements, and regression plan in [`docs/plans/create-pdf-front-preview.md`](docs/plans/create-pdf-front-preview.md).
 - [x] Fetch card art game section: initial view should be all games but once you've used it the list is collapsed and a "Recently used" section is shown at the top
+- [x] Keep successfully imported Custom card art in Recently used across restarts, pinned alongside five recent games; failed, cancelled, and empty imports do not count.
 - [x] Guided tutorial since the message after initially syncing the repos says "Show me around" but we don't actually show you around. The guided tour should be optional and should be able to be stopped before the end. It should at minimum guide you to fetch the card art, add a back image, and generate the pdf.
     - [x] Add a step in between 3 and 4 showcasing the card and paper sizes on the create pdf page
     - [x] Remove the text "Select Only fronts in the form when a back is not needed." from the step 4 (or step 5 if you've already added the new step above). Only fronts will remove any double-sided cards which are independent of the backs

@@ -1,4 +1,5 @@
 export const RECENT_FETCH_LIMIT = 6;
+export const RECENT_GAME_LIMIT = RECENT_FETCH_LIMIT - 1;
 
 
 export function recentFetchPlugins(jobs, availableSlugs) {
@@ -28,13 +29,15 @@ export function recentFetchPlugins(jobs, availableSlugs) {
 }
 
 
-export function recentFetchLayout(jobs, availableSlugs) {
+export function recentFetchLayout(jobs, availableSlugs, customArtUsed = false) {
   const all = Array.isArray(availableSlugs) ? [...availableSlugs] : [];
-  const recent = recentFetchPlugins(jobs, all);
+  const customPinned = customArtUsed === true && all.includes("__custom_art");
+  const recent = recentFetchPlugins(jobs, all.filter(slug => slug !== "__custom_art"));
+  const recentPlugins = customPinned ? [...recent.slice(0, RECENT_GAME_LIMIT), "__custom_art"] : recent;
   return {
     all,
-    recent,
-    hasRecent: recent.length > 0,
-    allOpen: recent.length === 0,
+    recent: recentPlugins,
+    hasRecent: recentPlugins.length > 0,
+    allOpen: recentPlugins.length === 0,
   };
 }

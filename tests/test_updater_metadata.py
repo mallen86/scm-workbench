@@ -553,28 +553,64 @@ class UpdaterDownloadTests(unittest.TestCase):
                 self.assertEqual(dest.read_bytes(), b"old")
                 self.assert_no_partial(dest)
 
-    def test_download_has_one_total_deadline_and_closes_response(self):
+    def test_download_can_progress_beyond_sixty_seconds(self):
+        body = b"new"
+        asset = self.asset(digest="sha256:" + hashlib.sha256(body).hexdigest())
+
+        class SlowResponse(FakeResponse):
+            def __init__(self):
+                super().__init__(body, headers={"Content-Length": "3"}, url=asset["url"])
+                self.now = 0
+
+            def read(self, size=-1):
+                self.now += 90
+                return super().read(size)
+
+        response = SlowResponse()
         dest = self.dest()
-        response = self.response()
-        with patch("urllib.request.urlopen", return_value=response), \
-                patch.object(updater.time, "monotonic",
-                             side_effect=[0.0, 0.0, 0.0, 2.0]):
-            with self.assertRaisesRegex(updater.UpdateError, "timed out"):
-                updater.download(self.asset()["url"], dest,
-                                 expected_asset=self.asset(), timeout=1)
+        with patch("urllib.request.urlopen", return_value=response) as urlopen, \
+                patch.object(updater.time, "monotonic", side_effect=lambda: response.now):
+            self.assertEqual(updater.download(asset["url"], dest, expected_asset=asset), 3)
+        self.assertGreaterEqual(response.now, 180)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS)
+        self.assertEqual(dest.read_bytes(), body)
         self.assertTrue(response.closed)
+
+    def test_download_uses_available_reads_and_refreshes_idle_timeout(self):
+        response = self.response()
+        available_read = response.read
+        response.read1 = available_read
+        response.read = lambda size=-1: (_ for _ in ()).throw(AssertionError("must not wait to fill the buffer"))
+        timeouts = []
+        response.settimeout = timeouts.append
+        with patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(updater.download(self.asset()["url"], self.dest(),
+                                             expected_asset=self.asset()), 3)
+        self.assertEqual(timeouts, [updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS] * 2)
+        self.assertTrue(response.closed)
+
+    def test_download_stall_cleans_partial_and_preserves_destination(self):
+        asset = self.asset()
+        dest = self.dest()
+        dest.write_bytes(b"old")
+        response = self.response()
+        response.read = lambda size=-1: (_ for _ in ()).throw(TimeoutError("stalled"))
+        with patch("urllib.request.urlopen", return_value=response):
+            with self.assertRaisesRegex(updater.UpdateError, "stalled or timed out"):
+                updater.download(asset["url"], dest, expected_asset=asset)
+        self.assertTrue(response.closed)
+        self.assertEqual(dest.read_bytes(), b"old")
         self.assert_no_partial(dest)
 
-    def test_download_default_and_maximum_total_deadline_are_sixty_seconds(self):
+    def test_download_timeout_argument_is_bounded_idle_timeout(self):
         for supplied_timeout in (60, 600):
             with self.subTest(timeout=supplied_timeout), tempfile.TemporaryDirectory() as directory:
                 dest = Path(directory) / "download.zip"
                 response = self.response()
-                with patch("urllib.request.urlopen", return_value=response) as urlopen, \
-                        patch.object(updater.time, "monotonic", return_value=100.0):
+                with patch("urllib.request.urlopen", return_value=response) as urlopen:
                     updater.download(self.asset()["url"], dest,
                                      expected_asset=self.asset(), timeout=supplied_timeout)
-                self.assertEqual(urlopen.call_args.kwargs["timeout"], 60.0)
+                self.assertEqual(urlopen.call_args.kwargs["timeout"], updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS)
                 self.assertTrue(response.closed)
 
     def test_download_cleans_partial_when_open_or_replace_fails(self):

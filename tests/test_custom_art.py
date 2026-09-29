@@ -39,6 +39,28 @@ class CustomArtTests(unittest.TestCase):
         p.write_bytes(content)
         return str(p)
 
+    def test_successful_custom_import_use_persists_and_failure_does_not_mark(self):
+        self.assertFalse(custom_art.custom_art_used(server))
+        failed = custom_art.import_selected("front", [self.source("bad.png", b"not image")], server, self.settings)
+        self.assertEqual(failed["imported"], 0)
+        self.assertFalse(custom_art.custom_art_used(server))
+        partial = custom_art.import_selected("front", [self.source("good.png"), self.source("also-bad.png", b"bad")], server, self.settings)
+        self.assertEqual(partial["imported"], 1)
+        self.assertTrue(custom_art.custom_art_used(server))
+        persisted = json.loads((self.data / "custom-art-use.json").read_text("utf-8"))
+        self.assertEqual(set(persisted), {"used_at"})
+        self.assertGreater(persisted["used_at"], 0)
+        self.assertTrue(custom_art.custom_art_used(server), "the durable flag survives a fresh info read")
+
+    def test_custom_usage_marker_is_bounded_and_strict(self):
+        path = self.data / "custom-art-use.json"
+        for raw in (b"x" * 257, b'{"used_at":NaN}', b'{"used_at":Infinity}',
+                    b'{"used_at":true}', b'{"used_at":-1}', b'{"used_at":1,"extra":1}', b'[]'):
+            path.write_bytes(raw)
+            self.assertFalse(custom_art.custom_art_used(server))
+        path.write_bytes(b'{"used_at":1}')
+        self.assertTrue(custom_art.custom_art_used(server))
+
     def test_fixed_destinations_copy_collision_no_replace_and_originals(self):
         src = self.source("one.png")
         folder = self.scm / "game" / "front"
