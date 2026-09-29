@@ -190,10 +190,14 @@ gh release create v0.1.1 --title "v0.1.1" --notes-file notes.md --verify-tag
 # Beta example: the tag, title, and GitHub prerelease flag must agree
 git tag -a v0.9.0-beta.1 -m "v0.9.0-beta.1"
 git push origin v0.9.0-beta.1
-gh release create v0.9.0-beta.1 --title "v0.9.0-beta.1" --notes-file notes.md --verify-tag --prerelease
+gh release create v0.9.0-beta.1 --title "v0.9.0-beta.1" --notes-file notes.md --verify-tag --prerelease --draft
+# After CI succeeds and all four draft assets are verified:
+gh release edit v0.9.0-beta.1 --draft=false --latest=false
 ```
 
 The tag message and the release title are both the bare version, for example `v0.1.1` or `v0.9.0-beta.1`. Nothing is prefixed to them.
+
+Keep a beta release in draft until packaging succeeds and all four downloads are attached and verified. If the workflow fails before downloads are published, fix the failure and reuse the same beta number rather than creating another release. Confirm that the failed build has stopped and no downloads were published before moving its tag to a corrective commit. Do not move tags for versions already available to users.
 
 For a local build, run `python scripts/inject_version.py v0.1.1` before building; with no tag in sight it keeps the version the repository declares.
 

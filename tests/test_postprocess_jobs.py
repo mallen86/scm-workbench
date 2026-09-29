@@ -136,6 +136,54 @@ class PostprocessJobTests(unittest.TestCase):
         }))
         self.assertEqual(job["progress"], {"current": 1, "total": 1, "label": "card.png"})
 
+    def test_advanced_activity_is_bounded_authorized_and_never_completes_an_image(self):
+        first = {"index": 1, "total": 2, "name": "Card  A.png", "role": "front",
+                 "phase": "initializing", "provider": "CUDAExecutionProvider", "tile": 0, "tiles": 0}
+        job = {"kind": "postprocess_images", "postprocess_builtin_activity": True,
+               "image_total": 2, "postprocess_entries": [
+                   {"name": "Card  A.png", "role": "front"},
+                   {"name": "B.png", "role": "front"}],
+               "progress": {"current": 0, "total": 2}, "log_lines": [], "subs": []}
+        prefix = server._ADVANCED_ACTIVITY_PREFIX
+        def send(frame):
+            server._append_job_line(job, prefix + json.dumps(frame))
+        with mock.patch.object(server.sys, "platform", "linux"):
+            for bad in ({**first, "index": 2}, {**first, "name": "other.png"},
+                        {**first, "tile": True}, {**first, "unexpected": 1},
+                        {**first, "phase": "tile", "tile": 1, "tiles": 2},
+                        {**first, "provider": "CoreMLExecutionProvider"},
+                        {**first, "name": "x" * 5000}):
+                send(bad)
+            self.assertNotIn("activity", job["progress"])
+            send(first)
+            self.assertEqual(job["progress"]["current"], 0)
+            send({**first, "phase": "fallback", "provider": "CPUExecutionProvider"})
+            self.assertEqual(job["postprocess_cpu_warning"], "cuda")
+            send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tiles": 4})
+            send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 2, "tiles": 4})
+            self.assertEqual(job["progress"]["activity"]["tile"], 2)
+            for bad in ({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 1, "tiles": 4},
+                        {**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 3, "tiles": 10},
+                        {**first, "phase": "fallback", "provider": "CUDAExecutionProvider"},
+                        {**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 3, "tiles": 4, "index": 2}):
+                send(bad)
+            self.assertEqual(job["progress"]["activity"]["tile"], 2)
+            self.assertEqual(job["progress"]["current"], 0)
+            job["postprocess_builtin_activity"] = False
+            send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 4, "tiles": 4})
+            self.assertEqual(job["progress"]["activity"]["tile"], 2)
+            job["postprocess_builtin_activity"] = True
+            send({**first, "phase": "tile", "provider": "CPUExecutionProvider", "tile": 4, "tiles": 4})
+            self.assertEqual(job["progress"]["current"], 0)
+            server._append_job_line(job, "WB_POSTPROCESS_PROGRESS " + json.dumps(
+                {"index": 1, "total": 2, "name": "Card  A.png", "role": "front"}))
+            self.assertEqual(job["progress"]["current"], 1)
+            send(first)  # stale activity for a completed image
+            self.assertNotIn("activity", job["progress"])
+            job["kind"] = "postprocess_dependencies"
+            send({**first, "index": 2, "name": "B.png"})
+            self.assertNotIn("activity", job["progress"])
+
     def test_unicode_and_spaced_filenames_keep_image_progress_sequential(self):
         names = ("01-before.png", "02-A\u00a0B-\U0001f0a1.png",
                  "03-after.png", "04-double  space.png")
@@ -462,6 +510,13 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(manifest["environment"], str(site_packages))
         self.assertEqual(manifest["limits"]["cpu_seconds"], 900)
         self.assertEqual(manifest["limits"]["address_space"], 4 * 1024 ** 3)
+        normalized, errors, _warnings = server.normalize_args(
+            server.get_manifest()["postprocess_images"],
+            {"processor_id": copied["id"], "revision_hash": copied["revision"],
+             "scope": "front", "cpu_seconds": None, "model_path": str(site_packages / "model.onnx")})
+        self.assertEqual(errors, [])
+        self.assertNotIn("cpu_seconds", normalized)
+        self.assertNotIn("model_path", normalized)
 
         fixed_run = self.data / "postprocessing/runs/fixed-linux-gpu"
         fixed_job = {
@@ -482,6 +537,10 @@ class PostprocessJobTests(unittest.TestCase):
         fixed_manifest = json.loads((fixed_run / "manifest.json").read_text(encoding="utf-8"))
         self.assertIn("model_path", fixed_manifest)
         self.assertEqual(fixed_manifest["limits"]["address_space"], 16 * 1024 ** 3)
+        self.assertIsNone(fixed_manifest["limits"]["cpu_seconds"])
+        self.assertEqual(fixed_manifest["limits"]["file_size"], 512 * 1024 * 1024)
+        self.assertEqual(fixed_manifest["limits"]["open_files"], 128)
+        self.assertEqual(fixed_manifest["limits"]["processes"], 8)
 
     def test_success_publishes_atomically_and_releases_exclusive_lease(self):
         image = self.repo / "game" / "front" / "card.png"
@@ -503,6 +562,72 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(server._POSTPROCESS_USERS, 0)
         self.assertFalse(Path(job["postprocess_run"]).exists())
 
+    def test_fixed_advanced_preparation_has_no_timer_but_remains_cancellable(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        store = server._postprocessor_store()
+        fixed = store.get(server.BUILTIN_ADVANCED_UPSCALER_ID, include_source=False)
+        args = {"processor_id": fixed["id"], "revision_hash": fixed["revision"], "scope": "front"}
+        ready = {"processor": {"trusted": True}, "environment": {"ready": True}}
+        entered = threading.Event()
+        def blocked(job, _args):
+            entered.set()
+            self.assertTrue(job["cancel_event"].wait(5))
+            raise server.postprocessing.CancelledError("cancelled")
+        with (mock.patch.object(server, "_postprocessor_status", return_value=ready),
+              mock.patch.object(server, "_prepare_image_postprocess_job", side_effect=blocked),
+              mock.patch.object(server.threading, "Timer", side_effect=AssertionError("unexpected timer"))):
+            job, errors = server.start_job("postprocess_images", args)
+            self.assertEqual(errors, [])
+            self.assertTrue(entered.wait(2))
+            self.assertIsNone(job["deadline_seconds"])
+            self.assertNotIn("timeout_timer", job)
+            self.assertTrue(server.kill_job(job["id"]))
+            self.wait(job)
+        self.assertEqual(job["status"], "killed")
+        self.assertEqual(image.read_bytes(), PNG)
+        self.assertEqual(server._POSTPROCESS_USERS, 0)
+
+    def test_custom_staging_wall_timeout_still_applies(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        def blocked(job, _args):
+            self.assertTrue(job["cancel_event"].wait(5))
+            raise server.postprocessing.CancelledError("timed out")
+        with (mock.patch.object(server, "POSTPROCESS_RUN_TIMEOUT_SECONDS", 0.05),
+              mock.patch.object(server, "_prepare_image_postprocess_job", side_effect=blocked)):
+            job, errors = self.start_images(item)
+            self.assertEqual(errors, [])
+            self.wait(job)
+        self.assertTrue(job["timed_out"])
+        self.assertEqual(job["status"], "fail")
+        self.assertEqual(image.read_bytes(), PNG)
+
+    def test_fixed_advanced_run_ignores_idle_limit_but_custom_run_does_not(self):
+        import subprocess
+        command = [str(server.job_python(self.settings)), "-c", "import time; time.sleep(0.35)"]
+        for unlimited in (True, False):
+            with self.subTest(unlimited=unlimited):
+                proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
+                job = {"id": "idle-fixture", "kind": "postprocess_images", "log_lines": [],
+                       "subs": [], "proc": proc, "proc_lock": threading.Lock(),
+                       "deadline_seconds": None if unlimited else 3600}
+                with (mock.patch.object(server, "POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS", 0.05),
+                      mock.patch.object(server, "_append_job_line")):
+                    try:
+                        rc = server._drain_postprocess_process(job, proc, None)
+                    finally:
+                        if proc.poll() is None:
+                            server._terminate_and_reap(proc, job["proc_lock"])
+                        proc.stdout.close()
+                if unlimited:
+                    self.assertEqual(rc, 0)
+                    self.assertFalse(job.get("idle_timed_out"))
+                else:
+                    self.assertTrue(job.get("idle_timed_out"))
+
     def test_staging_is_registered_and_cancellable_before_runner_spawn(self):
         image = self.repo / "game" / "front" / "card.png"
         image.write_bytes(PNG)
@@ -519,6 +644,8 @@ class PostprocessJobTests(unittest.TestCase):
             job, errors = self.start_images(item)
             self.assertEqual(errors, [])
             self.assertTrue(entered.wait(2))
+            self.assertEqual(job["deadline_seconds"], server.POSTPROCESS_RUN_TIMEOUT_SECONDS)
+            self.assertIsNotNone(job.get("timeout_timer"))
             self.assertTrue(server.kill_job(job["id"]))
             self.wait(job)
         self.assertEqual(job["status"], "killed")
@@ -577,6 +704,26 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(job["postprocess_outcome"], "unchanged")
         self.assertEqual(image.read_bytes(), PNG)
         self.assertTrue(any("did not complete every callback" in line for line in job["log_lines"]))
+
+    def test_inference_failure_does_not_commit_or_trust_custom_activity(self):
+        image = self.repo / "game" / "front" / "card.png"
+        image.write_bytes(PNG)
+        frame = json.dumps({"index": 1, "total": 1, "name": "card.png", "role": "front",
+                            "phase": "fallback", "provider": "CPUExecutionProvider",
+                            "tile": 0, "tiles": 0})
+        item = self.save_and_trust(
+            "def process_image(image_path, context):\n"
+            f"    print({(server._ADVANCED_ACTIVITY_PREFIX + frame)!r}, flush=True)\n"
+            "    raise RuntimeError('CPU inference failed')\n"
+        )
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        self.assertEqual(job["status"], "fail")
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertEqual(image.read_bytes(), PNG)
+        self.assertNotIn("postprocess_cpu_warning", job)
+        self.assertEqual(job["progress"]["current"], 0)
 
     def test_invalid_result_never_replaces_original(self):
         image = self.repo / "game" / "front" / "card.png"
@@ -716,6 +863,8 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(
             job["stage_max_entries"], server.POSTPROCESS_INSTALL_STAGE_MAX_ENTRIES,
         )
+        self.assertEqual(job["deadline_seconds"], server.POSTPROCESS_INSTALL_TIMEOUT_SECONDS)
+        self.assertIsNotNone(job.get("timeout_timer"))
         self.assertGreater(job["stage_max_entries"], server.POSTPROCESS_ENV_MAX_FILES)
         self.assertIn(" -B ", f" {job['cmd']} ")
         self.wait(job)

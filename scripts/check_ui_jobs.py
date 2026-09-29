@@ -595,7 +595,7 @@ if (result.fraction !== 0 || !result.text.includes("0 / 4")) fail("staged image 
 result = view(image("running", { current: 2, total: 4 }));
 if (result.fraction !== 0.5 || !result.text.includes("50%")) fail("validated image progress was not shown");
 result = view(image("running", { current: 4, total: 4 }));
-if (result.fraction !== 1 || !result.text.includes("validating results")) fail("processed images were confused with a completed job");
+if (result.fraction !== 1 || !result.text.includes("Validating results")) fail("processed images were confused with a completed job");
 for (const progress of [{ current: -1, total: 4 }, { current: 5, total: 4 },
                         { current: 1, total: 0 }, { current: true, total: 4 },
                         { current: 1, total: Infinity }]) {

@@ -2,17 +2,32 @@
    validated against the staged batch; library installs expose stages, not a
    made-up download percentage. */
 
+const providerName = {
+  CPUExecutionProvider: "CPU", CUDAExecutionProvider: "CUDA",
+  CoreMLExecutionProvider: "CoreML", DmlExecutionProvider: "DirectML",
+};
+
 export function jobNoticeProgress(job, status = job?.status) {
   if (status === "running" && job?.kind === "postprocess_images") {
     const current = job.progress?.current, total = job.progress?.total;
     if (Number.isSafeInteger(current) && Number.isSafeInteger(total) &&
-        total > 0 && total <= 1000000 && current >= 0 && current <= total) {
-      const percent = Math.floor(current * 100 / total);
+        total > 0 && total <= 1024 && current >= 0 && current <= total) {
+      const activity = job.progress?.activity;
+      const validActivity = activity && activity.index === current + 1 &&
+        activity.total === total && typeof activity.name === "string" && activity.name.length <= 255 &&
+        Object.hasOwn(providerName, activity.provider) &&
+        ["initializing", "fallback", "tile"].includes(activity.phase) &&
+        Number.isSafeInteger(activity.tile) && Number.isSafeInteger(activity.tiles) &&
+        activity.tile >= 0 && activity.tile <= activity.tiles && activity.tiles <= 1000000;
+      const warning = job.postprocess_cpu_warning === "cuda"
+        ? "CPU fallback: NVIDIA CUDA needs CUDA 12.x and cuDNN 9. AI processing may be slow. "
+        : job.postprocess_cpu_warning === "gpu" ? "GPU unavailable; using CPU. AI processing may be slow. " : "";
+      const detail = current === total ? "Validating results…" : validActivity
+        ? `${activity.phase === "initializing" ? "Initializing" : "Processing"} ${activity.name.slice(0, 64)} on ${providerName[activity.provider]}${activity.tiles ? `, tile ${activity.tile} / ${activity.tiles}` : ""}`
+        : "Preparing next image…";
       return {
-        text: current === total
-          ? `${current} / ${total} images processed; validating results…`
-          : `${current} / ${total} images processed (${percent}%)`,
-        fraction: current / total,
+        text: `${warning}${current} / ${total} images processed (${Math.floor(current * 100 / total)}%). ${detail}`,
+        fraction: current / total, warning: warning.trim(),
       };
     }
     return { text: "Preparing image set…", fraction: null };
@@ -23,16 +38,16 @@ export function jobNoticeProgress(job, status = job?.status) {
       ? stage : "Preparing installer…", fraction: null };
   }
   if (job?.kind === "postprocess_images") {
-    if (status === "ok") return { text: job.postprocess_outcome === "unchanged"
+    if (status === "ok") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
       ? "Processing complete; originals unchanged."
-      : job.postprocess_outcome === "committed" ? "Images processed and saved." : "Processing complete.", fraction: null };
+      : job.postprocess_outcome === "committed" ? "Images processed and saved." : "Processing complete."), fraction: null };
     if (job.postprocess_outcome === "needs_attention") return {
       text: "Rollback could not be verified; inspect image folders.", fraction: null,
     };
-    if (status === "killed") return { text: job.postprocess_outcome === "unchanged"
-      ? "Stopped; originals unchanged." : "Processing stopped.", fraction: null };
-    if (status === "fail") return { text: job.postprocess_outcome === "unchanged"
-      ? "Processing failed; originals unchanged." : "Processing failed; check Job history.", fraction: null };
+    if (status === "killed") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
+      ? "Stopped; originals unchanged." : "Processing stopped."), fraction: null };
+    if (status === "fail") return { text: (job.postprocess_cpu_warning ? "CPU fallback used. " : "") + (job.postprocess_outcome === "unchanged"
+      ? "Processing failed; originals unchanged." : "Processing failed; check Job history."), fraction: null };
   }
   if (job?.kind === "postprocess_dependencies") {
     if (status === "ok") return { text: "Libraries installed and ready.", fraction: null };

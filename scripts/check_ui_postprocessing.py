@@ -507,6 +507,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = jobs => globalThis.__cancelTest.notices.push(jobs.map(job => job.status));`,
+  "../job-notice-progress.js": `export const jobNoticeProgress = job => ({fraction: job.progress?.current / job.progress?.total || 0, text: "Processing", warning: ""});`,
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle = `from "${path}"`;
@@ -597,6 +598,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = () => {};`,
+  "../job-notice-progress.js": `export const jobNoticeProgress = () => ({fraction: 0, text: "Processing", warning: ""});`,
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle = `from "${path}"`;
@@ -628,6 +630,36 @@ if (!toasts.some(([kind, text]) => kind === "ok" && text.includes("Configure its
         stderr = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<postprocess-page>", result.stderr)
         sys.stderr.write(stderr[-3000:])
         return fail("Advanced Upscaler source-only duplication contract failed")
+    if ('import { jobNoticeProgress } from "../job-notice-progress.js";' not in page or
+            'const progress = jobNoticeProgress(running);' not in page or
+            'progress.fraction ?? 0' not in page or 'progress.text' not in page or
+            'syncJobNotices(S.jobs)' not in page or
+            'if (uiMode() === "simple") panel.append(' not in page):
+        return fail("Simple and Advanced processing status must share the job notice progress view")
+    activity_script = r'''import fs from "node:fs";
+const url = `data:text/javascript;base64,${Buffer.from(fs.readFileSync(process.argv[1])).toString("base64")}`;
+const {jobNoticeProgress: view} = await import(url);
+const job = {kind:"postprocess_images", status:"running", postprocess_cpu_warning:"cuda",
+  progress:{current:0,total:2,activity:{index:1,total:2,name:"First.png",role:"front",
+    phase:"tile",provider:"CPUExecutionProvider",tile:3,tiles:12}}};
+let result = view(job);
+if (result.fraction !== 0 || !result.text.includes("CUDA 12.x and cuDNN 9") ||
+    !result.text.includes("First.png on CPU, tile 3 / 12"))
+  throw new Error("CPU fallback/tile status missing before first completed image");
+job.progress.current = 1;
+job.progress.activity = {index:2,total:2,name:"Second.png",role:"back",
+  phase:"initializing",provider:"CUDAExecutionProvider",tile:0,tiles:0};
+result = view(job);
+if (result.fraction !== 0.5 || !result.text.includes("Initializing Second.png on CUDA"))
+  throw new Error("second image initialization lost monotonic image progress");
+job.progress.activity = {index:1,total:2,name:"stale",phase:"tile",provider:"CPUExecutionProvider",tile:12,tiles:12};
+if (view(job).text.includes("stale")) throw new Error("stale activity displayed");
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", activity_script,
+                             str(UI / "job-notice-progress.js")], cwd=ROOT,
+                            text=True, capture_output=True)
+    if result.returncode:
+        return fail("shared CPU/tile progress contract failed: " + result.stderr[-1200:])
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 

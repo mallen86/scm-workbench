@@ -117,8 +117,24 @@ def _load_manifest(path: Path) -> dict:
                 "file_size": 1024 * 1024 * 1024, "open_files": 1024, "processes": 64}
     if (not isinstance(limits, dict) or set(limits) != set(maximums) or
             any(not isinstance(limits[key], int) or isinstance(limits[key], bool) or
-                not (0 < limits[key] <= maximums[key]) for key in maximums)):
+                not (0 < limits[key] <= maximums[key]) for key in maximums
+                if key != "cpu_seconds") or
+            (limits["cpu_seconds"] is None and "model_path" not in value) or
+            (limits["cpu_seconds"] is not None and
+             (not isinstance(limits["cpu_seconds"], int) or
+              isinstance(limits["cpu_seconds"], bool) or
+              not (0 < limits["cpu_seconds"] <= maximums["cpu_seconds"])))):
         raise RunnerError("manifest limits are invalid")
+    if limits["cpu_seconds"] is None:
+        # The server alone prepares private manifests. Still reject a forged
+        # unlimited custom runner even if it supplies an app-model-shaped path.
+        source = Path(value["source_path"])
+        if source != Path(value["run_root"]) / "processor.py":
+            raise RunnerError("unlimited CPU time requires the fixed processor")
+        built_in = Path(__file__).parent / "builtin_processors" / "advanced_upscaler.py"
+        if (_read_regular(source, "processor source", 256 * 1024)[0] !=
+                _read_regular(built_in, "bundled processor", 256 * 1024)[0]):
+            raise RunnerError("unlimited CPU time requires the fixed processor")
     return value
 
 
@@ -219,9 +235,15 @@ def _set_windows_limits(limits: dict) -> bool:
         handle = kernel.CreateJobObjectW(None, None)
         if not handle: return False
         info = Extended()
-        info.basic.process_time = max(1, int(limits.get("cpu_seconds", 900))) * 10_000_000
+        cpu_seconds = limits["cpu_seconds"]
+        if cpu_seconds is not None:
+            info.basic.process_time = cpu_seconds * 10_000_000
         info.basic.active = max(1, int(limits.get("processes", 8)))
-        info.basic.flags = 0x00000002 | 0x00000008 | 0x00000200 | 0x00002000
+        # No per-process CPU-time flag for the fixed AI runner. Retain the
+        # active-process, job-memory, and kill-on-close limits.
+        info.basic.flags = 0x00000008 | 0x00000200 | 0x00002000
+        if cpu_seconds is not None:
+            info.basic.flags |= 0x00000002
         info.job_memory = max(256 * 1024 * 1024, int(limits.get("address_space", 4 * 1024 * 1024 * 1024)))
         if (not kernel.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info)) or
                 not kernel.AssignProcessToJobObject(handle, kernel.GetCurrentProcess())):
@@ -247,6 +269,16 @@ def _set_limits(manifest: dict) -> None:
         return
     for name, resource_name in (("cpu_seconds", "RLIMIT_CPU"), ("address_space", "RLIMIT_AS"), ("file_size", "RLIMIT_FSIZE"), ("open_files", "RLIMIT_NOFILE")):
         value = limits.get(name)
+        if name == "cpu_seconds" and value is None and hasattr(resource, resource_name):
+            # Undo an inherited *soft* CPU limit when permitted. A finite
+            # inherited hard limit cannot be raised by an unprivileged child.
+            try:
+                kind = getattr(resource, resource_name)
+                _soft, hard = resource.getrlimit(kind)
+                resource.setrlimit(kind, (hard, hard))
+            except (OSError, ValueError):
+                pass
+            continue
         if not isinstance(value, int) or value <= 0 or not hasattr(resource, resource_name):
             continue
         try:

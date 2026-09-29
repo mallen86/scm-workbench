@@ -3697,6 +3697,68 @@ def _record_fetch_image_warning(job: dict, text: str) -> None:
         job.pop("image_warnings", None)
 
 
+_ADVANCED_ACTIVITY_PREFIX = "WB_ADVANCED_UPSCALER_ACTIVITY "
+_ADVANCED_PROVIDER = {"darwin": "CoreMLExecutionProvider", "win32": "DmlExecutionProvider"}
+
+
+def _record_advanced_activity(job: dict, text: str) -> None:
+    """Accept status only from the pinned app-owned runner, never custom jobs."""
+    if (job.get("kind") != "postprocess_images" or
+            not job.get("postprocess_builtin_activity") or
+            len(text.encode("utf-8", "replace")) > 4096):
+        return
+    try:
+        frame = json.loads(text.removeprefix(_ADVANCED_ACTIVITY_PREFIX))
+        if not isinstance(frame, dict) or set(frame) != {
+                "index", "total", "name", "role", "phase", "provider", "tile", "tiles"}:
+            return
+        index, total, tile, tiles = (frame[key] for key in ("index", "total", "tile", "tiles"))
+        if any(type(value) is not int for value in (index, total, tile, tiles)):
+            return
+        entries = job.get("postprocess_entries") or []
+        progress = job.get("progress") or {}
+        completed = progress.get("current", 0)
+        if (type(completed) is not int or total != job.get("image_total") or
+                not 1 <= total <= 1024 or len(entries) != total or
+                index != completed + 1 or not 1 <= index <= total or
+                frame["name"] != entries[index - 1].get("name") or
+                frame["role"] != entries[index - 1].get("role")):
+            return
+        gpu = _ADVANCED_PROVIDER.get(sys.platform, "CUDAExecutionProvider" if sys.platform.startswith("linux") else None)
+        provider = frame["provider"]
+        phase = frame["phase"]
+        if provider not in ({"CPUExecutionProvider", gpu} if gpu else {"CPUExecutionProvider"}):
+            return
+        previous = progress.get("activity")
+        if previous and previous.get("index") != index:
+            previous = None
+        if phase == "initializing":
+            if previous is not None or tile != 0 or tiles != 0:
+                return
+        elif phase == "fallback":
+            if (provider != "CPUExecutionProvider" or previous is None or
+                    previous["phase"] == "fallback" or
+                    (previous["provider"] == "CPUExecutionProvider" and not sys.platform.startswith("linux")) or
+                    (tiles != previous["tiles"] or tile != previous["tile"])):
+                return
+        elif phase == "tile":
+            if (previous is None or not 1 <= tiles <= 1_000_000 or
+                    (previous["tiles"] not in (0, tiles)) or
+                    provider != previous["provider"] or
+                    not 0 <= tile <= tiles or
+                    (tile != 0 and tile <= previous["tile"]) or
+                    (tile == 0 and previous["phase"] not in {"initializing", "fallback"}) or
+                    (tile == 0 and previous["tiles"] != 0)):
+                return
+        else:
+            return
+        job["progress"] = {**progress, "activity": frame}
+        if phase == "fallback":
+            job["postprocess_cpu_warning"] = "cuda" if sys.platform.startswith("linux") else "gpu"
+    except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError):
+        return
+
+
 _POSTPROCESS_INSTALL_STAGES = frozenset({
     "Resolving compatible PyPI wheels",
     "Downloading the locked wheel set",
@@ -3733,6 +3795,8 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
             if stage in _POSTPROCESS_INSTALL_STAGES:
                 job["progress"] = {"label": ("Verifying and publishing installed libraries"
                                               if stage == "Offline wheel installation complete" else stage)}
+        if text.startswith(_ADVANCED_ACTIVITY_PREFIX):
+            _record_advanced_activity(job, text)
         if text.startswith("WB_POSTPROCESS_PROGRESS "):
             try:
                 progress = json.loads(text.removeprefix("WB_POSTPROCESS_PROGRESS "))
@@ -3804,7 +3868,7 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     with JOBS_LOCK:
         rows = sorted(JOBS.values(), key=lambda j: j.get("ts", 0), reverse=True)[:100]
     def slim_row(j: dict) -> dict:
-        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome")
+        return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning")
                  if k in j}
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
@@ -3989,6 +4053,8 @@ def list_jobs() -> dict:
             row["ended"] = j["ended"]
         if j.get("postprocess_outcome"):
             row["postprocess_outcome"] = j["postprocess_outcome"]
+        if j.get("postprocess_cpu_warning"):
+            row["postprocess_cpu_warning"] = j["postprocess_cpu_warning"]
         if j.get("progress"):
             row["progress"] = j["progress"]
         # The job history page rebuilds a job's settings from the exact args it
@@ -7952,7 +8018,10 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         job["postprocess_environment"] = dict(status_now["environment"])
     scm_cwd = Path(job["scm_path"])
     cancelled = job["cancel_event"].is_set
-    if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID:
+    fixed_advanced = (args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID and
+                      item["id"] == BUILTIN_ADVANCED_UPSCALER_ID and
+                      item["bundled"] and item["optional_model"])
+    if fixed_advanced:
         site_path = Path(status_now["environment"]["path"]) / "site-packages"
         if not advanced_model.verify_model(site_path / advanced_model.MODEL_NAME):
             raise postprocessing.IntegrityError("the installed Advanced Upscaler model changed")
@@ -7987,11 +8056,11 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         "source_path": str(source_path), "run_root": str(run_dir),
         "entries": runner_entries, "environment": site_packages,
         **({"model_path": str(Path(site_packages) / advanced_model.MODEL_NAME)}
-           if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else {}),
+           if fixed_advanced else {}),
         "environment_root": str(store.root / "environments"),
         "revision": item["revision"], "requirements": item["requirements"],
         "contract": store.contract,
-        "limits": {"cpu_seconds": 3300 if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID else 900,
+        "limits": {"cpu_seconds": None if fixed_advanced else 900,
                    "address_space": _postprocess_address_space(args["processor_id"]),
                    "file_size": 512 * 1024 * 1024, "open_files": 128,
                    "processes": 8},
@@ -8000,6 +8069,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         postprocessing._private(private_manifest)
         manifest_stream.write(payload)
         manifest_stream.flush(); os.fsync(manifest_stream.fileno())
+    job["postprocess_builtin_activity"] = fixed_advanced
     job["postprocess_entries"] = list(entries)
     job["image_total"] = len(entries)
     job["progress"] = {"current": 0, "total": len(entries)}
@@ -8008,7 +8078,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     argv = [str(python), "-I", "-B", "-u", "-X", "utf8",
             str(_HERE / "postprocess_runner.py"), "--manifest", str(private_manifest)]
     return argv, run_dir, _postprocess_env(
-        run_dir, system_gpu_libraries=args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID,
+        run_dir, system_gpu_libraries=fixed_advanced,
     )
 
 
@@ -8339,7 +8409,8 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
             job.update({"cmd": _fmt_argv(display_argv), "postprocess_run": str(run_dir),
                         "postprocess_manifest": str(private_manifest),
                         "display_cwd": "<private post-processing run>",
-                        "deadline_seconds": POSTPROCESS_RUN_TIMEOUT_SECONDS})
+                        "deadline_seconds": (None if args["processor_id"] == BUILTIN_ADVANCED_UPSCALER_ID
+                                             else POSTPROCESS_RUN_TIMEOUT_SECONDS)})
         elif kind == "postprocess_dependencies":
             argv, cwd, env = _prepare_dependency_job(job, args, job_python(load_settings()))
             display_argv = [*argv[:-1], "<private-installer-manifest>"] if "--manifest" in argv else argv
@@ -8468,13 +8539,16 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                     name=f"postprocess-prepare-{job_id}",
                 )
                 job["preparation_thread"] = prep_thread
-                timeout_timer = threading.Timer(float(job["deadline_seconds"]),
-                                                _postprocess_deadline, args=(job,))
-                timeout_timer.daemon = True
-                job["timeout_timer"] = timeout_timer
+                timeout_timer = None
+                if job["deadline_seconds"] is not None:
+                    timeout_timer = threading.Timer(float(job["deadline_seconds"]),
+                                                    _postprocess_deadline, args=(job,))
+                    timeout_timer.daemon = True
+                    job["timeout_timer"] = timeout_timer
                 JOBS[job_id] = job
             prep_thread.start()
-            timeout_timer.start()
+            if timeout_timer is not None:
+                timeout_timer.start()
             return job, []
         # Keep the final admission check and publication under the same lock as
         # update handoff. An update can therefore never quiesce after this job
@@ -8745,6 +8819,7 @@ def _drain_postprocess_process(job: dict, proc: subprocess.Popen, log_f) -> int:
     last_activity = time.monotonic()
     idle_limit = (POSTPROCESS_INSTALL_IDLE_TIMEOUT_SECONDS
                   if job.get("kind") == "postprocess_dependencies"
+                  else None if job.get("deadline_seconds") is None
                   else POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS)
     while True:
         if rc is None:
@@ -8770,7 +8845,7 @@ def _drain_postprocess_process(job: dict, proc: subprocess.Popen, log_f) -> int:
                         # Identity was already consumed elsewhere. Never send
                         # a broad signal to a potentially reused numeric PGID.
                         tree_stopped = True
-                if rc is None and time.monotonic() - last_activity >= idle_limit:
+                if rc is None and idle_limit is not None and time.monotonic() - last_activity >= idle_limit:
                     job["timed_out"] = True
                     job["idle_timed_out"] = True
                     _kill_process_group(proc)

@@ -8,6 +8,7 @@ import { postprocessors } from "../postprocess-transport.js";
 import { latestInstallJob, optionalInstallStatus } from "../postprocess-install-state.js";
 import { watchJobDone } from "./utilities.js";
 import { syncJobNotices } from "../job-notices.js";
+import { jobNoticeProgress } from "../job-notice-progress.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
@@ -607,10 +608,12 @@ function attachRunStatus(root) {
     const outcome = running.postprocess_outcome;
     const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
     const panel = el("div", { class: `pp-status ${running.status}` }, el("div", {}, message));
+    if (running.status !== "running" && running.postprocess_cpu_warning)
+      panel.append(el("div", { class: "small warn" }, "CPU fallback was used during this run."));
     status.replaceChildren(panel);
     if (running.status === "running") {
-      const done = Number(running.progress?.current || 0), total = Number(running.progress?.total || running.image_total || 0);
-      panel.append(el("div", { class: "pp-progress" }, el("progress", { max: total || 1, value: Math.min(done, total || 1) }), el("span", { class: "small faint" }, total ? `${done} / ${total}` : "Preparing image set…")));
+      const progress = jobNoticeProgress(running);
+      panel.append(el("div", { class: "pp-progress" }, el("progress", { max: 1, value: progress.fraction ?? 0 }), el("span", { class: progress.warning ? "small warn" : "small faint" }, progress.text)));
       if (uiMode() === "simple") panel.append(el("button", {
         class: "btn btn-ghost btn-sm pp-cancel", type: "button",
         disabled: stoppingId === running.id,

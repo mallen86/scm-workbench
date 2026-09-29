@@ -1,4 +1,6 @@
 # Bugs
+- [x] Remove Workbench CPU-time and wall/idle time limits for the fixed Advanced Upscaler while using all process-available CPU cores; retain cancellation, custom/install time limits, and other safety bounds.
+- [x] Keep automatic Advanced Upscaler CPU fallback visible in both modes, detect silent GPU initialization fallback, and show bounded tile progress without advancing completed-image counts.
 - [x] Make temporary-image metadata regression coverage independent of filesystem timestamp resolution, without weakening byte verification.
 - [x] Replace the managed repo's local non-user 1 GiB size gate with staging-space checks and bounded, cancellable copying/verification while retaining incoming-data limits, user-data budgets, and transactional recovery.
 - [x] Avoid false Custom import failures from temporary-file metadata changes by verifying copied bytes, verify every publication against the copied-source digest, and reject content edits/replacements within the import deadline.
