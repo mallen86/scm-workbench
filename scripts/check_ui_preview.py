@@ -136,6 +136,7 @@ const jobsUrl = dataUrl("export const jobs = {}; ");
 const prepUrl = dataUrl("export const repoReady = () => true; ");
 const navUrl = dataUrl("export const uiMode = () => \"advanced\"; ");
 const jobEventsUrl = dataUrl("export const publishJobsUpdated = () => {}; ");
+const jobNoticesUrl = dataUrl("export const syncJobNotices = () => {}; ");
 const settingsTransportUrl = dataUrl("export const canPickDirectory = () => false; export const pickDirectory = async () => null; ");
 globalThis.releases = [];
 const previewStubUrl = dataUrl(`
@@ -146,6 +147,7 @@ const previewStubUrl = dataUrl(`
 const formsForTest = formsSource
   .replace('from "./core.js"', `from "${coreUrl}"`)
   .replace('from "./job-events.js"', `from "${jobEventsUrl}"`)
+  .replace('from "./job-notices.js"', `from "${jobNoticesUrl}"`)
   .replace('from "./jobs.js"', `from "${jobsUrl}"`)
   .replace('from "./preview.js"', `from "${previewStubUrl}"`)
   .replace('from "./prep.js"', `from "${prepUrl}"`)
@@ -203,6 +205,27 @@ if (forms.directorySelectionValue({}, "/picked/fronts") !== "/picked/fronts" ||
     forms.directorySelectionValue({ browse_filename: "game.pdf" }, "/picked/output/") !== "/picked/output/game.pdf" ||
     forms.directorySelectionValue({ browse_filename: "game.pdf" }, "C:\\picked\\output\\") !== "C:\\picked\\output\\game.pdf") {
   fail("directory selections were not converted to form path values");
+}
+const outputOption = { managed_output_dir: "game/output" };
+const managedInfo = { repos: [
+  { key: "scm", mode: "managed", path: "/work/repos/scm" },
+  { key: "extras", mode: "managed", path: "/work/repos/extras" },
+], server: { is_windows: false } };
+if (forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/other", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/extras/game/output", managedInfo) ||
+    forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output/../front", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/repos/scm/game/output/decks", managedInfo) ||
+    !forms.managedOutputFolderAllowed(outputOption, "/work/scm-elsewhere", managedInfo) ||
+    !forms.managedOutputFolderAllowed({}, "/work/repos/scm/other", managedInfo)) {
+  fail("managed output picker did not keep non-default repo folders out");
+}
+const windowsManaged = { repos: [{ key: "scm", mode: "managed", path: "C:\\Work\\repos\\scm" }], server: { is_windows: true } };
+if (forms.managedOutputFolderAllowed(outputOption, "c:\\work\\repos\\scm\\GAME\\front", windowsManaged) ||
+    !forms.managedOutputFolderAllowed(outputOption, "C:\\WORK\\repos\\scm\\game\\output", windowsManaged) ||
+    !forms.managedOutputFolderAllowed(outputOption, "C:\\work\\repos\\scm-other", windowsManaged)) {
+  fail("Windows managed output picker path checks did not match canonical folder boundaries");
 }
 
 // Saved Create PDF preferences replace hard-coded manifest defaults for a

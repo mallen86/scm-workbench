@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wb-postprocessor-import"
+description = "Enables the wb_postprocessor_import command without any pre-configured scope."
+commands.allow = ["wb_postprocessor_import"]
+
+[[permission]]
+identifier = "deny-wb-postprocessor-import"
+description = "Denies the wb_postprocessor_import command without any pre-configured scope."
+commands.deny = ["wb_postprocessor_import"]

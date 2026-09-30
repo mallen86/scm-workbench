@@ -442,5 +442,10 @@ export function bindConsole() {
 
 
 export function startJobsPoll() {
-  setInterval(() => { if (S.jobs.some(j => j.status === "running")) refreshJobs(); }, 4000);
+  setInterval(() => { if (S.jobs.some(j => j.status === "running")) refreshJobs().catch(() => {}); }, 4000);
+  // Timers can be throttled while another window/tab is active. Reconcile
+  // against the authoritative job list as soon as the user returns.
+  const onReturn = () => { if (!document.hidden) refreshJobs().catch(() => {}); };
+  window.addEventListener("focus", onReturn);
+  document.addEventListener("visibilitychange", onReturn);
 }

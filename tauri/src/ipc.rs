@@ -158,6 +158,14 @@ impl WorkerRpc {
         if method == "fs.delete_images" {
             return self.delete_images(params);
         }
+        if method == "custom_art.open_folder" {
+            crate::custom_art::validate_open_folder(&params)?;
+            let value = self.call_unchecked(method, params)?;
+            if !crate::custom_art::valid_open_folder_result(&value) {
+                return Err("malformed custom art folder response".into());
+            }
+            return Ok(value);
+        }
         self.call_unchecked(method, params)
     }
 
@@ -199,6 +207,93 @@ impl WorkerRpc {
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Start and poll custom-art work over private worker methods. Source paths
+    /// are supplied only by a native drop grant or the parented picker.
+    pub(crate) fn start_custom_art_import(
+        &self,
+        destination: &str,
+        source_paths: &[String],
+    ) -> Result<Value, String> {
+        if !crate::custom_art::validate_destination(destination)
+            || source_paths.is_empty()
+            || source_paths.len()
+                > if destination == "back" {
+                    1
+                } else {
+                    crate::custom_art::MAX_PATHS
+                }
+        {
+            return Err("invalid custom art import".into());
+        }
+        for path in source_paths {
+            crate::custom_art::validate_path(path)?;
+            if !std::path::Path::new(path).is_absolute() {
+                return Err("invalid custom art import".into());
+            }
+        }
+        let value = self.call_unchecked(
+            "custom_art.import_selected",
+            json!({"destination":destination,"source_paths":source_paths}),
+        )?;
+        let Some(object) = value.as_object() else {
+            return Err("malformed custom art import response".into());
+        };
+        let valid_start = object.len() == 2
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(valid_operation_id);
+        let valid_rejection = crate::custom_art::valid_terminal_result(&value)
+            && value.get("ok").and_then(Value::as_bool) == Some(false);
+        if !valid_start && !valid_rejection {
+            return Err("malformed custom art import response".into());
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn poll_custom_art_import(&self, operation_id: &str) -> Result<Value, String> {
+        if !valid_operation_id(operation_id) {
+            return Err("invalid custom art operation".into());
+        }
+        let value = self.call_unchecked(
+            "custom_art.import_poll",
+            json!({"operation_id":operation_id}),
+        )?;
+        let Some(object) = value.as_object() else {
+            return Err("malformed custom art import response".into());
+        };
+        let valid_running = object.len() == 4
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object.get("status").and_then(Value::as_str) == Some("running")
+            && object
+                .get("completed")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n <= crate::custom_art::MAX_PATHS as u64)
+            && object
+                .get("total")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n <= crate::custom_art::MAX_PATHS as u64)
+            && object["completed"].as_u64() <= object["total"].as_u64();
+        if valid_running {
+            return Ok(value);
+        }
+        let terminal = object.len() == 3
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object.get("status").and_then(Value::as_str) == Some("done")
+            && object
+                .get("result")
+                .is_some_and(crate::custom_art::valid_terminal_result);
+        if terminal {
+            let encoded = serde_json::to_vec(&value)
+                .map_err(|_| "malformed custom art import response".to_string())?;
+            if encoded.len() <= 256 * 1024 {
+                return Ok(value);
+            }
+        }
+        Err("malformed custom art import response".into())
     }
 
     /// Private protocol edge owned by the native picker command. The caller
@@ -266,6 +361,105 @@ impl WorkerRpc {
                 });
         if !accepted && !rejected {
             return Err("malformed card-back import response".to_string());
+        }
+        Ok(value)
+    }
+
+    /// Private protocol edge owned by the native Python processor picker. The
+    /// command supplies the only path accepted here and the public RPC
+    /// allowlist deliberately excludes this worker method.
+    pub(crate) fn import_selected_postprocessor(&self, source_path: &str) -> Result<Value, String> {
+        let value = self.call_unchecked(
+            "postprocessors.import_selected",
+            json!({"source_path": source_path}),
+        )?;
+        let encoded = serde_json::to_vec(&value)
+            .map_err(|_| "malformed postprocessor import response".to_string())?;
+        if encoded.len() > 512 * 1024 {
+            return Err("postprocessor import response too large".to_string());
+        }
+        let Some(object) = value.as_object() else {
+            return Err("malformed postprocessor import response".to_string());
+        };
+        if object.get("ok").and_then(Value::as_bool) == Some(false) {
+            let valid_errors = object.len() == 2
+                && object
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .is_some_and(|errors| {
+                        !errors.is_empty()
+                            && errors.len() <= 8
+                            && errors.iter().all(|error| {
+                                error.as_str().is_some_and(|message| {
+                                    !message.is_empty() && message.len() <= 256
+                                })
+                            })
+                    });
+            if !valid_errors {
+                return Err("malformed postprocessor import response".to_string());
+            }
+        } else {
+            let valid_processor = object.len() == 2
+                && object.get("ok").and_then(Value::as_bool) == Some(true)
+                && object
+                    .get("processor")
+                    .and_then(Value::as_object)
+                    .is_some_and(|processor| {
+                        let id_valid =
+                            processor
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| {
+                                    id.len() == 32
+                                        && id
+                                            .chars()
+                                            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+                                });
+                        let revision = processor.get("revision").and_then(Value::as_str);
+                        let revision_valid = revision.is_some_and(|revision| {
+                            revision.len() == 64
+                                && revision
+                                    .chars()
+                                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+                                && processor.get("active_revision").and_then(Value::as_str)
+                                    == Some(revision)
+                        });
+                        let source = processor.get("source").and_then(Value::as_str);
+                        let source_valid = source.is_some_and(|source| {
+                            !source.is_empty()
+                                && source.len() <= 256 * 1024
+                                && processor.get("source_bytes").and_then(Value::as_u64)
+                                    == Some(source.len() as u64)
+                        });
+                        let requirements_valid = processor
+                            .get("requirements")
+                            .and_then(Value::as_array)
+                            .is_some_and(|requirements| {
+                                requirements.len() <= 32
+                                    && requirements.iter().all(|item| {
+                                        item.as_str().is_some_and(|text| text.len() <= 256)
+                                    })
+                                    && requirements
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::len)
+                                        .sum::<usize>()
+                                        <= 8 * 1024
+                            });
+                        processor.len() == 8
+                            && id_valid
+                            && revision_valid
+                            && source_valid
+                            && requirements_valid
+                            && processor
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty() && name.len() <= 128)
+                            && processor.get("trusted").and_then(Value::as_bool) == Some(false)
+                    });
+            if !valid_processor {
+                return Err("malformed postprocessor import response".to_string());
+            }
         }
         Ok(value)
     }
@@ -434,15 +628,56 @@ pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Res
     state.call(&method, params)
 }
 
+fn valid_operation_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_method(method: &str) -> Result<(), String> {
     match method {
-        "info" | "manifest" | "settings.get" | "settings.set" | "offset.set" | "offset.delete"
-        | "jobs.list" | "jobs.start" | "jobs.log" | "jobs.kill" | "jobs.poll"
-        | "fs.delete_images" | "preview" | "pdf_preview.start" | "pdf_preview.poll"
-        | "pdf_preview.cancel" | "template.resolve" | "template.delete" | "file.list"
-        | "file.open" | "file.reveal" | "url.open" | "repos.refs" | "repos.source.set"
-        | "repos.check" | "repos.poll" | "updates.get" | "updates.check" | "updates.notes"
-        | "updates.poll" | "updates.start" => Ok(()),
+        "info"
+        | "manifest"
+        | "settings.get"
+        | "settings.set"
+        | "offset.set"
+        | "offset.delete"
+        | "jobs.list"
+        | "jobs.start"
+        | "jobs.log"
+        | "jobs.kill"
+        | "jobs.poll"
+        | "fs.delete_images"
+        | "preview"
+        | "pdf_preview.start"
+        | "pdf_preview.poll"
+        | "pdf_preview.cancel"
+        | "template.resolve"
+        | "template.delete"
+        | "file.list"
+        | "file.open"
+        | "file.reveal"
+        | "url.open"
+        | "repos.refs"
+        | "repos.source.set"
+        | "repos.check"
+        | "repos.poll"
+        | "updates.get"
+        | "updates.check"
+        | "updates.notes"
+        | "updates.poll"
+        | "updates.start"
+        | "postprocessors.list"
+        | "postprocessors.guide"
+        | "postprocessors.get"
+        | "postprocessors.save"
+        | "postprocessors.duplicate"
+        | "postprocessors.trust"
+        | "postprocessors.delete"
+        | "postprocessors.optional.remove"
+        | "postprocessors.status"
+        | "custom_art.open_folder" => Ok(()),
         _ => Err("unknown method".to_string()),
     }
 }
@@ -707,6 +942,16 @@ mod tests {
             "updates.notes",
             "updates.poll",
             "updates.start",
+            "postprocessors.list",
+            "postprocessors.guide",
+            "postprocessors.get",
+            "postprocessors.save",
+            "postprocessors.duplicate",
+            "postprocessors.trust",
+            "postprocessors.delete",
+            "postprocessors.optional.remove",
+            "postprocessors.status",
+            "custom_art.open_folder",
         ] {
             assert!(
                 validate_method(method).is_ok(),
@@ -754,6 +999,11 @@ mod tests {
             "repos.source.set.extra",
             "repos.source.set/",
             "repos.source.set ",
+            "postprocessors",
+            "postprocessors.import_selected",
+            "postprocessors.list.extra",
+            "postprocessors.get/",
+            "postprocessors.save ",
             "repos.check.extra",
             "repos.check/",
             "repos.check ",
@@ -762,6 +1012,9 @@ mod tests {
             "repos.poll ",
             "decklists.import_selected",
             "back_images.import_selected",
+            "postprocessors.import_selected",
+            "custom_art.import_selected",
+            "custom_art.import_poll",
             "files.export_selected",
             "files.export_poll",
             "files.export_cancel",
@@ -776,6 +1029,31 @@ mod tests {
     }
 
     #[test]
+    fn private_custom_art_methods_are_not_public_and_folder_is_exact() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "custom_art.import_selected",
+                json!({"destination":"front","source_paths":["/tmp/a.png"]})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.call("custom_art.import_poll", json!({"operation_id":"a"})),
+            Err("unknown method".into())
+        );
+        assert!(rpc
+            .call(
+                "custom_art.open_folder",
+                json!({"destination":"front","path":"/tmp"})
+            )
+            .is_err());
+        assert!(rpc
+            .call("custom_art.open_folder", json!({"destination":"/tmp"}))
+            .is_err());
+    }
+
+    #[test]
     fn private_back_image_method_is_not_public() {
         let rpc = WorkerRpc::new();
         assert_eq!(
@@ -787,6 +1065,22 @@ mod tests {
         );
         assert_eq!(
             rpc.import_selected_back_image("/tmp/back.png"),
+            Err("worker unavailable".into())
+        );
+    }
+
+    #[test]
+    fn private_postprocessor_method_is_not_public() {
+        let rpc = WorkerRpc::new();
+        assert_eq!(
+            rpc.call(
+                "postprocessors.import_selected",
+                json!({"source_path": "/tmp/processor.py"})
+            ),
+            Err("unknown method".into())
+        );
+        assert_eq!(
+            rpc.import_selected_postprocessor("/tmp/processor.py"),
             Err("worker unavailable".into())
         );
     }

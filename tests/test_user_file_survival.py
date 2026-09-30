@@ -15,10 +15,14 @@ differently:
               recorded state.
 
 The rule these hold to is the module's own promise: an operation replaces what
-upstream provides and never removes anything else.
+upstream provides and never removes anything else. Reproducible calibration
+PDFs are the narrow exception: a generated sheet is removed when a source
+change removes its formerly configured paper size, while unrelated custom
+calibration files still survive.
 """
 
 import io
+import json
 import os
 import tarfile
 import tempfile
@@ -54,6 +58,10 @@ class UserFileSurvivalTests(unittest.TestCase):
     @staticmethod
     def target(sha):
         return {"sha": sha, "ref": "main", "date": "2026-01-01"}
+
+    @staticmethod
+    def layouts(*paper_sizes):
+        return json.dumps({"paper_sizes": {name: {} for name in paper_sizes}}).encode("utf-8")
 
     def make_tar(self, files):
         wrapper = "owner-repo-" + SHA1
@@ -110,7 +118,9 @@ class UserFileSurvivalTests(unittest.TestCase):
                           for rel in changed]}
 
         def download_to(key, sha, path, dest, log):
-            Path(dest).write_bytes(changed[path])
+            dest = Path(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(changed[path])
             return len(changed[path])
 
         with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
@@ -169,6 +179,41 @@ class UserFileSurvivalTests(unittest.TestCase):
         self.update_full({"README.md": b"r2", "calibration/letter-calibration.pdf": b"v2"})
         self.assertEqual((self.repo() / "README.md").read_bytes(), b"r2")
         self.assertEqual((self.repo() / CALIBRATION).read_bytes(), b"v2")
+
+    def test_full_update_removes_generated_sheet_for_removed_paper_size(self):
+        initial = {"README.md": b"r", "assets/layouts.json": self.layouts("letter", "legal"),
+                   "calibration/letter-calibration.pdf": b"letter"}
+        target = {"README.md": b"r2", "assets/layouts.json": self.layouts("letter"),
+                  "calibration/letter-calibration.pdf": b"letter"}
+        self.deploy(initial)
+        self.write("calibration/legal-calibration.pdf", b"generated legal")
+        self.write("calibration/mine-calibration.pdf", b"custom")
+        self.update_full(target)
+        self.assertFalse((self.repo() / "calibration/legal-calibration.pdf").exists())
+        self.assert_survived("calibration/mine-calibration.pdf", "a full update")
+        self.assertEqual((self.repo() / CALIBRATION).read_bytes(), b"letter")
+
+    def test_diff_update_removes_generated_sheet_for_removed_paper_size(self):
+        self.deploy({"README.md": b"r", "assets/layouts.json": self.layouts("letter", "legal")})
+        self.write("calibration/legal-calibration.pdf", b"generated legal")
+        self.update_diff({"assets/layouts.json": self.layouts("letter")})
+        self.assertFalse((self.repo() / "calibration/legal-calibration.pdf").exists())
+
+    def test_redeploy_removes_generated_sheet_for_removed_paper_size(self):
+        initial = {"README.md": b"r", "assets/layouts.json": self.layouts("letter", "legal")}
+        target = {"README.md": b"r2", "assets/layouts.json": self.layouts("letter")}
+        self.deploy(initial)
+        self.write("calibration/legal-calibration.pdf", b"generated legal")
+        self.deploy(target, redeploy=True)
+        self.assertFalse((self.repo() / "calibration/legal-calibration.pdf").exists())
+
+    def test_generated_sheet_survives_when_paper_size_is_still_configured(self):
+        initial = {"README.md": b"r", "assets/layouts.json": self.layouts("letter", "legal")}
+        target = {"README.md": b"r2", "assets/layouts.json": self.layouts("letter", "legal")}
+        self.deploy(initial)
+        self.write("calibration/legal-calibration.pdf", b"generated legal")
+        self.update_full(target)
+        self.assert_survived("calibration/legal-calibration.pdf", "an update retaining legal")
 
     # ---- files the manifest has never seen -------------------------------
 

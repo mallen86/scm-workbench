@@ -214,8 +214,11 @@ class HttpContractTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
-            raw = error.read().decode("utf-8")
-            return error.code, json.loads(raw) if raw else {}
+            try:
+                raw = error.read().decode("utf-8")
+                return error.code, json.loads(raw) if raw else {}
+            finally:
+                error.close()
 
     def test_standalone_browser_serves_root_relative_embedded_assets(self):
         expected_types = {
@@ -229,6 +232,65 @@ class HttpContractTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertTrue(response.read())
                     self.assertEqual(response.headers.get_content_type(), expected_type)
+
+    def test_postprocessor_http_round_trip_and_body_bound(self):
+        status, _settings = self.request("POST", "/api/settings", {"ui_mode": "advanced"})
+        self.assertEqual(status, 200)
+        status, guide = self.request("GET", "/api/postprocessors/guide")
+        self.assertEqual(status, 200)
+        self.assertTrue(guide["ok"])
+        self.assertEqual(guide["version"], server.SERVER_VERSION)
+        self.assertIn("<h1>Image post-processing</h1>", guide["body"])
+        self.assertNotIn("```", guide["body"])
+        source = "def process_image(image_path, context):\n    return None\n"
+        status, saved = self.request("POST", "/api/postprocessors", {
+            "processor_id": None, "name": "HTTP processor", "source": source,
+            "requirements": "", "expected_revision": None,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(saved["ok"])
+        processor = saved["processor"]
+        status, listed = self.request("GET", "/api/postprocessors")
+        self.assertEqual(status, 200)
+        self.assertNotIn("source", next(row for row in listed["processors"] if row["id"] == processor["id"]))
+        status, detail = self.request("GET", f"/api/postprocessors/{processor['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["source"], source)
+        status, trusted = self.request("POST", f"/api/postprocessors/{processor['id']}/trust", {
+            "processor_id": processor["id"], "revision_hash": processor["revision"],
+            "environment_fingerprint": detail["environment_fingerprint"],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(trusted["processor"]["trusted"])
+        revised_source = source + "\n# revised\n"
+        status, revised = self.request("POST", "/api/postprocessors", {
+            "processor_id": processor["id"], "name": "HTTP processor",
+            "source": revised_source, "requirements": "",
+            "expected_revision": processor["revision"],
+        })
+        self.assertEqual(status, 200)
+        revised = revised["processor"]
+        status, historical = self.request(
+            "GET", f"/api/postprocessors/{processor['id']}?revision={processor['revision']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(historical["source"], source)
+        self.assertFalse(historical["active"])
+        status, current = self.request("GET", f"/api/postprocessors/{processor['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual({item["revision"] for item in current["revisions"]},
+                         {processor["revision"], revised["revision"]})
+        status, deleted = self.request("DELETE", f"/api/postprocessors/{processor['id']}", {
+            "processor_id": processor["id"], "expected_revision": revised["revision"],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(deleted["ok"])
+        status, rejected = self.request("POST", "/api/postprocessors", {
+            "processor_id": None, "name": "Too large", "source": "x" * (server.POSTPROCESS_SOURCE_MAX_BYTES + 32 * 1024),
+            "requirements": "", "expected_revision": None,
+        })
+        self.assertEqual(status, 400)
+        self.assertFalse(rejected["ok"])
+        self.assertIn("source is too large", rejected["errors"][0])
 
     def test_settings_persistence_shape_and_nested_merge(self):
         status, result = self.request("POST", "/api/settings", {
@@ -349,7 +411,7 @@ class HttpContractTests(unittest.TestCase):
         expected = {
             "create_pdf", "offset_pdf", "calibration", "dxf_single", "dxf_batch",
             "dxf_list", "clean_up", "repo_update", "repo_init", "extras_generate",
-            "extras_tables",
+            "extras_tables", "postprocess_images", "postprocess_dependencies",
         }
         expected.update("fetch:" + slug for slug in server.PLUGINS)
         self.assertEqual(set(manifest), expected)
@@ -373,6 +435,33 @@ class HttpContractTests(unittest.TestCase):
             second_info_status, _second_info = self.request("GET", "/api/info")
         self.assertEqual((info_status, manifest_status, second_info_status), (200, 200, 200))
         self.assertEqual(scan.call_count, 2)
+
+    def test_info_enumerates_actual_calibration_pdf_files(self):
+        calibration = self.fixture.scm / "calibration"
+        calibration.mkdir()
+        letter = calibration / "letter-calibration.pdf"
+        legal = calibration / "legal-calibration.PDF"
+        ignored = calibration / "notes.txt"
+        fake_pdf = calibration / "not-a-file.pdf"
+        letter.write_bytes(b"letter")
+        legal.write_bytes(b"legal")
+        ignored.write_text("not a PDF", encoding="utf-8")
+        fake_pdf.mkdir()
+        try:
+            info = server.read_scm_info(self.fixture.scm, self.fixture.extras)
+            self.assertEqual(
+                [(entry["name"], entry["path"], entry["size"]) for entry in info["calibration"]],
+                [
+                    ("legal", str(legal), len(b"legal")),
+                    ("letter", str(letter), len(b"letter")),
+                ],
+            )
+        finally:
+            fake_pdf.rmdir()
+            ignored.unlink()
+            legal.unlink()
+            letter.unlink()
+            calibration.rmdir()
 
     def test_simple_pdf_presets_expand_to_fixed_cli_values_in_titled_sections(self):
         status, manifest = self.request("GET", "/api/manifest")
@@ -460,6 +549,93 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(options["output_path"]["default"], "game/output/game.pdf")
         self.assertEqual(options["output_path"]["width"], "half")
         self.assertEqual(options["output_path"]["browse_filename"], "game.pdf")
+
+    def test_managed_repo_output_paths_are_validated_by_preview_and_run(self):
+        create = server.get_manifest()["create_pdf"]
+        option = next(o for group in create["groups"] for o in group["options"]
+                      if o["key"] == "output_path")
+        self.assertEqual(option["managed_output_dir"], "game/output")
+        root = self.fixture.scm
+        cases = [
+            ("game/output/game.pdf", True),
+            (str(root / "game/output/nested/game.pdf"), True),
+            (str(self.fixture.outside / "deck.pdf"), True),
+            ("../outside/deck.pdf", True),
+            ("custom/deck.pdf", False),
+            ("game/front/deck.pdf", False),
+            ("game/output/../front/deck.pdf", False),
+            (str(root / "custom/deck.pdf"), False),
+        ]
+        managed_extras = self.fixture.data / "repos/scm-extras"
+        managed_extras.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: managed_extras.rmdir())
+        with mock.patch.object(repo_sync, "repo_dir", side_effect=lambda key: root if key == "scm" else managed_extras):
+            for path, valid in cases:
+                with self.subTest(path=path):
+                    preview = server.build_preview("create_pdf", {"output_path": path})
+                    self.assertEqual(not preview["errors"], valid, preview["errors"])
+                    if not valid:
+                        self.assertIn("game/output/", " ".join(preview["errors"]))
+                        job, errors = server.start_job("create_pdf", {"output_path": path})
+                        self.assertIsNone(job)
+                        self.assertIn("game/output/", " ".join(errors))
+            extras_output = server.build_preview("create_pdf", {
+                "output_path": str(managed_extras / "output/deck.pdf")})
+            self.assertIn("outside the managed scm-extras repo", " ".join(extras_output["errors"]))
+            offset = server.build_preview("offset_pdf", {
+                "pdf_path": "game/output/game.pdf", "output_pdf_path": "game/front/offset.pdf", "x_offset": 1,
+            })
+            self.assertIn("game/output/", " ".join(offset["errors"]))
+            _argv, _cwd, _env, _title, _warnings, auto_errors = server.build_command(
+                "offset_pdf", {"pdf_path": "game/front/deck.pdf", "x_offset": 1},
+                server.load_settings(), server.get_info_cached(), write_deck=False)
+            self.assertIn("game/output/", " ".join(auto_errors))
+            self.assertFalse(server.build_preview("offset_pdf", {
+                "pdf_path": "game/output/game.pdf", "x_offset": 1,
+            })["errors"])
+            dxf_args = {"card_mode": "named", "card_size": "standard",
+                        "paper_mode": "named", "paper_size": "letter", "save": False}
+            self.assertFalse(server.build_preview("dxf_single", dxf_args)["errors"])
+            self.assertIn("cutting_templates/dxf/", " ".join(server.build_preview(
+                "dxf_single", {**dxf_args, "output_path": "game/front/template.dxf"})["errors"]))
+            self.assertFalse(server.build_preview("dxf_single", {
+                **dxf_args, "output_path": str(self.fixture.outside / "template.dxf")})["errors"])
+
+        # A symlink inside the managed output directory cannot redirect the
+        # run to another repo folder or outside it. It would poison updates.
+        link = root / "game/output/linked"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(self.fixture.outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pass  # Windows without Developer Mode cannot create this fixture.
+        else:
+            try:
+                with mock.patch.object(repo_sync, "repo_dir", return_value=root):
+                    self.assertIn("do not save through a link", server._managed_output_error(
+                        root, "game/output/linked/deck.pdf", "game/output", "Output PDF"))
+                # A canonical root need not share the caller's path spelling
+                # (e.g. /var versus /private/var on macOS). Still reject links
+                # below that root when reached through an alias parent.
+                alias = self.fixture.data / "managed-root-alias"
+                try:
+                    alias.symlink_to(root, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    pass
+                else:
+                    try:
+                        with mock.patch.object(repo_sync, "repo_dir", return_value=alias):
+                            self.assertIn("do not save through a link", server._managed_output_error(
+                                alias, "game/output/linked/deck.pdf", "game/output", "Output PDF"))
+                    finally:
+                        alias.unlink()
+            finally:
+                link.unlink()
+
+        # A configured source checkout is not a managed copy; existing custom
+        # output locations in that checkout keep working.
+        with mock.patch.object(repo_sync, "repo_dir", return_value=self.fixture.data / "repos/missing"):
+            self.assertFalse(server.build_preview("create_pdf", {"output_path": "custom/deck.pdf"})["errors"])
 
     def test_skip_indexes_are_a_plain_comma_separated_input(self):
         create = server.get_manifest()["create_pdf"]

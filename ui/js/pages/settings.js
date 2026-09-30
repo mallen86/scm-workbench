@@ -334,7 +334,7 @@ PAGES.settings = (root) => {
   tc.append(el("div", { class: "card-head" },
     el("div", { class: "card-ico" }, ico("book")),
     el("div", { class: "grow" }, el("h2", {}, "Guided tutorial"),
-      el("p", {}, "Walk through fetching card art, adding a card back, and generating a PDF. The tutorial never changes a setting or starts a job."))));
+      el("p", {}, "Walk through fetching card art, optional image post-processing, choosing card and paper sizes, adding a card back, and generating a PDF. The tutorial never changes a setting or starts a job."))));
   tc.append(el("div", { style: "margin-top:12px; display:flex; gap:9px; align-items:center" },
     el("button", { class: "btn primary", type: "button", onclick: startGuidedTutorial },
       ico("book"), "Start guided tutorial"),
@@ -452,6 +452,7 @@ PAGES.settings = (root) => {
     let manualInstall = false;
     let manualPackage = null;
     let manualInstaller = null;
+    let downgradeAvailable = false;
     const vv = t => "v" + String(t || "").replace(/^v/, "");   // display form of a tag (v0.2.0 → v0.2.0, 0.2.0 → v0.2.0)
 
     const render = async () => {
@@ -474,6 +475,7 @@ PAGES.settings = (root) => {
         : r.package_format === "deb" ? "Debian package" : null;
       manualInstaller = r.package_format === "arch" ? "install it with pacman"
         : r.package_format === "deb" ? "install it with your software manager" : null;
+      downgradeAvailable = st.downgrade === true;
       betaI.checked = st.channel === "beta";
       betaI.disabled = busy || checkPending || st.checking || updateInstallActive();
       uLast.textContent = "Last checked: " + humanize(st.checked_at);
@@ -519,16 +521,17 @@ PAGES.settings = (root) => {
           const latest = vv(st.latest);
           const releaseUrl = serverReleaseUrl(st.release_url);
           if (manualInstall) {
-            setBtn(`View ${latest} download`, releaseUrl && manualPackage
+            setBtn(downgradeAvailable ? `View stable ${latest} download` : `View ${latest} download`, releaseUrl && manualPackage
               ? () => openUrl(releaseUrl, "the SCM Workbench release page") : null,
               !releaseUrl || !manualPackage);
           } else {
-            setBtn(`Download & install ${latest}`, startUpdate);
+            setBtn(downgradeAvailable ? `Install stable ${latest}` : `Download & install ${latest}`, startUpdate);
           }
           const released = st.published ? ` (released ${new Date(st.published).toLocaleDateString()})` : "";
           const whatsNew = releaseUrl ? el("a", { class: "linkish" }, "What's new") : null;
           uStatus.replaceChildren(
-            st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest), released,
+            downgradeAvailable ? "The latest stable version is ready to replace this beta: "
+              : st.prerelease ? "A newer beta version is available: " : "A newer version is available: ", el("b", {}, latest), released,
             manualInstall
               ? (manualPackage
                 ? `. Download the ${manualPackage} from the release page and ${manualInstaller}. Your decklists, images, and settings stay put.`
@@ -628,7 +631,7 @@ PAGES.settings = (root) => {
         return;
       }
       if (!r.ok) {
-        toast("warn", r.errors?.[0] || "The update could not start.");
+        if (!r.cancelled) toast("warn", r.errors?.[0] || "The update could not start.");
         await render();
         return;
       }

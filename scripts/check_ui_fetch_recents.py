@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -74,11 +75,23 @@ if (used.recent.join() !== "pokemon,mtg" || !used.hasRecent || used.allOpen)
   fail("recent games are not distinct, newest-first, and collapsed over the full list");
 const repeated = recents.recentFetchLayout(jobs, available);
 if (repeated.allOpen) fail("the full list did not stay collapsed after a game was used");
-
 const many = available.map((slug, index) => ({kind:`fetch:${slug}`, ts:index + 1}));
+const withCustom = recents.recentFetchLayout(many, [...available,"__custom_art"], true);
+if (withCustom.recent.length !== 6 || withCustom.recent.at(-1) !== "__custom_art" || withCustom.allOpen)
+  fail("successful Custom use is not pinned alongside five recent games");
+const unavailable = recents.recentFetchLayout([], available, false);
+if (unavailable.recent.includes("__custom_art")) fail("unused Custom appeared in recents");
 const bounded = recents.recentFetchPlugins(many, available);
 if (bounded.length !== recents.RECENT_FETCH_LIMIT || bounded.join() !== "netrunner,keyforge,digimon,lorcana,pokemon,mtg")
-  fail("the recently-used list is not bounded to six newest games");
+  fail("unused Custom must not reduce the normal six-game MRU list");
+if (recents.recentFetchLayout(many, available, true).recent.includes("__custom_art"))
+  fail("unavailable Custom must not appear in recents");
+const customOnly=recents.recentFetchLayout([], ["__custom_art"], true);
+if (customOnly.recent.join()!=="__custom_art" || customOnly.allOpen)
+  fail("Custom-only use must create a collapsed recents section");
+const duplicate=recents.recentFetchLayout([{kind:"fetch:__custom_art",ts:99},...many], [...available,"__custom_art"], true);
+if (duplicate.recent.filter(slug=>slug==="__custom_art").length!==1)
+  fail("Custom must never be duplicated by malformed job history");
 if (recents.recentFetchPlugins("bad", null).length)
   fail("malformed job history was not ignored");
 
@@ -101,7 +114,7 @@ console.log("ok: Fetch recents derive a bounded MRU list from canonical job hist
         return node.returncode
     print(node.stdout.strip())
     print("ok: initial all-games and used-game disclosure wiring is present")
-    return 0
+    return subprocess.run([sys.executable, str(ROOT / "scripts" / "check_ui_custom_art.py")], timeout=40).returncode
 
 
 if __name__ == "__main__":

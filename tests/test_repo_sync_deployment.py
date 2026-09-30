@@ -1,5 +1,6 @@
 """Transactional deployment tests using local tarballs and mocked network seams."""
 
+import errno
 import hashlib
 import io
 import json
@@ -185,7 +186,7 @@ class DeploymentTests(unittest.TestCase):
                        {"path": "edited.txt", "status": "modified", "previous": None},
                    ]}
 
-        def fetch(_key, _sha, path, dest, log=print):
+        def fetch(_key, _sha, path, dest, log=print, max_bytes=None):
             repo_sync._secure_write_bytes(dest, changed[path])
             return len(changed[path])
 
@@ -218,6 +219,81 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(any(row.get("stage") == "update" and row.get("total") == 4
                             and row.get("unit") == "files" for row in progress))
         self.assertIn("apply", [row["stage"] for row in progress])
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_update_preserves_locally_deleted_unchanged_tracked_file(self):
+        self.init_repo({"README.md": b"old", "game/front/README.md": b"placeholder"})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game/front/README.md").unlink()
+        before = self.metadata_bytes()
+        target = self.target(SHA2)
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "new.txt", "status": "added", "previous": None}]}
+
+        def fetch(_key, _sha, path, dest, log=print, max_bytes=None):
+            self.assertEqual(path, "new.txt")
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        with patch.object(repo_sync, "resolve_target", return_value=target), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            result = repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((repo / "new.txt").read_bytes(), b"new")
+        self.assertFalse((repo / "game/front/README.md").exists())
+        self.assertNotIn("game/front/README.md", repo_sync.load_manifest("scm")["files"])
+        self.assertEqual(repo_sync.load_manifest("scm")["sha"], SHA2)
+        self.assertTrue(repo_sync.verify_deployed("scm"))
+        self.assertNotEqual(self.metadata_bytes(), before)
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_update_restores_missing_file_if_upstream_changed_it(self):
+        self.init_repo({"README.md": b"old", "game/front/README.md": b"placeholder"})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game/front/README.md").unlink()
+        target = self.target(SHA2)
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "game/front/README.md", "status": "modified", "previous": None}]}
+
+        def fetch(_key, _sha, path, dest, log=print, max_bytes=None):
+            repo_sync._secure_write_bytes(dest, b"upstream changed")
+            return len(b"upstream changed")
+
+        with patch.object(repo_sync, "resolve_target", return_value=target), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual((repo / "game/front/README.md").read_bytes(), b"upstream changed")
+        self.assertEqual(repo_sync.load_manifest("scm")["files"]["game/front/README.md"],
+                         digest(b"upstream changed"))
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_update_rejects_file_lost_only_in_candidate(self):
+        self.init_repo({"README.md": b"old"})
+        repo = repo_sync.repo_dir("scm")
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "new.txt", "status": "added", "previous": None}]}
+        real_apply = repo_sync.apply_changes
+
+        def lose_file(*args, **kwargs):
+            result = real_apply(*args, **kwargs)
+            (kwargs["repo_root"] / "README.md").unlink()
+            return result
+
+        def fetch(_key, _sha, path, dest, log=print, max_bytes=None):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch), \
+                patch.object(repo_sync, "apply_changes", side_effect=lose_file), \
+                self.assertRaisesRegex(repo_sync.RepoError, "candidate is missing a manifest file"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual(self.tree_bytes(repo), before_tree)
+        self.assertEqual(self.metadata_bytes(), before_meta)
         self.assert_no_transaction_artifacts()
 
     def test_full_update_keeps_authorized_and_untracked_files(self):
@@ -260,6 +336,303 @@ class DeploymentTests(unittest.TestCase):
         for stage in ("download", "extract", "apply"):
             self.assertIn(stage, stages)
         self.assert_no_transaction_artifacts()
+
+    def test_old_byte_cap_does_not_block_diff_full_or_redeploy(self):
+        self.init_repo({"tracked.txt": b"old", "edited.txt": b"base",
+                        "game/front/README.md": b"placeholder"})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game/front/art.png").write_bytes(b"art" * 20)
+        (repo / "extra.bin").write_bytes(b"extra" * 20)
+        (repo / "edited.txt").write_bytes(b"local edit" * 8)
+        target = self.target(SHA2)
+        compare = {"status": "ahead", "too_many": False, "commits": 1,
+                   "files": [{"path": "tracked.txt", "status": "modified", "previous": None}]}
+
+        def fetch(_key, _sha, _path, dest, log=print, max_bytes=None):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 32), \
+                patch.object(repo_sync, "resolve_target", return_value=target), \
+                patch.object(repo_sync, "compare", return_value=compare), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+            self.assertTrue(repo_sync.verify_deployed("scm"))
+        self.assertEqual((repo / "tracked.txt").read_bytes(), b"new")
+        replacement = self.tar_path({"tracked.txt": b"newer", "edited.txt": b"upstream",
+                                     "game/front/README.md": b"placeholder"}, "large-replacement.tar.gz")
+        target3 = self.target(SHA3)
+
+        def download(_url, dest, **kwargs):
+            return Path(dest).write_bytes(replacement.read_bytes())
+
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 32), \
+                patch.object(repo_sync, "resolve_target", return_value=target3), \
+                patch.object(repo_sync, "gh_download_to", side_effect=download):
+            repo_sync.cmd_update("scm", force_full=True, log=lambda *_: None)
+        for expected in (b"art" * 20, b"extra" * 20, b"local edit" * 8):
+            self.assertIn(expected, [p.read_bytes() for p in (repo / "game/front/art.png",
+                           repo / "extra.bin", repo / "edited.txt")])
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 32), \
+                patch.object(repo_sync, "resolve_target", return_value=target3):
+            repo_sync.cmd_init("scm", tarball=replacement, force_redeploy=True,
+                               log=lambda *_: None)
+        self.assertEqual((repo / "game/front/art.png").read_bytes(), b"art" * 20)
+        self.assertEqual((repo / "extra.bin").read_bytes(), b"extra" * 20)
+        self.assertEqual((repo / "edited.txt").read_bytes(), b"local edit" * 8)
+        self.assert_no_transaction_artifacts()
+
+    def test_space_preflight_refuses_clone_without_touching_live(self):
+        self.init_repo({"tracked.txt": b"old" * 10})
+        repo = repo_sync.repo_dir("scm")
+        before = self.tree_bytes(repo), self.metadata_bytes()
+        with patch.object(repo_sync, "SPACE_RESERVE_BYTES", 0), \
+                patch.object(repo_sync.shutil, "disk_usage", return_value=type("Disk", (), {"free": 10})()), \
+                patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                self.assertRaisesRegex(repo_sync.RepoError, "not enough free space"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+        with patch.object(repo_sync.shutil, "disk_usage", side_effect=OSError("unavailable")), \
+                self.assertRaisesRegex(repo_sync.RepoError, "could not check repository free space"):
+            repo_sync._clone_tree(repo, Path(self.temp.name) / "unavailable-clone")
+        real_copy = repo_sync._secure_copy_file
+
+        def disk_fills(*args):
+            real_copy(*args)
+            raise OSError(errno.ENOSPC, "disk full")
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "_secure_copy_file", side_effect=disk_fills), \
+                self.assertRaisesRegex(repo_sync.RepoError, "not enough free space"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+
+    def test_diff_aggregate_bound_and_upstream_archive_bound(self):
+        self.init_repo({"tracked.txt": b"old"})
+        repo = repo_sync.repo_dir("scm")
+        before = self.tree_bytes(repo), self.metadata_bytes()
+        compare = {"status": "ahead", "too_many": False, "commits": 1,
+                   "files": [{"path": p, "status": "added", "previous": None}
+                             for p in ("one", "two")]}
+        limits = []
+
+        def fetch(_key, _sha, _path, dest, log=print, max_bytes=None):
+            limits.append(repo_sync._diff_download_limit.get())
+            repo_sync._secure_write_bytes(dest, b"12345")
+            return 5
+
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 8), \
+                patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=compare), \
+                patch.object(repo_sync, "download_to", side_effect=fetch), \
+                self.assertRaisesRegex(repo_sync.RepoError, "aggregate size limit"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual(limits, [8, 3])
+        # The real downloader receives the remaining aggregate ceiling before
+        # writing any bytes, even when the server provides no Content-Length.
+        staged = Path(self.temp.name) / "downloaded.bin"
+        with patch.object(repo_sync, "gh_get_bytes", return_value=b"1234") as get:
+            token = repo_sync._diff_download_limit.set(3)
+            try:
+                with self.assertRaisesRegex(repo_sync.RepoError, "aggregate size limit"):
+                    repo_sync.download_to("scm", SHA2, "new.txt", staged)
+            finally:
+                repo_sync._diff_download_limit.reset(token)
+        self.assertEqual(get.call_args.kwargs["max_bytes"], 3)
+        self.assertFalse(staged.exists())
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+        archive = self.tar_path({"game/front/large.bin": b"x" * 9})
+        with patch.object(repo_sync, "TARBALL_CAP", 8), \
+                patch.object(repo_sync, "_validated_tarball_path", return_value=archive), \
+                self.assertRaisesRegex(repo_sync.RepoError, "tarball contents are too large"):
+            repo_sync.extract_tarball(archive, Path(self.temp.name) / "untrusted")
+
+    def test_diff_at_exact_aggregate_cap_allows_following_empty_file(self):
+        self.init_repo({"tracked.txt": b"old"})
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": path, "status": "added", "previous": None}
+                                for path in ("a-full.txt", "z-empty.txt")]}
+        limits = []
+        def fetch(url, **kwargs):
+            limits.append(kwargs["max_bytes"])
+            return b"" if url.endswith("z-empty.txt") else b"123"
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 3), \
+                patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "gh_get_bytes", side_effect=fetch):
+            self.assertTrue(repo_sync.cmd_update("scm", log=lambda *_: None)["ok"])
+        self.assertEqual(limits, [3, 0])
+        self.assertEqual((repo_sync.repo_dir("scm") / "a-full.txt").read_bytes(), b"123")
+        self.assertEqual((repo_sync.repo_dir("scm") / "z-empty.txt").read_bytes(), b"")
+        self.assert_no_transaction_artifacts()
+        for body in (b"", b"x"):
+            response = io.BytesIO(body)
+            response.headers = {}
+            with patch.object(repo_sync.urllib.request, "urlopen", return_value=response):
+                if body:
+                    with self.assertRaisesRegex(repo_sync.RepoError, "size limit"):
+                        repo_sync.gh_get_bytes(repo_sync.RAW + "/owner/repo/empty", max_bytes=0)
+                else:
+                    self.assertEqual(repo_sync.gh_get_bytes(repo_sync.RAW + "/owner/repo/empty", max_bytes=0), b"")
+
+    def test_enospc_after_live_rename_restores_exact_previous_state(self):
+        self.init_repo({"tracked.txt": b"old"})
+        repo = repo_sync.repo_dir("scm")
+        before = self.tree_bytes(repo), self.metadata_bytes()
+        original_journal = repo_sync._journal_write
+        def fetch(_key, _sha, _path, dest, log=print):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+        for failure_phase in ("backup_renamed", "live_published"):
+            with self.subTest(phase=failure_phase):
+                def disk_full(tx, phase, *args, **kwargs):
+                    if phase == failure_phase:
+                        self.assertTrue(tx["backup"].exists())
+                        raise OSError(errno.ENOSPC, "disk full after rename")
+                    return original_journal(tx, phase, *args, **kwargs)
+                with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                        patch.object(repo_sync, "compare", return_value=self.basic_compare()), \
+                        patch.object(repo_sync, "download_to", side_effect=fetch), \
+                        patch.object(repo_sync, "_journal_write", side_effect=disk_full), \
+                        self.assertRaisesRegex(repo_sync.RepoError, "not enough free space"):
+                    repo_sync.cmd_update("scm", log=lambda *_: None)
+                self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+                self.assert_no_transaction_artifacts()
+                self.assertTrue(repo_sync.verify_deployed("scm"))
+
+    def test_source_growth_and_unsafe_paths_still_fail(self):
+        src = Path(self.temp.name) / "growing.bin"
+        src.write_bytes(b"a" * (1 << 20))
+        dest = Path(self.temp.name) / "copy-root"
+        dest.mkdir()
+        calls = [0]
+        real_check = repo_sync._check_budget
+
+        def grow_during_copy():
+            calls[0] += 1
+            if calls[0] == 2:
+                with src.open("ab") as out:
+                    out.write(b"changed")
+            return real_check()
+
+        with patch.object(repo_sync, "_check_budget", side_effect=grow_during_copy), \
+                self.assertRaisesRegex(repo_sync.RepoError, "source changed during copy"):
+            repo_sync._secure_copy_file(src, dest, "copy.bin")
+        src.write_bytes(b"b" * (1 << 20))
+        calls[0] = 0
+
+        def grow_during_hash():
+            calls[0] += 1
+            if calls[0] == 2:
+                with src.open("ab") as out:
+                    out.write(b"changed")
+            return real_check()
+
+        with patch.object(repo_sync, "_check_budget", side_effect=grow_during_hash), \
+                self.assertRaisesRegex(repo_sync.RepoError, "source changed during hashing"):
+            repo_sync.sha256_file(src)
+        replacement = Path(self.temp.name) / "replacement.bin"
+        replacement.write_bytes(b"b" * (1 << 20))
+        src.write_bytes(b"b" * (1 << 20))
+        calls[0] = 0
+        def replace_during_hash():
+            calls[0] += 1
+            if calls[0] == 2:
+                replacement.replace(src)
+            return real_check()
+        with patch.object(repo_sync, "_check_budget", side_effect=replace_during_hash), \
+                self.assertRaisesRegex(repo_sync.RepoError, "source changed during hashing"):
+            repo_sync.sha256_file(src)
+        (dest / "link").symlink_to(src)
+        with self.assertRaises(repo_sync.RepoError):
+            repo_sync._validate_tree(dest)
+
+    def test_cancelled_copy_and_hash_leave_live_and_metadata_intact(self):
+        self.init_repo({"tracked.txt": b"old" * (1 << 20)})
+        repo = repo_sync.repo_dir("scm")
+        before = self.tree_bytes(repo), self.metadata_bytes()
+        cancel = [False]
+        original_copy = repo_sync._secure_copy_file
+
+        def interrupt_copy(*args):
+            cancel[0] = True
+            return original_copy(*args)
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "_secure_copy_file", side_effect=interrupt_copy), \
+                self.assertRaisesRegex(repo_sync.RepoError, "cancelled"):
+            repo_sync.cmd_update("scm", cancel=lambda: cancel[0], log=lambda *_: None)
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+
+        archive = self.tar_path({"tracked.txt": b"new" * (1 << 20)}, "hash-snapshot.tar.gz")
+        original_hash = repo_sync.sha256_file
+        cancel[0] = False
+
+        def interrupt_hash(path):
+            cancel[0] = True
+            return original_hash(path)
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "sha256_file", side_effect=interrupt_hash), \
+                self.assertRaisesRegex(repo_sync.RepoError, "cancelled"):
+            repo_sync.cmd_init("scm", tarball=archive, force_redeploy=True,
+                               cancel=lambda: cancel[0], log=lambda *_: None)
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+        with self.assertRaisesRegex(repo_sync.RepoError, "deadline exceeded"):
+            repo_sync.cmd_update("scm", deadline=0, log=lambda *_: None)
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        # Expiry inside a bounded hash loop, not only at operation entry.
+        large = Path(self.temp.name) / "deadline.bin"
+        large.write_bytes(b"h" * (2 << 20))
+        with repo_sync._budget_scope(deadline=3), \
+                patch.object(repo_sync.time, "monotonic", side_effect=[1, 4]), \
+                self.assertRaisesRegex(repo_sync.RepoError, "deadline exceeded"):
+            repo_sync.sha256_file(large)
+
+    def test_cancellation_during_comparison_does_not_start_full_download(self):
+        self.init_repo({"tracked.txt": b"old"})
+        repo = repo_sync.repo_dir("scm")
+        before = self.tree_bytes(repo), self.metadata_bytes()
+        stopped = [False]
+        def cancel_comparison(*args):
+            stopped[0] = True
+            repo_sync._check_budget()
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", side_effect=cancel_comparison), \
+                patch.object(repo_sync, "gh_download_to") as download, \
+                self.assertRaisesRegex(repo_sync.RepoError, "cancelled"):
+            repo_sync.cmd_update("scm", cancel=lambda: stopped[0], log=lambda *_: None)
+        download.assert_not_called()
+        self.assertEqual((self.tree_bytes(repo), self.metadata_bytes()), before)
+        self.assert_no_transaction_artifacts()
+
+    def test_cancelled_network_and_empty_hash_work_does_not_start(self):
+        empty = Path(self.temp.name) / "empty"
+        empty.write_bytes(b"")
+        with repo_sync._budget_scope(cancel=lambda: True), \
+                patch.object(repo_sync.urllib.request, "urlopen") as network:
+            operations = [lambda: repo_sync.sha256_file(empty),
+                          lambda: repo_sync.gh_json("/repos/owner/repo"),
+                          lambda: repo_sync.gh_get_bytes(repo_sync.RAW + "/owner/repo/file"),
+                          lambda: repo_sync.gh_download_to(repo_sync.RAW + "/owner/repo/file", empty.parent / "download")]
+            for operation in operations:
+                with self.assertRaisesRegex(repo_sync.RepoError, "cancelled"):
+                    operation()
+            network.assert_not_called()
+
+    def test_deployed_verification_uses_scoped_cancellation_and_deadline(self):
+        self.init_repo({"tracked.txt": b"old"})
+        with self.assertRaisesRegex(repo_sync.RepoError, "cancelled"):
+            repo_sync.verify_deployed("scm", cancel=lambda: True)
+        with self.assertRaisesRegex(repo_sync.RepoError, "deadline exceeded"):
+            repo_sync.verify_deployed("scm", deadline=0)
+        self.assertTrue(repo_sync.verify_deployed("scm"))
+        self.assertIsNone(repo_sync._operation_budget.get())
 
     def update_failure_fixture(self):
         self.init_repo({"tracked.txt": b"old", "data/user.bin": b"user"})
@@ -331,7 +704,7 @@ class DeploymentTests(unittest.TestCase):
             original_build = repo_sync._build_tx
             with patch.object(repo_sync, "_build_tx", side_effect=build), \
                     patch.object(repo_sync, "compare", return_value=self.basic_compare()), \
-                    patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
+                    patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print, max_bytes=None: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
                     patch.object(repo_sync, "resolve_target", return_value=target):
                 if failure in ("backup", "publish"):
                     rename_calls = [0]
@@ -385,7 +758,7 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(repo_sync, "resolve_target", return_value=target), \
                 patch.object(repo_sync, "_publish_tx", side_effect=stale), \
                 patch.object(repo_sync, "compare", return_value=self.basic_compare()), \
-                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
+                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print, max_bytes=None: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]), \
                 self.assertRaises(repo_sync.RepoError):
             repo_sync.cmd_update("scm", log=lambda *_: None)
         self.assertEqual(self.tree_bytes(repo_sync.repo_dir("scm")), before_tree)
@@ -409,13 +782,82 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(repo_sync, "resolve_target", return_value=target), \
                 patch.object(repo_sync, "_publish_tx", side_effect=concurrent_other_repo_publish), \
                 patch.object(repo_sync, "compare", return_value=self.basic_compare()), \
-                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]):
+                patch.object(repo_sync, "download_to", side_effect=lambda _k, _s, _p, d, log=print, max_bytes=None: (repo_sync._secure_write_bytes(d, b"new"), 3)[1]):
             result = repo_sync.cmd_update("scm", log=lambda *_: None)
         self.assertTrue(result["ok"])
         self.assertEqual((repo_sync.repo_dir("scm") / "tracked.txt").read_bytes(), b"new")
         state = repo_sync.load_state()
         self.assertEqual(state["scm"]["deployed"]["sha"], target["sha"])
         self.assertEqual(state["extras"]["marker"], "concurrent")
+        self.assert_no_transaction_artifacts()
+
+    def test_windows_rename_retries_temporary_sharing_errors_without_fallback(self):
+        parent = self.data / "rename-parent"
+        parent.mkdir(parents=True)
+        blocked = repo_sync._WindowsRenameBlocked(32)
+        with patch.object(repo_sync, "_windows_rename_sibling",
+                          side_effect=[blocked, blocked, None]) as rename, \
+                patch.object(repo_sync.time, "sleep") as sleep, \
+                patch.object(repo_sync.os, "name", "nt"):
+            repo_sync._secure_rename_sibling(parent, "source", "destination")
+        self.assertEqual(rename.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.15, 0.3])
+
+        with patch.object(repo_sync, "_windows_rename_sibling",
+                          side_effect=repo_sync._WindowsRenameBlocked(5)) as rename, \
+                patch.object(repo_sync.time, "sleep") as sleep, \
+                patch.object(repo_sync.os, "name", "nt"), \
+                self.assertRaisesRegex(repo_sync.RepoError, "Close File Explorer windows"):
+            repo_sync._secure_rename_sibling(parent, "source", "destination")
+        self.assertEqual(rename.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.15, 0.3, 0.6])
+
+    @unittest.skipUnless(os.name == "nt", "real Windows directory handle")
+    def test_windows_explorer_style_folder_lock_preserves_live_repo_and_can_retry(self):
+        from ctypes import wintypes
+        import ctypes
+
+        self.init_repo({"README.md": b"old", "game/front/card.txt": b"card"})
+        repo = repo_sync.repo_dir("scm")
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                          wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                          wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        # Explorer can hold a folder inside the checkout without DELETE sharing.
+        handle = kernel32.CreateFileW(str(repo / "game/front"), 0x80000000, 1 | 2,
+                                      None, 3, 0x02000000, None)
+        value = handle.value if hasattr(handle, "value") else handle
+        self.assertNotIn(value, (None, ctypes.c_void_p(-1).value))
+        comparison = {"status": "ahead", "too_many": False, "commits": 1,
+                      "files": [{"path": "README.md", "status": "modified", "previous": None}]}
+
+        def fetch(_key, _sha, _path, dest, log=print, max_bytes=None):
+            repo_sync._secure_write_bytes(dest, b"new")
+            return 3
+
+        try:
+            with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                    patch.object(repo_sync, "compare", return_value=comparison), \
+                    patch.object(repo_sync, "download_to", side_effect=fetch), \
+                    patch.object(repo_sync.time, "sleep"), \
+                    self.assertRaisesRegex(repo_sync.RepoError, "Close File Explorer windows"):
+                repo_sync.cmd_update("scm", log=lambda *_: None)
+            self.assertEqual(self.tree_bytes(repo), before_tree)
+            self.assertEqual(self.metadata_bytes(), before_meta)
+            self.assert_no_transaction_artifacts()
+        finally:
+            kernel32.CloseHandle(handle)
+
+        with patch.object(repo_sync, "resolve_target", return_value=self.target(SHA2)), \
+                patch.object(repo_sync, "compare", return_value=comparison), \
+                patch.object(repo_sync, "download_to", side_effect=fetch):
+            result = repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((repo / "README.md").read_bytes(), b"new")
         self.assert_no_transaction_artifacts()
 
     def test_f016_windows_rename_uses_handle_safe_seam(self):
@@ -658,8 +1100,10 @@ class DeploymentTests(unittest.TestCase):
             repo_sync._clone_tree(source, dest)
         self.assertFalse(dest.exists())
 
-        with patch.object(repo_sync, "TREE_BYTES_CAP", 2), self.assertRaises(repo_sync.RepoError):
-            repo_sync._validate_tree(source)
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 2):
+            self.assertEqual(repo_sync._validate_tree(source), ["0.txt", "1.txt", "2.txt"])
+            with self.assertRaisesRegex(repo_sync.RepoError, "downloaded repository tree is too large"):
+                repo_sync._validate_tree(source, policy="upstream")
         outside = Path(self.temp.name) / "outside.txt"
         outside.write_bytes(b"outside")
         (source / "link.txt").symlink_to(outside)
@@ -702,6 +1146,38 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(repo_sync._is_user_data_rel("game/frontline/x.png"))
         self.assertFalse(repo_sync._is_user_data_rel("database/x.png"))
 
+    def test_explicit_local_and_upstream_tree_policies(self):
+        tree = Path(self.temp.name) / "oversized"
+        (tree / "extra").mkdir(parents=True)
+        (tree / "game" / "front").mkdir(parents=True)
+        (tree / "extra" / "local.bin").write_bytes(b"l" * 31)
+        (tree / "game" / "front" / "card.png").write_bytes(b"u" * 31)
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30):
+            self.assertEqual(len(repo_sync._validate_tree(tree, expected_paths=set())), 2)
+            with self.assertRaisesRegex(repo_sync.RepoError, "downloaded repository tree is too large"):
+                repo_sync._validate_tree(tree, policy="upstream")
+        with patch.object(repo_sync, "USER_DATA_BYTES_CAP", 30):
+            with self.assertRaisesRegex(repo_sync.RepoError, "user data is too large"):
+                repo_sync._validate_tree(tree)
+            with self.assertRaisesRegex(repo_sync.RepoError, "user data is too large"):
+                repo_sync._validate_tree(tree / "game" / "front", policy="user_data")
+        with self.assertRaisesRegex(repo_sync.RepoError, "policy"):
+            repo_sync._validate_tree(tree, policy="unknown")
+
+    def test_large_local_tree_is_not_rejected_before_target_resolution(self):
+        self.init_repo({"README.md": b"readme", "test/expected_pdfs/page1.png": b"p" * 15})
+        repo = repo_sync.repo_dir("scm")
+        (repo / "game").mkdir(exist_ok=True)
+        (repo / "game/extra.pdf").write_bytes(b"e" * 21)
+        before_tree, before_meta = self.tree_bytes(repo), self.metadata_bytes()
+        with patch.object(repo_sync, "TREE_BYTES_CAP", 30), \
+                patch.object(repo_sync, "resolve_target", side_effect=repo_sync.RepoError("offline")), \
+                self.assertRaisesRegex(repo_sync.RepoError, "offline"):
+            repo_sync.cmd_update("scm", log=lambda *_: None)
+        self.assertEqual(self.tree_bytes(repo), before_tree)
+        self.assertEqual(self.metadata_bytes(), before_meta)
+        self.assert_no_transaction_artifacts()
+
     def test_upstream_and_user_caps_are_each_still_enforced(self):
         """Exempting user data from the upstream cap must not remove bounds."""
         tree = Path(self.temp.name) / "capped"
@@ -710,8 +1186,9 @@ class DeploymentTests(unittest.TestCase):
         (tree / "game" / "front" / "card.png").write_bytes(b"i" * 40)
 
         with patch.object(repo_sync, "TREE_BYTES_CAP", 8):
-            with self.assertRaisesRegex(repo_sync.RepoError, "tree is too large"):
-                repo_sync._validate_tree(tree)
+            self.assertEqual(len(repo_sync._validate_tree(tree)), 2)
+            with self.assertRaisesRegex(repo_sync.RepoError, "downloaded repository tree is too large"):
+                repo_sync._validate_tree(tree, policy="upstream")
         with patch.object(repo_sync, "TREE_FILE_CAP", 0):
             with self.assertRaisesRegex(repo_sync.RepoError, "tree has too many files"):
                 repo_sync._validate_tree(tree)

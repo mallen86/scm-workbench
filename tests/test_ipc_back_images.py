@@ -72,6 +72,29 @@ class BackImageTests(unittest.TestCase):
         self.assertTrue((back / "EMPTY.md").exists())
         self.assertFalse((back / "old.png").exists())
 
+    def test_private_import_accepts_32_mib_and_rejects_larger_without_replacement(self):
+        limit = 32 * 1024 * 1024
+        self.assertEqual(server.BACK_IMAGE_SOURCE_MAX_BYTES, limit)
+        source = self.root / "high-resolution.png"
+        with source.open("wb") as output:
+            output.write(PNG)
+            output.truncate(limit)
+        response = ipc.dispatch({"id": "large-back", "method": "back_images.import_selected",
+                                 "params": {"source_path": str(source)}})
+        self.assertTrue(response["ok"], response)
+        self.assertTrue(response["result"]["ok"], response)
+        imported = self.fixture.scm / "game" / "back" / source.name
+        self.assertEqual(imported.stat().st_size, limit)
+        self.assertEqual(source.stat().st_size, limit)
+        with source.open("ab") as output:
+            output.write(b"x")
+        rejected = ipc.dispatch({"id": "too-large-back", "method": "back_images.import_selected",
+                                 "params": {"source_path": str(source)}})
+        self.assertTrue(rejected["ok"], rejected)
+        self.assertFalse(rejected["result"]["ok"], rejected)
+        self.assertEqual(imported.stat().st_size, limit)
+        self.assertEqual([image["name"] for image in server._scan_back_images(self.fixture.scm)], [source.name])
+
     def test_remove_flow_deletes_recognized_backs_only(self):
         back = self.fixture.scm / "game" / "back"
         (back / "one.png").write_bytes(PNG)

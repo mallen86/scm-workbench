@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable contracts for the optional guided Workbench tutorial."""
+"""Executable contracts for the guided tutorial and read-only page help."""
 
 from pathlib import Path
 import re
@@ -21,7 +21,36 @@ def main() -> int:
     tutorial = (JS / "guided-tutorial.js").read_text(encoding="utf-8")
     onboarding = (JS / "onboarding.js").read_text(encoding="utf-8")
     settings = (JS / "pages" / "settings.js").read_text(encoding="utf-8")
+    postprocess = (JS / "pages" / "postprocess.js").read_text(encoding="utf-8")
     css = (UI / "theme.css").read_text(encoding="utf-8")
+    index = (UI / "index.html").read_text(encoding="utf-8")
+    nav = (JS / "nav.js").read_text(encoding="utf-8")
+    help_ui = (JS / "page-help.js").read_text(encoding="utf-8")
+    help_content = (JS / "page-help-content.js").read_text(encoding="utf-8")
+    pages = {}
+    for path in sorted((JS / "pages").glob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        for page in re.findall(r'PAGES\.(\w+)\s*=', source):
+            pages[page] = source
+    help_keys = set(re.findall(r'^  (\w+): \{', help_content, re.MULTILINE))
+    if help_keys != set(pages):
+        return fail(f"page help coverage differs from current routes: {help_keys ^ set(pages)}")
+    topbar = index.split('<header class="topbar">', 1)[-1].split('</header>', 1)[0]
+    if ('id="btn-page-help"' not in topbar or 'aria-haspopup="dialog"' not in topbar or
+            topbar.index('id="btn-page-help"') < topbar.index('id="btn-console"') or
+            'showPageHelp(page, button)' not in nav):
+        return fail("help must be the rightmost button in the app's top bar")
+    if 'body.setup-welcome .topbar { display: none; }' in css:
+        return fail("the welcome page hides the top-bar help button")
+    for marker in ('.topbar-right {', 'margin-left: auto', '.page-help-dialog::backdrop',
+                   '.page-help-body {', 'overflow-y: auto'):
+        if marker not in css:
+            return fail(f"page help layout is missing {marker}")
+    for forbidden in ('innerHTML', '/api/', 'wb_rpc', 'window.open', 'doRun(', 'setSettings('):
+        if forbidden in help_ui or forbidden in help_content:
+            return fail(f"page help must render local text without side effects: {forbidden}")
+    if 'dialog.showModal()' not in help_ui or '"aria-labelledby": "page-help-title"' not in help_ui:
+        return fail("page help must use an accessible in-app modal dialog")
 
     for marker in (
         "export const GUIDED_TUTORIAL_STEPS",
@@ -29,6 +58,8 @@ def main() -> int:
         'target: ".plugin-sections"',
         "target: '.form-card[data-kind^=\"fetch:\"] .field[data-key=\"deck_source\"]'",
         "target: '.form-card[data-kind^=\"fetch:\"] .runbar'",
+        'page: "postprocess"',
+        'target: ".pp-simple-picker, .pp-library"',
         'page: "pdf"',
         'targets: Object.freeze([',
         "'.form-card[data-kind=\"create_pdf\"] .field[data-key=\"card_size\"]'",
@@ -54,13 +85,17 @@ def main() -> int:
             return fail(f"guided tutorial performs work instead of explaining it: {forbidden}")
 
     step_copy = re.findall(r'^    (?:title|text): "([^"]*)"', tutorial, re.MULTILINE)
-    if len(step_copy) != 12:
-        return fail(f"guided tutorial does not have six titled steps: {step_copy}")
+    if len(step_copy) != 14:
+        return fail(f"guided tutorial does not have seven titled steps: {step_copy}")
     if any(dash in text for text in step_copy for dash in ("\u2014", "\u2013")):
         return fail("guided tutorial user-facing text contains an en or em dash")
-    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Choose card and paper sizes", "Add a card back", "Generate the PDF"):
+    for phrase in ("Choose a game", "Add your decklist", "Fetch card art", "Optional image post-processing", "Choose card and paper sizes", "Add a card back", "Generate the PDF"):
         if phrase not in step_copy:
             return fail(f"guided tutorial does not cover {phrase}")
+    if not all(phrase in step_copy[7] for phrase in ("skip this step", "Simple Upscaler", "Advanced AI Upscaler", "installing its model and libraries")):
+        return fail("post-processing tutorial does not explain that both upscalers are optional and the AI assets require installation")
+    if 'class: "card pp-simple-picker"' not in postprocess or 'class: "card pp-library"' not in postprocess:
+        return fail("post-processing tutorial must have a target in both Simple and Advanced modes")
     if "Select Only fronts in the form when a back is not needed." in tutorial:
         return fail("the card-back step still gives incorrect Only fronts guidance")
 
@@ -79,6 +114,7 @@ def main() -> int:
     for marker in (
         'import { startGuidedTutorial } from "../guided-tutorial.js";',
         'class: "card guided-tutorial-card"',
+        'optional image post-processing, choosing card and paper sizes',
         '"Start guided tutorial"',
         'onclick: startGuidedTutorial',
         '"You can stop at any step."',
@@ -95,7 +131,8 @@ def main() -> int:
         return fail("guided tutorial does not block accidental actions or respect reduced motion")
 
     node = subprocess.run(
-        ["node", "--input-type=module", "-", str(JS / "guided-tutorial.js"), str(JS / "onboarding.js")],
+        ["node", "--input-type=module", "-", str(JS / "guided-tutorial.js"), str(JS / "onboarding.js"),
+         str(JS / "page-help-content.js"), str(JS / "page-help.js"), str(JS / "nav.js")],
         input=r'''
 import fs from "node:fs";
 const tutorialSource = fs.readFileSync(process.argv[2], "utf8");
@@ -167,6 +204,7 @@ class FakeNode {
   matches(selector) {
     if (selector === "button:not([disabled])") return this.tag === "button" && !this.disabled;
     if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
+    if (selector.startsWith("#")) return this.id === selector.slice(1);
     return this.tag === selector;
   }
   querySelectorAll(selector) {
@@ -190,6 +228,7 @@ class FakeNode {
   get textContent() {
     return this.children.map(child => child instanceof FakeNode ? child.textContent : String(child)).join("");
   }
+  set textContent(value) { this.replaceChildren(value); }
 }
 
 globalThis.FakeNode = FakeNode;
@@ -285,7 +324,7 @@ if (!tutorial.guidedTutorialActive() || globalThis.sharedState.page !== "fetch" 
     !body.classList.contains("guided-tutorial-open")) fail("tutorial did not start with bounded lifecycle state");
 let root = body.querySelector(".guided-tour-root");
 let popover = body.querySelector(".guided-tour-popover");
-if (!root || !popover || !popover.textContent.includes("Step 1 of 6") ||
+if (!root || !popover || !popover.textContent.includes("Step 1 of 7") ||
     !popover.textContent.includes("Choose a game") ||
     globalThis.targets.get(tutorial.GUIDED_TUTORIAL_STEPS[0].target).scrolls !== 1)
   fail("first tutorial step did not point to the game chooser");
@@ -302,16 +341,32 @@ if (globalThis.navigations.length !== 1 || !popover.textContent.includes("Add yo
 next();
 if (!popover.textContent.includes("Fetch card art")) fail("fetch action step did not render");
 next();
-if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.join() !== "fetch,pdf" ||
+const postprocessTarget = globalThis.targets.get(".pp-simple-picker, .pp-library");
+if (globalThis.sharedState.page !== "postprocess" || globalThis.navigations.join() !== "fetch,postprocess" ||
+    !popover.textContent.includes("Step 4 of 7") || !popover.textContent.includes("Optional image post-processing") ||
+    !popover.textContent.includes("Simple Upscaler") || !popover.textContent.includes("Advanced AI Upscaler") ||
+    !postprocessTarget?.isConnected || postprocessTarget.scrolls !== 1)
+  fail("optional post-processing step did not navigate and point to the processor picker");
+next();
+if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.join() !== "fetch,postprocess,pdf" ||
     !popover.textContent.includes("Choose card and paper sizes")) fail("size step did not navigate to Create PDF");
 const spotlight = body.querySelector(".guided-tour-spotlight");
 if (spotlight.style.left !== "293px" || spotlight.style.width !== "564px")
   fail("size step did not spotlight the combined card and paper controls");
+const back = popover.querySelectorAll("button").find(button => button.textContent === "Back");
+if (!back?.onclick) fail("PDF step has no Back action");
+back.onclick();
+flushFrames();
+if (globalThis.sharedState.page !== "postprocess" || !popover.textContent.includes("Optional image post-processing") ||
+    globalThis.navigations.at(-1) !== "postprocess") fail("Back did not return to optional post-processing");
+next();
+if (globalThis.sharedState.page !== "pdf" || globalThis.navigations.at(-1) !== "pdf")
+  fail("Next did not return to Create PDF after visiting post-processing");
 next();
 if (!popover.textContent.includes("Add a card back") || popover.textContent.includes("Only fronts"))
   fail("card-back step is missing or still gives incorrect Only fronts guidance");
 next();
-if (!popover.textContent.includes("Step 6 of 6") || !popover.textContent.includes("Generate the PDF") ||
+if (!popover.textContent.includes("Step 7 of 7") || !popover.textContent.includes("Generate the PDF") ||
     !popover.textContent.includes("Finish")) fail("final PDF action step did not render");
 
 let prevented = false;
@@ -325,7 +380,7 @@ if (!prevented || tutorial.guidedTutorialActive() || body.querySelector(".guided
 
 tutorial.startGuidedTutorial();
 flushFrames();
-for (let index = 0; index < 6; index++) {
+for (let index = 0; index < 7; index++) {
   documentListeners.get("keydown")({key:"ArrowRight", preventDefault() {}});
   flushFrames();
 }
@@ -382,7 +437,110 @@ await buttonNamed(card, "Got it. Show me around").onclick();
 if (done !== 2 || globalThis.tourStarts !== 1 || globalThis.sharedState.info.settings.onboarded ||
     globalThis.welcomeToasts.at(-1)?.kind !== "err") fail("a failed onboarding save still left or started the tutorial");
 
-console.log("ok: optional tutorial covers PDF sizes, gives accurate card-back guidance, returns to fetch, and cleans up on stop or finish");
+// Help has content for every route and only describes controls in the current mode.
+const helpContentUrl = dataUrl(fs.readFileSync(process.argv[4], "utf8"));
+const { PAGE_HELP, pageHelpContent } = await import(helpContentUrl);
+for (const page of Object.keys(PAGE_HELP)) {
+  for (const mode of ["simple", "advanced"]) for (const packaged of [false, true]) {
+    const content = pageHelpContent(page, { mode, packaged });
+    if (!content.title || !content.intro || !content.sections.length ||
+        content.sections.some(s => !s.title || !s.text || (s.mode && s.mode !== mode)))
+      fail(`incomplete or incorrect help for ${page} / ${mode}`);
+  }
+}
+if (pageHelpContent("missing") || pageHelpContent("__proto__")) fail("unknown help route did not fail closed");
+const helpText = (page, mode, packaged = true) => JSON.stringify(pageHelpContent(page, { mode, packaged }));
+if (!helpText("postprocess", "simple").includes("optional") ||
+    !helpText("postprocess", "simple").includes("Simple Upscaler") ||
+    !helpText("postprocess", "simple").includes("Advanced AI Upscaler") ||
+    helpText("postprocess", "simple").includes("Custom processors") ||
+    !helpText("postprocess", "advanced").includes("Custom processors")) fail("upscaler help is not mode-aware");
+if (helpText("settings", "simple").includes("Include beta releases") ||
+    !helpText("settings", "advanced").includes("Include beta releases") ||
+    helpText("settings", "advanced", false).includes("Include beta releases") ||
+    helpText("settings", "advanced").includes("Save python & server")) fail("settings help describes hidden controls");
+if (helpText("history", "simple").includes("Use Log") ||
+    helpText("offset", "simple").includes("Offset PDF")) fail("Simple help describes Advanced-only actions");
+const section = (page, title, mode = "simple") =>
+  pageHelpContent(page, {mode}).sections.find(item => item.title === title)?.text || "";
+const fetchHelp = section("fetch", "Fetch the images");
+if (!fetchHelp.includes("Clear card images") || !fetchHelp.includes("duplicate images") ||
+    fetchHelp.includes("check the decklist and fetch again"))
+  fail("fetch help suggests retrying will fill gaps without duplicating images");
+const aiHelp = section("postprocess", "Advanced AI Upscaler");
+if (!aiHelp.includes("GPU") || !aiHelp.includes("CPU") ||
+    !aiHelp.includes("hardware, drivers, and libraries") ||
+    /On Macs|Windows and Linux|macOS only/i.test(aiHelp))
+  fail("AI upscaler help must give platform-neutral GPU and CPU guidance");
+const pdfHelp = section("pdf", "Print and image options");
+if (!pdfHelp.includes("registration issues") || !pdfHelp.includes("MPCFill automatically adds 3 mm of bleed") ||
+    !pdfHelp.includes("removes that extra bleed") || !pdfHelp.includes("leave it on"))
+  fail("PDF help is missing skip, MPCFill bleed, or Extend Corners guidance");
+const offsetHelp = section("offset", "Enter the correction");
+if (section("offset", "Measure a test print").includes("Regenerate all") ||
+    !section("offset", "Regenerate calibration sheets").includes("Regenerate all") ||
+    !offsetHelp.includes("back page") || !offsetHelp.includes("1/300 inch") ||
+    offsetHelp.includes("measured in pixels"))
+  fail("calibration help has the wrong section, page, or offset units");
+
+// Exercise the actual header helper and help renderer. Native dialog behavior
+// (Escape and focus containment) is also checked in the desktop browser.
+FakeNode.prototype.addEventListener = function(name, fn) {
+  this.listeners ||= new Map(); this.listeners.set(name, fn);
+};
+FakeNode.prototype.showModal = function() { this.open = true; };
+FakeNode.prototype.close = function() { this.open = false; this.listeners?.get("close")?.(); };
+const helpUrl = dataUrl(fs.readFileSync(process.argv[5], "utf8")
+  .replace('from "./core.js"', `from "${coreUrl}"`)
+  .replace('from "./page-help-content.js"', `from "${helpContentUrl}"`));
+const { showPageHelp } = await import(helpUrl);
+const realNav = fs.readFileSync(process.argv[6], "utf8");
+const headerSource = (realNav.slice(realNav.indexOf("export function setNav("), realNav.indexOf("// Each page has a real URL")) +
+  realNav.slice(realNav.indexOf("export function bindNav("), realNav.indexOf("let themeSelection")))
+  .replace('import("./page-help.js")', `import("${helpUrl}")`);
+const { setNav, bindNav } = await import(dataUrl(`import { S, $, toast } from "${coreUrl}";
+  const $$ = () => []; const toggleConsole = () => {};\n${headerSource}`));
+const header = new FakeNode("header", { class: "topbar" });
+const title = new FakeNode("div", { id: "topbar-title" });
+const button = new FakeNode("button", { class: "btn page-help-button", id: "btn-page-help", "aria-haspopup": "dialog" });
+button.append("?");
+header.append(title, new FakeNode("button", { id: "btn-console" }), button);
+body.append(header);
+bindNav();
+globalThis.sharedState.info = { settings: { ui_mode: "simple" }, server: { is_packaged: true } };
+globalThis.sharedState.forms = { create_pdf: { paper_size: "a4" } };
+globalThis.sharedState.jobs = [{ id: "sentinel", status: "ok" }];
+for (const page of Object.keys(PAGE_HELP)) {
+  setNav(page);
+  if (button.disabled || !button["aria-label"].includes(PAGE_HELP[page].title))
+    fail(`${page} did not update the top-bar help action`);
+  const before = JSON.stringify(globalThis.sharedState);
+  button.focus();
+  await button.onclick({ currentTarget: button });
+  const modal = body.querySelector(".page-help-dialog");
+  if (!modal?.open || modal.tag !== "dialog" || !modal.textContent.includes(PAGE_HELP[page].intro) ||
+      document.activeElement !== modal.querySelector(".page-help-close")) fail(`${page} help did not open and focus`);
+  if (JSON.stringify(globalThis.sharedState) !== before) fail(`${page} help modified settings, forms, or jobs`);
+  modal.listeners.get("keydown")({ key: "Tab", preventDefault() {} });
+  if (document.activeElement !== modal.querySelector(".page-help-body")) fail("help text cannot be scrolled with the keyboard");
+  modal.listeners.get("keydown")({ key: "Tab", shiftKey: true, preventDefault() {} });
+  if (document.activeElement !== modal.querySelector(".page-help-close")) fail("help focus escaped the dialog");
+  modal.querySelector(".page-help-close").onclick();
+  if (body.querySelector(".page-help-dialog") || document.activeElement !== button) fail("help close did not clean up and restore focus");
+  // A backdrop click also closes the same dialog, without touching the form.
+  await button.onclick({ currentTarget: button });
+  const backdrop = body.querySelector(".page-help-dialog");
+  backdrop.listeners.get("click")({ target: backdrop, clientX: -1, clientY: -1 });
+  if (body.querySelector(".page-help-dialog") || JSON.stringify(globalThis.sharedState) !== before)
+    fail("help backdrop did not close cleanly");
+}
+showPageHelp("fetch");
+showPageHelp("pdf");
+if (body.querySelectorAll(".page-help-dialog").length !== 1 ||
+    !body.querySelector(".page-help-dialog").textContent.includes(PAGE_HELP.pdf.intro))
+  fail("reopening help left duplicate dialogs");
+body.querySelector(".page-help-dialog").close();
+console.log("ok: tutorial navigation, page help coverage, mode-aware copy, read-only dialogs, and cleanup");
 ''',
         text=True,
         capture_output=True,

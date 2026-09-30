@@ -134,6 +134,9 @@ def main() -> int:
     # prep.js, so the import has to stay dynamic) and offer a way to dismiss.
     if 'class: "rp-actions"' not in prep or '"aria-label": "Dismiss this message"' not in prep:
         return fail("the repo failure notice has no retry and dismiss actions")
+    if ('managed repository tree is too large' not in prep or
+            '"Show unexpected files and folders"' not in prep or 'el("details"' not in prep):
+        return fail("the simple-mode repo failure notice hides oversized file details")
     if "repoReady" not in (JS / "forms.js").read_text(encoding="utf-8"):
         return fail("forms.js no longer owns the repo runner the retry reuses")
     for path in sorted(JS.rglob("*.js")):
@@ -251,11 +254,13 @@ def main() -> int:
         return fail("navigating away does not restore the top bar")
     if nav.find('document.body.classList.remove("setup-welcome");') > nav.find("S.page = page;"):
         return fail("the top bar is restored after the page is recorded, so a render could re-add it late")
-    if "body.setup-welcome .topbar { display: none; }" not in css:
-        return fail("the welcome screen's top bar is not actually hidden")
-    # Hiding the chrome must not strand anyone: the card's own controls leave it.
+    if ("body.setup-welcome .topbar-title { visibility: hidden; }" not in css or
+            "body.setup-welcome #btn-console { display: none; }" not in css or
+            "body.setup-welcome .topbar { display: none; }" in css):
+        return fail("welcome must hide the title and console without hiding page help")
+    # Hiding the title and console must not strand anyone: the card has its own exit.
     if "first-boot-close" not in page or 'class: "btn primary"' not in onboarding:
-        return fail("the welcome screen hides the top bar without an in-card exit")
+        return fail("the welcome screen has no in-card exit")
 
     # A returning user must never see it again, and no other page may render it.
     if 'S.info.settings.onboarded' not in onboarding:

@@ -1,4 +1,29 @@
 # Bugs
+- [x] Remove the Custom card-art import total-size limit while retaining 32 MiB per image and 256 images per import.
+- [x] Remove the overall app-update asset download deadline while retaining network inactivity detection, metadata deadlines, and verified atomic publication.
+- [x] Highlight the targeted Custom image drop zone during native file drags and clear it on leave, drop, busy state, or page disposal.
+- [x] Preserve macOS logical drop coordinates on Retina displays so Custom card-art drops hit the intended image zone.
+- [x] Preserve verified Advanced Upscaler libraries and the installed CUDA profile across bundled source-only updates; require reinstallation only for changed requirements or incompatible/damaged assets or runtime.
+- [x] Retry a failed CUDA inference tile once on a verified CPU-only session when cuDNN is missing, retaining bounded progress and truthful warnings without changing originals on failure.
+- [x] Space the Linux CUDA profile label, selector, and explanation consistently in both Image post-processing modes.
+- [x] Support automatic detection and manual CUDA 12/CUDA 13 installation profiles for the Linux Advanced Upscaler without switching existing installations on read; retain verified CPU fallback and transactional install rollback.
+- [x] Remove Workbench CPU-time and wall/idle time limits for the fixed Advanced Upscaler while using all process-available CPU cores; retain cancellation, custom/install time limits, and other safety bounds.
+- [x] Keep automatic Advanced Upscaler CPU fallback visible in both modes, detect silent GPU initialization fallback, and show bounded tile progress without advancing completed-image counts.
+- [x] Make temporary-image metadata regression coverage independent of filesystem timestamp resolution, without weakening byte verification.
+- [x] Replace the managed repo's local non-user 1 GiB size gate with staging-space checks and bounded, cancellable copying/verification while retaining incoming-data limits, user-data budgets, and transactional recovery.
+- [x] Avoid false Custom import failures from temporary-file metadata changes by verifying copied bytes, verify every publication against the copied-source digest, and reject content edits/replacements within the import deadline.
+- [x] Keep Custom import results concise without successful filename lists, right-align and separate the next-step buttons, and preserve spacing between image areas across responsive layouts.
+- [x] Accept card-back images up to 32 MiB in every import path, including Custom drops/uploads and the Create PDF picker, with matching UI guidance and boundary regression tests.
+- [x] List only unrecorded, non-user files/folders in oversized managed-repository update errors without hiding their recorded upstream contribution or weakening the 1 GiB limit.
+- [x] Write the back-only processor test source as exact UTF-8 bytes so Windows newline translation cannot invalidate its approved revision.
+- [x] Reject app-generated PDF and DXF output paths outside their designated folders within a managed SCM checkout while permitting external output locations; identify cumulative oversized non-user folders and files in repo-update failures.
+- [x] Explain Windows managed-repository rename failures caused by open Explorer folders and retry transient locks without weakening atomic deployment.
+- [x] Let Windows managed-repository diff updates preserve locally deleted tracked files without rejecting the candidate manifest, while still rejecting files lost during staging.
+- [x] Force UTF-8 mode for isolated Windows image processors so accented card filenames do not stall job progress.
+- [x] Preserve Unicode whitespace and repeated spaces in image post-processing progress filenames so Windows jobs advance past those images.
+- [x] Preserve approved postprocessor source and dependency-lock bytes on Windows instead of invalidating their revision digests through newline translation.
+- [x] Return a structured validation error for oversized processor source payloads instead of resetting the browser HTTP connection.
+- [x] Preserve verified postprocessor libraries and trust across compatible app/runtime replacement without binding Python compatibility to bundle paths, inodes, or timestamps.
 - [x] Bound release-asset uploads to five minutes, retry transient server failures, and retain Actions artifacts when attachment fails.
 - [x] Replace the blank Job History startup flash with an honest loading state and remove the duplicate UI bootstrap that repeated every startup request.
 - [x] Keep Create PDF and MTG Fetch Card Art options available when a slow Windows machine exceeds the bounded help probe by safely reading literal Click options from source.
@@ -55,10 +80,15 @@
 - [x] The cancel button for the jobs in simple mode has a weird square to the left of the text. Make it an actual X and also change the button to red to highlight the "danger" of clicking the button.
 - [x] The PDF preview enlargement seems to have a maximum width. Make it a percentage of the screen size instead so if your window is bigger the preview is also bigger. This only applies in the enlargement view, don't make the non-enlarged view bigger.
 - [x] Make automatic app-update checks run promptly at packaged startup and once daily, then surface newly discovered releases during the same session.
+- [x] Calibration sheets appear to be hardcoded. upgrading scm v3.0.0 to current main adds a legal size calibration sheet but that doesn't show up in the calibration list. Make the buttons enumerated from the actual files.
 - [x] Keep saved Create PDF defaults, including PPI, visible after saving and apply them to fresh forms without overwriting an edited form.
 - [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
+- [x] Add a Custom Fetch Card Art game with front/double-sided image drop zones, per-folder open buttons, safe native/browser imports, and the existing deck cleanup section.
+- [x] Add a single-image card-back zone to Custom Fetch Card Art, replacing the shared back transactionally while retaining two-column front/double-sided layout and stacked narrow layout.
+- [x] Use clickable built-in processor blocks in Simple mode, plus a Custom Processor block that reveals a ready-only dropdown when selected.
+- [x] Add plain-English help for every current page, opened with a ? button at the far right of the app's top bar. Keep help inside the app and match the controls available in Simple and Advanced modes.
 - [x] Add a Simple-mode 3.5mm Extend Corners preset and group the everyday Create PDF toggles into titled print and image-finishing sections.
 - [x] Detect the options supported by each connected SCM Python script, disable unavailable workflows and form controls with an explanation, and reject stale unsupported settings before launch.
 - [x] The macos build workflow double zips the app. main zip -> inside zip -> SCM Workbench.app. Instead of fixing the zip situation let's implement the proper solution by making the file the macos standard installer method where a UI box opens and prompts you to drag the app to the applications folder and you physically drag the app icon over the applications icon (a `.dmg` file). Windows stays as the "portable" solution.
@@ -93,12 +123,22 @@
     - Debounce and cancel stale renders, keep native and browser behavior equivalent, never retry native failures over HTTP, and never modify source folders, real PDF output, job history, or artifact grants.
     - Follow the detailed design, security bounds, lifecycle requirements, and regression plan in [`docs/plans/create-pdf-front-preview.md`](docs/plans/create-pdf-front-preview.md).
 - [x] Fetch card art game section: initial view should be all games but once you've used it the list is collapsed and a "Recently used" section is shown at the top
+- [x] Keep successfully imported Custom card art in Recently used across restarts, pinned alongside five recent games; failed, cancelled, and empty imports do not count.
 - [x] Guided tutorial since the message after initially syncing the repos says "Show me around" but we don't actually show you around. The guided tour should be optional and should be able to be stopped before the end. It should at minimum guide you to fetch the card art, add a back image, and generate the pdf.
     - [x] Add a step in between 3 and 4 showcasing the card and paper sizes on the create pdf page
     - [x] Remove the text "Select Only fronts in the form when a back is not needed." from the step 4 (or step 5 if you've already added the new step above). Only fronts will remove any double-sided cards which are independent of the backs
     - [x] When the tutorial is done bring the user back to the fetch card art page
 - [x] Add the ability to click the PDF preview to get a larger version of it. Click anywhere on the PDF to get a popup inside the app that's large and another click to put it back.
+- [x] Add the managed Python image post-processing workflow described in [`docs/plans/python-image-postprocessing.md`](docs/plans/python-image-postprocessing.md), including a ready-only Simple-mode runner and built-in upscaler, the Advanced processor library, revision trust, isolated optional dependencies, Workbench-owned per-image invocation, transactional publication, native/browser transport parity, and regression coverage.
+    - [x] Treat processor libraries bound to a replaced Python runtime as stale and reinstallable without blocking access to the saved processor source.
+    - [x] Add a Processor library button that opens the running version's bundled post-processing Markdown guide as rendered in-app documentation.
+    - [x] Allow picking a specific revision when clicking Revert button
+    - [x] Job history should take you to the specific processor used for the job
+    - [x] Add a fixed, optional-install Advanced AI Upscaler in both Simple and Advanced modes, with upfront size estimates, pinned/hash-verified assets, cancellable install, remove/reinstall, offline processing, and original-format preservation.
+    - [x] Add GPU inference on Windows (DirectML) and Linux NVIDIA (CUDA with system libraries), preserving CPU fallback and platform-neutral help.
+    - [x] Allow the fixed Linux GPU runner sufficient bounded virtual address space for CUDA without increasing custom processor limits.
 - [x] Add the notion of beta releases and the ability for users to opt-in to beta releases. Github pre-release would be used for beta versions and the built-in updater would pick the newest version (regardless of release/pre-release) when opted in to beta and the newest release when not opted in to beta.
+    - [x] Allow downgrading from beta to stable
 - [x] Add and verify the first Debian/Ubuntu x86_64 package with the bundled runtime, native IPC, XDG data, manual package-manager updates, and lifecycle smoke coverage.
 - [x] Add Arch/Manjaro x86_64 packaging with exact distro-bound updates, a package recipe, clean-container install checks, and WebKitGTK/native IPC lifecycle smokes.
 - [x] Add browse buttons to choose the folder for front card directory, double-sided card directory, and output directory in advanced mode. Add the button to the right of the inputs. Also add a reset button for each to go back to the default.

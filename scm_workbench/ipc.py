@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import threading
 import traceback
@@ -37,17 +38,21 @@ PRIVATE_METHODS = frozenset((
     "ready",
     "files.export_selected", "files.export_poll", "files.export_cancel",
     "fs.delete_images_start", "fs.delete_images_poll",
-    "back_images.import_selected",
+    "back_images.import_selected", "postprocessors.import_selected",
+    "custom_art.import_selected", "custom_art.import_poll",
 ))
 ALLOWED_METHODS = frozenset((
     "info", "manifest", "settings.get", "settings.set", "preview",
     "pdf_preview.start", "pdf_preview.poll", "pdf_preview.cancel",
     "template.resolve", "template.delete", "file.list",
-    "file.open", "file.reveal", "url.open",
+    "file.open", "file.reveal", "url.open", "custom_art.open_folder",
     "jobs.list", "jobs.start", "jobs.log", "jobs.kill", "jobs.poll",
     "repos.refs", "repos.source.set", "repos.check", "repos.poll",
     "updates.get", "updates.check", "updates.notes", "updates.poll", "updates.start",
     "offset.set", "offset.delete", "decklists.import_selected",
+    "postprocessors.list", "postprocessors.guide", "postprocessors.get", "postprocessors.save",
+    "postprocessors.duplicate", "postprocessors.trust", "postprocessors.delete",
+    "postprocessors.status", "postprocessors.optional.remove",
 )) | PRIVATE_METHODS
 
 
@@ -188,6 +193,33 @@ def dispatch(request: dict) -> dict:
                 result = server.import_decklist(params["source_path"])
             except server.DecklistImportError as error:
                 result = {"ok": False, "errors": [error.message]}
+        elif method.startswith("custom_art."):
+            from scm_workbench import custom_art
+            if method == "custom_art.open_folder":
+                if set(params) != {"destination"} or not isinstance(params.get("destination"), str) or params["destination"] not in custom_art.DESTINATIONS:
+                    return _bad_params(request_id, "custom_art.open_folder requires exactly destination")
+                result = custom_art.open_folder(params["destination"], server)
+            elif method == "custom_art.import_selected":
+                if (set(params) != {"destination", "source_paths"} or
+                        not isinstance(params.get("destination"), str) or
+                        params["destination"] not in custom_art.DESTINATIONS or
+                        not isinstance(params.get("source_paths"), list) or
+                        not 1 <= len(params["source_paths"]) <= (1 if params.get("destination") == "back" else custom_art.MAX_FILES)):
+                    return _bad_params(request_id, "custom_art.import_selected requires destination and 1 to 256 source_paths")
+                try:
+                    for source in params["source_paths"]:
+                        custom_art.source_path(source)
+                except custom_art.ImportError as exc:
+                    return _bad_params(request_id, exc.message)
+                result = custom_art.start(params["destination"], params["source_paths"], server)
+            else:
+                if (set(params) != {"operation_id"} or not isinstance(params.get("operation_id"), str)
+                        or re.fullmatch(r"[0-9a-f]{32}", params["operation_id"]) is None):
+                    return _bad_params(request_id, "custom_art.import_poll requires a valid operation_id")
+                try:
+                    result = custom_art.poll(params["operation_id"])
+                except custom_art.ImportError as exc:
+                    return _bad_params(request_id, exc.message)
         elif method == "back_images.import_selected":
             if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
                 return _bad_params(request_id, "back_images.import_selected requires exactly source_path string")
@@ -202,6 +234,59 @@ def dispatch(request: dict) -> dict:
                 result = server.import_back_image(params["source_path"])
             except server.BackImageImportError as error:
                 result = {"ok": False, "errors": [error.message]}
+        elif method.startswith("postprocessors."):
+            if method == "postprocessors.list":
+                if params: return _bad_params(request_id, "postprocessors.list does not accept parameters")
+                result = server.postprocessors_list()
+            elif method == "postprocessors.guide":
+                if params: return _bad_params(request_id, "postprocessors.guide does not accept parameters")
+                result = server.postprocessor_guide()
+            elif method == "postprocessors.get":
+                allowed = ({"processor_id"}, {"processor_id", "revision_hash"})
+                if (set(params) not in allowed or not isinstance(params.get("processor_id"), str) or
+                        ("revision_hash" in params and
+                         (not isinstance(params["revision_hash"], str) or
+                          re.fullmatch(r"[0-9a-f]{64}", params["revision_hash"]) is None))):
+                    return _bad_params(request_id, "postprocessors.get requires processor_id and an optional revision_hash")
+                result = server.postprocessor_get(params["processor_id"], params.get("revision_hash"))
+            elif method == "postprocessors.save":
+                required = {"name", "source", "requirements", "processor_id", "expected_revision"}
+                if (set(params) != required or not isinstance(params.get("name"), str) or
+                        not isinstance(params.get("source"), str) or not isinstance(params.get("requirements"), str) or
+                        (params.get("processor_id") is not None and not isinstance(params.get("processor_id"), str)) or
+                        (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str))):
+                    return _bad_params(request_id, "postprocessors.save has invalid parameters")
+                try:
+                    if len(params["source"].encode("utf-8")) > server.POSTPROCESS_SOURCE_MAX_BYTES or len(params["requirements"].encode("utf-8")) > server.postprocessing.REQUIREMENTS_MAX_BYTES:
+                        return _bad_params(request_id, "postprocessor payload is too large")
+                except UnicodeEncodeError:
+                    return _bad_params(request_id, "postprocessor payload must be valid UTF-8")
+                result = server.postprocessor_save(params)
+            elif method == "postprocessors.duplicate":
+                if set(params) != {"processor_id", "name", "expected_revision"} or not all(isinstance(params.get(k), str) for k in ("processor_id", "name")) or (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str)):
+                    return _bad_params(request_id, "postprocessors.duplicate requires processor_id, name, and expected_revision")
+                result = server.postprocessor_duplicate(params["processor_id"], params)
+            elif method == "postprocessors.trust":
+                if set(params) != {"processor_id", "revision_hash", "environment_fingerprint"} or not all(isinstance(params.get(k), str) for k in ("processor_id", "revision_hash")) or (params.get("environment_fingerprint") is not None and not isinstance(params.get("environment_fingerprint"), str)):
+                    return _bad_params(request_id, "postprocessors.trust requires processor_id, revision_hash, and environment_fingerprint")
+                result = server.postprocessor_trust(params["processor_id"], params)
+            elif method == "postprocessors.delete":
+                if set(params) != {"processor_id", "expected_revision"} or not isinstance(params.get("processor_id"), str) or (params.get("expected_revision") is not None and not isinstance(params.get("expected_revision"), str)):
+                    return _bad_params(request_id, "postprocessors.delete requires processor_id and expected_revision")
+                result = server.postprocessor_delete(params["processor_id"], params)
+            elif method == "postprocessors.optional.remove":
+                if (set(params) != {"processor_id", "revision_hash"} or
+                        not all(isinstance(params.get(k), str) for k in ("processor_id", "revision_hash"))):
+                    return _bad_params(request_id, "postprocessors.optional.remove requires processor_id and revision_hash")
+                result = server.postprocessor_optional_remove(params["processor_id"], params)
+            elif method == "postprocessors.status":
+                if set(params) != {"processor_id"} or not isinstance(params.get("processor_id"), str):
+                    return _bad_params(request_id, "postprocessors.status requires exactly processor_id")
+                result = server.postprocessor_status(params["processor_id"])
+            else:  # private native picker operation
+                if set(params) != {"source_path"} or not isinstance(params.get("source_path"), str):
+                    return _bad_params(request_id, "postprocessors.import_selected requires exactly source_path")
+                result = server.postprocessor_import_selected(params["source_path"])
         elif method == "settings.set":
             if set(params) != {"changes"}:
                 return _bad_params(request_id, "settings.set requires exactly changes")
@@ -470,11 +555,27 @@ def dispatch(request: dict) -> dict:
                     return _bad_params(request_id, "each poll cursor requires job_id and nonnegative after")
                 clean.append({"job_id": cursor["job_id"], "after": cursor["after"]})
             result = server.poll_jobs(clean, max_events)
+    except server.postprocessing.PostProcessingError as exc:
+        result = server._postprocessor_error(exc)
     except Exception:
         # Keep exception details out of the wire contract.  The traceback is
         # useful to the supervising shell and belongs on stderr, not stdout.
         traceback.print_exc(file=sys.stderr)
         return _error(request_id, "internal", "request handler failed")
+    if method.startswith("postprocessors."):
+        try:
+            result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > server.POSTPROCESS_RESPONSE_MAX_BYTES:
+            return _error(request_id, "result_too_large", "post-processor result exceeds 512 KiB")
+    if method.startswith("custom_art."):
+        try:
+            result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return _error(request_id, "internal", "request handler failed")
+        if result_size > 256 * 1024:
+            return _error(request_id, "result_too_large", "custom art result exceeds 256 KiB")
     if method == "back_images.import_selected":
         try:
             result_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

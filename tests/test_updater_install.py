@@ -310,10 +310,13 @@ class ExtractionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/package.yml").read_text(encoding="utf-8")
         builder = (root / "scripts/build_macos_dmg.sh").read_text(encoding="utf-8")
+        local_builder = (root / "scripts/build.sh").read_text(encoding="utf-8")
         arch_check = (root / "scripts/check_arch_package.sh").read_text(encoding="utf-8")
         background = (root / "tauri/dmg-background.png").read_bytes()
         self.assertIn("scm-workbench-macos.dmg", workflow)
         self.assertIn("scripts/build_macos_dmg.sh", workflow)
+        self.assertEqual(workflow.count("image-postprocessing.md"), 4)
+        self.assertIn("docs/image-postprocessing.md", local_builder)
         self.assertIn('ln -s /Applications "$root/Applications"', builder)
         self.assertIn('set position of item "SCM Workbench.app" to {170, 225}', builder)
         self.assertIn('set position of item "Applications" to {490, 225}', builder)
@@ -718,6 +721,40 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.assertEqual(observed["latest"], "v2.0.0")
         self.assertEqual(observed["asset"], canonical["asset"])
         self.assertEqual(observed["channel"], "stable")
+        self.assertFalse(observed["downgrade"])
+
+    def test_prerelease_can_start_exact_checked_stable_downgrade(self):
+        server.SERVER_VERSION = "2.0.0-beta.1"
+        tag = "v1.5.0"
+        asset = {
+            **self.asset,
+            "tag": tag,
+            "url": self.asset["url"].replace("v2.0.0", tag),
+        }
+        state = server._default_update_state("stable")
+        state.update(status="update-available", latest=tag, prerelease=False,
+                     asset=asset, checked_at=1.0)
+        server.save_update_state(state)
+        started = []
+
+        class NoRunThread:
+            def __init__(self, *, target, daemon, name):
+                started.append(target)
+            def start(self):
+                pass
+
+        with patch.object(server.threading, "Thread", NoRunThread):
+            job, errors = server.start_update_job()
+        self.assertFalse(errors)
+        self.assertEqual(job["title"], "Switch the app to stable v1.5.0")
+        observed = {}
+        with patch.object(updater, "run_job",
+                          side_effect=lambda _job, plan, _log: observed.update(plan)):
+            started[0]()
+        self.assertTrue(observed["downgrade"])
+        self.assertEqual(observed["channel"], "stable")
+        self.assertEqual(observed["current"], "2.0.0-beta.1")
+        self.assertEqual(observed["latest"], tag)
 
     def test_linux_manual_packages_cannot_enter_self_update_worker(self):
         for name in (updater.LINUX_DEB_ASSET, updater.LINUX_ARCH_ASSET):

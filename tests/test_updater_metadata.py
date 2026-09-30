@@ -237,6 +237,14 @@ class UpdaterMetadataTests(unittest.TestCase):
                          updater.parse_version("v1.2.3+two"))
         self.assertTrue(updater.is_prerelease("v1.2.3-beta.1+build"))
         self.assertFalse(updater.is_prerelease("v1.2.3+build"))
+        self.assertTrue(updater.is_stable_downgrade(
+            "stable", "0.9.0-beta.3", "v0.8.4"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "beta", "0.9.0-beta.3", "v0.8.4"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "stable", "0.8.4", "v0.8.3"))
+        self.assertFalse(updater.is_stable_downgrade(
+            "stable", "0.9.0-beta.3", "v0.9.0"))
         for invalid in ("v01.2.3", "v1.2.3-beta..1", "v1.2.3-beta.01",
                         "v1.2.3+", " v1.2.3", "v1.2.3 ", "nightly"):
             self.assertIsNone(updater.canonical_version(invalid))
@@ -545,28 +553,64 @@ class UpdaterDownloadTests(unittest.TestCase):
                 self.assertEqual(dest.read_bytes(), b"old")
                 self.assert_no_partial(dest)
 
-    def test_download_has_one_total_deadline_and_closes_response(self):
+    def test_download_can_progress_beyond_sixty_seconds(self):
+        body = b"new"
+        asset = self.asset(digest="sha256:" + hashlib.sha256(body).hexdigest())
+
+        class SlowResponse(FakeResponse):
+            def __init__(self):
+                super().__init__(body, headers={"Content-Length": "3"}, url=asset["url"])
+                self.now = 0
+
+            def read(self, size=-1):
+                self.now += 90
+                return super().read(size)
+
+        response = SlowResponse()
         dest = self.dest()
-        response = self.response()
-        with patch("urllib.request.urlopen", return_value=response), \
-                patch.object(updater.time, "monotonic",
-                             side_effect=[0.0, 0.0, 0.0, 2.0]):
-            with self.assertRaisesRegex(updater.UpdateError, "timed out"):
-                updater.download(self.asset()["url"], dest,
-                                 expected_asset=self.asset(), timeout=1)
+        with patch("urllib.request.urlopen", return_value=response) as urlopen, \
+                patch.object(updater.time, "monotonic", side_effect=lambda: response.now):
+            self.assertEqual(updater.download(asset["url"], dest, expected_asset=asset), 3)
+        self.assertGreaterEqual(response.now, 180)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS)
+        self.assertEqual(dest.read_bytes(), body)
         self.assertTrue(response.closed)
+
+    def test_download_uses_available_reads_and_refreshes_idle_timeout(self):
+        response = self.response()
+        available_read = response.read
+        response.read1 = available_read
+        response.read = lambda size=-1: (_ for _ in ()).throw(AssertionError("must not wait to fill the buffer"))
+        timeouts = []
+        response.settimeout = timeouts.append
+        with patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(updater.download(self.asset()["url"], self.dest(),
+                                             expected_asset=self.asset()), 3)
+        self.assertEqual(timeouts, [updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS] * 2)
+        self.assertTrue(response.closed)
+
+    def test_download_stall_cleans_partial_and_preserves_destination(self):
+        asset = self.asset()
+        dest = self.dest()
+        dest.write_bytes(b"old")
+        response = self.response()
+        response.read = lambda size=-1: (_ for _ in ()).throw(TimeoutError("stalled"))
+        with patch("urllib.request.urlopen", return_value=response):
+            with self.assertRaisesRegex(updater.UpdateError, "stalled or timed out"):
+                updater.download(asset["url"], dest, expected_asset=asset)
+        self.assertTrue(response.closed)
+        self.assertEqual(dest.read_bytes(), b"old")
         self.assert_no_partial(dest)
 
-    def test_download_default_and_maximum_total_deadline_are_sixty_seconds(self):
+    def test_download_timeout_argument_is_bounded_idle_timeout(self):
         for supplied_timeout in (60, 600):
             with self.subTest(timeout=supplied_timeout), tempfile.TemporaryDirectory() as directory:
                 dest = Path(directory) / "download.zip"
                 response = self.response()
-                with patch("urllib.request.urlopen", return_value=response) as urlopen, \
-                        patch.object(updater.time, "monotonic", return_value=100.0):
+                with patch("urllib.request.urlopen", return_value=response) as urlopen:
                     updater.download(self.asset()["url"], dest,
                                      expected_asset=self.asset(), timeout=supplied_timeout)
-                self.assertEqual(urlopen.call_args.kwargs["timeout"], 60.0)
+                self.assertEqual(urlopen.call_args.kwargs["timeout"], updater.DOWNLOAD_IDLE_TIMEOUT_SECONDS)
                 self.assertTrue(response.closed)
 
     def test_download_cleans_partial_when_open_or_replace_fails(self):
@@ -695,6 +739,30 @@ class UpdaterJobTests(unittest.TestCase):
             updater.run_job(job, plan, io.StringIO())
         lookup.assert_called_once_with(include_prereleases=True)
         self.assertEqual(job["status"], "fail")
+
+    def test_run_job_reverifies_an_explicit_stable_downgrade(self):
+        target = self.asset("v1.5.0")
+        release = {"tag": "v1.5.0", "prerelease": False, "assets": [target]}
+        plan = self.plan(self.asset("v1.0.0"))
+        plan.update(current="2.0.0-beta.1", latest="v1.5.0", channel="stable",
+                    downgrade=True)
+        job = self.job()
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "download",
+                             side_effect=updater.UpdateError("stop after selection")) as download:
+            updater.run_job(job, plan, io.StringIO())
+        download.assert_called_once()
+        self.assertEqual(download.call_args.args[0], target["url"])
+        self.assertEqual(job["status"], "fail")
+
+        plan.pop("downgrade")
+        rejected = self.job()
+        with patch.object(updater, "latest_release", return_value=release), \
+                patch.object(updater, "download") as rejected_download:
+            updater.run_job(rejected, plan, io.StringIO())
+        rejected_download.assert_not_called()
+        self.assertEqual(rejected["status"], "fail")
+        self.assertIn("update direction changed", "".join(rejected["log_lines"]))
 
     def test_run_job_stable_channel_rejects_a_prerelease_before_download(self):
         prerelease = self.asset("v2.0.0-beta.1")
@@ -896,6 +964,28 @@ class UpdateStateTests(unittest.TestCase):
         self.assertTrue(state["prerelease"])
         self.assertEqual(server.load_update_state(), state)
 
+    def test_stable_channel_offers_latest_stable_to_a_newer_beta(self):
+        server.SERVER_VERSION = "2.0.0-beta.1"
+        tag = "v1.5.0"
+        asset = self.installable_asset(tag)
+        release = {
+            "tag": tag, "name": "stable", "body": "", "published": "",
+            "url": f"https://github.com/owner/workbench/releases/tag/{tag}",
+            "assets": [asset], "prerelease": False,
+        }
+        with patch.object(updater, "latest_release", return_value=release) as lookup:
+            state = server.run_update_check("stable")
+
+        lookup.assert_called_once_with(include_prereleases=False)
+        self.assertEqual(state["status"], "update-available")
+        self.assertEqual(state["latest"], tag)
+        self.assertEqual(state["asset"], asset)
+        self.assertEqual(server.current_update_state(state)["status"], "update-available")
+        view = server.updates_view()["state"]
+        self.assertTrue(view["downgrade"])
+        self.assertFalse(view["prerelease"])
+        self.assertNotIn("downgrade", server.load_update_state())
+
     def test_channel_switch_hides_cache_and_blocks_stale_install(self):
         stable = self.valid_state(
             status="update-available", latest="v2.0.0", prerelease=False,
@@ -910,7 +1000,7 @@ class UpdateStateTests(unittest.TestCase):
         self.assertEqual((view["status"], view["channel"]), ("never", "beta"))
         job, errors = server.start_update_job()
         self.assertIsNone(job)
-        self.assertIn("No newer update", errors[0])
+        self.assertIn("No installable update", errors[0])
 
         checked = server._default_update_state("beta")
         checked.update(status="up-to-date", latest="v2.0.0-beta.1",
@@ -1218,12 +1308,14 @@ class ReleaseNotesTests(unittest.TestCase):
 Raw <b>HTML</b> and [\"><img src=x onerror=alert(1)>](https://example.com)
 [x](javascript:alert(1)) [x](data:text/html,alert(1))
 - **bold** and *italic* with `inline <script>`
+1. first ordered item
+2. second ordered item
 ```html
 <script>alert(1)</script>
 <img src=x onerror=alert(1)>
 ```'''
         rendered = server._render_release_notes(source)
-        allowed = {"h1", "h2", "h3", "h4", "p", "ul", "li", "code", "pre", "b", "i"}
+        allowed = {"h1", "h2", "h3", "h4", "p", "ul", "ol", "li", "code", "pre", "b", "i"}
         tags = re.findall(r"</?([A-Za-z][A-Za-z0-9]*)\b", rendered)
         self.assertTrue(set(tags) <= allowed, rendered)
         self.assertNotIn("<script", rendered.lower())
@@ -1235,6 +1327,7 @@ Raw <b>HTML</b> and [\"><img src=x onerror=alert(1)>](https://example.com)
         self.assertIn("&lt;img", rendered)
         self.assertIn("<b>bold</b>", rendered)
         self.assertIn("<i>italic</i>", rendered)
+        self.assertIn("<ol><li>first ordered item</li><li>second ordered item</li></ol>", rendered)
 
     def test_markdown_source_and_rendered_caps(self):
         with self.assertRaises(updater.UpdateError):

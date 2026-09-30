@@ -2,6 +2,7 @@
    step; the entry point is ui/js/app.js, which imports every page). */
 
 import { $, $$, S, confirmModal, el, ico, toast } from "./core.js";import { publishJobsUpdated } from "./job-events.js";import { jobs } from "./jobs.js";import { preview } from "./preview.js";import { repoReady } from "./prep.js";import { uiMode } from "./nav.js";import { canPickDirectory, pickDirectory } from "./settings-transport.js";
+import { syncJobNotices } from "./job-notices.js";
 export const escRe = x => String(x || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
@@ -16,6 +17,7 @@ export function kindHasSimple(spec) {
 
 
 export function optVisible(o, spec) {
+  if (o.hidden) return false;
   if (uiMode() !== "simple" || !kindHasSimple(spec)) return true;
   return !!o.simple;
 }
@@ -308,7 +310,13 @@ export function renderOption(o, args, kind) {
               browse.disabled = true;
               try {
                 const selected = await pickDirectory();
-                if (selected !== null) setValue(directorySelectionValue(o, selected));
+                if (selected !== null) {
+                  if (managedOutputFolderAllowed(o, selected, S.info)) {
+                    setValue(directorySelectionValue(o, selected));
+                  } else {
+                    toast("err", `Inside a managed SCM repo, choose ${o.managed_output_dir}/ or a folder outside the managed repo.`);
+                  }
+                }
               } catch (error) {
                 toast("err", error?.message || "Could not open the folder picker");
               } finally {
@@ -503,6 +511,32 @@ export function renderOption(o, args, kind) {
 export function strVal(v) { return v === null || v === undefined ? "" : String(v); }
 
 
+export function managedOutputFolderAllowed(option, directory, info) {
+  const allowed = strVal(option?.managed_output_dir);
+  if (!allowed) return true;
+  const windows = !!info?.server?.is_windows;
+  const normalize = value => {
+    const parts = [];
+    for (const part of strVal(value).replace(/\\/g, "/").split("/")) {
+      if (part === "..") parts.pop();
+      else if (part && part !== ".") parts.push(windows ? part.toLowerCase() : part);
+    }
+    return parts.join("/");
+  };
+  const selected = normalize(directory);
+  // The picker returns an absolute directory. This is immediate feedback, not
+  // an authorization check: the command builder validates typed paths, links,
+  // traversal and every native/browser job start on the backend.
+  for (const row of info?.repos || []) {
+    if (row.mode !== "managed" || !row.path) continue;
+    const root = normalize(row.path);
+    if (selected !== root && !selected.startsWith(`${root}/`)) continue;
+    const target = `${root}/${allowed}`;
+    if (row.key !== "scm" || (selected !== target && !selected.startsWith(`${target}/`))) return false;
+  }
+  return true;
+}
+
 export function directorySelectionValue(option, directory) {
   const selected = strVal(directory);
   const filename = strVal(option?.browse_filename);
@@ -582,7 +616,7 @@ export function formCard(kind, opts = {}) {
   }
 
   const appendCollapsibleGroup = g => {
-    const os = (g.options || []).filter(o => !o.simple_only);
+    const os = (g.options || []).filter(o => !o.simple_only && !o.hidden);
     if (!os.some(o => o.show ? o.show(args) : true)) return;
     const adv = el("div", { class: "adv" });
     adv.append(
@@ -609,7 +643,7 @@ export function formCard(kind, opts = {}) {
       // simple-mode visibility: create_pdf's flat section shows only its
       // `simple`-flagged options; the fetch form is fully flat, so every
       // option is visible there.
-      const visible = kind === "create_pdf" ? o => optVisible(o, spec) : () => true;
+      const visible = kind === "create_pdf" ? o => optVisible(o, spec) : o => !o.hidden;
       const draw = (o, k, target) => {
         const node = renderOption(o, args, kind);
         if (node) target.append(node);
@@ -671,7 +705,7 @@ export function formCard(kind, opts = {}) {
     }
   } else {
     for (const g of spec.groups || []) {
-      const os = (g.options || []).filter(o => !o.simple_only);   // simple-only options never appear in the advanced form
+      const os = (g.options || []).filter(o => !o.simple_only && !o.hidden);   // internal/simple-only options never appear in the advanced form
       if (g.collapsible) appendCollapsibleGroup(g);
       else card.append(el("div", { class: "section-label", "data-label": true }, g.title), groupInner(os, kind, args));
     }
@@ -740,20 +774,20 @@ export function groupInner(opts, kind, args) {
 /* ================================ job control ============================== */
 
 export async function doRun(kind, btn, opts = {}) {
+  const rejectStart = message => { opts.onError?.(message); toast("err", message); return null; };
   const spec = S.manifest?.[kind];
   if (spec?.available === false) {
-    toast("err", spec.unavailable_reason || "The connected repository does not support this workflow.");
-    return null;
+    return rejectStart(spec.unavailable_reason || "The connected repository does not support this workflow.");
   }
   if (!S.info || S.manifest[kind]) {
     for (const need of S.manifest[kind].needs || []) {
       if (need === "scm" && !S.info.scm.found) {
-        return toast("err", (S.info.server.is_packaged && !repoReady("scm"))
+        return rejectStart((S.info.server.is_packaged && !repoReady("scm"))
           ? "silhouette-card-maker is still being prepared. The button unlocks when it is done."
           : "SCM repo not found. Open Settings and choose your silhouette-card-maker folder.");
       }
       if (need === "extras" && !S.info.extras.found) {
-        return toast("err", (S.info.server.is_packaged && !repoReady("extras"))
+        return rejectStart((S.info.server.is_packaged && !repoReady("extras"))
           ? "scm-extras is still being prepared. The button unlocks when it is done."
           : "scm-extras repo not found. Open Settings and choose your scm-extras folder.");
       }
@@ -772,11 +806,10 @@ export async function doRun(kind, btn, opts = {}) {
       j = await jobs.start(kind, runArgs);
     } catch (error) {
       startFailed = true;
-      toast("err", error?.message || "Failed to start job");
-      return null;
+      return rejectStart(error?.message || "Failed to start job");
     }
     if (!j.ok) {
-      toast("err", j.errors?.join("; ") || "Failed to start job");
+      rejectStart(j.errors?.join("; ") || "Failed to start job");
     } else {
       const warnings = j.job?.warnings || j.warnings || [];
       for (const w of warnings) toast("warn", w, 5200);
@@ -796,10 +829,16 @@ export async function doRun(kind, btn, opts = {}) {
       if (i >= 0) S.jobs[i] = { ...S.jobs[i], ...j0 };
       else S.jobs = [j0, ...(S.jobs || [])];
       publishJobsUpdated();
+      // Seed the sidebar before the authoritative refresh: a fast installer
+      // may already be terminal by the time jobs.list returns.
+      syncJobNotices(S.jobs);
       const { refreshJobs, openConsole } = await import("./console.js");
       refreshJobs();
       if (uiMode() !== "simple") openConsole(j.job.id);   // in simple mode the page's status strip takes over
-      if (kind === "calibration" || kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
+      if (kind === "dxf_batch" || kind === "dxf_single" || kind === "extras_generate" || kind === "clean_up" || kind === "repo_update" || kind === "repo_init") {
+        // Calibration owns a completion-based refresh on its page because the
+        // generated file inventory must not be sampled while the job is still
+        // running. Other inventory-changing jobs retain the legacy delay.
         // clean_up changes image inventory, not form choices. Preserve the live
         // fetch form object so its completion preview cannot serialize
         // `undefined` and remain stuck at “Waiting for the server”.

@@ -14,7 +14,10 @@ created and updated:
     fallback when the diff is too large or the API misbehaves.
   * User-generated files (card art, decklists, printed PDFs, offsets, …) are
     all *untracked* in the repos, so an update never deletes or overwrites
-    them. Locally-edited *tracked* files are reconciled against a stored hash
+    them. Reproducible calibration sheets are the one derived-data exception:
+    when a source change removes a configured paper size, its untracked sheet
+    is removed so the managed checkout cannot advertise a stale size.
+    Locally-edited *tracked* files are reconciled against a stored hash
     manifest (which always records the PRISTINE upstream hash per path):
       - upstream-only change   -> new content applied
       - user-only change       -> local content kept
@@ -33,6 +36,7 @@ Exit codes: 0 ok, 1 failure (message on stdout, or {"error": ...} with --json).
 
 import argparse
 import contextlib
+import contextvars
 import copy
 import errno
 import hashlib
@@ -61,19 +65,16 @@ GH_JSON_CAP = 8 * 1024 * 1024
 RAW_FILE_CAP = 256 * 1024 * 1024
 TARBALL_CAP = 1024 * 1024 * 1024
 TAR_MEMBER_CAP = TARBALL_CAP
-# A managed tree is deliberately bounded independently of the archive cap.  The
-# bounds protect the clone/fingerprint phase as well as tar extraction.
+# Network-sourced snapshots and diff staging retain a strict aggregate cap.
+# Local trees have count, path and type bounds, but no fixed non-user byte cap.
 TREE_FILE_CAP = 200_000
 TREE_BYTES_CAP = TARBALL_CAP
-# User data (fetched card images, decklists, generated output, offsets) lives
-# inside the managed tree, so it is walked by the same validation. It must not
-# be counted against the upstream bounds above: those bound *network-sourced*
-# content (clone, fingerprint, extraction), and the upstream repository alone
-# already uses most of the byte budget. Counting the user's own image cache
-# there meant that once the cache filled the remaining headroom every repo
-# update failed with "managed repository tree is too large", permanently and
-# with nothing the user could do. User data gets its own, much larger, still
-# finite budget instead, so the walk stays bounded either way.
+SPACE_RESERVE_BYTES = 1 << 20
+LOCAL_OPERATION_SECONDS = 6 * 60 * 60
+# Recognized local user-data slots (images, decks, output, offsets) retain
+# their independent finite size/count budget. Non-user *local* content is
+# bounded by entry counts, available staging space and operation time rather
+# than a fixed network-sized byte cap; remote archives/diffs still have it.
 USER_DATA_BYTES_CAP = 32 * 1024 ** 3
 USER_DATA_FILE_CAP = 500_000
 TAR_MEMBER_COUNT_CAP = TREE_FILE_CAP * 2 + 1
@@ -104,6 +105,80 @@ REPOS = {
 
 class RepoError(Exception):
     pass
+
+
+class _OperationStopped(RepoError):
+    """Cancellation/expiry must not be mistaken for a recoverable fetch error."""
+
+
+# Context-local to an operation, never shared with concurrent repository jobs.
+# Stop already terminates the CLI subprocess; this also supports cooperative
+# cancellation/deadlines for callers and long-running local I/O.
+_operation_budget = contextvars.ContextVar("repo_sync_operation_budget", default=None)
+_diff_download_limit = contextvars.ContextVar("repo_sync_diff_download_limit", default=None)
+
+
+@contextlib.contextmanager
+def _budget_scope(cancel=None, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + LOCAL_OPERATION_SECONDS
+    token = _operation_budget.set((cancel, deadline))
+    try:
+        yield
+    finally:
+        _operation_budget.reset(token)
+
+
+@contextlib.contextmanager
+def _without_budget():
+    token = _operation_budget.set(None)
+    try:
+        yield
+    finally:
+        _operation_budget.reset(token)
+
+
+def _check_budget():
+    budget = _operation_budget.get()
+    if budget is not None:
+        cancel, deadline = budget
+        if cancel is not None and cancel():
+            raise _OperationStopped("repository operation cancelled")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise _OperationStopped("repository operation deadline exceeded")
+
+
+def _require_space(path, amount):
+    """Preflight only *new* writes on the destination volume, not renames.
+
+    Check again as work proceeds; free space may change outside our lock.
+    An unavailable free-space reading is a failure, not permission to write.
+    """
+    if amount < 0:
+        raise RepoError("invalid repository write size")
+    path = Path(path)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        free = shutil.disk_usage(path).free
+    except (OSError, ValueError) as exc:
+        raise RepoError(f"could not check repository free space: {_brief(exc)}") from exc
+    if isinstance(free, bool) or not isinstance(free, int) or free < 0:
+        raise RepoError("could not check repository free space: invalid result")
+    if free < amount + SPACE_RESERVE_BYTES:
+        def size(value):
+            return f"{value / (1 << 30):.2f} GiB" if value >= 1 << 30 else f"{value / (1 << 20):.1f} MiB"
+        raise RepoError("not enough free space for repository staging: "
+                        f"need at least {size(amount + SPACE_RESERVE_BYTES)}, "
+                        f"{size(free)} available")
+
+
+class _WindowsRenameBlocked(RepoError):
+    """A Windows sharing/permission error while moving a verified directory."""
+
+    def __init__(self, error):
+        self.error = error
+        super().__init__(f"Windows directory rename blocked (error {error})")
 
 
 def _text(value, label, limit=256, allow_empty=False):
@@ -633,6 +708,8 @@ def _secure_open_absolute(path: Path, write=False, create_parents=False,
 
 
 def _secure_write_bytes(path: Path, data: bytes):
+    _check_budget()
+    _require_space(Path(path).parent, len(data))
     with _secure_open_absolute(path, write=True, create_parents=True) as fh:
         fh.write(data)
         fh.flush()
@@ -640,12 +717,40 @@ def _secure_write_bytes(path: Path, data: bytes):
     _fsync_dir(Path(path).parent)
 
 
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _check_source_path(path, before, action):
+    try:
+        current = Path(path).lstat()
+    except OSError as exc:
+        raise RepoError(f"repository source changed during {action}") from exc
+    if (not stat.S_ISREG(current.st_mode) or
+            (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
+        raise RepoError(f"repository source changed during {action}")
+
+
 def _secure_copy_file(source: Path, root: Path, relative: str):
     with _secure_open_absolute(Path(source), write=False) as src:
-        mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+        before = os.fstat(src.fileno())
+        mode = stat.S_IMODE(before.st_mode)
+        _check_budget()
+        _require_space(root, before.st_size)
         with _secure_open_relative(root, relative, write=True,
                                    create_parents=True, mode=mode) as dst:
-            shutil.copyfileobj(src, dst, length=1 << 20)
+            remaining = before.st_size
+            while remaining:
+                _check_budget()
+                chunk = src.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise RepoError("repository source changed during copy")
+                dst.write(chunk)
+                remaining -= len(chunk)
+            if src.read(1) or _file_identity(os.fstat(src.fileno())) != _file_identity(before):
+                raise RepoError("repository source changed during copy")
+            _check_source_path(source, before, "copy")
+            _check_budget()
             dst.flush()
             os.fsync(dst.fileno())
             try:
@@ -755,10 +860,22 @@ def _secure_unlink_absolute(path: Path):
 
 
 def _secure_hash_file(path: Path) -> str:
+    _check_budget()
     h = hashlib.sha256()
     with _secure_open_absolute(Path(path), write=False) as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
+        before = os.fstat(fh.fileno())
+        remaining = before.st_size
+        while remaining:
+            _check_budget()
+            chunk = fh.read(min(1 << 20, remaining))
+            if not chunk:
+                raise RepoError("repository source changed during hashing")
             h.update(chunk)
+            remaining -= len(chunk)
+        if fh.read(1) or _file_identity(os.fstat(fh.fileno())) != _file_identity(before):
+            raise RepoError("repository source changed during hashing")
+        _check_source_path(path, before, "hashing")
+        _check_budget()
     return h.hexdigest()
 
 
@@ -1290,6 +1407,7 @@ def _response_url(response, initial_url: str) -> str:
 
 
 def gh_json(path: str, params: dict = None):
+    _check_budget()
     path = _text(path, "API path", 2048)
     if not path.startswith("/") or "://" in path or "\\" in path:
         raise RepoError("invalid GitHub API path")
@@ -1316,6 +1434,7 @@ def gh_json(path: str, params: dict = None):
                     raise RepoError("GitHub API response is too large")
             chunks, total = [], 0
             while True:
+                _check_budget()
                 b = r.read(min(1 << 16, GH_JSON_CAP + 1 - total))
                 if not b:
                     break
@@ -1344,7 +1463,10 @@ def gh_json(path: str, params: dict = None):
 
 def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
                  max_bytes: int = RAW_FILE_CAP):
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+    _check_budget()
+    # Zero permits an empty diff file when the aggregate budget is exhausted;
+    # the one-byte overrun probe below still rejects any non-empty response.
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
         raise RepoError("invalid download size limit")
     try:
         parsed = urllib.parse.urlsplit(url)
@@ -1377,6 +1499,7 @@ def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
         if progress_cb is not None:
             progress_cb(0, total)
         while True:
+            _check_budget()
             b = r.read(min(1 << 20, max_bytes + 1 - done))
             if not b:
                 break
@@ -1394,6 +1517,7 @@ def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
 def gh_download_to(url: str, dest: Path, timeout: int = 120,
                    progress_cb=None, max_bytes: int = RAW_FILE_CAP) -> int:
     """Stream to a unique sibling and publish only after a complete fsync."""
+    _check_budget()
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
         raise RepoError("invalid download size limit")
     dest = safe_destination(Path(dest))
@@ -1425,6 +1549,8 @@ def gh_download_to(url: str, dest: Path, timeout: int = 120,
             raise RepoError("download returned an invalid content length")
         if total < 0 or total > max_bytes:
             raise RepoError("download exceeds its size limit")
+        if total:
+            _require_space(dest.parent, total)
         fd, name = tempfile.mkstemp(prefix=f".{dest.name}.download-", dir=str(dest.parent))
         tmp = Path(name)
         if progress_cb is not None:
@@ -1432,12 +1558,14 @@ def gh_download_to(url: str, dest: Path, timeout: int = 120,
         with os.fdopen(fd, "wb") as out:
             fd = None
             while True:
+                _check_budget()
                 chunk = response.read(min(1 << 20, max_bytes + 1 - done))
                 if not chunk:
                     break
                 done += len(chunk)
                 if done > max_bytes:
                     raise RepoError("download exceeds its size limit")
+                _require_space(dest.parent, len(chunk))
                 out.write(chunk)
                 if progress_cb is not None:
                     progress_cb(done, total)
@@ -1628,12 +1756,18 @@ def compare(key: str, base_sha: str, head_sha: str) -> dict:
             "commits": commits, "status": status}
 
 
-def download_to(key: str, sha: str, path: str, dest: Path, log=print) -> int:
+def download_to(key: str, sha: str, path: str, dest: Path, log=print,
+                max_bytes=RAW_FILE_CAP) -> int:
     key = validate_repo_key(key)
     sha = validate_sha(sha)
     path = validate_repo_path(path)
     dest = safe_destination(Path(dest))
-    data = gh_get_bytes(f"{RAW}/{REPOS[key]['owner']}/{REPOS[key]['repo']}/{sha}/{urllib.parse.quote(path, safe='/')}")
+    remaining = _diff_download_limit.get()
+    limit = min(RAW_FILE_CAP, max_bytes, remaining if remaining is not None else RAW_FILE_CAP)
+    data = gh_get_bytes(f"{RAW}/{REPOS[key]['owner']}/{REPOS[key]['repo']}/{sha}/{urllib.parse.quote(path, safe='/')}",
+                        max_bytes=limit)
+    if len(data) > limit:
+        raise RepoError("diff downloads exceed their aggregate size limit")
     _secure_write_bytes(dest, data)
     n = len(data)
     if n >= 1024 * 1024:
@@ -1666,6 +1800,7 @@ def safe_members(members: list):
     if len(members) > TAR_MEMBER_COUNT_CAP:
         raise RepoError("tarball has too many members")
     for i, m in enumerate(members):
+        _check_budget()
         if not isinstance(m.name, str) or (i == 0 and m.name not in (root_name, root)) or (i != 0 and not m.name.startswith(root)):
             raise RepoError("unexpected tarball layout")
         if m.issym() or m.islnk() or m.isdev() or not (m.isdir() or m.isfile()):
@@ -1724,13 +1859,16 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
     with tarfile.open(tar_path, "r:*") as tf:
         members = []
         for member in tf:
+            _check_budget()
             members.append(member)
             if len(members) > TAR_MEMBER_COUNT_CAP:
                 raise RepoError("tarball has too many members")
         safe_members(members)
+        _require_space(dest, sum(m.size for m in members if m.isfile()))
         if members and members[0].name == "":
             members = members[1:]
         for member in members:
+            _check_budget()
             name = validate_repo_path(member.name)
             mode = stat.S_IMODE(member.mode) or (0o755 if member.isdir() else 0o644)
             if member.isdir():
@@ -1747,6 +1885,7 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
                                                 mode=mode) as target:
                 remaining = member.size
                 while remaining:
+                    _check_budget()
                     chunk = source.read(min(1 << 20, remaining))
                     if not chunk:
                         raise RepoError("truncated tarball member")
@@ -1761,8 +1900,17 @@ def extract_tarball(tar_path: Path, dest: Path, log=print):
     _fsync_tree_dirs(dest)
 
 
-def _validate_tree(tree_dir: Path, require_dir=True):
-    """Walk a managed tree without following links or special files."""
+def _validate_tree(tree_dir: Path, require_dir=True, expected_paths=None,
+                   policy="local"):
+    """Walk a tree without links/special files; charge bytes by trust boundary.
+
+    `upstream` is exclusively for untrusted extracted snapshots. `local` is
+    for live/candidate/backup and recovery trees, including locally preserved
+    extras. `user_data` is for a separately walked recognized user subtree.
+    Folder spelling alone never determines whether a remote tree is trusted.
+    """
+    if policy not in {"local", "upstream", "user_data"}:
+        raise RepoError("invalid repository tree validation policy")
     tree_dir = Path(tree_dir)
     _ensure_no_symlink_components(tree_dir)
     if not tree_dir.exists():
@@ -1774,9 +1922,11 @@ def _validate_tree(tree_dir: Path, require_dir=True):
     files, upstream_bytes, upstream_files, user_bytes, user_files = [], 0, 0, 0, 0
     stack = [(tree_dir, "")]
     while stack:
+        _check_budget()
         current, prefix = stack.pop()
         with os.scandir(current) as entries:
             for entry in entries:
+                _check_budget()
                 if entry.is_symlink():
                     raise RepoError("refusing a symbolic link in repository tree")
                 rel = f"{prefix}/{entry.name}" if prefix else entry.name
@@ -1788,7 +1938,7 @@ def _validate_tree(tree_dir: Path, require_dir=True):
                     files.append(rel)
                     # Every entry is still walked and name-validated above; only
                     # the cap it is charged against depends on what it is.
-                    if _is_user_data_rel(rel):
+                    if policy == "user_data" or (policy == "local" and _is_user_data_rel(rel)):
                         user_bytes += info.st_size
                         user_files += 1
                         if user_bytes > USER_DATA_BYTES_CAP:
@@ -1798,17 +1948,17 @@ def _validate_tree(tree_dir: Path, require_dir=True):
                     else:
                         upstream_bytes += info.st_size
                         upstream_files += 1
-                        if upstream_bytes > TREE_BYTES_CAP:
-                            raise RepoError("managed repository tree is too large")
                         if upstream_files > TREE_FILE_CAP:
                             raise RepoError("managed repository tree has too many files")
+                        if policy == "upstream" and upstream_bytes > TREE_BYTES_CAP:
+                            raise RepoError("downloaded repository tree is too large")
                 else:
                     raise RepoError("refusing a special file in repository tree")
     return sorted(files)
 
 
-def tracked_paths(tree_dir: Path) -> list:
-    return _validate_tree(tree_dir)
+def tracked_paths(tree_dir: Path, policy="local") -> list:
+    return _validate_tree(tree_dir, policy=policy)
 
 
 def _remove_tree(path: Path):
@@ -1816,14 +1966,21 @@ def _remove_tree(path: Path):
     path = Path(path)
     if not path.exists():
         return
-    _validate_tree(path)
-    shutil.rmtree(path)
+    with _without_budget():
+        _validate_tree(path, policy="local")
+        shutil.rmtree(path)
 
 
 def _clone_tree(source: Path, dest: Path):
-    files = _validate_tree(source)
+    files = _validate_tree(source, policy="local")
     dest = Path(dest)
     safe_destination(dest)
+    # Existing live becomes backup by rename, never another physical copy.
+    total = 0
+    for rel in files:
+        _check_budget()
+        total += safe_path(source, rel).stat().st_size
+    _require_space(dest.parent, total)
     dest.mkdir(parents=True, exist_ok=False)
     for rel in files:
         _secure_copy_file(safe_path(source, rel), dest, rel)
@@ -1840,7 +1997,7 @@ def _copy_authorized_user_data(source: Path, dest: Path, log=print):
             continue
         if directory.is_symlink() or not directory.is_dir():
             raise RepoError("refusing unsafe user data")
-        for rel in _validate_tree(directory):
+        for rel in _validate_tree(directory, policy="user_data"):
             full_rel = f"{base}/{rel}"
             if Path(rel).name in _PRISTINE_NAMES:
                 continue
@@ -1929,7 +2086,7 @@ def apply_changes(key: str, man: dict, target: dict,
         raise RepoError("conflicting update paths")
 
     repo = safe_destination(repo_root if repo_root is not None else repo_dir(key))
-    _validate_tree(repo)
+    _validate_tree(repo, expected_paths=man["files"], policy="local")
     # Resolve every local path before asking for staging content.  This makes
     # malformed later entries fail before any repository mutation is possible.
     for path in apply_paths | previous_paths | delete_set:
@@ -2178,11 +2335,16 @@ def _sync_deps(key: str, log=print) -> None:
 
 
 # User data lives in these repo subfolders (decklists, fetched card images,
-# generated output, calibration data, and the cutting templates the Workbench
-# itself generates). A re-deploy must never lose it: copies are staged before
-# the tree is replaced and put back afterwards, and the update paths exempt
-# these from the deletions an upstream change would otherwise apply.
-# Upstream placeholder files (README/EMPTY) are not user data.
+# generated output, offsets, and the cutting templates the Workbench itself
+# generates). A re-deploy must never lose it: copies are staged before the tree
+# is replaced and put back afterwards, and the update paths exempt these from
+# the deletions an upstream change would otherwise apply. Upstream placeholder
+# files (README/EMPTY) are not user data.
+#
+# Calibration PDFs are reproducible outputs rather than durable user data. They
+# normally survive updates like any other untracked file, but a source change
+# must remove a generated sheet when its paper size disappears from layouts.json
+# or a rollback keeps advertising a size the selected source does not support.
 #
 # cutting_templates/dxf and cutting_templates/borderless/dxf are where the
 # Workbench writes a template it generated. They are the user's own files, and
@@ -2191,11 +2353,65 @@ USER_DATA_PATHS = ("data", "game/front", "game/back", "game/double_sided",
                    "game/decklist", "game/output",
                    "cutting_templates/dxf", "cutting_templates/borderless/dxf")
 _PRISTINE_NAMES = {"README.md", "EMPTY.md"}
+_CALIBRATION_SUFFIX = "-calibration.pdf"
 
 
 def _is_user_data_rel(rel: str) -> bool:
     """True when an already-validated relative path is one of the user slots."""
     return any(rel == base or rel.startswith(base + "/") for base in USER_DATA_PATHS)
+
+
+def _configured_paper_sizes(repo: Path):
+    """Return the checkout's paper-size names, or None when unknowable."""
+    try:
+        layouts = _load_json_object(safe_path(repo, "assets/layouts.json"),
+                                    "SCM layouts", None)
+    except RepoError:
+        return None
+    if not isinstance(layouts, dict):
+        return None
+    paper_sizes = layouts.get("paper_sizes")
+    if not isinstance(paper_sizes, dict) or any(not isinstance(name, str) or not name
+                                                for name in paper_sizes):
+        return None
+    return set(paper_sizes)
+
+
+def _remove_obsolete_generated_calibrations(repo: Path, before, after,
+                                             manifest_files: dict, log=print) -> int:
+    """Remove untracked sheets for paper sizes dropped by a source change."""
+    if before is None or after is None:
+        return 0
+    after_names = {name.casefold() for name in after}
+    removed_sizes = {name.casefold() for name in before if name.casefold() not in after_names}
+    if not removed_sizes:
+        return 0
+    if not isinstance(manifest_files, dict):
+        raise RepoError("invalid repository manifest shape")
+    repo = safe_destination(repo).resolve()
+    calibration = safe_path(repo, "calibration")
+    if not calibration.exists():
+        return 0
+    if calibration.is_symlink() or not calibration.is_dir():
+        raise RepoError("calibration output path is unsafe")
+    removed = 0
+    for path in sorted(calibration.iterdir(), key=lambda item: item.name.casefold()):
+        rel = validate_repo_path(str(path.relative_to(repo)).replace(os.sep, "/"))
+        safe_path(repo, rel)
+        if path.is_symlink():
+            raise RepoError("refusing a symbolic link in calibration output")
+        if not path.is_file() or not path.name.casefold().endswith(_CALIBRATION_SUFFIX):
+            continue
+        paper_size = path.name[:-len(_CALIBRATION_SUFFIX)]
+        # Target-owned files and retained tracked conflicts follow normal
+        # manifest reconciliation; only derived, untracked output is disposable.
+        if paper_size.casefold() not in removed_sizes or rel in manifest_files:
+            continue
+        _secure_unlink_relative(repo, rel)
+        removed += 1
+    if removed:
+        log(f"[repos] removed {removed} stale calibration sheet(s) for paper sizes absent from the target")
+    return removed
 
 
 def stash_user_data(repo: Path, dest: Path, log=print) -> list:
@@ -2302,11 +2518,13 @@ def _fsync_dir(path: Path):
 def _fsync_tree_dirs(root: Path):
     """Fsync every trusted directory bottom-up before publication."""
     root = Path(root)
-    _validate_tree(root)
+    _validate_tree(root, policy="local")
     def visit(directory):
+        _check_budget()
         children = []
         with os.scandir(directory) as entries:
             for entry in entries:
+                _check_budget()
                 if entry.is_symlink():
                     raise RepoError("refusing a symbolic link during fsync")
                 if entry.is_dir(follow_symlinks=False):
@@ -2401,13 +2619,13 @@ def _remove_transaction(root: Path):
         return
     if root.is_symlink() or not _TXN_RE.fullmatch(root.name):
         raise RepoError("refusing an unsafe deployment transaction")
-    with os.scandir(root) as entries:
+    with _without_budget(), os.scandir(root) as entries:
         for entry in entries:
             if entry.is_symlink():
                 raise RepoError("refusing a symbolic link in transaction")
             info = entry.stat(follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
-                _validate_tree(Path(entry.path))
+                _validate_tree(Path(entry.path), policy="local")
             elif not stat.S_ISREG(info.st_mode):
                 raise RepoError("refusing a special transaction file")
     shutil.rmtree(root)
@@ -2498,12 +2716,17 @@ def _journal_remove(tx):
 
 def _tx_cleanup(tx, remove_backup=True):
     """Idempotent cleanup: validated trees, journal, then snapshot root."""
+    with _without_budget():
+        return _tx_cleanup_unbudgeted(tx, remove_backup)
+
+
+def _tx_cleanup_unbudgeted(tx, remove_backup=True):
     if os.path.lexists(tx["backup"]) and not tx.get("backup_created"):
         raise RepoError("unexpected deployment backup")
     if remove_backup and tx.get("backup_created") and os.path.lexists(tx["backup"]):
         if not tx["repo"].exists() or tx["repo"].is_symlink():
             raise RepoError("refusing to delete the only good repository copy")
-        _validate_tree(tx["repo"])
+        _validate_tree(tx["repo"], policy="local")
     for p in (tx["candidate"], tx["backup"] if remove_backup and tx.get("backup_created") else None):
         if p is not None and os.path.lexists(p):
             if p.is_symlink():
@@ -2624,6 +2847,11 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
             return None, ctypes.get_last_error()
         return handle, 0
 
+    def blocked(error, message):
+        if error in (5, 32, 33):  # access denied, sharing/lock violation
+            raise _WindowsRenameBlocked(error)
+        raise RepoError(f"{message} (Windows error {error})")
+
     def validate(handle, expected, require_dir):
         info = _Info()
         if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -2638,20 +2866,20 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
     safe_destination(parent)
     parent_handle, error = create(parent, GENERIC_READ, SHARE_WITHOUT_DELETE)
     if parent_handle is None:
-        raise RepoError("could not open Windows rename parent")
+        blocked(error, "could not open Windows rename parent")
     source_handle = None
     try:
         validate(parent_handle, parent, True)
         source_handle, error = create(parent / src_name, GENERIC_READ | DELETE)
         if source_handle is None:
-            raise RepoError("could not open Windows rename source")
+            blocked(error, "could not open Windows rename source")
         validate(source_handle, parent / src_name, True)
         destination_handle, destination_error = create(parent / dst_name, GENERIC_READ)
         if destination_handle is not None:
             kernel32.CloseHandle(destination_handle)
             raise RepoError("deployment destination already exists")
         if destination_error not in (2, 3):
-            raise RepoError("could not verify Windows rename destination")
+            blocked(destination_error, "could not verify Windows rename destination")
         encoded = str(parent / dst_name).encode("utf-16-le")
         class _RenameHeader(ctypes.Structure):
             _fields_ = [("replace", wintypes.BOOL), ("root", HANDLE),
@@ -2665,7 +2893,7 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
         ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
         if not kernel32.SetFileInformationByHandle(source_handle, FILE_RENAME_INFO,
                                                    buffer, ctypes.sizeof(buffer)):
-            raise RepoError("Windows handle rename failed")
+            blocked(ctypes.get_last_error(), "Windows handle rename failed")
         if not kernel32.FlushFileBuffers(parent_handle):
             # FlushFileBuffers can be unsupported for some filesystem handles;
             # publication remains process-crash safe, not power-loss absolute.
@@ -2679,7 +2907,20 @@ def _windows_rename_sibling(parent: Path, src_name: str, dst_name: str):
 def _secure_rename_sibling(parent: Path, src_name: str, dst_name: str):
     """Rename one generated directory beside another without path races."""
     if os.name == "nt":
-        return _windows_rename_sibling(parent, src_name, dst_name)
+        # Explorer, antivirus and image tools can briefly hold descendants
+        # without FILE_SHARE_DELETE. Recheck handles on each bounded attempt;
+        # never fall back to a path rename or publish a partial tree.
+        for delay in (0.15, 0.3, 0.6, None):
+            try:
+                return _windows_rename_sibling(parent, src_name, dst_name)
+            except _WindowsRenameBlocked as exc:
+                if delay is None:
+                    raise RepoError(
+                        f"Windows could not move the managed repository (error {exc.error}). "
+                        "Close File Explorer windows and other programs using files or folders "
+                        "inside this repository, then retry. If it persists, check folder "
+                        "permissions or antivirus exclusions.") from exc
+                time.sleep(delay)
     parent = safe_destination(Path(parent))
     if not parent.is_dir() or any(x in src_name + dst_name for x in ("/", "\\")):
         raise RepoError("invalid sibling rename")
@@ -2723,7 +2964,7 @@ def _restore_tx_tree(tx):
     if backup.exists() and not tx.get("backup_created"):
         raise RepoError("unexpected deployment backup")
     if backup.exists():
-        _validate_tree(backup)
+        _validate_tree(backup, policy="local")
         if repo.exists():
             _remove_tree(repo)
         _secure_rename_sibling(repo.parent, backup.name, repo.name)
@@ -2741,7 +2982,7 @@ def _restore_tx_tree(tx):
 
 def _rollback_tx(tx, state_raw, manifest_raw):
     try:
-        with _settings_source_lock():
+        with _without_budget(), _settings_source_lock():
             with _state_lock():
                 current_state = _raw_metadata(state_file())
                 current_manifest = _raw_metadata(manifest_file(tx["key"]))
@@ -2790,7 +3031,7 @@ def _recover_locked_unlocked(key):
                 if (not tx["repo"].exists() or tx["repo"].is_symlink() or
                         os.path.lexists(tx["backup"]) and not tx["repo"].exists()):
                     raise RepoError("committed deployment has no safe live tree")
-                _validate_tree(tx["repo"])
+                _validate_tree(tx["repo"], policy="local")
                 try:
                     committed_manifest = json.loads(_raw_metadata(manifest_file(key)).decode("utf-8"))
                     _validate_manifest_shape(committed_manifest)
@@ -2913,7 +3154,7 @@ def _recover_locked_unlocked(key):
 def _recover_locked(key):
     # Recovery mutates metadata and therefore uses the same lock order as
     # publication: repo-operation (caller) -> settings-source -> state.
-    with _settings_source_lock():
+    with _without_budget(), _settings_source_lock():
         with _state_lock():
             return _recover_locked_unlocked(key)
 
@@ -2947,17 +3188,18 @@ def _carry_over_local_files_the_archive_lacks(source: Path, dest: Path, log=prin
 
     Enumerating the folders that are *expected* to hold user data is not enough
     for that, because it silently omits whatever nobody thought of: a custom
-    cutting template the Workbench generated, a calibration sheet, a note the
-    user dropped in the repo. This pass is the backstop, and its rule is the
-    one the module promises: a re-deploy replaces upstream's files and never
-    removes anything else.
+    cutting template the Workbench generated, a custom calibration sheet, a
+    note the user dropped in the repo. This pass is the backstop, and its rule
+    is the one the module promises: a re-deploy replaces upstream's files and
+    never removes anything else. The narrow derived-data cleanup later removes
+    only generator-named sheets for paper sizes dropped by the target source.
 
     The documented user slots are still staged separately, and before this, so
     that user data keeps winning over a same-named upstream file. Here, a path
     the archive already provides is left alone.
     """
     copied = 0
-    for rel in _validate_tree(source):
+    for rel in _validate_tree(source, policy="local"):
         if os.path.lexists(dest / rel):
             continue
         src = safe_path(source, rel)
@@ -2971,7 +3213,7 @@ def _carry_over_local_files_the_archive_lacks(source: Path, dest: Path, log=prin
 
 
 def _fingerprint_tree(key, target, tree, progress=False):
-    files = _validate_tree(tree)
+    files = _validate_tree(tree, policy="upstream")
     man = {"sha": target["sha"], "ref": target.get("ref"), "date": target.get("date"), "files": {}}
     for i, rel in enumerate(files, 1):
         man["files"][rel] = sha256_file(safe_path(tree, rel))
@@ -3001,7 +3243,7 @@ def _with_local_edits(tree, man):
 def _validate_final_manifest(tree, man):
     """Validate presence while retaining pristine hashes for local edits."""
     _validate_manifest_shape(man)
-    _validate_tree(tree)
+    _validate_tree(tree, expected_paths=man["files"], policy="local")
     for rel in man["files"]:
         path = safe_path(tree, rel)
         if not path.is_file() or path.is_symlink():
@@ -3060,8 +3302,9 @@ def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, ta
                 tx["state_after"] = _tx_snapshot(tx, "state-after.bin", new_state_raw)
                 tx["state_after_raw"] = new_state_raw
                 tx["state_after_entry"] = _state_entry(new_state_raw, tx["key"])
+                _check_budget()
                 _journal_write(tx, "prepared", {"target_sha": target_sha})
-                _validate_tree(tx["candidate"])
+                _validate_tree(tx["candidate"], policy="local")
                 if os.path.lexists(tx["candidate"]) and tx["candidate"].is_symlink():
                     raise RepoError("refusing a symbolic link candidate")
                 if os.path.lexists(tx["backup"]):
@@ -3069,7 +3312,7 @@ def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, ta
                 _fsync_tree_dirs(tx["candidate"])
                 _fsync_dir(tx["repo"].parent)
                 if tx["repo"].exists():
-                    _validate_tree(tx["repo"])
+                    _validate_tree(tx["repo"], policy="local")
                     if tx["repo"].is_symlink():
                         raise RepoError("refusing a symbolic link live tree")
                     _journal_write(tx, "backup_move_started", {"target_sha": target_sha})
@@ -3093,14 +3336,17 @@ def _publish_tx(tx, new_manifest, new_state, old_state_raw, old_manifest_raw, ta
                 _journal_write(tx, "state_committed", {"target_sha": target_sha})
     except Exception as exc:
         try:
-            if mutated:
-                _rollback_tx(tx, old_state_raw, old_manifest_raw)
-            else:
-                _tx_cleanup(tx)
-        except Exception:
-            raise
+            with _without_budget():
+                if mutated:
+                    _rollback_tx(tx, old_state_raw, old_manifest_raw)
+                else:
+                    _tx_cleanup(tx)
+        except Exception as rollback_exc:
+            raise RepoError(f"deployment failed: {_brief(exc)}; rollback failed: {_brief(rollback_exc)}") from rollback_exc
         if isinstance(exc, RepoError):
             raise
+        if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+            raise RepoError("not enough free space during repository deployment") from exc
         raise RepoError(f"deployment failed: {_brief(exc)}") from exc
     _tx_cleanup(tx)
 
@@ -3150,7 +3396,7 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
     if entry.get("deployed") and not tarball and not force_redeploy:
         if old_manifest is None:
             raise RepoError("repository manifest is missing")
-        _validate_tree(repo)
+        _validate_tree(repo, expected_paths=old_manifest["files"], policy="local")
         log(f"[init {key}] already deployed at {entry['deployed']['ref']} — nothing to do.")
         return {"ok": True, "noop": True}
     target = resolve_target(key, source)
@@ -3170,8 +3416,12 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
         # Fingerprint upstream before overlaying preserved local content so
         # the manifest continues to record pristine hashes.
         pristine = _fingerprint_tree(key, target, tx["candidate"], progress=True)
+        old_paper_sizes = None
         if repo.exists():
-            _validate_tree(repo)
+            _validate_tree(repo, expected_paths=old_manifest["files"] if old_manifest else None,
+                           policy="local")
+            if key == "scm":
+                old_paper_sizes = _configured_paper_sizes(repo)
             _copy_authorized_user_data(repo, tx["candidate"], log)
             if old_manifest is not None:
                 _copy_existing_local_edits(repo, tx["candidate"], old_manifest, log)
@@ -3179,8 +3429,12 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
             # the user's, including files no list of "user data folders" would
             # have predicted. Without this a re-deploy silently discarded them.
             _carry_over_local_files_the_archive_lacks(repo, tx["candidate"], log)
+        if key == "scm":
+            _remove_obsolete_generated_calibrations(
+                tx["candidate"], old_paper_sizes,
+                _configured_paper_sizes(tx["candidate"]), pristine["files"], log)
         man = pristine
-        candidate_paths = set(_validate_tree(tx["candidate"]))
+        candidate_paths = set(_validate_tree(tx["candidate"], policy="local"))
         if old_manifest is not None:
             for rel, digest in old_manifest["files"].items():
                 if rel in candidate_paths and rel not in man["files"]:
@@ -3195,14 +3449,18 @@ def _cmd_init_locked(key, tarball=None, log=print, force_redeploy=False):
         _publish_tx(tx, man, new_state, old_state_raw, old_manifest_raw, target["sha"])
         log(f"[init {key}] {REPOS[key]['name']} deployed at {target['ref']} ({target['sha'][:7]}) — {len(man['files'])} tracked files fingerprinted")
         return {"ok": True, "files": len(man["files"])}
-    except Exception:
-        if tx["journal"].exists():
-            _recover_locked(key)
-        else:
-            for p in (tx["candidate"], tx["backup"]):
-                if p.exists():
-                    _remove_tree(p)
-            _remove_transaction(tx["root"])
+    except Exception as exc:
+        try:
+            with _without_budget():
+                if tx["journal"].exists():
+                    _recover_locked(key)
+                else:
+                    for p in (tx["candidate"], tx["backup"]):
+                        if p.exists():
+                            _remove_tree(p)
+                    _remove_transaction(tx["root"])
+        except Exception as cleanup_exc:
+            raise RepoError(f"repository staging failed: {_brief(exc)}; cleanup failed: {_brief(cleanup_exc)}") from cleanup_exc
         raise
     finally:
         clear_progress(key)
@@ -3221,7 +3479,22 @@ def _cmd_update_locked(key, force_full=False, log=print):
     if not deployed:
         raise RepoError("no managed copy of this repo yet — run “Download latest” (init) first.")
     repo = safe_destination(repo_dir(key))
-    _validate_tree(repo)
+    live_files = {os.path.normcase(rel) for rel in _validate_tree(
+        repo, expected_paths=man["files"] if man else None, policy="local")}
+    # A user may delete a tracked file without changing the stored pristine
+    # manifest. Diff updates only visit paths changed upstream, so an unchanged
+    # missing file would otherwise survive in the candidate manifest and make
+    # the entire update fail at the final presence check. Remember only actual
+    # local absences; a file lost while building the candidate must still fail.
+    missing_before = set()
+    if man is not None:
+        for rel in man["files"]:
+            if os.path.normcase(rel) not in live_files:
+                # A directory in a manifest file slot is not a local deletion.
+                if safe_path(repo, rel).exists():
+                    raise RepoError("tracked local file is not a regular file")
+                missing_before.add(rel)
+    old_paper_sizes = _configured_paper_sizes(repo) if key == "scm" else None
     target = resolve_target(key, source)
     if deployed["sha"] == target["sha"]:
         return {"ok": True, "noop": True}
@@ -3241,6 +3514,8 @@ def _cmd_update_locked(key, force_full=False, log=print):
                 cmp = compare(key, deployed["sha"], target["sha"])
                 if cmp["status"] != "ahead" or cmp["too_many"]:
                     mode = "full"
+            except _OperationStopped:
+                raise
             except RepoError as exc:
                 # compare() raises for a rate limit, a 404, an invalid response,
                 # or a diff past the file cap. Falling back is the whole point
@@ -3251,18 +3526,29 @@ def _cmd_update_locked(key, force_full=False, log=print):
         if mode == "diff":
             staging.mkdir()
             count = [0]
+            incoming = [0]
             def pristine_for(path):
                 dest = safe_path(staging, path)
                 try:
-                    downloaded = download_to(key, target["sha"], path, dest, log)
-                    if isinstance(downloaded, bool) or not isinstance(downloaded, int) or downloaded < 0:
-                        raise RepoError("download returned an invalid byte count")
+                    remaining = TREE_BYTES_CAP - incoming[0]
+                    if remaining < 0:
+                        raise RepoError("diff downloads exceed their aggregate size limit")
+                    token = _diff_download_limit.set(remaining)
+                    try:
+                        downloaded = download_to(key, target["sha"], path, dest, log)
+                    finally:
+                        _diff_download_limit.reset(token)
+                    if (isinstance(downloaded, bool) or not isinstance(downloaded, int) or
+                            downloaded < 0 or downloaded > RAW_FILE_CAP or downloaded > remaining or
+                            dest.stat().st_size != downloaded):
+                        raise RepoError("diff downloads exceed their aggregate size limit")
+                    incoming[0] += downloaded
                     count[0] += 1
                     set_progress(key, done=count[0])
                     return dest
                 except RepoError as exc:
                     log(f"    ! could not fetch {_brief(path)}: {_brief(exc)}")
-                    raise RepoError(f"could not fetch pristine {_brief(path)}") from exc
+                    raise RepoError(f"could not fetch pristine {_brief(path)}: {_brief(exc)}") from exc
             ops, deletes = {}, []
             for item in cmp["files"]:
                 if item["status"] == "removed":
@@ -3282,11 +3568,19 @@ def _cmd_update_locked(key, force_full=False, log=print):
             set_progress(key, stage="extract", done=0, total=0)
             extract_tarball(archive, staging, log)
             set_progress(key, stage="apply", done=0, total=0)
-            upstream = {p: staging / p for p in tracked_paths(staging)}
+            upstream = {p: staging / p for p in tracked_paths(staging, policy="upstream")}
             ops = {p: None for p in upstream}
             deletes = [p for p in man["files"] if p not in upstream and not _is_authorized_user_path(p)]
             result = apply_changes(key, man, target, ops, deletes, lambda p: upstream.get(p), log, repo_root=tx["candidate"])
-        _validate_tree(tx["candidate"])
+        if key == "scm":
+            result["deleted"] += _remove_obsolete_generated_calibrations(
+                tx["candidate"], old_paper_sizes,
+                _configured_paper_sizes(tx["candidate"]), result["manifest"]["files"], log)
+        _validate_tree(tx["candidate"], expected_paths=result["manifest"]["files"], policy="local")
+        for rel in missing_before:
+            if rel in result["manifest"]["files"] and not safe_path(tx["candidate"], rel).exists():
+                result["manifest"]["files"].pop(rel)
+                log(f"[update {key}] kept your deletion of {_brief(rel)}")
         result["manifest"] = _with_local_edits(tx["candidate"], result["manifest"])
         _validate_final_manifest(tx["candidate"], result["manifest"])
         new_state = _new_state_for_update(st, key, source, target, started, result)
@@ -3294,34 +3588,48 @@ def _cmd_update_locked(key, force_full=False, log=print):
         for p in result["conflicts"][:10]:
             log(f"  ! kept your local version of {_brief(p)} (upstream also changed it — merge manually if needed)")
         return {"ok": True, "applied": result["applied"], "deleted": result["deleted"], "conflicts": result["conflicts"]}
-    except Exception:
-        if tx["journal"].exists():
-            _recover_locked(key)
-        else:
-            for p in (tx["candidate"], tx["backup"]):
-                if p.exists():
-                    _remove_tree(p)
-            _remove_transaction(tx["root"])
+    except Exception as exc:
+        try:
+            with _without_budget():
+                if tx["journal"].exists():
+                    _recover_locked(key)
+                else:
+                    for p in (tx["candidate"], tx["backup"]):
+                        if p.exists():
+                            _remove_tree(p)
+                    _remove_transaction(tx["root"])
+        except Exception as cleanup_exc:
+            raise RepoError(f"repository staging failed: {_brief(exc)}; cleanup failed: {_brief(cleanup_exc)}") from cleanup_exc
         raise
     finally:
         clear_progress(key)
 
 
-def cmd_init(key, tarball=None, log=print, force_redeploy=False):
+def cmd_init(key, tarball=None, log=print, force_redeploy=False, *, cancel=None, deadline=None):
     key = validate_repo_key(key)
-    with _repo_lock(key):
-        return _cmd_init_locked(key, tarball=tarball, log=log, force_redeploy=force_redeploy)
+    try:
+        with _repo_lock(key), _budget_scope(cancel, deadline):
+            return _cmd_init_locked(key, tarball=tarball, log=log, force_redeploy=force_redeploy)
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            raise RepoError("not enough free space during repository staging") from exc
+        raise
 
 
-def cmd_update(key, force_full=False, log=print):
+def cmd_update(key, force_full=False, log=print, *, cancel=None, deadline=None):
     key = validate_repo_key(key)
-    with _repo_lock(key):
-        return _cmd_update_locked(key, force_full=force_full, log=log)
+    try:
+        with _repo_lock(key), _budget_scope(cancel, deadline):
+            return _cmd_update_locked(key, force_full=force_full, log=log)
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            raise RepoError("not enough free space during repository staging") from exc
+        raise
 
 
-def verify_deployed(key):
+def verify_deployed(key, *, cancel=None, deadline=None):
     key = validate_repo_key(key)
-    with _repo_lock(key):
+    with _repo_lock(key), _budget_scope(cancel, deadline):
         _recover_locked(key)
         st = load_state().get(key) or {}
         deployed = st.get("deployed") or {}
@@ -3336,7 +3644,7 @@ def verify_deployed(key):
         if not files or man.get("sha") not in (None, deployed["sha"]):
             return False
         try:
-            _validate_tree(repo_dir(key))
+            _validate_tree(repo_dir(key), policy="local")
             edits = set(man.get("local_edits", []))
             pristine = [rel for rel in sorted(files) if rel not in edits]
             probes = pristine[:1] if pristine else []
@@ -3345,6 +3653,8 @@ def verify_deployed(key):
             # All recorded paths are local edits: validate structure and
             # presence, but deliberately do not compare them to pristine hashes.
             return all(safe_path(repo_dir(key), rel).is_file() for rel in files)
+        except _OperationStopped:
+            raise
         except Exception:
             return False
 

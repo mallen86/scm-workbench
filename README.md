@@ -57,9 +57,11 @@ Both Linux packages include the same private Python runtime. App files are insta
 
 Workbench downloads the card-making tools and game information it needs. This can take a few minutes, and progress is shown in the app. Keep the window open until it says your workspace is ready.
 
-When setup finishes, choose **Got it. Show me around** for an optional guided tutorial. It walks through fetching card art, choosing card and paper sizes, adding a card back, and creating a PDF. You can stop at any step and replay it later from **Settings > Guided tutorial**.
+When setup finishes, choose **Got it. Show me around** for an optional guided tutorial. It walks through fetching card art, optional image post-processing with the Simple or Advanced AI Upscaler, choosing card and paper sizes, adding a card back, and creating a PDF. You can stop at any step and replay it later from **Settings > Guided tutorial**.
 
 If setup stops early, use **Retry setup**. Workbench only retries the parts that are not ready.
+
+For help with the page you are on, click **?** at the far right of the app's top bar. The explanation opens inside Workbench. Close it with **Close**, **Escape**, or a click outside the window; your settings stay as you left them.
 
 ## Make your first PDF
 
@@ -91,13 +93,14 @@ Your choices and job history stay the same when you switch modes.
 
 ## Updates and your files
 
-Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. On macOS and Windows, Workbench can install an update itself. On Linux, it detects the supported distribution and opens the exact GitHub release for the matching Debian or Arch package; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
+Workbench checks for stable app updates automatically. Advanced mode exposes an explicit GitHub-prerelease opt-in under **Settings > App updates**. Once selected, that beta preference remains active in both Simple and Advanced modes; users who have not opted in receive stable releases only. Turning beta updates off while running a prerelease offers the newest stable release even when its version is lower, with an explicit confirmation before installation. On macOS and Windows, Workbench can install an update itself. On Linux, it detects the supported distribution and opens the exact GitHub release for the matching Debian or Arch package; it never tries to replace package-manager-owned files. Updating replaces the app but leaves your settings, decklists, card images, PDFs, and job history alone.
 
-Use **Settings > Open data folder** if you want to view or back up your Workbench files.
+Use **Settings > Open data folder** if you want to view or back up your Workbench files. In Advanced mode, a PDF output inside the managed silhouette-card-maker repo must go under `game/output/`; choose a location outside both managed repos for other custom output folders. Generated DXF templates use their corresponding `cutting_templates/*/dxf/` folder. This does not restrict outputs in a separately configured, external SCM checkout. Managed-repo updates check available disk space before staging copies rather than rejecting existing local files for exceeding a 1 GiB limit. Downloaded snapshots and changed-file batches still have strict size limits, and recognized user-data folders retain their separate 32 GiB allowance. Copying and verification use bounded chunks and a processing deadline; the normal Stop action remains available. If staging runs out of space, Workbench preserves or restores the existing repo. Workbench never deletes your files to make an update fit.
 
 ## Help
 
 - Open **Documentation** in the Workbench sidebar for the silhouette-card-maker guide.
+- Read [Image post-processing](docs/image-postprocessing.md) for the Advanced-mode Python processor contract, dependency rules, and a Scryfall 4× upscaling example.
 - Read [First run on macOS](docs/macos-first-run.md) if the Mac app is blocked or does not finish opening.
 - [Join the SCM Discord](https://discord.gg/jhsKmAgbXc) to ask questions and meet other users.
 - [Open a GitHub issue](https://github.com/mallen86/scm-workbench/issues) to report a Workbench problem.

@@ -98,10 +98,8 @@ PAGES.preparing = () => {
     // no reason. There is no live #repoprog to keep patching here either, so
     // the prep rows are not wired up in this branch.
     wrap.append(onboardCard(leaveSetup));
-    // This screen is a one-time welcome, so the top bar's page title and its
-    // console button are noise: the title names a page the user has not opened
-    // and the card itself is the whole message. setNav clears this on the next
-    // navigation, so no page has to clean it up.
+    // Hide the top bar's title and console on the welcome screen, but keep
+    // page help available. setNav clears this on the next navigation.
     document.body.classList.add("setup-welcome");
   } else {
     wrap.append(progressCard);

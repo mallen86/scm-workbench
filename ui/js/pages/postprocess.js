@@ -1,0 +1,772 @@
+/* Simple run workflow plus the Advanced processor library and editor. */
+import { PAGES, S, $, confirmModal, el, ico, pageHead, toast } from "../core.js";
+import { afterFormChange, COMMAND_PREVIEW_EVENT, doRun, formArgs, formCard } from "../forms.js";
+import { jobs } from "../jobs.js";
+import { go, uiMode } from "../nav.js";
+import { renderPythonHighlight } from "../python-highlight.js";
+import { postprocessors } from "../postprocess-transport.js";
+import { latestInstallJob, optionalInstallStatus } from "../postprocess-install-state.js";
+import { watchJobDone } from "./utilities.js";
+import { syncJobNotices } from "../job-notices.js";
+import { jobNoticeProgress } from "../job-notice-progress.js";
+
+const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
+
+const state = { cudaChoice: "auto", processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, installFailure: null, installLogLoading: null, installStartError: null, installActivity: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
+const first = value => Array.isArray(value) ? value[0] : value;
+const revision = p => p?.revision_hash || p?.revision || p?.active_revision || "";
+const normalizeList = result => Array.isArray(result) ? result : (result?.processors || []);
+const isReady = p => p && (p.environment_ready === true || p.dependencies === "ready" || p.environment?.status === "ready");
+const isStale = p => p?.environment_status === "stale" || p?.environment?.status === "stale";
+const isTrusted = p => !!p && (p.trusted === true || p.trust?.revision_hash === revision(p));
+const canRun = p => !!p && (p.ready_to_run === true || (isReady(p) && isTrusted(p)));
+export function simpleProcessorChoices(processors, selectedId, previousCustomId = null) {
+  const builtins = processors.filter(p => p.bundled && (canRun(p) || p.optional_model))
+    .sort((a, b) => Number(!!a.optional_model) - Number(!!b.optional_model));
+  const custom = processors.filter(p => !p.bundled && canRun(p));
+  const customSelected = custom.some(p => p.id === selectedId);
+  const remembered = customSelected ? selectedId : previousCustomId;
+  return { builtins, custom, customSelected, rememberedCustomId: remembered, customSelection: custom.find(p => p.id === remembered)?.id || custom[0]?.id || null };
+}
+const selectedProcessor = () => state.processors.find(p => p.id === state.selected) || null;
+let lastCustomProcessorId = null;
+const currentInstallJob = p => {
+  if (!p?.optional_model) return null;
+  const saved = latestInstallJob(S.jobs, p.id);
+  const started = state.installJob?.args?.processor_id === p.id ? state.installJob : null;
+  return saved && (!started || saved.id === started.id || saved.ts >= started.ts) ? saved : started;
+};
+
+async function loadInstallProgress(job) {
+  if (job?.status !== "running") return;
+  if (state.installActivity?.id !== job.id) state.installActivity = { id: job.id, after: 0, pollAt: 0, busy: false, step: null };
+  const activity = state.installActivity;
+  if (activity.busy || Date.now() - activity.pollAt < 4000) return;
+  activity.pollAt = Date.now();
+  activity.busy = true;
+  try {
+    const result = await jobs.log(job.id, activity.after, 64);
+    activity.after = Math.max(activity.after, Number(result.next_seq) || 0);
+    const step = (result.lines || []).map(line => String(line).trim()).filter(line => /^\[processor libraries\] /.test(line)).at(-1);
+    if (step) activity.step = step.replace(/^\[processor libraries\]\s*/, "").slice(0, 120);
+  } catch { /* A transient log read must not hide the authoritative running job. */ }
+  finally { activity.busy = false; updateEditorState(); repaintSimplePicker(); }
+}
+
+async function loadInstallFailure(job) {
+  if (job?.status !== "fail" || state.installFailure?.id === job.id || state.installLogLoading === job.id) return;
+  state.installLogLoading = job.id;
+  let message = "No reason was recorded. Retry, or inspect the full log in Advanced mode.";
+  try {
+    // This is a one-time, bounded read for the terminal job, not a log stream.
+    const result = await jobs.log(job.id, 0, 4096);
+    const lines = (result.lines || []).map(line => String(line).trim()).filter(Boolean);
+    const reason = [...lines].reverse().find(line => /processor library installation failed:|^error:|^!\s+|no matching distribution|failed/i.test(line));
+    if (reason) message = reason.replace(/\s+/g, " ").slice(0, 320);
+  } catch { message = "Could not read the job's failure details. Retry, or inspect Job history in Advanced mode."; }
+  state.installFailure = { id: job.id, message };
+  state.installLogLoading = null;
+  updateEditorState();
+  repaintSimplePicker();
+}
+
+function cudaInstallControl() {
+  const option = S.manifest?.postprocess_dependencies?.groups?.flatMap(group => group.options || [])
+    .find(item => item.key === "cuda_profile");
+  const select = el("select", { class: "input pp-cuda-profile", "aria-label": "Linux CUDA install profile" });
+  for (const [value, label] of option?.choices || []) select.append(el("option", { value }, label));
+  select.value = state.cudaChoice;
+  select.onchange = () => { state.cudaChoice = select.value; updateCudaInstallInfo(); };
+  return el("label", { class: "pp-cuda-install", hidden: !option }, "Linux CUDA install profile", select,
+    el("span", { class: "small faint pp-cuda-info" }));
+}
+function updateCudaInstallInfo() {
+  const p = selectedProcessor();
+  const detected = p?.cuda_detection;
+  for (const control of document.querySelectorAll?.(".pp-cuda-install") || []) {
+    control.hidden = !p?.optional_model || !detected;
+    const select = control.querySelector("select");
+    if (select) select.value = state.cudaChoice;
+    const resolved = state.cudaChoice === "auto" ? detected?.recommended : state.cudaChoice;
+    const text = control.querySelector(".pp-cuda-info");
+    if (text && detected) text.textContent = `Installed: ${p.cuda_profile === "cuda13" ? "CUDA 13" : p.cuda_profile === "cuda12" ? "CUDA 12" : "none"}. Auto: ${detected.reason}. Selected: ${resolved === "cuda13" ? "CUDA 13" : "CUDA 12"}. Matching system CUDA, cuDNN 9 and an NVIDIA GPU/driver are needed for GPU inference; CPU fallback remains available. Detection does not guarantee GPU compatibility.`;
+  }
+}
+function sourceBytes(value) { return new TextEncoder().encode(String(value || "")).length; }
+function updateLockSummary() {
+  const box = document.querySelector(".pp-lock");
+  if (!box) return;
+  box.replaceChildren();
+  if (state.dirty) {
+    box.append(el("span", { class: "small faint" }, "Save this revision, then install libraries to resolve its exact dependency lock."));
+    return;
+  }
+  if (isStale(state.loaded)) {
+    box.append(el("span", { class: "small warn" }, "The selected Python runtime changed. Reinstall libraries for this processor, then review and trust it again."));
+    return;
+  }
+  const wheels = state.loaded?.environment?.wheels || [];
+  if (!wheels.length) {
+    box.append(el("span", { class: "small faint" }, state.loaded?.requirements?.length ? "No resolved dependency lock is installed." : "No third-party wheels are required."));
+    return;
+  }
+  box.append(el("strong", {}, "Resolved library lock"));
+  for (const wheel of wheels) box.append(el("div", { class: "small mono" }, `${wheel.name}==${wheel.version}  sha256:${wheel.sha256.slice(0, 16)}…`));
+}
+function updateCursor(source = document.querySelector(".pp-source")) {
+  const status = document.querySelector(".pp-cursor");
+  if (!source || !status) return;
+  const before = source.value.slice(0, source.selectionStart ?? 0).split("\n");
+  status.textContent = `Line ${before.length}, column ${before.at(-1).length + 1}`;
+}
+function syncSourceHighlightScroll(source = document.querySelector(".pp-source")) {
+  const highlight = source?.closest(".pp-source-wrap")?.querySelector(".pp-source-highlight");
+  if (!source || !highlight) return;
+  highlight.scrollTop = source.scrollTop;
+  highlight.scrollLeft = source.scrollLeft;
+}
+function paintSourceHighlight(source = document.querySelector(".pp-source")) {
+  const wrap = source?.closest(".pp-source-wrap");
+  const code = wrap?.querySelector(".pp-source-code");
+  if (!source || !wrap || !code) return;
+  renderPythonHighlight(code, source.value);
+  wrap.classList.add("highlight-ready");
+  syncSourceHighlightScroll(source);
+}
+function markDirty() { state.dirty = true; updateEditorState(); updateLockSummary(); }
+function updateEditorState() {
+  const status = document.querySelector(".pp-dirty");
+  if (status) { status.textContent = state.dirty ? "Unsaved changes" : "Saved revision"; status.className = `pp-dirty ${state.dirty ? "warn" : "ok"}`; }
+  const bundled = state.loaded?.bundled === true;
+  const save = document.querySelector(".pp-save");
+  if (save) { save.disabled = bundled || state.loadError || !state.draft?.name?.trim() || !state.draft?.source; save.title = bundled ? "Built-in processors are read-only; duplicate it to customize" : "Save revision"; }
+  const trust = document.querySelector(".pp-trust");
+  if (trust) {
+    trust.disabled = bundled || state.loadError || !state.loaded || state.dirty || !isReady(state.loaded);
+    trust.title = bundled ? "Built-in processors are app-trusted" : !state.loaded ? "Save the processor first" : state.dirty ? "Save this revision first" : isStale(state.loaded) ? "Reinstall its libraries for this Python first" : !isReady(state.loaded) ? "Install its libraries first" : "Trust this exact revision";
+  }
+  const install = document.querySelector(".pp-install");
+  if (install) { install.disabled = (bundled && !state.loaded?.optional_model) || state.loadError || !state.loaded || state.dirty || state.installing; install.title = state.loaded?.optional_model ? "Install the fixed, verified model and libraries into Workbench data" : bundled ? "This built-in needs no installation" : "Install or update libraries"; install.textContent = state.loaded?.optional_model ? "Install model & libraries" : "Install / update libraries"; }
+  const remove = document.querySelector(".pp-model-remove");
+  if (remove) { remove.hidden = !state.loaded?.optional_model || !isReady(state.loaded); remove.disabled = !!state.installing; }
+  const cancel = document.querySelector(".pp-editor-actions .pp-model-cancel");
+  if (cancel) { cancel.hidden = currentInstallJob(state.loaded)?.status !== "running"; cancel.disabled = !state.installing; }
+  const explanation = document.querySelector(".pp-model-explain");
+  if (explanation) explanation.hidden = !state.loaded?.optional_model;
+  const installStatus = document.querySelector(".pp-model-status");
+  if (installStatus) {
+    const view = optionalInstallStatus(state.loaded, currentInstallJob(state.loaded), state.installFailure, state.installStartError, state.installActivity);
+    installStatus.hidden = !state.loaded?.optional_model;
+    installStatus.className = `small pp-model-status ${view.tone}`;
+    installStatus.textContent = view.label;
+  }
+  updateCudaInstallInfo();
+  for (const control of [document.querySelector(".pp-name"), document.querySelector(".pp-source"), document.querySelector(".pp-requirements")]) if (control) control.readOnly = bundled;
+}
+function setEditorValue(value) {
+  const d = state.draft || (state.draft = { name: "New processor", source: TEMPLATE, requirements: "" });
+  d.name = value?.name ?? d.name;
+  d.source = value?.source ?? d.source;
+  const requirements = value?.requirements ?? d.requirements;
+  d.requirements = Array.isArray(requirements) ? requirements.join("\n") : String(requirements || "");
+  const name = document.querySelector(".pp-name");
+  const source = document.querySelector(".pp-source");
+  const req = document.querySelector(".pp-requirements");
+  if (name) name.value = d.name;
+  if (source) {
+    source.value = d.source;
+    paintSourceHighlight(source);
+  }
+  if (req) req.value = d.requirements;
+  updateCursor(source);
+  state.dirty = false;
+  updateEditorState();
+  updateLockSummary();
+}
+
+async function refreshProcessors(selectId = state.selected, { preserveDirty = true } = {}) {
+  let result;
+  try { result = await postprocessors.list(); }
+  catch (error) {
+    state.processors = [];
+    state.loadError = true;
+    updateEditorState();
+    updateLockSummary();
+    repaintLibrary();
+    repaintSimplePicker();
+    patchRunForm();
+    const box = document.querySelector(".pp-library-list");
+    if (box) box.replaceChildren(el("div", { class: "empty" }, error.message || "Post-processing is not available yet."));
+    return;
+  }
+  state.processors = normalizeList(result);
+  state.loadError = false;
+  const simple = uiMode() === "simple";
+  const available = simple ? [
+    ...state.processors.filter(canRun),
+    ...state.processors.filter(p => p.optional_model && !canRun(p)),
+  ] : state.processors;
+  const keepDraft = !simple && preserveDirty && state.dirty;
+  const prefillId = S.postprocessPrefill?.processor_id || null;
+  const requested = prefillId || selectId;
+  if (keepDraft) {
+    // A refresh must never turn an unsaved new draft into an edit of the
+    // first saved processor, or silently move an existing draft to a peer.
+    state.selected = state.processors.some(p => p.id === state.selected) ? state.selected : null;
+  } else {
+    state.selected = available.some(p => p.id === requested)
+      ? requested : (prefillId ? null : available[0]?.id || null);
+    if (prefillId && !state.selected)
+      toast("warn", "The processor used by this job is no longer available to run.");
+  }
+  if (state.selected && keepDraft) {
+    const summary = selectedProcessor();
+    state.loaded = state.loaded ? { ...state.loaded, ...summary } : summary;
+    state.loadError = false;
+  } else if (state.selected && simple) {
+    state.loaded = selectedProcessor();
+    state.loadError = false;
+    state.dirty = false;
+  } else if (state.selected) await loadProcessor(state.selected);
+  else if (keepDraft) {
+    state.loaded = null;
+  } else {
+    state.loaded = null;
+    state.loadError = false;
+    if (!simple) setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+  }
+  updateEditorState();
+  updateLockSummary();
+  repaintLibrary();
+  repaintSimplePicker();
+  patchRunForm();
+}
+
+async function loadProcessor(id) {
+  state.selected = id;
+  const summary = selectedProcessor();
+  if (!summary) return;
+  try {
+    const detail = await postprocessors.get(id);
+    state.loaded = { ...summary, ...detail };
+    state.loadError = false;
+    setEditorValue({ name: state.loaded.name || "Processor", source: state.loaded.source || "", requirements: state.loaded.requirements || "" });
+  } catch (error) { state.loaded = null; state.loadError = true; updateEditorState(); updateLockSummary(); toast("err", error.message || "Could not load processor."); }
+}
+
+function repaintLibrary() {
+  const box = document.querySelector(".pp-library-list");
+  if (!box) return;
+  box.replaceChildren();
+  if (!state.processors.length) { box.append(el("div", { class: "empty" }, "No processors saved yet. Create one below.")); return; }
+  for (const p of state.processors) {
+    const active = p.id === state.selected;
+    const trust = isTrusted(p), ready = isReady(p);
+    const actions = el("div", { class: "pp-actions" });
+    actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); duplicateProcessor(p); } }, "Duplicate"));
+    if (!p.bundled) actions.append(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: e => { e.stopPropagation(); deleteProcessor(p); } }, "Delete"));
+    const meta = el("div", { class: "pp-processor-meta" });
+    if (p.bundled) meta.append(el("span", { class: "chip" }, "Built in"));
+    meta.append(el("span", { class: `chip ${trust ? "ok" : "warn"}` }, trust ? "Trusted" : "Untrusted"), el("span", { class: `chip ${ready ? "ok" : "warn"}` }, ready ? "Libraries ready" : isStale(p) ? "Libraries need reinstall" : (p.environment_status || "Libraries not ready")));
+    box.append(el("div", { class: `pp-processor ${active ? "active" : ""}`, onclick: async () => {
+      if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
+      await loadProcessor(p.id); repaintLibrary(); patchRunForm();
+    } },
+      el("div", { class: "pp-processor-main" }, el("strong", {}, p.name || "Unnamed processor"), el("span", { class: "small faint mono" }, revision(p).slice(0, 12) || "no revision")),
+      meta,
+      actions,
+    ));
+  }
+}
+
+function repaintSimplePicker() {
+  const select = document.querySelector(".pp-simple-select");
+  const grid = document.querySelector(".pp-simple-builtins");
+  const customPicker = document.querySelector(".pp-custom-picker");
+  if (!select || !grid || !customPicker) return;
+  const choices = simpleProcessorChoices(state.processors, state.selected, lastCustomProcessorId);
+  const { builtins, custom } = choices;
+  lastCustomProcessorId = choices.rememberedCustomId;
+  const optionsKey = JSON.stringify(custom.map(p => [p.id, p.name]));
+  const tilesKey = JSON.stringify([...builtins.map(p => [p.id, p.name, p.optional_model]), ["__custom", custom.length]]);
+  if (select.dataset.optionsKey !== optionsKey) {
+    select.replaceChildren(el("option", { value: "" }, "Choose a custom processor…"));
+    for (const p of custom) select.append(el("option", { value: p.id }, p.name || "Unnamed processor"));
+    select.dataset.optionsKey = optionsKey;
+  }
+  select.disabled = !custom.length;
+  if (grid.dataset.tilesKey !== tilesKey) {
+    grid.replaceChildren(...builtins.map(p => el("button", { class: "plugin-card pp-simple-processor", type: "button", "data-processor-id": p.id }, el("div", { class: "pc-t" }, p.name || "Unnamed processor"), el("div", { class: "pc-f" }))));
+    grid.append(el("button", { class: "plugin-card pp-simple-processor pp-custom-tile", type: "button", "data-processor-id": "__custom" }, el("div", { class: "pc-t" }, "Custom Processor"), el("div", { class: "pc-f" })));
+    for (const tile of grid.querySelectorAll(".pp-simple-processor")) tile.onclick = () => {
+      const id = tile.dataset.processorId;
+      if (id === "__custom") {
+        const current = simpleProcessorChoices(state.processors, state.selected, lastCustomProcessorId);
+        const chosen = current.custom.find(p => p.id === current.customSelection);
+        if (!chosen) return;
+        state.selected = chosen.id; lastCustomProcessorId = chosen.id; state.loaded = chosen;
+      } else { state.selected = id; state.loaded = selectedProcessor(); }
+      patchRunForm(); repaintSimplePicker();
+    };
+    grid.dataset.tilesKey = tilesKey;
+  }
+  const customSelected = custom.some(p => p.id === state.selected);
+  for (const tile of grid.querySelectorAll(".pp-simple-processor")) {
+    const isCustom = tile.dataset.processorId === "__custom";
+    const p = builtins.find(item => item.id === tile.dataset.processorId);
+    const active = isCustom ? customSelected : p?.id === state.selected;
+    tile.classList.toggle("active", !!active);
+    tile.setAttribute("aria-pressed", active ? "true" : "false");
+    tile.disabled = isCustom && !custom.length;
+    const note = tile.querySelector(".pc-f");
+    if (note) note.textContent = isCustom ? (custom.length ? `${custom.length} ready custom processor${custom.length === 1 ? "" : "s"}` : "No ready custom processors") : p.optional_model ? (canRun(p) ? "Ready · AI upscaler" : "Install model & libraries") : "Built in · Ready";
+  }
+  customPicker.hidden = !customSelected;
+  select.value = customSelected ? state.selected : "";
+  const detail = document.querySelector(".pp-simple-detail");
+  const selected = selectedProcessor();
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. This upscaler requires its model and inference libraries to be installed before use. Output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
+  const summary = document.querySelector(".pp-install-summary");
+  if (summary) {
+    const optional = state.processors.find(p => p.optional_model);
+    const job = optional && latestInstallJob(S.jobs, optional.id);
+    const show = optional && selected?.id !== optional.id &&
+      (job?.status === "running" || job?.status === "fail" || state.installStartError?.processorId === optional.id);
+    summary.hidden = !show;
+    if (show) {
+      const view = optionalInstallStatus(optional, job, state.installFailure, state.installStartError, state.installActivity);
+      summary.textContent = `Advanced Upscaler: ${view.label} Select it above for installation controls.`;
+      summary.className = `small pp-install-summary ${view.tone}`;
+    }
+  }
+  const setup = document.querySelector(".pp-model-setup");
+  if (setup) {
+    setup.hidden = !selected?.optional_model;
+    if (selected?.optional_model) {
+      const active = currentInstallJob(selected);
+      const label = setup.querySelector(".pp-model-state");
+      if (label) {
+        const view = optionalInstallStatus(selected, active, state.installFailure, state.installStartError, state.installActivity);
+        label.textContent = view.label;
+        label.className = `small pp-model-state ${view.tone}`;
+      }
+      const cost = setup.querySelector(".pp-model-cost");
+      if (cost) cost.textContent = canRun(selected) ? "Model and libraries are stored under Workbench data (size varies by system). Remove them whenever you like." : "One-time download: a 67 MB AI model plus inference libraries. Leave at least 2 GB free during installation.";
+      const button = setup.querySelector(".pp-model-install");
+      if (button) { button.disabled = !!state.installing; button.hidden = false; button.textContent = canRun(selected) ? (selected.cuda_detection ? "Reinstall / switch CUDA profile" : "Reinstall model & libraries") : "Install model & libraries"; }
+      const remove = setup.querySelector(".pp-model-remove");
+      if (remove) { remove.hidden = !canRun(selected); remove.disabled = !!state.installing; }
+      const cancel = setup.querySelector(".pp-model-cancel");
+      if (cancel) { cancel.hidden = active?.status !== "running"; cancel.disabled = !state.installing; }
+    }
+  }
+}
+
+async function showGuide() {
+  const root = $("#modal-root");
+  const modal = $(".modal", root);
+  const backdrop = $(".modal-backdrop", root);
+  let open = true;
+  const onKey = event => { if (event.key === "Escape") close(); };
+  const close = () => {
+    if (!open) return;
+    open = false;
+    root.hidden = true;
+    modal.classList.remove("pp-guide-modal");
+    backdrop.onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  modal.classList.add("pp-guide-modal");
+  modal.replaceChildren(
+    el("div", { class: "m-ico info" }, ico("book")),
+    el("h3", {}, "Image post-processing guide"),
+    el("div", { class: "m-loading" }, "Loading the guide bundled with this version…"),
+  );
+  root.hidden = false;
+  backdrop.onclick = close;
+  document.addEventListener("keydown", onKey);
+  try {
+    const result = await postprocessors.guide();
+    if (!open) return;
+    modal.replaceChildren(el("h3", {}, result.title || "Image post-processing guide"));
+    modal.append(el("p", { class: "m-when" }, `Bundled with SCM Workbench v${result.version || "unknown"}`));
+    const body = el("div", { class: "notes pp-guide-content" });
+    // The server reads the version-bundled Markdown through a bounded regular
+    // file and emits only its small escaped HTML subset.
+    body.innerHTML = result.body || "<p>(The bundled guide is empty.)</p>";
+    modal.append(body, el("div", { class: "m-actions" }, el("button", { class: "btn primary", type: "button", onclick: close }, "Close")));
+  } catch (error) {
+    if (!open) return;
+    modal.replaceChildren(
+      el("div", { class: "m-ico warn" }, ico("alert")),
+      el("h3", {}, "Guide unavailable"),
+      el("p", {}, error?.message || "The bundled image post-processing guide could not be loaded."),
+      el("div", { class: "m-actions" }, el("button", { class: "btn", type: "button", onclick: close }, "Close")),
+    );
+  }
+}
+
+async function newProcessor() {
+  if (state.dirty && !await confirmModal({ title: "Discard unsaved changes?", text: "Your processor edits will be lost.", okLabel: "Discard changes", danger: true })) return;
+  state.selected = null;
+  state.loaded = null;
+  state.loadError = false;
+  state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
+  setEditorValue(state.draft);
+  repaintLibrary();
+  patchRunForm();
+}
+
+async function duplicateProcessor(p) {
+  if (p.optional_model && !await confirmModal({
+    title: "Duplicate Advanced Upscaler source?",
+    text: "This creates an editable, untrusted source copy. It does not inherit Workbench's installed AI model or libraries. To run it, supply your own model path in the source, install its required libraries, and trust the revision in Advanced mode.",
+    okLabel: "Duplicate source",
+  })) return;
+  try {
+    const result = await postprocessors.duplicate(p.id, `${p.name || "Processor"} copy`, revision(p));
+    const keepDraft = state.dirty;
+    await refreshProcessors(keepDraft ? state.selected : result?.processor?.id || result?.id || p.id, { preserveDirty: keepDraft });
+    toast("ok", p.optional_model ? "Source duplicated. Configure its model and libraries before running." : "Processor duplicated.");
+  } catch (error) { toast("err", error.message || "Could not duplicate processor."); }
+}
+async function deleteProcessor(p) {
+  if (!await confirmModal({ title: "Delete processor?", text: `Delete “${p.name || "processor"}” and its saved revisions?`, okLabel: "Delete processor", danger: true })) return;
+  try {
+    await postprocessors.delete(p.id, revision(p));
+    if (p.id === state.selected) {
+      state.selected = null; state.loaded = null; state.dirty = false;
+      await refreshProcessors(null, { preserveDirty: false });
+    } else {
+      await refreshProcessors(state.selected, { preserveDirty: true });
+    }
+    toast("ok", "Processor deleted.");
+  } catch (error) { toast("err", error.message || "Could not delete processor."); }
+}
+
+async function saveRevision() {
+  const d = state.draft;
+  if (!d?.name?.trim() || !d.source) return toast("warn", "Enter a processor name and source first.");
+  if (sourceBytes(d.source) > 256 * 1024) return toast("err", "Processor source is too large.");
+  try {
+    const result = await postprocessors.save({ processor_id: state.selected, name: d.name.trim(), source: d.source, requirements: d.requirements, expected_revision: revision(state.loaded) || null });
+    await refreshProcessors(result?.processor?.id || result?.id || state.selected, { preserveDirty: false });
+    toast("ok", "Saved an untrusted revision. Trust it before running.");
+  } catch (error) { toast("err", error.message || "Could not save the processor."); }
+}
+
+async function importSource() {
+  try {
+    const result = await postprocessors.importSource({ saveDraft: payload => postprocessors.save(payload) });
+    if (result === null) return;
+    if (result?.ok === false) throw new Error((result.errors || ["Import failed."])[0]);
+    const id = result?.processor?.id || result?.id;
+    if (id) await refreshProcessors(id, { preserveDirty: false }); else setEditorValue(result);
+    state.dirty = false;
+    toast("ok", "Imported an untrusted revision. Trust it before running.");
+  } catch (error) { toast("err", error.message || "Could not import the processor."); }
+}
+async function revert() {
+  if (!state.loaded) {
+    if (!state.dirty || await confirmModal({ title: "Revert unsaved changes?", text: "Your current editor contents will be replaced.", okLabel: "Revert changes", danger: true }))
+      setEditorValue({ name: "New processor", source: TEMPLATE, requirements: "" });
+    return;
+  }
+  const revisions = Array.isArray(state.loaded.revisions) ? state.loaded.revisions : [];
+  const activeRevision = revision(state.loaded);
+  const picker = el("select", { class: "input pp-revision-picker", "aria-label": "Saved processor revision" });
+  for (const item of revisions) {
+    const saved = new Date(Number(item.saved_at) * 1000);
+    const when = Number.isFinite(saved.getTime()) ? saved.toLocaleString() : "Saved revision";
+    picker.append(el("option", { value: item.revision, selected: item.revision === activeRevision },
+      `${item.revision.slice(0, 12)} · ${when}${item.active ? " · current" : ""}`));
+  }
+  if (!revisions.length) picker.append(el("option", { value: activeRevision }, `${activeRevision.slice(0, 12)} · current`));
+  const approved = await confirmModal({
+    title: "Revert to a saved revision?",
+    text: "Choose the immutable revision to load. Your current editor contents will be replaced. Loading an older revision does not make it active until you save it.",
+    content: el("label", {}, "Saved revision", picker),
+    okLabel: "Load revision",
+    danger: true,
+  });
+  if (!approved) return;
+  const chosen = picker.value;
+  if (chosen === activeRevision) {
+    setEditorValue(state.loaded);
+    return;
+  }
+  try {
+    const historical = await postprocessors.get(state.loaded.id, chosen);
+    setEditorValue({ ...historical, name: state.loaded.name });
+    state.dirty = true;
+    updateEditorState();
+    updateLockSummary();
+    toast("ok", `Loaded revision ${chosen.slice(0, 12)}. Save it to make it current.`);
+  } catch (error) { toast("err", error.message || "Could not load the saved revision."); }
+}
+async function trustRevision() {
+  const p = state.loaded || selectedProcessor();
+  if (!p) return toast("warn", "Save a processor before trusting it.");
+  const approved = await confirmModal({
+    title: "Trust this Python revision?",
+    text: "This code and its installed libraries run as your user account and can access your files and network. Only continue if you trust the exact source and packages shown here.",
+    okLabel: "Trust revision",
+    danger: true,
+  });
+  if (!approved) return;
+  try { await postprocessors.trust(p.id, revision(p), p.environment_fingerprint || p.environment?.fingerprint || null); await refreshProcessors(p.id); toast("ok", "This exact revision is trusted."); }
+  catch (error) { toast("err", error.message || "Could not trust this revision."); }
+}
+async function removeOptionalModel() {
+  const p = selectedProcessor();
+  if (!p?.optional_model || !isReady(p)) return;
+  if (!await confirmModal({ title: "Remove upscaler files?", text: "Remove the downloaded AI model and libraries from Workbench data? The Simple Upscaler remains available. You can install the Advanced Upscaler again later.", okLabel: "Remove files", danger: true })) return;
+  try {
+    const result = await postprocessors.removeOptional(p.id, revision(p));
+    state.installStartError = null;
+    state.installFailure = null;
+    await refreshProcessors(p.id);
+    toast("ok", result.space_reclaimed ? "Upscaler model and libraries removed." : "Upscaler disabled. Shared files may remain in use by another processor.");
+  } catch (error) { toast("err", error.message || "Could not remove upscaler files."); }
+}
+
+async function cancelOptionalInstall() {
+  if (!state.installJob?.id) return;
+  try {
+    const result = await jobs.kill(state.installJob.id);
+    if (result?.ok) toast("warn", "Stopping installation…");
+  } catch (error) { toast("err", error.message || "Could not stop installation."); }
+}
+
+async function installLibraries() {
+  const p = state.loaded || selectedProcessor();
+  if (!p) return toast("warn", "Save a processor first.");
+  if (state.dirty) return toast("warn", "Save the requirements as a new revision before installing them.");
+  const model = p.optional_model === true;
+  const requirements = model ? "" : String(state.draft?.requirements || "").trim();
+  const detected = p.cuda_detection;
+  // Freeze the displayed auto recommendation for this explicit install.
+  const cudaProfile = model && detected ? (state.cudaChoice === "auto" ? detected.recommended : state.cudaChoice) : undefined;
+  const resolved = cudaProfile;
+  const approved = await confirmModal({
+    title: model ? "Install Advanced Upscaler?" : "Install processor libraries?",
+    text: model ? (resolved ? `Install ${resolved === "cuda13" ? "CUDA 13" : "CUDA 12"} profile? Current installed profile: ${p.cuda_profile === "cuda13" ? "CUDA 13" : p.cuda_profile === "cuda12" ? "CUDA 12" : "none"}. This explicit install may switch the active profile only after verification; failed or cancelled installs leave the current one available. Download: 67 MB model plus verified wheels. Leave at least 2 GB free. Follow the installation job in the sidebar. GPU inference also needs matching system CUDA, cuDNN 9 and NVIDIA driver; CPU fallback is available. Continue?` : "One-time download: 67 MB RealESRGAN_x4plus model plus compatible ONNX Runtime and verified Python wheels. Leave at least 2 GB free for the libraries and temporary staging space. Workbench will verify the model and install into app data. Follow the installation job in the sidebar. Processing itself works offline. Continue?") : requirements ? `Workbench will download wheel packages for:\n\n${requirements}` : "This processor has no additional libraries. Workbench will prepare its empty environment.",
+    okLabel: model ? "Install upscaler" : "Install libraries",
+  });
+  if (!approved) return;
+  state.installJob = null;
+  state.installActivity = null;
+  state.installStartError = null;
+  state.installFailure = null;
+  const showStartError = message => {
+    state.installStartError = { processorId: p.id, at: Date.now(), message };
+    updateEditorState(); repaintSimplePicker();
+  };
+  try {
+    const job = await doRun("postprocess_dependencies", null, {
+      args: { processor_id: p.id, revision_hash: revision(p), requirements, ...(cudaProfile ? { cuda_profile: cudaProfile } : {}) }, onError: showStartError,
+    });
+    if (job?.id) {
+      state.installJob = { ...job, kind: "postprocess_dependencies", status: "running", ts: Date.now() / 1000,
+                           args: { processor_id: p.id } };
+      state.installing = true;
+      updateEditorState(); repaintSimplePicker();
+      watchJobDone(job.id, () => refreshProcessors(p.id));
+    } else if (!state.installStartError) showStartError("No installation job was created. Try again.");
+  } catch (error) {
+    showStartError(error?.message || "Could not start the installation job.");
+    toast("err", error?.message || "Could not start the installation job.");
+  }
+}
+
+function paintRunGate() {
+  const scope = first(formArgs("postprocess_images")?.scope) || "both";
+  const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
+  const p = selectedProcessor();
+  const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const run = document.querySelector(".pp-run");
+  if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
+  const note = document.querySelector(".pp-run-note");
+  if (note) note.textContent = countKnown && state.imageCount > 0 ? `${gate} · ${state.imageCount} recognized image${state.imageCount === 1 ? "" : "s"}` : gate;
+}
+
+function patchRunForm() {
+  const kind = "postprocess_images";
+  const card = document.querySelector(`.form-card[data-kind="${kind}"]`);
+  if (!card) return;
+  const args = formArgs(kind);
+  if (S.postprocessPrefill?.scope && args.scope !== undefined) args.scope = S.postprocessPrefill.scope;
+  S.postprocessPrefill = null;
+  args.processor_id = state.selected || "";
+  args.revision_hash = revision(selectedProcessor());
+  const scope = first(args.scope) || "both";
+  if (state.imageScope !== scope) state.imageCount = null;
+  afterFormChange(kind, args);
+  paintRunGate();
+}
+
+function attachRunStatus(root) {
+  const status = el("div", { class: "pp-run-status", "aria-live": "polite", hidden: true });
+  const host = $(".pp-run-card", root) || root;
+  host.append(status);
+  let stoppingId = null;
+  const requestCancel = async jobId => {
+    if (stoppingId === jobId) return;
+    stoppingId = jobId;
+    paint();
+    try {
+      const result = await jobs.kill(jobId);
+      if (result?.ok) toast("warn", "Stopping…");
+      else {
+        if (stoppingId === jobId) stoppingId = null;
+        toast("warn", "The job has already finished.");
+      }
+    } catch (error) {
+      if (stoppingId === jobId) stoppingId = null;
+      toast("err", error?.message || "Could not stop the processor job.");
+    }
+    paint();
+  };
+  const paint = () => {
+    const running = state.job && (S.jobs || []).find(j => j.id === state.job.id);
+    if (!running) { status.hidden = true; status.replaceChildren(); return; }
+    status.hidden = false;
+    const outcome = running.postprocess_outcome;
+    const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
+    const panel = el("div", { class: `pp-status ${running.status}` }, el("div", {}, message));
+    if (running.status !== "running" && running.postprocess_cpu_warning)
+      panel.append(el("div", { class: "small warn" },
+        running.postprocess_cpu_reason === "missing_cudnn" ? `cuDNN 9 (libcudnn.so) is missing. CPU fallback was ${running.status === "ok" ? "used" : "attempted"} during this run.` :
+        running.status === "ok" ? "CPU fallback was used during this run." : "CPU fallback was attempted during this run."));
+    status.replaceChildren(panel);
+    if (running.status === "running") {
+      const progress = jobNoticeProgress(running);
+      panel.append(el("div", { class: "pp-progress" }, el("progress", { max: 1, value: progress.fraction ?? 0 }), el("span", { class: progress.warning ? "small warn" : "small faint" }, progress.text)));
+      if (uiMode() === "simple") panel.append(el("button", {
+        class: "btn btn-ghost btn-sm pp-cancel", type: "button",
+        disabled: stoppingId === running.id,
+        onclick: () => requestCancel(running.id),
+      }, stoppingId === running.id ? "Stopping…" : "Cancel processing"));
+    } else if (running.status === "ok") status.append(el("button", { class: "btn primary", onclick: () => go("pdf") }, ico("arrow"), "Go to Create PDF"));
+  };
+  const previewListener = event => {
+    const detail = event.detail || {};
+    if (detail.kind !== "postprocess_images") return;
+    state.imageScope = first(detail.args?.scope) || "both";
+    state.imageCount = Number.isInteger(detail.result?.image_count) ? detail.result.image_count : null;
+    paintRunGate();
+  };
+  document.addEventListener(COMMAND_PREVIEW_EVENT, previewListener);
+  let lastDependencyStatus = "";
+  const tick = async () => { try {
+    const result = await jobs.list();
+    S.jobs = result.jobs || S.jobs;
+    syncJobNotices(S.jobs);
+    const processing = (S.jobs || []).find(j => j.kind === "postprocess_images" && j.status === "running");
+    if (processing) state.job = processing;
+    const dependency = (S.jobs || []).find(j => j.kind === "postprocess_dependencies" && j.status === "running");
+    state.installing = !!dependency;
+    const optional = state.processors.find(p => p.optional_model);
+    const selectedInstall = optional && latestInstallJob(S.jobs, optional.id);
+    if (selectedInstall?.status === "running") void loadInstallProgress(selectedInstall);
+    if (selectedInstall?.status === "fail") void loadInstallFailure(selectedInstall);
+    if (selectedInstall && state.selected === optional.id) state.installJob = selectedInstall;
+    updateEditorState();
+    repaintSimplePicker();
+    if (!dependency && lastDependencyStatus === "running") await refreshProcessors(state.selected);
+    lastDependencyStatus = dependency ? "running" : "idle";
+    paint();
+    paintRunGate();
+  } catch {} };
+  state.timer = setInterval(tick, 700); tick();
+  root.__dispose = () => { clearInterval(state.timer); document.removeEventListener(COMMAND_PREVIEW_EVENT, previewListener); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
+}
+
+function renderSimplePostprocess() {
+  const wrap = el("div", {});
+  wrap.append(pageHead("Image post-processing", "Optionally improve card images before creating your PDF."));
+  wrap.append(el("div", { class: "banner info" }, ico("sparkle"), el("span", {}, "Choose a ready processor. You can install the Advanced AI Upscaler before SCM is ready; processing images still needs SCM. Editing code or installing custom libraries requires Advanced mode.")));
+  wrap.append(el("section", { class: "card pp-simple-picker" },
+    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Choose an image processor"), el("p", {}, "The built-in Simple Upscaler is ready without any downloads."))),
+    el("div", { class: "plugin-grid pp-simple-builtins", "aria-label": "Built-in image processors" }),
+    el("label", { class: "pp-custom-picker", hidden: true }, "Custom processor", el("select", { class: "input pp-simple-select", "aria-label": "Ready custom processor" })),
+    el("div", { class: "small faint pp-simple-detail" }, "Loading ready processors…"),
+    el("p", { class: "small pp-install-summary", "aria-live": "polite", hidden: true }),
+    cudaInstallControl(),
+    el("div", { class: "pp-model-setup", hidden: true },
+      el("div", { class: "pp-model-copy" },
+        el("p", { class: "small pp-model-state", "aria-live": "polite" }, "Not installed."),
+        el("p", { class: "small faint pp-model-cost" }, "One-time download: a 67 MB AI model plus inference libraries. Leave at least 2 GB free during installation.")),
+      el("div", { class: "pp-model-actions" },
+        el("button", { class: "btn btn-ghost pp-model-install", type: "button", onclick: installLibraries }, "Install model & libraries"),
+        el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"),
+        el("button", { class: "btn danger pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove model & libraries")))));
+  const run = el("section", { class: "card pp-run-card" },
+    el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "Choose which images to improve. Originals are replaced only after every result passes validation."))),
+    formCard("postprocess_images", { run: false, preview: "summary" }),
+    el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Checking image inventory…"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
+  wrap.append(run);
+  wrap.__patch = async () => {
+    state.dirty = false;
+    S.pageGuard = null;
+    $(".pp-simple-select", wrap).addEventListener("change", event => {
+      if (!event.currentTarget.value) return;
+      state.selected = event.currentTarget.value;
+      state.loaded = selectedProcessor();
+      patchRunForm();
+      repaintSimplePicker();
+    });
+    $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
+    await refreshProcessors(state.selected, { preserveDirty: false });
+    repaintSimplePicker();
+    patchRunForm();
+    attachRunStatus(wrap);
+  };
+  return wrap;
+}
+
+PAGES.postprocess = root => {
+  if (uiMode() === "simple") return renderSimplePostprocess();
+  const wrap = el("div", {});
+  wrap.append(pageHead("Image post-processing", "Save a trusted Python processor, install its optional libraries, then apply it manually to card images."));
+  wrap.append(el("div", { class: "banner warn pp-warning" }, ico("alert"), el("span", {}, "Python processors and their libraries run as your user account. Only use code and packages you trust. Workbench limits inputs, resources, and image publication, but it cannot safely sandbox arbitrary Python from your other files or network.")));
+  const library = el("section", { class: "card pp-library" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("layers")), el("div", { class: "grow" }, el("h2", {}, "Processor library"), el("p", {}, "Select a revision to edit, trust, install, or run.")), el("div", { class: "actions" }, el("button", { class: "btn btn-ghost pp-guide", type: "button", "aria-label": "Open the image post-processing guide", onclick: showGuide }, ico("book"), "Guide"), el("button", { class: "btn btn-ghost", type: "button", onclick: newProcessor }, "New processor"))), el("div", { class: "pp-library-list" }));
+  wrap.append(library);
+  const sourceEditor = el("div", { class: "pp-source-wrap" },
+    el("pre", { class: "pp-source-highlight", "aria-hidden": "true" }, el("code", { class: "pp-source-code" })),
+    el("textarea", { class: "input pp-source", rows: 16, wrap: "off", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-label": "Python source" }));
+  const editor = el("section", { class: "card pp-editor" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("file")), el("div", { class: "grow" }, el("h2", {}, "Processor editor"), el("p", {}, "Saving creates an immutable, untrusted revision.")), el("span", { class: "pp-dirty" }, "Saved revision")),
+    el("label", {}, "Processor name", el("input", { class: "input pp-name", spellcheck: "false" })),
+    el("label", {}, "Python source", sourceEditor),
+    el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
+    el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
+    el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; leave at least 2 GB free during installation. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
+    el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
+    cudaInstallControl(),
+    el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),
+    el("div", { class: "runbar pp-editor-actions" }, el("span", { class: "rb-note" }, "Source is parsed when saved, never executed."), el("button", { class: "btn btn-ghost", type: "button", onclick: importSource }, "Import .py"), el("button", { class: "btn btn-ghost", type: "button", onclick: revert }, "Revert"), el("button", { class: "btn btn-ghost pp-trust", type: "button", onclick: trustRevision }, "Trust this revision"), el("button", { class: "btn btn-ghost pp-install", type: "button", onclick: installLibraries }, "Install / update libraries"), el("button", { class: "btn btn-ghost pp-model-cancel", type: "button", hidden: true, onclick: cancelOptionalInstall }, "Cancel installation"), el("button", { class: "btn danger pp-model-remove", type: "button", hidden: true, onclick: removeOptionalModel }, "Remove model & libraries"), el("button", { class: "btn primary pp-save", type: "button", onclick: saveRevision }, "Save revision")));
+  wrap.append(editor);
+  const run = el("section", { class: "card pp-run-card" }, el("div", { class: "card-head" }, el("div", { class: "card-ico" }, ico("play")), el("div", { class: "grow" }, el("h2", {}, "Run processor"), el("p", {}, "One isolated batch processes the selected image scope."))), formCard("postprocess_images", { run: false, preview: "summary" }), el("div", { class: "runbar" }, el("span", { class: "rb-note pp-run-note" }, "Choose a processor"), el("button", { class: "btn primary pp-run", type: "button", onclick: async e => { state.job = await doRun("postprocess_images", e.currentTarget); paintRunGate(); } }, ico("play"), "Run processor")));
+  wrap.append(run);
+  wrap.__patch = async () => {
+    if (!state.draft) state.draft = { name: "New processor", source: TEMPLATE, requirements: "" };
+    const source = $(".pp-source", wrap), req = $(".pp-requirements", wrap), name = $(".pp-name", wrap);
+    source.oninput = () => { state.draft.source = source.value; markDirty(); updateCursor(source); paintSourceHighlight(source); };
+    for (const event of ["click", "keyup", "select"]) source.addEventListener(event, () => updateCursor(source));
+    source.addEventListener("scroll", () => syncSourceHighlightScroll(source));
+    req.oninput = () => { state.draft.requirements = req.value; markDirty(); };
+    name.oninput = () => { state.draft.name = name.value; markDirty(); };
+    source.addEventListener("keydown", e => { if (e.key === "Tab" && !e.target.readOnly) { e.preventDefault(); const at = e.target.selectionStart; e.target.setRangeText("    ", at, e.target.selectionEnd, "end"); state.draft.source = e.target.value; markDirty(); updateCursor(source); paintSourceHighlight(source); } });
+    $(".pp-run-card", wrap).addEventListener("change", () => { const scope = first(formArgs("postprocess_images")?.scope) || "both"; if (state.imageScope !== scope) state.imageCount = null; paintRunGate(); });
+    await refreshProcessors(state.selected, { preserveDirty: false }); repaintLibrary(); patchRunForm(); attachRunStatus(wrap);
+  };
+  wrap.__guard = async () => {
+    if (!state.dirty) return true;
+    const leave = await confirmModal({ title: "Unsaved processor changes", text: "Leave this page and discard your edits?", okLabel: "Leave page", danger: true });
+    if (leave) state.dirty = false;
+    return leave;
+  };
+  S.pageGuard = wrap.__guard;
+  return wrap;
+};

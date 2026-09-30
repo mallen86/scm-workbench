@@ -32,7 +32,10 @@ export function createJobNoticeState() {
       record.job = job;
       if (record.status === "running" && TERMINAL.has(job.status)) {
         record.status = job.status;
-        record.expiresAt = now + JOB_NOTICE_HOLD_MS;
+        // Completion can happen while the window is inactive and timers are
+        // throttled. Hold from the worker's completion time, not first focus.
+        const ended = Number(job.ended) * 1000;
+        record.expiresAt = (Number.isFinite(ended) && ended > 0 ? Math.min(ended, now) : now) + JOB_NOTICE_HOLD_MS;
       }
       if (record.expiresAt && record.expiresAt <= now) records.delete(id);
     }

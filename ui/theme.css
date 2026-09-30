@@ -201,7 +201,7 @@ body:not(.mode-simple).console-open .main { padding-bottom: 330px; }
   backdrop-filter: blur(8px);
 }
 .topbar-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 
 /* simple / advanced switch — bottom of the sidebar, where the repo pills
    used to sit */
@@ -264,8 +264,23 @@ body:not(.mode-simple).console-open .main { padding-bottom: 330px; }
 
 .page-head { margin-bottom: 22px; }
 .page-head h1 { font-size: 25px; font-weight: 800; letter-spacing: -0.02em; }
+.btn.page-help-button { flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border-radius: 50%; font-size: 18px; font-weight: 700; }
+.page-help-button:focus-visible, .page-help-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .page-head .sub { margin-top: 6px; color: var(--muted); font-size: 13.5px; max-width: 760px; line-height: 1.5; }
 .page-head .sub code { font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 5px; padding: 1px 5px; }
+
+/* Read-only page help: a separate dialog so it cannot replace a confirmation. */
+.page-help-dialog { width: min(660px, calc(100vw - 64px)); max-height: calc(100vh - 64px); margin: auto; padding: 0; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.page-help-dialog[open] { display: flex; flex-direction: column; }
+.page-help-dialog::backdrop { background: rgba(5, 7, 11, 0.65); }
+.page-help-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; flex: 0 0 auto; padding: 20px 24px; border-bottom: 1px solid var(--border-soft); }
+.page-help-heading h2 { font-size: 21px; font-weight: 800; letter-spacing: -0.02em; }
+.page-help-close { flex: 0 0 auto; }
+.page-help-body { min-height: 0; overflow-y: auto; padding: 20px 24px 24px; font-size: 14px; line-height: 1.6; }
+.page-help-intro { color: var(--text); }
+.page-help-body section { margin-top: 20px; }
+.page-help-body h3 { font-size: 14px; font-weight: 700; margin-bottom: 5px; }
+.page-help-body section p { color: var(--muted); }
 
 /* ============================================================================
    Cards & layout primitives
@@ -1411,17 +1426,25 @@ cursor: pointer;
 }
 .linkish:hover { text-decoration: underline; }
 
-/* the in-app release-notes view ("What's new" on the app-update card) */
+/* Safe server-rendered Markdown views: release notes and bundled guides. */
 .modal .m-loading { font-size: 13px; color: var(--muted); }
 .modal .m-when { font-size: 12.5px; color: var(--muted); }
+.modal.pp-guide-modal { width: min(820px, calc(100vw - 48px)); }
 .modal .notes { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 12px 16px; max-height: 46vh; overflow: auto; }
-.modal .notes h4, .modal .notes h5 { font-size: 13px; font-weight: 750; margin: 12px 0 6px; color: var(--text); }
-.modal .notes h4:first-child, .modal .notes h5:first-child { margin-top: 0; }
+.modal .notes.pp-guide-content { max-height: 65vh; }
+.modal .notes h1 { font-size: 18px; }
+.modal .notes h2 { font-size: 16px; }
+.modal .notes h3 { font-size: 14.5px; }
+.modal .notes h4, .modal .notes h5 { font-size: 13px; }
+.modal .notes h1, .modal .notes h2, .modal .notes h3, .modal .notes h4, .modal .notes h5 { font-weight: 750; margin: 14px 0 6px; color: var(--text); }
+.modal .notes > :first-child { margin-top: 0; }
 .modal .notes p { font-size: 13px; line-height: 1.55; color: var(--text); margin: 6px 0; }
-.modal .notes ul { margin: 6px 0; padding-left: 20px; }
+.modal .notes ul, .modal .notes ol { margin: 6px 0; padding-left: 20px; }
 .modal .notes li { font-size: 13px; line-height: 1.55; color: var(--text); }
 .modal .notes b { font-weight: 700; }
 .modal .notes code { font-family: var(--mono); font-size: 12px; background: rgba(128, 128, 128, 0.12); border-radius: 4px; padding: 1px 5px; }
+.modal .notes pre { margin: 8px 0; padding: 10px 12px; overflow: auto; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); }
+.modal .notes pre code { display: block; min-width: max-content; padding: 0; background: transparent; white-space: pre; line-height: 1.5; }
 .modal .notes a { color: var(--info); text-decoration: underline; }
 
 /* pdf preview frame */
@@ -1641,6 +1664,120 @@ cursor: pointer;
 .plugin-card .pc-t { font-size: 13px; font-weight: 700; }
 .plugin-card .pc-f { font-size: 10.5px; color: var(--faint); margin-top: 3px; }
 
+/* Custom fetch source: full-height front at left, two equal zones at right. */
+.custom-art-zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.custom-art-zone { min-width: 0; display: flex; flex-direction: column; }
+.custom-art-zone[data-destination="front"] { grid-column: 1; grid-row: 1 / 3; }
+.custom-art-zone[data-destination="double_sided"] { grid-column: 2; grid-row: 1; }
+.custom-art-zone[data-destination="back"] { grid-column: 2; grid-row: 2; }
+.custom-art-zone h3 { font-size: 14px; margin: 0 0 10px; }
+.custom-art-drop { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 170px; padding: 24px 16px; border: 2px dashed var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--muted); font-family: var(--sans); cursor: pointer; transition: background .12s, border-color .12s; }
+.custom-art-drop > .ic svg { width: 30px; height: 30px; }
+.custom-art-drop strong { color: var(--text); }
+.custom-art-drop:hover:not(:disabled), .custom-art-zone.drag-over .custom-art-drop { border-color: var(--accent); background: var(--accent-soft); }
+.custom-art-zone.drag-over .custom-art-drop { transition: none; }
+.custom-art-drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.custom-art-drop:disabled { opacity: .6; cursor: wait; }
+.custom-art-folder { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.custom-art-folder .mono { overflow-wrap: anywhere; }
+.custom-art-limits { margin-top: 16px; }
+.custom-art-status { margin-top: 16px; overflow-wrap: anywhere; }
+.custom-art-status p { margin: 8px 0; }
+.custom-art-status details { margin-top: 8px; }
+.custom-art-progress { width: 100%; accent-color: var(--accent); }
+.custom-art-failures { max-height: 220px; overflow: auto; }
+.custom-art-next { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.custom-art-next[hidden] { display: none; }
+@media (max-width: 760px) { .custom-art-zones { grid-template-columns: 1fr; grid-template-rows: none; } .custom-art-zone[data-destination] { grid-column: auto; grid-row: auto; } }
+
+/* image post-processing workflow */
+.pp-warning { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; margin-bottom: 22px; }
+.pp-warning .ic { flex: 0 0 auto; color: var(--warn); }
+.pp-simple-builtins { margin: 4px 0 14px; }
+.pp-simple-processor { min-height: 72px; }
+.pp-simple-processor:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pp-custom-picker { display: block; max-width: 440px; }
+.pp-custom-picker[hidden] { display: none; }
+.pp-custom-picker .input { margin-top: 6px; }
+.pp-simple-detail { margin-top: 10px; line-height: 1.5; }
+.pp-install-summary { margin-top: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.pp-install-summary.fail { color: var(--err); }
+.pp-install-summary.running { color: var(--info); }
+.pp-install-summary[hidden] { display: none; }
+.pp-model-setup { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 14px; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
+.pp-model-copy { flex: 1 1 250px; min-width: 0; }
+.pp-model-copy p { line-height: 1.5; }
+.pp-cuda-install, .pp-editor .pp-cuda-install { display: grid; gap: 8px; min-width: 0; margin: 14px 0; line-height: 1.5; }
+.pp-cuda-install[hidden] { display: none; }
+.pp-cuda-profile { width: 100%; min-width: 0; }
+.pp-cuda-info { display: block; line-height: 1.5; overflow-wrap: anywhere; }
+.pp-model-cost { margin-top: 4px; }
+.pp-model-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.pp-model-status { line-height: 1.5; overflow-wrap: anywhere; }
+.pp-model-state.fail, .pp-model-status.fail { color: var(--err); overflow-wrap: anywhere; }
+.pp-model-state.running, .pp-model-status.running { color: var(--info); }
+.pp-model-setup[hidden], .pp-model-status[hidden], .pp-model-setup [hidden], .pp-editor-actions .pp-model-remove[hidden], .pp-editor-actions .pp-model-cancel[hidden], .pp-model-explain[hidden] { display: none !important; }
+.pp-library-list { display: grid; gap: 8px; }
+.pp-processor { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
+.pp-processor:hover, .pp-processor.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft)); background: var(--surface-3); }
+.pp-processor-main { min-width: 0; display: grid; gap: 3px; }
+.pp-processor-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-processor-meta, .pp-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pp-editor { display: grid; gap: 12px; }
+.pp-editor .card-head, .pp-run-card > .card-head { margin-bottom: 2px; }
+.pp-dirty { margin-left: auto; font-size: 11px; font-weight: 700; }
+.pp-dirty.warn { color: var(--warn); }
+.pp-dirty.ok { color: var(--ok); }
+.pp-editor label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.pp-editor textarea { font-family: var(--mono); font-size: 12px; line-height: 1.5; tab-size: 4; }
+.pp-source-wrap { position: relative; min-width: 0; }
+.pp-source-highlight, .pp-editor .pp-source {
+  min-height: 260px; font-family: var(--mono); font-size: 12px; font-weight: 400; line-height: 1.5;
+  tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal;
+}
+.pp-source-highlight {
+  position: absolute; inset: 0; overflow: hidden; margin: 0; padding: 8px 12px;
+  border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--surface-2);
+  color: var(--text); pointer-events: none; visibility: hidden;
+}
+.pp-source-highlight code { display: block; min-width: max-content; font: inherit; white-space: inherit; }
+.pp-source-wrap.highlight-ready .pp-source-highlight { visibility: visible; }
+.pp-source-wrap.highlight-ready .pp-source {
+  position: relative; z-index: 1; color: transparent; -webkit-text-fill-color: transparent;
+  caret-color: var(--text); background: transparent; overflow: auto;
+}
+.pp-source-wrap.highlight-ready .pp-source:focus { background: transparent; }
+.pp-source-wrap.highlight-ready:focus-within .pp-source-highlight { background: var(--surface-3); }
+.pp-source-wrap.highlight-ready .pp-source::selection { background: color-mix(in srgb, var(--info) 34%, transparent); }
+.py-keyword { color: var(--accent-2); font-weight: 650; }
+.py-definition { color: var(--info); font-weight: 650; }
+.py-builtin { color: var(--info); }
+.py-string { color: var(--ok); }
+.py-comment { color: var(--muted); font-style: italic; }
+.py-number { color: var(--warn); }
+.py-decorator { color: var(--accent); }
+.py-operator { color: var(--muted); }
+.pp-lock { display: grid; gap: 4px; padding: 9px 11px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-2); overflow-wrap: anywhere; }
+.pp-editor-actions { flex-wrap: wrap; }
+.pp-editor-actions .rb-note { min-width: 180px; }
+.pp-run-card .form-card { border: 0; padding: 0; box-shadow: none; background: transparent; }
+.pp-run-card .form-card > .card-head { display: none; }
+.pp-run-card .cmdbox { margin-top: 12px; }
+.pp-run-status { display: grid; gap: 8px; margin-top: 16px; }
+.pp-status { display: grid; gap: 10px; padding: 11px 13px; border-radius: var(--radius-sm); background: var(--surface-2); color: var(--muted); }
+.pp-status.ok { color: var(--ok); background: var(--ok-soft); }
+.pp-status.fail, .pp-status.killed { color: var(--err); background: var(--err-soft); }
+.pp-progress { display: grid; gap: 6px; }
+.pp-cancel { justify-self: start; }
+.pp-run-status progress { width: 100%; height: 8px; accent-color: var(--accent); }
+@media (max-width: 760px) {
+  .pp-library > .card-head { align-items: flex-start; flex-wrap: wrap; }
+  .pp-library > .card-head .actions { flex-basis: 100%; justify-content: flex-end; }
+  .pp-processor { grid-template-columns: 1fr; }
+  .pp-processor-meta, .pp-actions { justify-content: flex-start; }
+  .pp-editor-actions .rb-note { flex-basis: 100%; }
+}
+
 /* fade-in for page switch */
 @keyframes pagein { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 .page-anim { animation: pagein 0.22s ease; }
@@ -1677,11 +1814,10 @@ cursor: pointer;
   border: 1px solid transparent; border-radius: 9px; cursor: pointer;
 }
 .first-boot-close:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
-/* The one-time welcome card is the whole message on that screen, so the app
-   chrome stands back: no page title for a page the user has not opened, and no
-   console button on a screen whose only action is to leave it. The close control
-   in the card replaces the top bar's, so this never traps anyone. */
-body.setup-welcome .topbar { display: none; }
+/* Keep help at the top right on the welcome screen without repeating its
+   title or offering the console over the setup instructions. */
+body.setup-welcome .topbar-title { visibility: hidden; }
+body.setup-welcome #btn-console { display: none; }
 .first-boot-close .ic { width: 18px; height: 18px; }
 .first-boot-mark {
   width: 62px; height: 62px; margin: 0 auto 18px;
@@ -1763,6 +1899,8 @@ body.setup-welcome .topbar { display: none; }
    notice needs the error colour and its own action row. */
 .rp-fail .rp-label { color: var(--err); }
 .rp-fail .rp-meta { color: var(--muted); }
+.rp-fail-detail summary { cursor: pointer; margin-top: 4px; }
+.rp-fail-detail div { margin-top: 4px; overflow-wrap: anywhere; }
 .rp-actions { margin-top: 7px; display: flex; gap: 6px; align-items: center; }
 .rp-actions .btn.ghost { padding-left: 8px; padding-right: 8px; }
 /* A notice whose heading carries its close control on the right. */

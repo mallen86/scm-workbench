@@ -79,6 +79,9 @@ class LinuxPackagingTests(unittest.TestCase):
             (root / "scm_workbench/cached.pyc").write_bytes(b"cache")
             (root / "ui").mkdir()
             (root / "ui/index.html").write_text("app", encoding="utf-8")
+            (root / "docs/licenses").mkdir(parents=True)
+            (root / "docs/image-postprocessing.md").write_text("guide", encoding="utf-8")
+            (root / "docs/licenses/Real-ESRGAN.txt").write_text("attribution", encoding="utf-8")
             (root / "tauri/icons").mkdir(parents=True)
             (root / "tauri/icons/512.png").write_bytes(b"png")
             (root / "LICENSE.md").write_text("license", encoding="utf-8")
@@ -106,6 +109,8 @@ class LinuxPackagingTests(unittest.TestCase):
             self.assertTrue((payload / "runtime/python/install/bin/python3.13").is_file())
             self.assertTrue((payload / "app/scm_workbench/server.py").is_file())
             self.assertFalse((payload / "app/scm_workbench/cached.pyc").exists())
+            self.assertEqual((payload / "app/docs/image-postprocessing.md").read_text(), "guide")
+            self.assertEqual((payload / "app/docs/licenses/Real-ESRGAN.txt").read_text(), "attribution")
             launcher = work / "root/usr/bin/scm-workbench"
             self.assertTrue(launcher.is_symlink())
             self.assertEqual(launcher.readlink().as_posix(),

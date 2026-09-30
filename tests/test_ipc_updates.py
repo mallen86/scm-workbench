@@ -64,7 +64,10 @@ class UpdateIpcTests(unittest.TestCase):
         self.assertIn(result["install_mode"], ("automatic", "manual"))
         self.assertIn(result["package_format"], (None, "deb", "arch", "unsupported"))
         self.assertIs(result["state"]["checking"], False)
-        self.assertNotIn("checking", json.loads(server.UPDATE_STATE_FILE.read_text()))
+        self.assertIs(result["state"]["downgrade"], False)
+        persisted = json.loads(server.UPDATE_STATE_FILE.read_text())
+        self.assertNotIn("checking", persisted)
+        self.assertNotIn("downgrade", persisted)
         for method, params in (("updates.get", {"x": 1}),
                                ("updates.check", {}),
                                ("updates.check", {"force": 1}),

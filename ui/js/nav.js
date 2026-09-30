@@ -3,12 +3,19 @@
 
 import { toggleConsole, refreshJobs } from "./console.js";import { $, $$, PAGES, S, iconize, openUrl, toast } from "./core.js";import { defaultArgs, restoreArgs } from "./forms.js";import { setSettings } from "./settings-transport.js";
 export function setNav(page) {
+  if (page !== S.page) $(".page-help-dialog")?.close();
   $$("#nav .nav-item").forEach(a => a.classList.toggle("active", a.dataset.page === page));
   $("#topbar-title").textContent = {
-    preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", pdf: "Create PDF", offset: "Offset & calibration",
+    preparing: "Getting ready", history: "Job history", fetch: "Fetch card art", postprocess: "Image post-processing", pdf: "Create PDF", offset: "Offset & calibration",
     templates: "Cutting templates", extras: "Extras: MTG & Sorcery", sizes: "Sizes & layouts",
     utilities: "Utilities", settings: "Settings",
   }[page] || page;
+  const help = $("#btn-page-help");
+  if (help) {
+    help.disabled = false;
+    help.title = `Help: ${$("#topbar-title").textContent}`;
+    help.setAttribute("aria-label", `Help for ${$("#topbar-title").textContent}`);
+  }
   // The welcome card asks for the app chrome to stand back so the screen it
   // belongs to is the whole view. This runs on every navigation and before the
   // page renders, so leaving that screen restores the top bar without the page
@@ -37,6 +44,18 @@ export function pageFromPath() {
 
 
 export function go(page, prefill, { push = true, anim = true } = {}) {
+  if (uiMode() === "simple" && page && !SIMPLE_PAGES.includes(page)) page = "fetch";
+  const existingPage = $("#page").firstElementChild;
+  if (page !== S.page && typeof S.pageGuard === "function" && existingPage?.isConnected) {
+    const guard = S.pageGuard;
+    Promise.resolve().then(() => guard()).then(ok => {
+      if (ok !== false) {
+        S.pageGuard = null;
+        go(page, prefill, { push, anim });
+      }
+    }).catch(() => {});
+    return false;
+  }
   if (prefill) applyPrefill(page, prefill);
   const pageEl = $("#page");
   const previous = pageEl.firstElementChild;
@@ -92,6 +111,9 @@ export function applyPrefill(page, prefill) {
   // in that kind's form slot, so the page opens on exactly what the job ran.
   if (prefill.kind && S.manifest?.[prefill.kind]?.page === page) {
     S.forms[prefill.kind] = restoreArgs(prefill.kind, prefill.args || {});
+    if (page === "postprocess") S.postprocessPrefill = { ...prefill };
+  } else if (page === "postprocess" && prefill.processor_id) {
+    S.postprocessPrefill = { ...prefill };
   } else if (page === "pdf" && prefill.card_size) {
     S.forms.create_pdf = defaultArgs("create_pdf");
     S.forms.create_pdf.card_size = prefill.card_size;
@@ -111,6 +133,19 @@ export function bindNav() {
   });
   $$(".mode-switch .ms-btn").forEach(b => b.onclick = () => setUiMode(b.dataset.mode));
   $("#btn-console").onclick = toggleConsole;
+  $("#btn-page-help").onclick = async event => {
+    const button = event.currentTarget;
+    const page = S.page;
+    button.disabled = true;
+    try {
+      const { showPageHelp } = await import("./page-help.js");
+      if (button.isConnected && S.page === page) showPageHelp(page, button);
+    } catch {
+      toast("err", "Could not open page help. Please try again.");
+    } finally {
+      button.disabled = false;
+    }
+  };
   $$("#theme-switch .ts-btn").forEach(b => b.onclick = () => setTheme(b.dataset.theme));
 }
 
@@ -153,7 +188,7 @@ export function setTheme(theme) {
    paths. Real paths stay in job.cmd for the engine. */
 
 
-export const SIMPLE_PAGES = ["history", "fetch", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
+export const SIMPLE_PAGES = ["history", "fetch", "postprocess", "pdf", "offset", "settings"];   // what the nav keeps in simple mode
 
 
 export function uiMode() {
@@ -202,9 +237,9 @@ export async function setUiMode(mode) {
   const page = S.page || "history";
   if (mode === "simple" && !SIMPLE_PAGES.includes(page)) {
     go("fetch");
-    toast("ok", "Simple: just the essentials. Fetch art, make the PDF, and calibrate your printer.");
+    toast("ok", "Simple: just the essentials. Fetch art, optionally improve it, make the PDF, and calibrate your printer.");
   } else {
-    if (page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
+    if (page === "postprocess" || page === "pdf" || page === "offset" || page === "settings") go(page, null, { push: false }); // re-render mode-specific forms/cards
     toast("ok", mode === "simple" ? "Simple: navigation shows only the essentials." : "Advanced: every page and control is available.");
   }
   // A mode switch changes only local presentation. Pollers already keep jobs

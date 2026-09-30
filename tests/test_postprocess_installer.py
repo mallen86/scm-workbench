@@ -1,0 +1,125 @@
+"""Offline, hash-locked dependency installer contract."""
+
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from scm_workbench import advanced_model, postprocess_installer
+
+
+class InstallerTests(unittest.TestCase):
+    def test_resolution_download_and_install_are_hash_locked_and_offline(self):
+        with tempfile.TemporaryDirectory(prefix="postprocess-installer-") as temp:
+            stage = Path(temp) / "stage"
+            stage.mkdir()
+            target = stage / "site-packages"
+            report = stage / "resolve-report.json"
+            lock = stage / "requirements.lock"
+            wheelhouse = stage / "wheels"
+            manifest = stage / "installer-manifest.json"
+            manifest.write_text(json.dumps({
+                "stage": str(stage), "target": str(target),
+                "requirements": ["demo==1.0"], "resolve_report": str(report),
+                "lock_file": str(lock), "wheelhouse": str(wheelhouse),
+            }), encoding="utf-8")
+            wheel_bytes = b"fixture wheel bytes"
+            digest = hashlib.sha256(wheel_bytes).hexdigest()
+            calls = []
+
+            def fake_run(argv, label):
+                calls.append((argv, label))
+                if "--dry-run" in argv:
+                    report.write_text(json.dumps({"install": [{
+                        "metadata": {"name": "demo", "version": "1.0"},
+                        "download_info": {
+                            "url": "https://files.pythonhosted.org/packages/demo-1.0-py3-none-any.whl",
+                            "archive_info": {"hashes": {"sha256": digest}},
+                        },
+                    }]}), encoding="utf-8")
+                elif "download" in argv:
+                    (wheelhouse / "demo-1.0-py3-none-any.whl").write_bytes(wheel_bytes)
+                else:
+                    (target / "demo.py").write_text("VALUE = 1\n", encoding="utf-8")
+                    (stage / "install-report.json").write_text('{"install": []}', encoding="utf-8")
+
+            with mock.patch.object(postprocess_installer, "_run", side_effect=fake_run):
+                postprocess_installer.install(manifest)
+
+            self.assertEqual(len(calls), 3)
+            self.assertIn("--dry-run", calls[0][0])
+            self.assertIn("--require-hashes", calls[1][0])
+            self.assertIn("--no-deps", calls[1][0])
+            self.assertIn("--no-index", calls[2][0])
+            self.assertIn("--no-compile", calls[2][0])
+            self.assertIn("--require-hashes", calls[2][0])
+            self.assertEqual(
+                lock.read_text(encoding="utf-8"),
+                f"demo==1.0 --hash=sha256:{digest}\n",
+            )
+
+    def test_fixed_model_manifest_rejects_other_platforms_wheels(self):
+        with tempfile.TemporaryDirectory(prefix="postprocess-model-manifest-") as temp:
+            stage = Path(temp) / "stage"
+            stage.mkdir()
+            manifest = stage / "installer-manifest.json"
+            payload = {
+                "stage": str(stage), "target": str(stage / "site-packages"),
+                "resolve_report": str(stage / "resolve-report.json"),
+                "lock_file": str(stage / "requirements.lock"),
+                "wheelhouse": str(stage / "wheels"), "model": True,
+            }
+            for platform in ("darwin", "win32", "linux"):
+                with self.subTest(platform=platform), mock.patch.object(
+                        advanced_model, "REQUIREMENTS",
+                        advanced_model.requirements_for_platform(platform)):
+                    payload["requirements"] = list(advanced_model.REQUIREMENTS)
+                    manifest.write_text(json.dumps(payload), encoding="utf-8")
+                    self.assertEqual(postprocess_installer._load_manifest(manifest)["requirements"],
+                                     list(advanced_model.REQUIREMENTS))
+                    payload["requirements"] = [r for r in advanced_model.REQUIREMENTS
+                                                if not r.startswith("onnxruntime")]
+                    payload["requirements"].append("onnxruntime==1.30.0" if platform != "darwin"
+                                                   else "onnxruntime-gpu==1.26.0")
+                    manifest.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(postprocess_installer.InstallerError):
+                        postprocess_installer._load_manifest(manifest)
+
+    def test_cuda_profile_manifest_must_match_approved_exact_requirements(self):
+        with tempfile.TemporaryDirectory() as temp:
+            stage = Path(temp)
+            manifest = stage / "installer-manifest.json"
+            payload = {"stage": str(stage), "target": str(stage / "site-packages"),
+                       "resolve_report": str(stage / "resolve-report.json"),
+                       "lock_file": str(stage / "requirements.lock"),
+                       "wheelhouse": str(stage / "wheels"), "model": True,
+                       "cuda_profile": "cuda13",
+                       "requirements": list(advanced_model.requirements_for_platform("linux", "cuda13"))}
+            with mock.patch.object(postprocess_installer.sys, "platform", "linux"):
+                manifest.write_text(json.dumps(payload))
+                self.assertEqual(postprocess_installer._load_manifest(manifest)["cuda_profile"], "cuda13")
+                payload["requirements"] = list(advanced_model.requirements_for_platform("linux", "cuda12"))
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+                payload["cuda_profile"] = "amd"
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+                payload.pop("model")
+                manifest.write_text(json.dumps(payload))
+                with self.assertRaises(postprocess_installer.InstallerError):
+                    postprocess_installer._load_manifest(manifest)
+
+    def test_download_hash_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="postprocess-wheel-") as temp:
+            wheelhouse = Path(temp)
+            (wheelhouse / "demo.whl").write_bytes(b"wrong")
+            with self.assertRaises(postprocess_installer.InstallerError):
+                postprocess_installer._verify_downloads(wheelhouse, {"0" * 64})
+
+
+if __name__ == "__main__":
+    unittest.main()

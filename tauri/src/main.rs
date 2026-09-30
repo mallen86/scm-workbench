@@ -24,11 +24,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tauri::Emitter;
 use tauri::{
     AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 
+mod custom_art;
 mod ipc;
 mod update_helper;
 use ipc::WorkerRpc;
@@ -273,6 +275,171 @@ async fn wb_back_image_import(
     state.inner().import_selected_back_image(source_path)
 }
 
+/// Native postprocessor import owns the picker. The selected source is passed
+/// only to the private worker import boundary; browsers cannot provide this
+/// absolute-path capability.
+#[tauri::command]
+async fn wb_postprocessor_import(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+) -> Result<Value, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Import Python processor")
+        .add_filter("Python files", &["py"])
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "Python processor picker failed".to_string())
+        .and_then(|result| result.map_err(|_| "Python processor picker failed".to_string()))?;
+    let Some(path) = selected else {
+        return Ok(Value::Null);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| "selected processor path is unavailable".to_string())?;
+    let source_path = path
+        .to_str()
+        .ok_or_else(|| "selected processor path is not valid UTF-8".to_string())?;
+    if source_path.as_bytes().len() > 4096
+        || source_path
+            .chars()
+            .any(|character| character.is_control() || character == '\u{7f}')
+    {
+        return Err("selected processor path is invalid".to_string());
+    }
+    state.inner().import_selected_postprocessor(source_path)
+}
+
+/// Run a private custom-art start/poll exchange without monopolizing the
+/// serialized worker call lock between polls.
+fn run_custom_art_import(
+    worker: WorkerRpc,
+    destination: String,
+    source_paths: Vec<String>,
+) -> Result<Value, String> {
+    let started = worker.start_custom_art_import(&destination, &source_paths)?;
+    if started.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Ok(started);
+    }
+    let operation_id = started
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "malformed custom art import response".to_string())?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(600);
+    loop {
+        if Instant::now() >= deadline {
+            return Err("custom art import timed out".into());
+        }
+        let polled = worker.poll_custom_art_import(&operation_id)?;
+        if polled.get("status").and_then(Value::as_str) == Some("done") {
+            return polled
+                .get("result")
+                .cloned()
+                .ok_or_else(|| "malformed custom art import response".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Consume a one-use native OS drop grant, then copy via the worker's private
+/// import operation. JavaScript never supplies or receives source paths.
+#[tauri::command]
+async fn wb_custom_art_import(
+    window: WebviewWindow,
+    grants: State<'_, custom_art::DropGrants>,
+    state: State<'_, WorkerRpc>,
+    destination: String,
+    token: String,
+) -> Result<Value, String> {
+    if window.label() != "main" || !custom_art::validate_destination(&destination) {
+        return Err("invalid custom art import".into());
+    }
+    let source_paths = grants.consume(window.label(), &token)?;
+    if destination == "back" && source_paths.len() != 1 {
+        return Err("card back requires exactly one dropped image".into());
+    }
+    let worker = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_custom_art_import(worker, destination, source_paths)
+    })
+    .await
+    .map_err(|_| "custom art import task failed".to_string())?
+}
+
+/// Parent-owned image picker; card backs select one file only.
+/// Cancellation is represented as null.
+#[tauri::command]
+async fn wb_custom_art_pick(
+    window: WebviewWindow,
+    state: State<'_, WorkerRpc>,
+    destination: String,
+) -> Result<Value, String> {
+    if window.label() != "main" || !custom_art::validate_destination(&destination) {
+        return Err("invalid custom art destination".into());
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose custom card art")
+        .add_filter(
+            "Images",
+            &[
+                "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "tif", "tiff", "bmp",
+                "dib", "avif", "heif", "heic", "qoi", "dds", "jp2", "j2k",
+            ],
+        );
+    if destination == "back" {
+        dialog.pick_file(move |path| {
+            let _ = sender.send(path.into_iter().collect::<Vec<_>>());
+        });
+    } else {
+        dialog.pick_files(move |paths| {
+            let _ = sender.send(paths.unwrap_or_default());
+        });
+    }
+    let paths = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| "custom art picker failed".to_string())?
+        .map_err(|_| "custom art picker failed".to_string())?;
+    if paths.is_empty() {
+        return Ok(Value::Null);
+    };
+    if paths.is_empty() || paths.len() > custom_art::MAX_PATHS {
+        return Err("invalid custom art selection".into());
+    }
+    let source_paths = paths
+        .into_iter()
+        .map(|path| {
+            let path = path
+                .into_path()
+                .map_err(|_| "selected image path is unavailable".to_string())?;
+            let value = path
+                .to_str()
+                .ok_or_else(|| "selected image path is invalid".to_string())?;
+            custom_art::validate_path(value)?;
+            if !path.is_absolute() {
+                return Err("selected image path is invalid".into());
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let worker = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_custom_art_import(worker, destination, source_paths)
+    })
+    .await
+    .map_err(|_| "custom art import task failed".to_string())?
+}
+
 /// Native artifact save. The selected destination is consumed here and is
 /// never returned to JavaScript before the worker has copied it. Rust only
 /// accepts an opaque grant and a bounded basename hint from the WebView.
@@ -391,6 +558,9 @@ fn main() {
             wb_pick_repo_directory,
             wb_decklist_import,
             wb_back_image_import,
+            wb_postprocessor_import,
+            wb_custom_art_import,
+            wb_custom_art_pick,
             wb_save_artifact
         ])
         .manage(worker_slot.clone())
@@ -399,6 +569,7 @@ fn main() {
             #[cfg(windows)]
             job: Mutex::new(None),
         })
+        .manage(custom_art::DropGrants::default())
         .manage(WorkerRpc::default())
         .setup(|app| {
             let exe = std::env::current_exe().expect("current_exe");
@@ -617,6 +788,39 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(drop_event) = event {
+                if window.label() == "main" {
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    // Hover notifications never authorize imports or expose paths.
+                    let hover = match drop_event {
+                        tauri::DragDropEvent::Enter { position, .. } |
+                        tauri::DragDropEvent::Over { position } => Some(Some(position)),
+                        tauri::DragDropEvent::Leave => Some(None),
+                        _ => None,
+                    };
+                    if let Some(position) = hover {
+                        let payload = position.and_then(|position| custom_art::logical_drop_position(
+                            position.x, position.y, scale, cfg!(target_os = "macos"),
+                        )).map(|(x, y)| serde_json::json!({"phase":"over","x":x,"y":y}))
+                          .unwrap_or_else(|| serde_json::json!({"phase":"leave"}));
+                        let _ = window.emit_to(tauri::EventTarget::webview_window("main"), "custom-art-drop", payload);
+                    }
+                    if let tauri::DragDropEvent::Drop { paths, position } = drop_event {
+                    let position = custom_art::logical_drop_position(
+                        position.x, position.y, scale, cfg!(target_os = "macos"),
+                    );
+                    let payload = if let Some((x, y)) = position {
+                        match window.app_handle().state::<custom_art::DropGrants>().issue(window.label(), paths) {
+                            Ok(token) => serde_json::json!({"token":token,"x":x,"y":y}),
+                            Err(error) => serde_json::json!({"error":error.chars().take(256).collect::<String>(),"x":x,"y":y}),
+                        }
+                    } else {
+                        serde_json::json!({"error":"invalid drop position","x":0,"y":0})
+                    };
+                    let _ = window.emit_to(tauri::EventTarget::webview_window("main"), "custom-art-drop", payload);
+                    }
+                }
+            }
             // The window goes, protocol EOF first gives Python a bounded
             // chance to reap its jobs. Native process-group/job-object
             // termination remains the fallback and hard-exit backstop.
@@ -893,6 +1097,7 @@ fn spawn_worker(
                 .open(log_path)?;
             Stdio::from(f)
         })
+        .arg("-B")
         .arg("-X")
         .arg("utf8")
         .arg("-m")
@@ -907,9 +1112,12 @@ fn spawn_worker(
         root.to_path_buf()
     };
     cmd.env("PYTHONPATH", pkg);
-    // The packaged app/runtime tree is immutable: sealed on macOS and normally
-    // root-owned under /usr/lib on Linux. Keeping the worker bytecode-less
-    // prevents first launch from trying to write __pycache__ into that tree.
+    // The packaged app/runtime tree is immutable: sealed under Contents on
+    // macOS and normally root-owned under /usr/lib on Linux. Python compiling
+    // __pycache__ files there would break the macOS seal or attempt to mutate
+    // package-manager-owned files. The explicit -B above protects every
+    // platform; keep the environment guard on Unix too so launches remain
+    // write-free if argv is refactored.
     #[cfg(unix)]
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]
