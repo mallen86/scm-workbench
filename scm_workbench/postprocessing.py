@@ -497,8 +497,14 @@ def _decoded_dimensions(stream, fmt: str) -> tuple[int, int]:
                 return dimensions
     except IntegrityError:
         raise
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError) as exc:
+        raise IntegrityError(
+            "This image has too many pixels to process safely. Use a smaller "
+            "original image; restore or re-fetch "
+            "images that were already upscaled."
+        ) from exc
     except Exception as exc:
-        raise IntegrityError("image is not decodable") from exc
+        raise IntegrityError("The image could not be read as a valid image. Restore or re-fetch it and retry.") from exc
 
 
 def _digest_stream(stream, *, cancelled: Callable[[], bool] | None = None) -> str:
@@ -566,7 +572,10 @@ def _stable_image(path: Path, root: Path, role: str, *, cancelled: Callable[[], 
             head = stream.read(64)
             fmt = _source_image_format(expected_format, head)
             if fmt is None: return None
-            width, height = _decoded_dimensions(stream, fmt)
+            try:
+                width, height = _decoded_dimensions(stream, fmt)
+            except IntegrityError as exc:
+                raise IntegrityError(f'Image "{path.name}": {exc}') from exc
             if width <= 0 or height <= 0 or width * height > 200_000_000:
                 raise IntegrityError("image dimensions are outside the supported bounds")
             digest = _digest_stream(stream, cancelled=cancelled)
@@ -722,7 +731,9 @@ def validate_staged_results(entries: Sequence[Mapping[str, Any]], *, run_dir: st
             if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or
                     getattr(st, "st_nlink", 1) != 1):
                 raise IntegrityError("processor result is not a private regular file")
-            if st.st_size > OUTPUT_MAX_BYTES: raise IntegrityError("processor result is too large")
+            if st.st_size > OUTPUT_MAX_BYTES:
+                raise IntegrityError(f'Processed image "{path.name}" exceeds the 64-MiB file-size limit. '
+                                     "Use smaller original images or less detail/noise in the processor output.")
             identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
             flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
             if hasattr(os, "O_NOFOLLOW"): flags |= os.O_NOFOLLOW
@@ -733,7 +744,10 @@ def validate_staged_results(entries: Sequence[Mapping[str, Any]], *, run_dir: st
                     raise IntegrityError("processor result changed while opening")
                 fmt = _format_from_header(stream.read(64))
                 if fmt != entry.get("format"): raise IntegrityError("processor changed image format")
-                width, height = _decoded_dimensions(stream, fmt)
+                try:
+                    width, height = _decoded_dimensions(stream, fmt)
+                except IntegrityError as exc:
+                    raise IntegrityError(f'Processed image "{path.name}": {exc}') from exc
                 after_read = os.fstat(stream.fileno())
             after = os.stat(path, follow_symlinks=False)
             if ((after_read.st_dev, after_read.st_ino, after_read.st_size, after_read.st_mtime_ns) != identity or

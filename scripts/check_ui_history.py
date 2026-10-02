@@ -224,10 +224,12 @@ const formsSource = fs.readFileSync(process.argv[2], "utf8")
   .replace('from "./nav.js"', `from "${navUrl}"`)
   .replace('from "./settings-transport.js"', `from "${settingsTransportUrl}"`);
 const formsUrl = dataUrl(formsSource);
+const progressUrl = dataUrl(fs.readFileSync(process.argv[4], "utf8"));
 const historySource = fs.readFileSync(process.argv[3], "utf8")
   .replace('from "./core.js"', `from "${coreUrl}"`)
   .replace('from "./forms.js"', `from "${formsUrl}"`)
-  .replace('from "./nav.js"', `from "${navUrl}"`);
+  .replace('from "./nav.js"', `from "${navUrl}"`)
+  .replace('from "./job-notice-progress.js"', `from "${progressUrl}"`);
 const history = await import(dataUrl(historySource));
 const forms = await import(formsUrl);
 
@@ -340,10 +342,80 @@ history.openJobSettings({ kind: "update", title: "Fixture", args: {} });
 if (globalThis.histGo || globalThis.histToasts.length)
   fail("a page-less job navigated or announced something");
 
+// Persisted failure rows must work without an active processor page or console.
+const rowText = node => typeof node === "string" ? node : (node?.kids || []).map(rowText).join(" ");
+for (const mode of ["simple", "advanced"]) {
+  globalThis.histMode = mode;
+  const job = {kind:"postprocess_images", title:"Failed processing", status:"fail", cmd:"",
+    postprocess_outcome:"unchanged", postprocess_error:"Close other applications. <img src=x onerror=alert(1)>"};
+  let text = rowText(history.jobHistoryRow(job));
+  if (!text.includes(job.postprocess_error) || !text.includes("originals unchanged"))
+    fail(`${mode} history hides the actionable persisted reason`);
+  job.postprocess_outcome = "needs_attention";
+  text = rowText(history.jobHistoryRow(job));
+  if (!text.includes("Rollback could not be verified") || text.includes("originals unchanged"))
+    fail(`${mode} history hides the rollback warning`);
+  for (const status of ["ok", "running", "killed"]) {
+    job.status = status;
+    job.postprocess_outcome = "unchanged";
+    if (rowText(history.jobHistoryRow(job)).includes(job.postprocess_error))
+      fail(`${mode} history exposes a stale ${status} failure reason`);
+  }
+  job.status = "killed";
+  job.postprocess_outcome = "needs_attention";
+  if (!rowText(history.jobHistoryRow(job)).includes("Rollback could not be verified"))
+    fail(`${mode} history hides cancelled-job rollback warnings`);
+  job.status = "fail";
+  job.postprocess_outcome = "unchanged";
+  const generic = rowText(history.jobHistoryRow({...job, postprocess_error:undefined}));
+  for (const reason of ["é".repeat(1025), 17, {}, "bad\u0000value"]) {
+    job.postprocess_error = reason;
+    if (rowText(history.jobHistoryRow(job)) !== generic)
+      fail(`${mode} history renders malformed failure metadata`);
+  }
+}
+const descendants = node => typeof node === "object" && node ? [node, ...(node.kids || []).flatMap(descendants)] : [];
+const visibleText = node => typeof node === "string" ? node :
+  (node?.tag === "details" && !node.attrs.open ? node.kids.slice(0, 1) : node?.kids || []).map(visibleText).join(" ");
+const skipItem = {name: "Cárd  A.png", role: "front", reason: "Already at 1200 PPI <img src=x onerror=alert(1)>"};
+for (const mode of ["simple", "advanced"]) {
+  globalThis.histMode = mode;
+  for (const [status, outcome] of [["ok", "committed"], ["ok", "unchanged"], ["fail", "unchanged"],
+                                  ["fail", "needs_attention"], ["killed", "needs_attention"], ["ok", undefined], ["killed", undefined]]) {
+    const job = {kind: "postprocess_images", title: "Persisted processing", status, cmd: "",
+      postprocess_outcome: outcome, postprocess_error: "Close other applications.",
+      postprocess_skips: {count: 2, total: 2, reasons: [skipItem]}};
+    const row = history.jobHistoryRow(job);
+    const disclosure = descendants(row).find(node => node.tag === "details");
+    if (!disclosure || disclosure.attrs.open || visibleText(row).includes(skipItem.name) || visibleText(row).includes(skipItem.reason))
+      fail(`${mode} history exposes collapsed filenames`);
+    if (status === "fail" && !visibleText(row).includes(job.postprocess_error)) fail(`${mode} hid the failure`);
+    if (outcome === "needs_attention" && !visibleText(row).includes("Rollback could not be verified"))
+      fail(`${mode} hid the rollback warning`);
+    if ((status !== "ok" || !outcome) && /resized|saved/.test(visibleText(row)))
+      fail(`${mode} unverified history outcome claimed resized results`);
+    let stopped = false;
+    disclosure.attrs.onclick({stopPropagation() { stopped = true; }});
+    disclosure.attrs.open = true;
+    if (!stopped || !visibleText(row).includes(skipItem.reason)) fail(`${mode} history details are inaccessible`);
+    const text = rowText(row);
+    if (!text.includes("left unchanged") || !text.includes("game/front/Cárd  A.png") || !text.includes(skipItem.reason))
+      fail(`${mode} ${status} persisted history lost named skip explanations`);
+    if (!text.includes("1 more skip reason in the job log")) fail(`${mode} history lost omitted-reason count`);
+    if (status === "ok" && text.includes("saved")) fail(`${mode} all-skipped history claims images were saved`);
+    if (outcome === "needs_attention" && (!text.includes("Rollback could not be verified") ||
+        text.indexOf("Rollback could not be verified") > text.indexOf(skipItem.reason)))
+      fail(`${mode} history skip details overrode rollback warnings`);
+    if (status === "fail" && !text.includes(job.postprocess_error)) fail(`${mode} skip details hid history failure reason`);
+    job.postprocess_skips.reasons[0] = {...skipItem, reason: "é".repeat(129)};
+    if (rowText(history.jobHistoryRow(job)).includes("Details")) fail(`${mode} history rendered invalid skip metadata`);
+  }
+}
+console.log("ok: persisted image-processing failures remain actionable in both history modes");
 console.log("ok: job history page routing, manifest filtering, and settings restoration pass");
 '''.strip()
     result = subprocess.run(
-        [node, "--input-type=module", "-", str(forms_path), str(history_path)],
+        [node, "--input-type=module", "-", str(forms_path), str(history_path), str(JS / "job-notice-progress.js")],
         input=node_script,
         text=True,
         capture_output=True,

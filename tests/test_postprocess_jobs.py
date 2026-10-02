@@ -82,15 +82,21 @@ class PostprocessJobTests(unittest.TestCase):
             "scope": "front",
         })
 
-    def test_only_fixed_linux_gpu_runner_gets_larger_bounded_address_space(self):
+    def test_only_fixed_upscalers_get_larger_bounded_memory_budgets(self):
         advanced = server.BUILTIN_ADVANCED_UPSCALER_ID
-        for platform, expected in (("linux", 16), ("linux2", 16),
-                                   ("darwin", 4), ("win32", 4)):
+        for platform, expected in (("linux", 16), ("linux2", 16), ("darwin", 4)):
             with self.subTest(platform=platform):
                 self.assertEqual(server._postprocess_address_space(advanced, platform=platform),
                                  expected * 1024 ** 3)
-        self.assertEqual(server._postprocess_address_space("custom-processor", platform="linux"),
-                         4 * 1024 ** 3)
+        memory = server.postprocess_memory
+        info = memory.MemoryInfo(32 * memory.GIB, 24 * memory.GIB, 40 * memory.GIB)
+        for processor in (advanced, server.BUILTIN_SIMPLE_UPSCALER_ID):
+            self.assertEqual(server._postprocess_address_space(processor, platform="win32", memory_info=info),
+                             16 * memory.GIB)
+        with mock.patch.object(memory, "read_windows_memory", side_effect=AssertionError("custom must retain its cap")):
+            for platform in ("win32", "linux", "darwin"):
+                self.assertEqual(server._postprocess_address_space("custom-processor", platform=platform),
+                                 4 * memory.GIB)
 
     def test_system_cuda_library_paths_only_reach_fixed_linux_runner(self):
         cuda = self.root / "cuda" / "lib64"
@@ -135,6 +141,62 @@ class PostprocessJobTests(unittest.TestCase):
             "index": 1, "total": 1, "name": "card.png", "role": "front",
         }))
         self.assertEqual(job["progress"], {"current": 1, "total": 1, "label": "card.png"})
+
+    def test_simple_skip_frames_are_authorized_sequential_and_bounded(self):
+        frame = {"index": 1, "total": 2, "name": "Cárd  A.png", "role": "front", "reason": "Embedded resolution is already at or above 1200 PPI"}
+        job = {"kind": "postprocess_images", "postprocess_builtin_skips": True,
+               "image_total": 2, "postprocess_entries": [
+                   {"name": "Cárd  A.png", "role": "front"}, {"name": "B.png", "role": "front"}],
+               "progress": {"current": 0, "total": 2}, "log_lines": [], "subs": []}
+        def send(value):
+            server._append_job_line(job, server._POSTPROCESS_SKIP_PREFIX + json.dumps(value, ensure_ascii=False))
+        for value in ({**frame, "index": True}, {**frame, "index": 2}, {**frame, "total": 1025},
+                      {**frame, "total": 2.0}, {**frame, "name": "other.png"}, {**frame, "role": "back"},
+                      {**frame, "name": "../card.png"}, {**frame, "extra": 1},
+                      {**frame, "reason": "é" * 129}, {**frame, "reason": []},
+                      {**frame, "reason": "bad\nreason"}, {**frame, "reason": "bad\u202ereason"},
+                      {**frame, "reason": " "}, {**frame, "reason": "x" * 5000}):
+            send(value)
+            self.assertNotIn("postprocess_skips", job)
+        server._append_job_line(job, server._POSTPROCESS_SKIP_PREFIX + '{"index":' + "[" * 1100 + "0" + "]" * 1100 + "}")
+        self.assertNotIn("postprocess_skips", job)
+        job["postprocess_builtin_skips"] = False
+        send(frame)
+        self.assertNotIn("postprocess_skips", job)
+        job["postprocess_builtin_skips"] = True
+        send(frame)
+        self.assertEqual(job["postprocess_skips"]["count"], 1)
+        self.assertEqual(job["progress"]["current"], 0)  # Skip is not a progress increment.
+        send(frame)
+        self.assertEqual(job["postprocess_skips"]["count"], 1)
+        progress = {key: frame[key] for key in ("index", "total", "name", "role")}
+        server._append_job_line(job, "WB_POSTPROCESS_PROGRESS " + json.dumps(progress))
+        send(frame)  # Late duplicate is rejected too.
+        send({**frame, "index": 2, "name": "B.png"})
+        self.assertEqual(job["postprocess_skips"]["count"], 2)
+        self.assertEqual(job["progress"]["current"], 1)
+
+    def test_skip_summary_keeps_counts_at_1024_without_unbounded_reason_lists(self):
+        total = 1024
+        # Names and reasons at their UTF-8 limits force the aggregate byte cap
+        # before the item-count cap; later count digits cannot invalidate it.
+        entries = [{"name": str(index).zfill(5) + "é" * 125, "role": "front"} for index in range(total)]
+        job = {"kind": "postprocess_images", "postprocess_builtin_skips": True,
+               "image_total": total, "postprocess_entries": entries,
+               "progress": {"current": 0, "total": total}, "log_lines": [], "subs": []}
+        for index, entry in enumerate(entries, 1):
+            skip = {**entry, "index": index, "total": total, "reason": "é" * 128}
+            server._append_job_line(job, server._POSTPROCESS_SKIP_PREFIX + json.dumps(skip, ensure_ascii=False))
+            progress = {key: skip[key] for key in ("index", "total", "name", "role")}
+            server._append_job_line(job, "WB_POSTPROCESS_PROGRESS " + json.dumps(progress))
+        summary = server._public_postprocess_skips(job)
+        self.assertEqual((summary["count"], summary["total"]), (1024, 1024))
+        self.assertLessEqual(len(summary["reasons"]), 8)
+        self.assertGreater(len(summary["reasons"]), 0)
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8")), 4096)
+        # Public results must not alias private detail storage.
+        summary["reasons"][0]["reason"] = "changed"
+        self.assertNotEqual(summary, job["postprocess_skips"])
 
     def test_advanced_activity_is_bounded_authorized_and_never_completes_an_image(self):
         first = {"index": 1, "total": 2, "name": "Card  A.png", "role": "front",
@@ -347,6 +409,8 @@ class PostprocessJobTests(unittest.TestCase):
         })
         self.assertEqual(job["progress"], {"current": 0, "total": 1})
         self.assertEqual(job["image_total"], 1)
+        manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIsNone(manifest["limits"]["cpu_seconds"])
 
     def test_simple_mode_can_preview_the_ready_bundled_upscaler(self):
         image = self.repo / "game" / "front" / "card.png"
@@ -371,6 +435,124 @@ class PostprocessJobTests(unittest.TestCase):
                 "revision_hash": item["revision"],
                 "requirements": "",
             })
+
+    def test_simple_builtin_mixed_resolution_batch_preserves_skips_and_logs_names(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        self.settings["ui_mode"] = "simple"
+        originals = {}
+        for name, ppi in (("300.png", 300), ("600.png", 600), ("1200.png", 1200),
+                          ("1600  PPI.png", 1600), ("2400.png", 2400)):
+            path = self.repo / "game/front" / name
+            options = {} if ppi is None else {"dpi": ppi if isinstance(ppi, tuple) else (ppi, ppi)}
+            Image.new("RGB", (3, 5), "red").save(path, **options)
+            originals[name] = path.read_bytes()
+        store = server._postprocessor_store()
+        item = store.get(server.BUILTIN_SIMPLE_UPSCALER_ID)
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "ok", job.get("log_lines"))
+        self.assertEqual(job["progress"]["current"], 5)
+        self.assertEqual(job["progress"]["total"], 5)
+        log = "\n".join(job["log_lines"])
+        for name, reason in (("1200.png", "already at or above 1200"),
+                             ("1600  PPI.png", "already at or above 1200"),
+                             ("2400.png", "already at or above 1200")):
+            self.assertEqual((self.repo / "game/front" / name).read_bytes(), originals[name])
+            self.assertIn(f"game/front/{name}", log)
+            self.assertIn(reason, log)
+        for name, size in (("300.png", (12, 20)), ("600.png", (6, 10))):
+            with Image.open(self.repo / "game/front" / name) as output:
+                self.assertEqual(output.size, size)
+        self.assertEqual(job["postprocess_outcome"], "committed")
+        summary = job["postprocess_skips"]
+        self.assertEqual((summary["count"], summary["total"]), (3, 5))
+        self.assertEqual({item["name"] for item in summary["reasons"]},
+                         {"1200.png", "1600  PPI.png", "2400.png"})
+        listed = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(listed["postprocess_skips"], summary)
+        server.JOBS.clear()
+        historical = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(historical["postprocess_skips"], summary)
+        self.assertEqual(historical["postprocess_outcome"], "committed")
+
+    def test_custom_processor_cannot_spoof_skip_result_or_receive_private_reporter(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        frame = {"index": 1, "total": 1, "name": "card.png", "role": "front", "reason": "Embedded resolution is already at or above 1200 PPI"}
+        source = ("def process_image(image_path, context):\n"
+                  "    assert '_workbench_report_skip' not in context\n"
+                  f"    print({(server._POSTPROCESS_SKIP_PREFIX + json.dumps(frame))!r}, flush=True)\n")
+        item = self.save_and_trust(source)
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "ok", job.get("log_lines"))
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertNotIn("postprocess_skips", job)
+        listed = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertNotIn("postprocess_skips", listed)
+        self.assertEqual(image.read_bytes(), PNG)
+
+    def test_simple_all_skipped_success_is_unchanged_with_persisted_reasons(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        image = self.repo / "game/front/card.png"
+        Image.new("RGB", (3, 5)).save(image, dpi=(1200, 1200))
+        original_bytes = image.read_bytes()
+        original = image.stat()
+        self.settings["ui_mode"] = "simple"
+        item = server._postprocessor_store().get(server.BUILTIN_SIMPLE_UPSCALER_ID)
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "ok", job.get("log_lines"))
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertEqual(job["postprocess_skips"]["count"], 1)
+        self.assertIn("already at or above 1200", job["postprocess_skips"]["reasons"][0]["reason"])
+        self.assertEqual(image.read_bytes(), original_bytes)
+        self.assertEqual((image.stat().st_ino, image.stat().st_mtime_ns), (original.st_ino, original.st_mtime_ns))
+        server.JOBS.clear()
+        historical = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(historical["postprocess_skips"], job["postprocess_skips"])
+        self.assertEqual(historical["postprocess_outcome"], "unchanged")
+
+    def test_simple_skip_reasons_survive_later_size_failure_without_publication(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        skipped = self.repo / "game/front/a.png"
+        Image.new("RGB", (3, 5)).save(skipped, dpi=(1200, 1200))
+        skipped_bytes = skipped.read_bytes()
+        oversized = self.repo / "game/front/b.png"
+        Image.new("RGB", (10, 10)).save(oversized, dpi=(1, 1))
+        original = oversized.read_bytes()
+        item = server._postprocessor_store().get(server.BUILTIN_SIMPLE_UPSCALER_ID)
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "fail", job.get("log_lines"))
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertEqual(job["postprocess_skips"]["count"], 1)
+        self.assertEqual(job["postprocess_skips"]["total"], 2)
+        self.assertIn("above the supported limit", job["postprocess_error"])
+        self.assertEqual(skipped.read_bytes(), skipped_bytes)
+        self.assertEqual(oversized.read_bytes(), original)
+        server.JOBS.clear()
+        historical = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(historical["postprocess_skips"], job["postprocess_skips"])
+        self.assertEqual(historical["postprocess_error"], job["postprocess_error"])
+        self.assertEqual(historical["postprocess_outcome"], "unchanged")
 
     def test_simple_mode_can_preview_only_the_fixed_optional_install(self):
         self.settings["ui_mode"] = "simple"
@@ -604,7 +786,7 @@ class PostprocessJobTests(unittest.TestCase):
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         self.assertNotIn("model_path", manifest)
         self.assertEqual(manifest["environment"], str(site_packages))
-        self.assertEqual(manifest["limits"]["cpu_seconds"], 900)
+        self.assertIsNone(manifest["limits"]["cpu_seconds"])
         self.assertEqual(manifest["limits"]["address_space"], 4 * 1024 ** 3)
         normalized, errors, _warnings = server.normalize_args(
             server.get_manifest()["postprocess_images"],
@@ -637,6 +819,167 @@ class PostprocessJobTests(unittest.TestCase):
         self.assertEqual(fixed_manifest["limits"]["file_size"], 512 * 1024 * 1024)
         self.assertEqual(fixed_manifest["limits"]["open_files"], 128)
         self.assertEqual(fixed_manifest["limits"]["processes"], 8)
+
+    def test_windows_fixed_preparation_uses_adaptive_memory_with_reserve(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        store = server._postprocessor_store()
+        item = store.get(server.BUILTIN_SIMPLE_UPSCALER_ID)
+        run = self.data / "postprocessing/runs/windows-memory"
+        job = {"scm_path": str(self.repo), "cancel_event": threading.Event(),
+               "postprocess_run": str(run), "postprocess_manifest": str(run / "manifest.json")}
+        memory = server.postprocess_memory
+        info = memory.MemoryInfo(32 * memory.GIB, 24 * memory.GIB, 40 * memory.GIB)
+        ready = {"processor": {"trusted": True}, "environment": {"ready": True}}
+        with (mock.patch.object(server.sys, "platform", "win32"),
+              mock.patch.object(server, "_postprocessor_store", return_value=store),
+              mock.patch.object(store, "status", return_value=ready),
+              mock.patch.object(server, "_verify_dependency_environment"),
+              mock.patch.object(memory, "read_windows_memory", return_value=info)):
+            server._prepare_image_postprocess_job(job, {
+                "processor_id": item["id"], "revision_hash": item["revision"], "scope": "front"})
+        manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["limits"]["address_space"], 16 * memory.GIB)
+        self.assertIsNone(manifest["limits"]["cpu_seconds"])
+        self.assertEqual(job["postprocess_memory_reserve"], memory.system_reserve(info))
+        self.assertEqual(image.read_bytes(), PNG)
+
+    def test_low_memory_before_start_is_actionable_without_spawning_or_changing_images(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        failure = server.postprocess_memory.MemoryBudgetError(
+            "Not enough available memory to start safely. Close other applications and retry.")
+        with (mock.patch.object(server, "_prepare_image_postprocess_job", side_effect=failure),
+              mock.patch.object(server.subprocess, "Popen", side_effect=AssertionError("unexpected processor spawn"))):
+            job, errors = self.start_images(item)
+            self.assertEqual(errors, [])
+            self.wait(job)
+            job["preparation_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "fail")
+        self.assertIn("Close other applications", job["postprocess_error"])
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertEqual(image.read_bytes(), PNG)
+        self.assertEqual(server._POSTPROCESS_USERS, 0)
+
+    def test_memory_pressure_or_telemetry_failure_stops_job_and_preserves_originals(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        item = self.save_and_trust(
+            "import time\ndef process_image(image_path, context):\n"
+            "    with image_path.open('ab') as stream:\n        stream.write(b'changed staged copy')\n"
+            "    print('fixture staged output ready', flush=True)\n    time.sleep(10)\n")
+        memory = server.postprocess_memory
+        healthy = memory.MemoryInfo(32 * memory.GIB, 24 * memory.GIB, 40 * memory.GIB)
+        original_prepare = server._prepare_image_postprocess_job
+        def prepare(job, args):
+            result = original_prepare(job, args)
+            job["postprocess_memory_reserve"] = memory.system_reserve(healthy)
+            return result
+        for telemetry_failure in (False, True):
+            with self.subTest(telemetry_failure=telemetry_failure):
+                holder = {}
+                def sample():
+                    job = holder.get("job")
+                    if job is None or "fixture staged output ready" not in job.get("log_lines", []):
+                        return healthy
+                    if telemetry_failure:
+                        raise memory.MemoryBudgetError("Windows memory availability could not be checked; restart Workbench and retry.")
+                    return memory.MemoryInfo(32 * memory.GIB, memory.GIB, 40 * memory.GIB)
+                with (mock.patch.object(server, "_prepare_image_postprocess_job", side_effect=prepare),
+                      mock.patch.object(memory, "read_windows_memory", side_effect=sample)):
+                    job, errors = self.start_images(item)
+                    holder["job"] = job
+                    self.assertEqual(errors, [])
+                    self.wait(job)
+                    job["pump_thread"].join(timeout=3)
+                self.assertEqual(job["status"], "fail", job["log_lines"])
+                self.assertIn("Windows", job["postprocess_error"])
+                self.assertIn("retry", job["postprocess_error"])
+                self.assertFalse(job.get("kill_requested"))
+                self.assertEqual(job["postprocess_outcome"], "unchanged")
+                self.assertEqual(image.read_bytes(), PNG)
+                self.assertEqual(server._POSTPROCESS_USERS, 0)
+                self.assertFalse(Path(job["postprocess_run"]).exists())
+                self.assertFalse(job["memory_monitor_thread"].is_alive())
+
+    def test_memory_watchdog_does_not_fail_an_exited_or_user_cancelled_job(self):
+        memory = server.postprocess_memory
+        proc = mock.Mock()
+        stop = mock.Mock()
+        stop.wait.return_value = False
+        low = memory.MemoryInfo(32 * memory.GIB, 0, 40 * memory.GIB)
+        for exited, cancelled in ((True, False), (False, True)):
+            with self.subTest(exited=exited, cancelled=cancelled):
+                proc.poll.return_value = 0 if exited else None
+                job = {"kind": "postprocess_images", "status": "running", "proc": proc,
+                       "proc_lock": threading.Lock(), "stage_monitor_stop": stop,
+                       "postprocess_memory_reserve": 4 * memory.GIB, "kill_requested": cancelled}
+                with (mock.patch.object(memory, "read_windows_memory", return_value=low),
+                      mock.patch.object(server, "_kill_process_group") as kill):
+                    server._postprocess_memory_monitor(job, proc)
+                kill.assert_not_called()
+                self.assertNotIn("memory_limit_reason", job)
+
+    def test_failure_details_are_bounded_public_and_persisted(self):
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        item = self.save_and_trust("def process_image(image_path, context):\n    raise MemoryError()\n")
+        job, errors = self.start_images(item)
+        self.assertEqual(errors, [])
+        self.wait(job)
+        job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "fail")
+        reason = job["postprocess_error"]
+        self.assertIn("card.png", reason)
+        self.assertIn("Workbench memory budget", reason)
+        self.assertIn("Close other applications", reason)
+        self.assertLessEqual(len(reason.encode("utf-8")), server.POSTPROCESS_ERROR_MAX_BYTES)
+        listed = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(listed["postprocess_error"], reason)
+        server.JOBS.clear()
+        historical = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+        self.assertEqual(historical["postprocess_error"], reason)
+        self.assertEqual(image.read_bytes(), PNG)
+
+    def test_oversized_processed_image_has_named_size_error_and_originals_remain_unchanged(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        item = self.save_and_trust(
+            "from PIL import Image\ndef process_image(image_path, context):\n"
+            "    with Image.open(image_path) as opened:\n        output = opened.resize((20, 20))\n"
+            "    output.save(image_path, format='PNG')\n    output.close()\n")
+        with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 100):
+            job, errors = self.start_images(item)
+            self.assertEqual(errors, [])
+            self.wait(job)
+            job["pump_thread"].join(timeout=3)
+        self.assertEqual(job["status"], "fail")
+        self.assertIn("Processed image", job["postprocess_error"])
+        self.assertIn("card.png", job["postprocess_error"])
+        self.assertIn("too many pixels", job["postprocess_error"])
+        self.assertNotIn("not decodable", job["postprocess_error"])
+        self.assertEqual(job["postprocess_outcome"], "unchanged")
+        self.assertEqual(image.read_bytes(), PNG)
+
+    def test_failure_frames_and_exit_codes_have_bounded_actionable_errors(self):
+        job = {"kind": "postprocess_images", "log_lines": [], "subs": []}
+        for invalid in ("not json", json.dumps({"error": []}), json.dumps({"error": "error", "extra": 1})):
+            server._append_job_line(job, "WB_POSTPROCESS_ERROR " + invalid)
+        self.assertNotIn("postprocess_error", job)
+        server._append_job_line(job, "WB_POSTPROCESS_ERROR " + json.dumps({"error": "bad\x00message\n" + "é" * 1500}, ensure_ascii=False))
+        self.assertLessEqual(len(job["postprocess_error"].encode("utf-8")), server.POSTPROCESS_ERROR_MAX_BYTES)
+        self.assertNotIn("\x00", job["postprocess_error"])
+        self.assertNotIn("\n", job["postprocess_error"])
+        for rc in (0xC0000017, 0xC000009A, 0xC000012D, 0xC0000044):
+            self.assertIn("Windows", server._postprocess_exit_message({}, rc))
+            self.assertIn("Close other applications", server._postprocess_exit_message({}, rc))
+        server._append_job_line(job, "Insufficient memory (case 4)")
+        self.assertIn("JPEG encoder", server._postprocess_exit_message(job, 1))
 
     def test_success_publishes_atomically_and_releases_exclusive_lease(self):
         image = self.repo / "game" / "front" / "card.png"
@@ -698,6 +1041,8 @@ class PostprocessJobTests(unittest.TestCase):
             self.wait(job)
         self.assertTrue(job["timed_out"])
         self.assertEqual(job["status"], "fail")
+        self.assertIn("elapsed-time limit", job["postprocess_error"])
+        self.assertIn("smaller batch", job["postprocess_error"])
         self.assertEqual(image.read_bytes(), PNG)
 
     def test_fixed_advanced_run_ignores_idle_limit_but_custom_run_does_not(self):

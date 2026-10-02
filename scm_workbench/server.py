@@ -60,7 +60,7 @@ if __name__ == "__main__":
     sys.modules["scm_workbench.server"] = sys.modules[__name__]
 
 from scm_workbench import repo_sync, updater
-from scm_workbench import advanced_model, cuda_detection, postprocessing
+from scm_workbench import advanced_model, cuda_detection, postprocessing, postprocess_memory
 
 # The one version constant the whole app reports (About-card line, banner,
 # and the updater's notion of "what am I running"). It is pinned per build
@@ -97,6 +97,11 @@ POSTPROCESS_ENV_CACHE_MAX_BYTES = 12 * 1024 * 1024 * 1024
 POSTPROCESS_FREE_SPACE_RESERVE_BYTES = postprocessing.FREE_SPACE_RESERVE_BYTES
 POSTPROCESS_REPORT_MAX_BYTES = 2 * 1024 * 1024
 POSTPROCESS_LINE_MAX_BYTES = 4096
+POSTPROCESS_ERROR_MAX_BYTES = 2048
+POSTPROCESS_SKIP_REASON_MAX_BYTES = 256
+POSTPROCESS_SKIP_MAX_REASONS = 8
+POSTPROCESS_SKIP_SUMMARY_MAX_BYTES = 4096
+_POSTPROCESS_SKIP_PREFIX = "WB_POSTPROCESS_SKIP "
 POSTPROCESS_LOG_MAX_BYTES = 16 * 1024 * 1024
 
 
@@ -3770,6 +3775,72 @@ def _record_advanced_activity(job: dict, text: str) -> None:
         return
 
 
+def _valid_postprocess_skip_item(item: Any) -> bool:
+    if not isinstance(item, dict) or set(item) != {"name", "role", "reason"}:
+        return False
+    name, reason = item["name"], item["reason"]
+    return (item["role"] in ("front", "double_sided", "back") and
+            isinstance(name, str) and bool(name) and name not in (".", "..") and
+            "/" not in name and "\\" not in name and
+            not any(unicodedata.category(char).startswith("C") for char in name) and
+            len(name.encode("utf-8")) <= 255 and
+            isinstance(reason, str) and bool(reason.strip()) and
+            not any(unicodedata.category(char).startswith("C") for char in reason) and
+            len(reason.encode("utf-8")) <= POSTPROCESS_SKIP_REASON_MAX_BYTES)
+
+
+def _public_postprocess_skips(job: dict) -> dict:
+    """The same bounded summary for live, persisted, native, and HTTP jobs."""
+    summary = job.get("postprocess_skips")
+    if (job.get("kind") != "postprocess_images" or not isinstance(summary, dict) or
+            set(summary) != {"count", "total", "reasons"}):
+        return {}
+    count, total, reasons = (summary[key] for key in ("count", "total", "reasons"))
+    if (type(count) is not int or type(total) is not int or not 1 <= count <= total <= 1024 or
+            not isinstance(reasons, list) or not 1 <= len(reasons) <= min(count, POSTPROCESS_SKIP_MAX_REASONS) or
+            any(not _valid_postprocess_skip_item(item) for item in reasons) or
+            len({(item["role"], item["name"]) for item in reasons}) != len(reasons) or
+            len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > POSTPROCESS_SKIP_SUMMARY_MAX_BYTES):
+        return {}
+    return {"count": count, "total": total, "reasons": [dict(item) for item in reasons]}
+
+
+def _record_postprocess_skip(job: dict, text: str) -> None:
+    # A custom processor's stdout is not authorization to claim Simple skips.
+    if (job.get("kind") != "postprocess_images" or not job.get("postprocess_builtin_skips") or
+            len(text.encode("utf-8", "replace")) > POSTPROCESS_LINE_MAX_BYTES):
+        return
+    try:
+        frame = json.loads(text.removeprefix(_POSTPROCESS_SKIP_PREFIX))
+        if not isinstance(frame, dict) or set(frame) != {"index", "total", "name", "role", "reason"}:
+            return
+        index, total = frame["index"], frame["total"]
+        completed = (job.get("progress") or {}).get("current", 0)
+        entries = job.get("postprocess_entries") or []
+        item = {key: frame[key] for key in ("name", "role", "reason")}
+        if (type(index) is not int or type(total) is not int or type(completed) is not int or
+                total != job.get("image_total") or not 1 <= total <= 1024 or len(entries) != total or
+                not 1 <= index <= total or index != completed + 1 or
+                index <= job.get("postprocess_skip_index", 0) or not _valid_postprocess_skip_item(item) or
+                item["name"] != entries[index - 1].get("name") or
+                item["role"] != entries[index - 1].get("role")):
+            return
+        previous = _public_postprocess_skips(job)
+        reasons = previous.get("reasons", [])
+        summary = {"count": previous.get("count", 0) + 1, "total": total, "reasons": reasons}
+        if len(reasons) < POSTPROCESS_SKIP_MAX_REASONS:
+            candidate = {**summary, "reasons": [*reasons, item]}
+            # Reserve count digits for an all-skipped batch before keeping a
+            # detail; later count-only increments must stay within the cap.
+            largest = {**candidate, "count": total}
+            if len(json.dumps(largest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= POSTPROCESS_SKIP_SUMMARY_MAX_BYTES:
+                summary = candidate
+        job["postprocess_skips"] = summary
+        job["postprocess_skip_index"] = index
+    except (ValueError, TypeError, KeyError, IndexError, RecursionError):
+        return
+
+
 _POSTPROCESS_INSTALL_STAGES = frozenset({
     "Resolving compatible PyPI wheels",
     "Downloading the locked wheel set",
@@ -3777,6 +3848,44 @@ _POSTPROCESS_INSTALL_STAGES = frozenset({
     "Downloading verified RealESRGAN_x4plus model (67 MB)",
     "Offline wheel installation complete",
 })
+
+
+def _postprocess_error_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.replace("\x00", " ").split())
+    text = "".join(c for c in text if not unicodedata.category(c).startswith("C"))
+    return text.encode("utf-8", "replace")[:POSTPROCESS_ERROR_MAX_BYTES].decode("utf-8", "ignore")
+
+
+def _set_postprocess_error(job: dict, message: Any) -> None:
+    text = _postprocess_error_text(message)
+    if job.get("kind") == "postprocess_images" and text:
+        with JOBS_LOCK:
+            job["postprocess_error"] = text
+
+
+def _postprocess_timeout_message(job: dict, *, staging: bool = False) -> str:
+    if job.get("idle_timed_out"):
+        minutes = POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS / 60
+        return (f"Processing stopped after {minutes:g} minutes without progress. "
+                "Try fewer or smaller original images, or check the processor in Job history.")
+    minutes = float(job.get("deadline_seconds") or POSTPROCESS_RUN_TIMEOUT_SECONDS) / 60
+    phase = "Image preparation" if staging else "Processing"
+    return (f"{phase} reached the {minutes:g}-minute elapsed-time limit. "
+            "Try a smaller batch or smaller original images.")
+
+
+def _postprocess_exit_message(job: dict, rc: int) -> str:
+    if job.get("jpeg_encoder_memory_error"):
+        return ("The JPEG encoder ran out of memory while saving a processed image. "
+                "Close other applications and retry, or use smaller original images.")
+    if (rc & 0xFFFFFFFF) in {0xC0000017, 0xC000009A, 0xC000012D, 0xC0000044}:
+        return ("Windows stopped the processor because a memory allocation or resource "
+                "quota failed. Close other applications and retry, or use smaller "
+                "original images. See Job history for the Windows exit code.")
+    return (f"The processor stopped unexpectedly (exit code {rc}). "
+            "Check this job's details in Job history before retrying.")
 
 
 def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
@@ -3801,6 +3910,16 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
             log_f.flush()
     with JOBS_LOCK:
         _record_fetch_image_warning(job, text)
+        if job.get("kind") == "postprocess_images":
+            if re.fullmatch(r"Insufficient memory \(case \d+\)", text.strip()):
+                job["jpeg_encoder_memory_error"] = True
+            if text.startswith("WB_POSTPROCESS_ERROR ") and len(text.encode("utf-8", "replace")) <= POSTPROCESS_LINE_MAX_BYTES:
+                try:
+                    error = json.loads(text.removeprefix("WB_POSTPROCESS_ERROR "))
+                    if isinstance(error, dict) and set(error) == {"error"}:
+                        _set_postprocess_error(job, error["error"])
+                except (ValueError, TypeError):
+                    pass
         if job.get("kind") == "postprocess_dependencies" and text.startswith("[processor libraries] "):
             stage = text.removeprefix("[processor libraries] ")
             if stage in _POSTPROCESS_INSTALL_STAGES:
@@ -3808,6 +3927,8 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
                                               if stage == "Offline wheel installation complete" else stage)}
         if text.startswith(_ADVANCED_ACTIVITY_PREFIX):
             _record_advanced_activity(job, text)
+        if text.startswith(_POSTPROCESS_SKIP_PREFIX):
+            _record_postprocess_skip(job, text)
         if text.startswith("WB_POSTPROCESS_PROGRESS "):
             try:
                 progress = json.loads(text.removeprefix("WB_POSTPROCESS_PROGRESS "))
@@ -3881,6 +4002,10 @@ def _persist_jobs(*, strict: bool = False, finalized: Optional[list] = None) -> 
     def slim_row(j: dict) -> dict:
         return ({k: j[k] for k in ("id", "ts", "kind", "title", "cmd", "args", "status", "exit_code", "log_file", "ended", "duration", "scm_path", "artifact_snapshots", "deck_total", "image_warnings", "postprocess_outcome", "postprocess_cpu_warning", "postprocess_cpu_reason", "postprocess_cuda_profile")
                  if k in j}
+                | ({"postprocess_skips": _public_postprocess_skips(j)}
+                   if _public_postprocess_skips(j) else {})
+                | ({"postprocess_error": _postprocess_error_text(j["postprocess_error"])}
+                   if j.get("postprocess_error") and j.get("status") == "fail" else {})
                 | {k: j[k] for k in ("update_token", "expected_version", "result_message") if k in j})
 
     slim = [
@@ -4064,6 +4189,11 @@ def list_jobs() -> dict:
             row["ended"] = j["ended"]
         if j.get("postprocess_outcome"):
             row["postprocess_outcome"] = j["postprocess_outcome"]
+        skips = _public_postprocess_skips(j)
+        if skips:
+            row["postprocess_skips"] = skips
+        if j.get("status") == "fail" and j.get("postprocess_error"):
+            row["postprocess_error"] = _postprocess_error_text(j["postprocess_error"])
         if j.get("postprocess_cpu_warning"):
             row["postprocess_cpu_warning"] = j["postprocess_cpu_warning"]
         if j.get("postprocess_cpu_reason") == "missing_cudnn":
@@ -4092,6 +4222,14 @@ def list_jobs() -> dict:
         if old.get("id") in ids:
             continue
         row = dict(old)
+        skips = _public_postprocess_skips(row)
+        row.pop("postprocess_skips", None)
+        if skips:
+            row["postprocess_skips"] = skips
+        if row.get("status") == "fail" and row.get("postprocess_error"):
+            row["postprocess_error"] = _postprocess_error_text(row["postprocess_error"])
+        else:
+            row.pop("postprocess_error", None)
         row.setdefault("outputs", job_outputs(row))
         # Persisted immutable snapshots mint fresh process-local grants after
         # restart; historical rows without snapshots remain display-only.
@@ -8049,13 +8187,16 @@ def _finalize_dependency_job(job: dict) -> bool:
     return trust_preserved
 
 
-def _postprocess_address_space(processor_id: str, *, platform: str | None = None) -> int:
-    # The fixed Linux CUDA runner reserves more than 8 GiB of *virtual*
-    # address space even for one tile. Keep other/custom processors at 4 GiB;
-    # the runner's independently validated maximum remains 16 GiB.
+def _postprocess_address_space(processor_id: str, *, platform: str | None = None,
+                               memory_info: postprocess_memory.MemoryInfo | None = None) -> int:
     platform = sys.platform if platform is None else platform
+    if platform == "win32" and processor_id in {BUILTIN_SIMPLE_UPSCALER_ID, BUILTIN_ADVANCED_UPSCALER_ID}:
+        info = memory_info if memory_info is not None else postprocess_memory.read_windows_memory()
+        return postprocess_memory.upscaler_budget(info)
+    # CUDA needs a larger *virtual* allowance. Other/custom processors retain
+    # 4 GiB; Windows uses a bounded adaptive committed-memory budget above.
     gib = (16 if processor_id == BUILTIN_ADVANCED_UPSCALER_ID and platform.startswith("linux") else 4)
-    return gib * 1024 * 1024 * 1024
+    return gib * 1024 ** 3
 
 
 def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Path, dict]:
@@ -8091,6 +8232,15 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
     if shutil.disk_usage(run_dir.parent).free < required_free:
         raise postprocessing.ValidationError("not enough free space to stage the image batch safely")
     entries = postprocessing.stage_images(records, run_dir, cancelled=cancelled)
+    fixed_upscaler = bool(item["bundled"] and item["id"] == args["processor_id"] and
+                          item["id"] in {BUILTIN_SIMPLE_UPSCALER_ID, BUILTIN_ADVANCED_UPSCALER_ID})
+    memory_info = (postprocess_memory.read_windows_memory()
+                   if sys.platform == "win32" and fixed_upscaler else None)
+    memory_budget = _postprocess_address_space(args["processor_id"] if fixed_upscaler else "",
+                                              memory_info=memory_info)
+    job["postprocess_memory_budget"] = memory_budget
+    if memory_info is not None:
+        job["postprocess_memory_reserve"] = postprocess_memory.system_reserve(memory_info)
     source_path = run_dir / "processor.py"
     with source_path.open("xb") as source_stream:
         postprocessing._private(source_path)
@@ -8118,8 +8268,8 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         "environment_root": str(store.root / "environments"),
         "revision": item["revision"], "requirements": item["requirements"],
         "contract": store.contract,
-        "limits": {"cpu_seconds": None if fixed_advanced else 900,
-                   "address_space": _postprocess_address_space(args["processor_id"]),
+        "limits": {"cpu_seconds": None,
+                   "address_space": memory_budget,
                    "file_size": 512 * 1024 * 1024, "open_files": 128,
                    "processes": 8},
     }, separators=(",", ":"))
@@ -8128,6 +8278,7 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         manifest_stream.write(payload)
         manifest_stream.flush(); os.fsync(manifest_stream.fileno())
     job["postprocess_builtin_activity"] = fixed_advanced
+    job["postprocess_builtin_skips"] = fixed_upscaler and args["processor_id"] == BUILTIN_SIMPLE_UPSCALER_ID
     if fixed_advanced and sys.platform.startswith("linux"):
         job["postprocess_cuda_profile"] = advanced_model.profile_for_requirements(tuple(item["requirements"]), sys.platform) or "cuda12"
     job["postprocess_entries"] = list(entries)
@@ -8227,6 +8378,40 @@ def _postprocess_stage_monitor(job: dict, proc: subprocess.Popen) -> None:
         return
 
 
+def _postprocess_memory_monitor(job: dict, proc: subprocess.Popen) -> None:
+    """Lightweight pressure watchdog, independent of recursive staging scans."""
+    stop = job["stage_monitor_stop"]
+    reserve = job["postprocess_memory_reserve"]
+    while not stop.wait(0.25):
+        with JOBS_LOCK:
+            if job.get("status") != "running" or job.get("proc") is not proc:
+                return
+        try:
+            reason = postprocess_memory.pressure_message(postprocess_memory.read_windows_memory(), reserve)
+        except postprocess_memory.MemoryBudgetError as exc:
+            reason = str(exc)
+        if reason is None:
+            continue
+        with job.setdefault("proc_lock", threading.Lock()):
+            if job.get("proc_reaped"):
+                return
+            # This watchdog is only started on Windows. Retain the Popen
+            # process handle and the same signal/reap lock used by cancellation.
+            if proc.poll() is not None:
+                job["proc_reaped"] = True
+                return
+            with JOBS_LOCK:
+                if (job.get("status") != "running" or job.get("proc") is not proc or
+                        job.get("kill_requested") or job.get("timed_out")):
+                    return
+                job["memory_limit_reason"] = _postprocess_error_text(reason)
+            try:
+                _kill_process_group(proc)
+            except Exception:
+                pass
+        return
+
+
 def _job_timeout(job: dict, proc: subprocess.Popen) -> None:
     proc_lock = job.setdefault("proc_lock", threading.Lock())
     with proc_lock:
@@ -8274,11 +8459,13 @@ def _finish_unspawned_postprocess(job: dict, log_f, exc: Exception) -> None:
     killed = bool(job.get("kill_requested")) or isinstance(exc, postprocessing.CancelledError)
     status = "fail" if timed_out or not killed else "killed"
     if timed_out:
-        message = "job exceeded its wall-clock time limit during image staging"
+        message = _postprocess_timeout_message(job, staging=True)
     elif killed:
         message = "post-processing cancelled before the processor started; originals were not changed"
     else:
         message = f"post-processing failed before execution; originals were not changed: {exc}"
+    if status == "fail":
+        _set_postprocess_error(job, message if timed_out else str(exc))
     try: _append_job_line(job, message, log_f=log_f)
     except Exception: pass
     now = time.time()
@@ -8329,6 +8516,15 @@ def _prepare_and_spawn_image_job(job: dict, args: dict, log_f) -> None:
                 name=f"postprocess-quota-{job['id']}",
             )
             job["stage_monitor_thread"] = stage_monitor
+            memory_monitor = None
+            if job.get("postprocess_memory_reserve") is not None:
+                memory_monitor = threading.Thread(
+                    target=_postprocess_memory_monitor, args=(job, proc), daemon=True,
+                    name=f"postprocess-memory-{job['id']}",
+                )
+                job["memory_monitor_thread"] = memory_monitor
+        if memory_monitor is not None:
+            memory_monitor.start()
         stage_monitor.start()
         pump_thread.start()
     except Exception as exc:
@@ -8950,14 +9146,22 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
             timed_out = bool(job.get("timed_out"))
             resource_exceeded = bool(job.get("resource_exceeded"))
             pump_lines = list(job.get("log_lines") or [])
-        if resource_exceeded:
+        if job.get("memory_limit_reason"):
+            status = "fail"
+            _set_postprocess_error(job, job["memory_limit_reason"])
+        elif resource_exceeded:
             status = "fail"
             reason = str(job.get("stage_limit_reason") or "file, size, or link")
             _append_job_line(job, f"processor staging exceeded its {reason} limit", log_f=log_f)
+            message = ("Processing stopped because free disk space fell below Workbench's "
+                       "512-MiB safety reserve. Free disk space and retry."
+                       if reason == "free-space reserve" else
+                       f"Processing exceeded Workbench's output-file safety limit ({reason}). "
+                       "Try a smaller batch, or review the custom processor's output.")
+            _set_postprocess_error(job, message)
         elif timed_out:
             status = "fail"
-            timeout_kind = "idle/progress" if job.get("idle_timed_out") else "wall-clock"
-            _append_job_line(job, f"job exceeded its {timeout_kind} time limit", log_f=log_f)
+            _set_postprocess_error(job, _postprocess_timeout_message(job))
         elif kill_requested:
             status = "killed"
         elif rc == 0 and any(re.search(r"is not a valid file", l, re.IGNORECASE) for l in pump_lines):
@@ -8967,6 +9171,14 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
 
         if job.get("kind") == "postprocess_images" and status != "ok":
             job["postprocess_outcome"] = "unchanged"
+            if status == "fail":
+                if (not job.get("postprocess_error") or
+                        (job.get("jpeg_encoder_memory_error") and
+                         not (job.get("memory_limit_reason") or resource_exceeded or timed_out))):
+                    _set_postprocess_error(job, _postprocess_exit_message(job, rc))
+                _append_job_line(job, f"Post-processing failed; originals were not changed. {job['postprocess_error']}", log_f=log_f)
+            else:
+                job.pop("postprocess_error", None)
 
         if job.get("kind") == "postprocess_images" and status == "ok":
             try:
@@ -9004,6 +9216,7 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
                     job["postprocess_outcome"] = "unchanged" if rollback_safe else "needs_attention"
                     message = ("originals were not changed" if rollback_safe else
                                "rollback could not be verified; inspect the image folders before continuing")
+                    _set_postprocess_error(job, str(exc))
                     _append_job_line(job, f"post-processing failed; {message}: {exc}", log_f=log_f)
 
         if job.get("kind") == "postprocess_dependencies" and status == "ok":
@@ -9055,6 +9268,8 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
 
         with JOBS_LOCK:
             job["status"] = status
+            if status in {"ok", "killed"}:
+                job.pop("postprocess_error", None)
             job["exit_code"] = rc
             job["ended"] = time.time()
             job["duration"] = round(job["ended"] - job["started"], 2)
@@ -9075,6 +9290,7 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         _terminate_and_reap(proc, job.get("proc_lock"))
         job["proc_reaped"] = proc.poll() is not None
         try:
+            _set_postprocess_error(job, f"Processing could not finish: {exc}. Check this job's details in Job history.")
             _append_job_line(job, f"job pump failed: {exc}", log_f=log_f)
         except Exception:
             pass
@@ -9094,9 +9310,10 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         monitor_stop = job.get("stage_monitor_stop")
         if monitor_stop is not None:
             monitor_stop.set()
-        monitor = job.get("stage_monitor_thread")
-        if monitor is not None and monitor is not threading.current_thread():
-            monitor.join(timeout=0.5)
+        for monitor_name in ("stage_monitor_thread", "memory_monitor_thread"):
+            monitor = job.get(monitor_name)
+            if monitor is not None and monitor is not threading.current_thread():
+                monitor.join(timeout=0.5)
         try:
             if proc.stdout is not None:
                 proc.stdout.close()
@@ -11343,7 +11560,7 @@ def _postprocessor_store(*, scm_root: Optional[Path] = None,
     except UnicodeDecodeError as exc:
         raise postprocessing.IntegrityError("bundled Simple Upscaler is not valid UTF-8") from exc
     store.provision_bundled(
-        BUILTIN_SIMPLE_UPSCALER_ID, "Simple Upscaler (4×)", source,
+        BUILTIN_SIMPLE_UPSCALER_ID, "Simple Upscaler (1200 PPI)", source,
         interpreter=python,
     )
     advanced_raw = postprocessing._read_regular_bytes(

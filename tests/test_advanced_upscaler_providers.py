@@ -171,6 +171,7 @@ class AdvancedUpscalerProviderTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def load(self): pass
+            def close(self): pass
             def getexif(self): return {}
             def getbands(self): return ("R", "G", "B")
             def convert(self, mode): return self
@@ -197,6 +198,7 @@ class AdvancedUpscalerProviderTests(unittest.TestCase):
                                            clip=lambda value, *args: value, uint8=lambda value: value),
                      "_activity": lambda context, phase, provider, tile=0, tiles=0:
                          events.append((phase, tile, tiles))}
+        namespace["Image"].MAX_IMAGE_PIXELS = 89_478_485
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), namespace)
         namespace["process_image"](Path("staged.png"), {"model_path": "model.onnx"})
         self.assertEqual(events[:4], [("tile", 0, 2), "inference", ("tile", 1, 2), "inference"])
@@ -266,6 +268,7 @@ class AdvancedUpscalerProviderTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def load(self): pass
+            def close(self): pass
             def getexif(self): return {}
             def getbands(self): return ("R", "G", "B")
             def convert(self, mode): return self
@@ -317,6 +320,7 @@ class AdvancedUpscalerProviderTests(unittest.TestCase):
                                            ascontiguousarray=lambda value: value,
                                            pad=lambda value, *args, **kwargs: value,
                                            clip=lambda value, *args: value, uint8=lambda value: value)}
+        namespace["Image"].MAX_IMAGE_PIXELS = 89_478_485
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), "exec"), namespace)
         def process(index=1, total=1):
             namespace["process_image"](Path("staged.png"), {"model_path": "model.onnx",

@@ -587,7 +587,7 @@ console.log("ok: sidebar job notice lifecycle passed");
         ["node", "--input-type=module", "-", str(notice_progress_path)],
         input=r'''import fs from "node:fs";
 const dataUrl = value => `data:text/javascript;base64,${Buffer.from(value, "utf8").toString("base64")}`;
-const { jobNoticeProgress: view } = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
+const { jobNoticeProgress: view, postprocessSkipSummary } = await import(dataUrl(fs.readFileSync(process.argv[2], "utf8")));
 const fail = text => { throw new Error(text); };
 const image = (status, progress, postprocess_outcome) => ({ kind: "postprocess_images", status, progress, postprocess_outcome });
 let result = view(image("running", { current: 0, total: 4 }));
@@ -605,11 +605,76 @@ if (view(image("fail", {}, "needs_attention")).text !== "Rollback could not be v
   fail("unsafe rollback did not retain its warning in the notice");
 if (!view(image("killed", {}, "unchanged")).text.includes("originals unchanged"))
   fail("cancelled processor notice lost its safe outcome");
+const reason = "Not enough memory for AI upscaling. Try the Simple Upscaler or smaller images. <b>plain text</b>";
+const failed = { ...image("fail", {}, "unchanged"), postprocess_error: reason };
+result = view(failed);
+if (!result.text.includes(reason) || !result.text.includes("originals unchanged"))
+  fail("failed processing notice hid its actionable memory reason or safe outcome");
+result = view({ ...failed, postprocess_outcome: "needs_attention" });
+if (!result.text.startsWith("Rollback could not be verified; inspect image folders.") ||
+    !result.text.includes(reason) || result.text.includes("originals unchanged"))
+  fail("failure details overrode the higher-priority rollback warning");
+for (const invalid of [null, 42, true, {}, [reason], "", "   ", "x".repeat(2049), "é".repeat(1025), "bad\u0000error"]) {
+  if (view({ ...failed, postprocess_error: invalid }).text !== view({ ...failed, postprocess_error: undefined }).text)
+    fail("malformed or unbounded processing failure details were displayed");
+}
+for (const boundary of ["x".repeat(2048), "é".repeat(1024), "😀".repeat(512)]) {
+  if (!view({ ...failed, postprocess_error: boundary }).text.endsWith(boundary))
+    fail("valid 2048-byte failure details were discarded");
+}
+for (const status of ["running", "ok", "killed"]) {
+  if (view({ ...failed, status }).text.includes(reason) || view(failed, status).text.includes(reason))
+    fail(`stale failure details appeared for ${status}`);
+}
+if (view({ ...failed, kind: "create_pdf" }).text.includes(reason))
+  fail("processing failure field leaked into unrelated job notices");
 result = view({ kind: "postprocess_dependencies", status: "running", progress: { label: "Downloading the locked wheel set" } });
 if (result.fraction !== null || result.text !== "Downloading the locked wheel set")
   fail("installer stage was not shown without inventing a percentage");
 if (view({ kind: "postprocess_dependencies", status: "running", progress: { label: "x".repeat(121) } }).text !== "Preparing installer…")
   fail("unbounded installer progress label was displayed");
+const skipItem = {name: "Cárd  A.png", role: "front", reason: "Embedded resolution is already at or above 1200 PPI"};
+const skips = {count: 1, total: 2, reasons: [skipItem]};
+for (const [status, outcome] of [["running", undefined], ["ok", "committed"], ["ok", "unchanged"],
+                                ["fail", "unchanged"], ["fail", "needs_attention"], ["killed", "unchanged"]]) {
+  const job = {...image(status, {current: 1, total: 2}, outcome), postprocess_skips: skips, postprocess_error: reason};
+  result = view(job);
+  if (!result.text.includes("left unchanged") || result.text.includes(skipItem.name) || result.text.includes(skipItem.reason) || result.text.includes("Details in Job history"))
+    fail(`sidebar is not compact for ${status}`);
+  if (status === "ok" && outcome === "committed" && !result.text.includes("Finished: 1 image resized, 1 left unchanged."))
+    fail("sidebar implies mixed skipped images were saved");
+  if (outcome === "needs_attention" && (!result.text.startsWith("Rollback could not be verified") || !result.text.includes(reason)))
+    fail("sidebar skip details overrode rollback/failure warnings");
+}
+result = view({...image("ok", {}, "unchanged"), postprocess_skips: {count: 2, total: 2, reasons: [skipItem]}});
+if (!result.text.includes("Finished: 2 images left unchanged.") || result.text.includes("saved"))
+  fail("all-skipped sidebar notice claims files were saved");
+result = view({...image("ok", {}, "unchanged"), postprocess_skips: {...skips, reasons: [{...skipItem, name: "x".repeat(251) + ".png"}]}});
+if (result.text.includes(".png") || result.text.includes(skipItem.reason)) fail("sidebar exposed filenames or reasons");
+const detail = postprocessSkipSummary({...image("ok", {}, "unchanged"), postprocess_skips: skips});
+if (!detail.details[0].includes(skipItem.name) || !detail.details[0].includes("Already large enough for sharp printing."))
+  fail("friendly expanded reason lost its full filename");
+const fallbackDetail = postprocessSkipSummary({...image("ok", {}, "unchanged"), postprocess_skips: {...skips,
+  reasons: [{...skipItem, reason: "pixels already meet or exceed the standard MTG fallback fit target"}]}});
+if (!fallbackDetail.details[0].includes("Already large enough for sharp printing.")) fail("fallback skip reason remained technical");
+for (const [status, outcome] of [["fail", "unchanged"], ["killed", "unchanged"], ["ok", undefined], ["ok", "needs_attention"]]) {
+  const text = view({...image(status, {}, outcome), postprocess_skips: skips}).text;
+  if (text.includes("resized") || text.includes("saved")) fail("unverified outcome claimed resizing");
+}
+result = view({...image("ok", {}, "committed"), postprocess_skips: {count: 3, total: 5, reasons: [skipItem]}});
+if (!result.text.startsWith("Finished: 2 images resized, 3 left unchanged.")) fail("mixed counts are not concise");
+const baseline = view(image("ok", {}, "unchanged")).text;
+for (const invalid of [null, [], {...skips, count: true}, {...skips, count: 3}, {...skips, total: 1025},
+    {...skips, extra: 1}, {...skips, reasons: []}, {...skips, reasons: [skipItem, skipItem]},
+    {...skips, reasons: [{...skipItem, reason: "é".repeat(129)}]},
+    {...skips, reasons: [{...skipItem, reason: "bad\u202evalue"}]},
+    {...skips, reasons: [{...skipItem, name: "../outside.png"}]},
+    {count: 8, total: 8, reasons: Array.from({length: 8}, (_, i) => ({...skipItem, name: "é".repeat(127) + i, reason: "é".repeat(128)}))}]) {
+  if (view({...image("ok", {}, "unchanged"), postprocess_skips: invalid}).text !== baseline)
+    fail("sidebar displayed malformed or unbounded skip metadata");
+}
+if (view({...image("ok", {}, "unchanged"), kind: "create_pdf", postprocess_skips: skips}).text.includes("skipped"))
+  fail("skip metadata leaked into unrelated job notices");
 console.log("ok: processor job notice progress and terminal states passed");
 ''', text=True, capture_output=True,
     )

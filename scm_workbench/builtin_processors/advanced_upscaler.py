@@ -155,16 +155,26 @@ def process_image(image_path: Path, context: dict) -> None:
     model_path = context.get("model_path")
     if not isinstance(model_path, str) or not model_path:
         raise ValueError("the Advanced Upscaler model is not installed")
-    session = _model(model_path, context)
     with Image.open(image_path) as opened:
         image_format = opened.format  # SCM may name actual JPEG content .png.
+        output_size = (opened.width * SCALE, opened.height * SCALE)
+        pixel_limit = min(200_000_000, Image.MAX_IMAGE_PIXELS or 200_000_000)
+        if output_size[0] * output_size[1] > pixel_limit:
+            raise ValueError(
+                f"4× upscaling would produce {output_size[0]:,} × {output_size[1]:,} pixels, "
+                f"above the supported limit of {pixel_limit:,} total pixels. "
+                "Use smaller original images; restore or re-fetch images if they were already upscaled."
+            )
         icc = opened.info.get("icc_profile")
         image = ImageOps.exif_transpose(opened)
         image.load()
         exif = image.getexif()
+        opened.close()  # Release the decoded source core as well as its file.
     exif.pop(274, None)
+    session = _model(model_path, context)
     alpha = image.getchannel("A") if "A" in image.getbands() else None
     rgb = image.convert("RGB")
+    image.close()
     width, height = rgb.size
     output = Image.new("RGB", (width * SCALE, height * SCALE))
     tiles = ((width + TILE - 1) // TILE) * ((height + TILE - 1) // TILE)
@@ -216,22 +226,33 @@ def process_image(image_path: Path, context: dict) -> None:
                 raise ValueError("advanced upscaler produced an invalid tile")
             tile = Image.fromarray(np.uint8(np.clip(core.transpose(1, 2, 0), 0, 1) * 255 + 0.5), "RGB")
             output.paste(tile, (left * SCALE, top * SCALE))
+            tile.close()
+            del predicted, core, pixels, tensor, tile
             completed += 1
             # At most 32 intermediate updates plus start/end per image.
             if completed == tiles or completed == 1 or completed * 32 // tiles != (completed - 1) * 32 // tiles:
                 _activity(context, "tile", _provider, completed, tiles)
                 reported = completed
-    if alpha is not None and image_format == "PNG":
-        output.putalpha(alpha.resize(output.size, Image.Resampling.LANCZOS))
+    rgb.close()
+    if alpha is not None:
+        if image_format == "PNG":
+            scaled_alpha = alpha.resize(output.size, Image.Resampling.LANCZOS)
+            output.putalpha(scaled_alpha)
+            scaled_alpha.close()
+        alpha.close()
     options = {"dpi": DPI}
     if icc:
         options["icc_profile"] = icc
     if exif:
         options["exif"] = exif.tobytes()
     if image_format == "JPEG":
-        options.update(quality=95, subsampling=0, optimize=True)
+        # Streaming JPEG encoding avoids full-image optimization buffers.
+        options.update(quality=95, subsampling=0, optimize=False)
     elif image_format == "PNG":
         # Extra PNG size optimization takes nearly as long as inference on
         # large images; standard lossless compression keeps identical pixels.
         options["optimize"] = False
-    output.save(image_path, format=image_format, **options)
+    try:
+        output.save(image_path, format=image_format, **options)
+    finally:
+        output.close()

@@ -8,9 +8,11 @@ import { postprocessors } from "../postprocess-transport.js";
 import { latestInstallJob, optionalInstallStatus } from "../postprocess-install-state.js";
 import { watchJobDone } from "./utilities.js";
 import { syncJobNotices } from "../job-notices.js";
-import { jobNoticeProgress } from "../job-notice-progress.js";
+import { jobNoticeProgress, postprocessSkipDetails } from "../job-notice-progress.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
+
+const SIMPLE_UPSCALER_HELP = "Enlarges images for sharp printing, up to 1200 PPI. Uses standard MTG card size when resolution information is missing. Images already large enough are left unchanged.";
 
 const state = { cudaChoice: "auto", processors: [], selected: null, draft: null, loaded: null, loadError: false, dirty: false, installing: false, installJob: null, installFailure: null, installLogLoading: null, installStartError: null, installActivity: null, job: null, sub: null, timer: null, imageCount: null, imageScope: null };
 const first = value => Array.isArray(value) ? value[0] : value;
@@ -325,7 +327,7 @@ function repaintSimplePicker() {
   select.value = customSelected ? state.selected : "";
   const detail = document.querySelector(".pp-simple-detail");
   const selected = selectedProcessor();
-  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. This upscaler requires its model and inference libraries to be installed before use. Output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? "Built into Workbench: enlarges each image to 4× its width and height using high-quality Lanczos resampling. JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied." : "This processor was installed and trusted in Advanced mode.";
+  if (detail) detail.textContent = !selected ? "No processor is ready to run." : selected.optional_model ? "AI 4× upscaling with RealESRGAN_x4plus. This upscaler requires its model and inference libraries to be installed before use. Output is 1200 DPI. Processing can take a while depending on your computer." : selected.bundled ? SIMPLE_UPSCALER_HELP : "This processor was installed and trusted in Advanced mode.";
   const summary = document.querySelector(".pp-install-summary");
   if (summary) {
     const optional = state.processors.find(p => p.optional_model);
@@ -632,13 +634,13 @@ function attachRunStatus(root) {
     const running = state.job && (S.jobs || []).find(j => j.id === state.job.id);
     if (!running) { status.hidden = true; status.replaceChildren(); return; }
     status.hidden = false;
-    const outcome = running.postprocess_outcome;
-    const message = running.status === "running" ? "Processing images…" : running.status === "ok" ? (outcome === "unchanged" ? "Processing complete. Every result was byte-identical, so original files were left unchanged." : "Processing complete. Original images were replaced after validation.") : outcome === "needs_attention" ? "Processing failed and rollback could not be verified. Inspect the image folders and job details before continuing." : "Processing failed or was cancelled. Original images were not changed.";
+    const message = running.status === "running" ? "Processing images…" : jobNoticeProgress(running).text;
     const panel = el("div", { class: `pp-status ${running.status}` }, el("div", {}, message));
-    if (running.status !== "running" && running.postprocess_cpu_warning)
-      panel.append(el("div", { class: "small warn" },
-        running.postprocess_cpu_reason === "missing_cudnn" ? `cuDNN 9 (libcudnn.so) is missing. CPU fallback was ${running.status === "ok" ? "used" : "attempted"} during this run.` :
-        running.status === "ok" ? "CPU fallback was used during this run." : "CPU fallback was attempted during this run."));
+    const details = postprocessSkipDetails(running, el);
+    if (details) {
+      details.open = !!status.querySelector?.("details")?.open;
+      panel.append(details);
+    }
     status.replaceChildren(panel);
     if (running.status === "running") {
       const progress = jobNoticeProgress(running);
@@ -742,6 +744,7 @@ PAGES.postprocess = root => {
     el("label", {}, "Optional requirements", el("textarea", { class: "input pp-requirements", rows: 4, spellcheck: "false", placeholder: "Pillow==10.4.0" })),
     el("div", { class: "pp-lock" }, el("span", { class: "small faint" }, "No third-party wheels are required.")),
     el("p", { class: "small faint pp-model-explain" }, "The Advanced AI Upscaler downloads a 67 MB model and pinned ONNX Runtime libraries only after confirmation; leave at least 2 GB free during installation. Processing can take a while depending on your computer. The Simple Upscaler needs no download."),
+    el("p", { class: "small faint pp-simple-policy" }, SIMPLE_UPSCALER_HELP),
     el("p", { class: "small pp-model-status", "aria-live": "polite", hidden: true }),
     cudaInstallControl(),
     el("div", { class: "small faint mono pp-cursor" }, "Line 1, column 1"),

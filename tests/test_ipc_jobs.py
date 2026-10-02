@@ -57,6 +57,52 @@ class NativeJobsTests(unittest.TestCase):
         live = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "a")
         self.assertEqual(live["args"], {})
 
+    def test_failed_image_jobs_expose_bounded_plain_text_reasons_in_native_and_browser_views(self):
+        server.JOBS["a"].update(kind="postprocess_images", status="fail",
+                                postprocess_outcome="unchanged", postprocess_error="Close other applications and retry.")
+        with mock.patch.object(server, "read_persisted_jobs", return_value=[]):
+            native = self.call("jobs.list", {})["result"]["jobs"][0]
+            self.assertEqual(native, server.list_jobs()["jobs"][0])
+            self.assertEqual(native["postprocess_error"], "Close other applications and retry.")
+            self.assertEqual(native["postprocess_outcome"], "unchanged")
+            server.JOBS["a"]["postprocess_error"] = "\x00\n" + "é" * 3000
+            reason = self.call("jobs.list", {})["result"]["jobs"][0]["postprocess_error"]
+            self.assertLessEqual(len(reason.encode("utf-8")), 2048)
+            self.assertNotIn("\x00", reason)
+            self.assertNotIn("\n", reason)
+            for status in ("ok", "running", "killed"):
+                server.JOBS["a"]["status"] = status
+                self.assertNotIn("postprocess_error", self.call("jobs.list", {})["result"]["jobs"][0])
+
+    def test_skip_summaries_are_equivalent_bounded_and_safe_after_restart(self):
+        item = {"name": "Cárd  A.png", "role": "front", "reason": "Embedded resolution is already at or above 1200 PPI"}
+        summary = {"count": 1, "total": 2, "reasons": [item]}
+        server.JOBS["a"].update(kind="postprocess_images", status="ok", postprocess_skips=summary)
+        with mock.patch.object(server, "read_persisted_jobs", return_value=[]):
+            for status in ("running", "ok", "fail", "killed"):
+                server.JOBS["a"]["status"] = status
+                native = self.call("jobs.list", {})["result"]["jobs"][0]
+                self.assertEqual(native, server.list_jobs()["jobs"][0])
+                self.assertEqual(native["postprocess_skips"], summary)
+                self.assertNotIn("postprocess_builtin_skips", native)
+        persisted = {**server.JOBS["a"], "id": "old", "postprocess_outcome": "unchanged"}
+        with mock.patch.object(server, "read_persisted_jobs", return_value=[persisted]):
+            native = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "old")
+            self.assertEqual(native["postprocess_skips"], summary)
+            self.assertEqual(native, next(row for row in server.list_jobs()["jobs"] if row["id"] == "old"))
+            for invalid in (None, [], {**summary, "count": True}, {**summary, "count": 3},
+                            {**summary, "total": 1025}, {**summary, "extra": 1},
+                            {**summary, "reasons": []}, {**summary, "reasons": [item] * 9},
+                            {**summary, "reasons": [{**item, "reason": "é" * 129}]},
+                            {**summary, "reasons": [{**item, "name": "../outside.png"}]},
+                            {**summary, "reasons": [{**item, "reason": "bad\nreason"}]}):
+                persisted["postprocess_skips"] = invalid
+                historical = next(row for row in self.call("jobs.list", {})["result"]["jobs"] if row["id"] == "old")
+                self.assertNotIn("postprocess_skips", historical)
+        server.JOBS["a"]["kind"] = "create_pdf"
+        with mock.patch.object(server, "read_persisted_jobs", return_value=[]):
+            self.assertNotIn("postprocess_skips", self.call("jobs.list", {})["result"]["jobs"][0])
+
     def test_terminal_jobs_expose_completion_time_for_sidebar_expiry(self):
         self.assertNotIn("ended", self.call("jobs.list", {})["result"]["jobs"][0])
         server.JOBS["a"].update(status="ok", ended=1700000000.25)

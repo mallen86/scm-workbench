@@ -25,6 +25,8 @@ MAX_OUTPUT_BYTES = 256 * 1024
 MAX_MESSAGE_BYTES = 4096
 PROGRESS_PREFIX = "WB_POSTPROCESS_PROGRESS "
 ERROR_PREFIX = "WB_POSTPROCESS_ERROR "
+SKIP_PREFIX = "WB_POSTPROCESS_SKIP "
+MAX_SKIP_REASON_BYTES = 256
 
 
 class RunnerError(Exception):
@@ -119,23 +121,44 @@ def _load_manifest(path: Path) -> dict:
             any(not isinstance(limits[key], int) or isinstance(limits[key], bool) or
                 not (0 < limits[key] <= maximums[key]) for key in maximums
                 if key != "cpu_seconds") or
-            (limits["cpu_seconds"] is None and "model_path" not in value) or
             (limits["cpu_seconds"] is not None and
              (not isinstance(limits["cpu_seconds"], int) or
               isinstance(limits["cpu_seconds"], bool) or
               not (0 < limits["cpu_seconds"] <= maximums["cpu_seconds"])))):
         raise RunnerError("manifest limits are invalid")
-    if limits["cpu_seconds"] is None:
-        # The server alone prepares private manifests. Still reject a forged
-        # unlimited custom runner even if it supplies an app-model-shaped path.
-        source = Path(value["source_path"])
-        if source != Path(value["run_root"]) / "processor.py":
-            raise RunnerError("unlimited CPU time requires the fixed processor")
-        built_in = Path(__file__).parent / "builtin_processors" / "advanced_upscaler.py"
-        if (_read_regular(source, "processor source", 256 * 1024)[0] !=
-                _read_regular(built_in, "bundled processor", 256 * 1024)[0]):
-            raise RunnerError("unlimited CPU time requires the fixed processor")
+    if limits["address_space"] > 4 * 1024 ** 3 and not _fixed_upscaler_source(value):
+        raise RunnerError("a larger memory budget requires a fixed bundled upscaler")
     return value
+
+
+def _fixed_upscaler_source(manifest: dict, *, names=("simple_upscaler.py", "advanced_upscaler.py")) -> bool:
+    source = Path(manifest["source_path"])
+    if not source.is_absolute() or source != Path(manifest["run_root"]) / "processor.py":
+        return False
+    raw, _identity = _read_regular(source, "processor source", 256 * 1024)
+    directory = Path(__file__).parent / "builtin_processors"
+    for name in names:
+        bundled, _identity = _read_regular(directory / name, "bundled processor", 256 * 1024)
+        # Provisioning preserves bundled bytes; older callers may normalize
+        # app-owned newlines. Accept either spelling without modifying staged
+        # bytes or the separate approved-revision verification.
+        canonical = bundled.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+        if raw == bundled or raw == canonical:
+            return True
+    return False
+
+
+def _load_memory_policy():
+    # -I excludes ordinary package/sibling imports. Load only this app-owned
+    # sibling before exposing any optional processor dependency directories.
+    path = Path(__file__).parent / "postprocess_memory.py"
+    spec = importlib.util.spec_from_file_location("_wb_postprocess_memory", path)
+    if spec is None or spec.loader is None:
+        raise RunnerError("Windows memory protection could not be loaded; restart Workbench and retry")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_processor(manifest: dict):
@@ -211,6 +234,10 @@ def _set_windows_limits(limits: dict) -> bool:
     global _WINDOWS_JOB_HANDLE
     if _WINDOWS_JOB_HANDLE is not None:
         return True
+    memory_limit = limits.get("address_space")
+    if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or
+            not 256 * 1024 ** 2 <= memory_limit <= 16 * 1024 ** 3):
+        return False
     try:
         import ctypes
         from ctypes import wintypes
@@ -239,12 +266,12 @@ def _set_windows_limits(limits: dict) -> bool:
         if cpu_seconds is not None:
             info.basic.process_time = cpu_seconds * 10_000_000
         info.basic.active = max(1, int(limits.get("processes", 8)))
-        # No per-process CPU-time flag for the fixed AI runner. Retain the
-        # active-process, job-memory, and kill-on-close limits.
+        # Image-processing manifests omit the CPU quota. Retain the active-
+        # process, aggregate committed-memory, and kill-on-close limits.
         info.basic.flags = 0x00000008 | 0x00000200 | 0x00002000
         if cpu_seconds is not None:
             info.basic.flags |= 0x00000002
-        info.job_memory = max(256 * 1024 * 1024, int(limits.get("address_space", 4 * 1024 * 1024 * 1024)))
+        info.job_memory = memory_limit
         if (not kernel.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info)) or
                 not kernel.AssignProcessToJobObject(handle, kernel.GetCurrentProcess())):
             kernel.CloseHandle(handle); return False
@@ -258,6 +285,16 @@ def _set_limits(manifest: dict) -> None:
     """Apply best-effort OS limits before importing user code."""
     limits = manifest.get("limits") if isinstance(manifest.get("limits"), dict) else {}
     if os.name == "nt":
+        if _fixed_upscaler_source(manifest):
+            policy = _load_memory_policy()
+            # Availability may have changed while the parent staged the deck.
+            # Never raise the parent-approved ceiling during this recheck.
+            limits = dict(limits)
+            limits["address_space"] = min(limits["address_space"],
+                                          policy.upscaler_budget(policy.read_windows_memory()))
+            manifest["limits"] = limits
+            print(f"(Workbench Windows memory budget: {limits['address_space'] / 1024 ** 3:.2f} GiB)",
+                  flush=True)
         if not _set_windows_limits(limits):
             raise RunnerError("Windows process limits could not be established")
         return
@@ -292,8 +329,18 @@ def _set_limits(manifest: dict) -> None:
             continue
 
 
+def _collect_skip(reasons: list, reason: str) -> None:
+    """A private, one-use reporter, offered only to the fixed Simple source."""
+    if (reasons or not isinstance(reason, str) or not reason.strip() or
+            any(unicodedata.category(char).startswith("C") for char in reason) or
+            len(reason.encode("utf-8")) > MAX_SKIP_REASON_BYTES):
+        raise RunnerError("invalid or duplicate Simple Upscaler skip reason")
+    reasons.append(reason)
+
+
 def run(manifest_path: str | Path) -> int:
     manifest = _load_manifest(Path(manifest_path))
+    fixed_simple = _fixed_upscaler_source(manifest, names=("simple_upscaler.py",))
     _set_limits(manifest)
     _configure_environment(manifest)
     callback, source_identity = _load_processor(manifest)
@@ -338,9 +385,34 @@ def run(manifest_path: str | Path) -> int:
         }
         if "model_path" in manifest:
             context["model_path"] = manifest["model_path"]
-        result = callback(image, context)
+        skip_reasons = []
+        if fixed_simple:
+            context["_workbench_report_skip"] = lambda reason: _collect_skip(skip_reasons, reason)
+        try:
+            result = callback(image, context)
+        except MemoryError as exc:
+            budget = manifest["limits"]["address_space"] / 1024 ** 3
+            raise RunnerError(
+                f"Not enough memory to process \"{name}\" within the {budget:.2f}-GiB "
+                "Workbench memory budget. Close other applications and retry, "
+                "or use smaller original images."
+            ) from exc
+        except Exception as exc:
+            detail = _bounded_text(exc, 2048)
+            if isinstance(exc, OSError) and "broken data stream when writing image file" in detail:
+                detail = (
+                    "The image encoder could not finish saving the processed image. "
+                    "It may have run out of memory or output space. Close other "
+                    "applications, check free disk space, or use smaller original images."
+                )
+            raise RunnerError(f"Could not process \"{name}\": {detail}") from exc
         if result is not None:
             raise RunnerError("process_image must return None")
+        if skip_reasons:
+            # Emit only after a successful no-op callback. Identity comes from
+            # the private manifest, not a processor-supplied path/count.
+            _emit(SKIP_PREFIX, {"index": index, "total": total, "name": name,
+                                "role": role, "reason": skip_reasons[0]})
         # The validated filename is the progress frame's identity. Collapsing
         # whitespace here changes Unicode spaces (and repeated ordinary spaces),
         # so the parent rejects this and every subsequent sequential frame.
@@ -364,7 +436,10 @@ def main(argv: list[str] | None = None) -> int:
         _emit(ERROR_PREFIX, {"error": "cancelled"})
         return 130
     except Exception as exc:
-        _emit(ERROR_PREFIX, {"error": _bounded_text(exc)})
+        message = ("The processor ran out of memory while starting. Close other "
+                   "applications and retry, or use smaller original images."
+                   if isinstance(exc, MemoryError) else _bounded_text(exc))
+        _emit(ERROR_PREFIX, {"error": message})
         # Keep frame locations useful without copying processor source lines
         # into persisted job history.
         frames = []

@@ -1,4 +1,7 @@
 # Bugs
+- [x] Keep Simple Upscaler copy and completion/sidebar counts concise, with collapsed named skip reasons on the processing page and in Job history in both modes, without hiding failures or batch safety outcomes.
+- [x] Make Simple Upscaler honor valid embedded PPI, use an aspect-preserving standard-MTG 63 × 88 mm fallback at approximately 1200 PPI for missing/unusable metadata, and preserve images at/above their target with named diagnostics.
+- [x] Remove cumulative image-processing CPU quotas, add bounded adaptive Windows upscaler memory with system-pressure protection, and surface actionable failure reasons without changing originals.
 - [x] Remove the Custom card-art import total-size limit while retaining 32 MiB per image and 256 images per import.
 - [x] Remove the overall app-update asset download deadline while retaining network inactivity detection, metadata deadlines, and verified atomic publication.
 - [x] Highlight the targeted Custom image drop zone during native file drags and clear it on leave, drop, busy state, or page disposal.

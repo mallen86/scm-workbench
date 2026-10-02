@@ -512,8 +512,36 @@ baseline or losing a user save.
   add the exact `reason:"missing_cudnn"`; arbitrary exception text is not a
   status field. The optional job-level `postprocess_cpu_reason` retains this
   fixed enum through later checkpoints, terminal notices, and persisted
-  history; older frames/jobs without a reason remain valid. Both native and
-  browser job views share these validated shapes.
+  history; older frames/jobs without a reason remain valid. Failed image-processing
+  jobs may also include `postprocess_error`, a sanitized plain-text reason bounded
+  to 2048 UTF-8 bytes. It is retained in history and shown in both UI modes, history
+  rows, and sidebar notices, alongside the separate `postprocess_outcome` safety status.
+  Successful, running, and user-cancelled jobs do not expose stale failure reasons.
+  Both native and browser job views share these validated shapes.
+  Fixed Simple Upscaler jobs may also include `postprocess_skips`, exactly
+  `{count,total,reasons:[{name,role,reason},...]}`: non-boolean integers
+  `1 <= count <= total <= 1024`, one to eight named details (no more than
+  `count`), and at most **4096 compact UTF-8 JSON bytes** for the whole summary.
+  Names are staged basenames of at most 255 UTF-8 bytes, `role` is `front`,
+  `double_sided`, or `back`, and reasons are non-empty plain text of at most
+  256 UTF-8 bytes. Controls, unsafe path spellings, duplicate identities, and
+  unknown fields are rejected, including when loading persisted history.
+  `count - reasons.length` is the number of additional reasons in the bounded
+  job log. Successful, running, failed, and cancelled rows can carry this
+  summary independently of their commit/rollback outcome; it never replaces
+  failure or rollback warnings. Both UI modes show it on the processing page,
+  sidebar, and history. Callback progress counts checked images, including skips.
+
+  This adds no public method or request parameter. The isolated runner emits
+  `WB_POSTPROCESS_SKIP {index,total,name,role,reason}` only after a successful
+  fixed Simple callback and before its ordinary progress frame. The fixed
+  source receives a private one-use reporter; arbitrary callbacks still return
+  `None` and retain their existing context contract. The worker treats frames
+  as untrusted: only the app-owned Simple job is authorized, `index` must be
+  the next staged image after current completed progress, `total` must equal
+  the staged batch, name/role must match that entry, and at most one skip per
+  image is accepted. Count increments are derived server-side, not supplied
+  by a processor. Complete frames remain within the existing 4096-byte line cap.
 * `jobs.start`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). Success is `{"ok":true,"job":{"id":"...","title":"...",
   "status":"running","cmd":"...","warnings":[...]}}`. Rejected form

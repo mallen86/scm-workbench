@@ -7,6 +7,7 @@
 import { S, el, ico, toast } from "./core.js";
 import { displayCmd } from "./forms.js";
 import { go, uiMode, SIMPLE_PAGES } from "./nav.js";
+import { jobNoticeProgress, postprocessSkipDetails } from "./job-notice-progress.js";
 
 /* =========================== job -> page mapping ========================== */
 
@@ -100,9 +101,11 @@ async function openJobLog(job) {
 
 export function jobHistoryRow(job) {
   const restorable = jobRestorable(job);
+  const summary = job.kind === "postprocess_images" ? jobNoticeProgress(job).text : "";
   return el("div", {
     class: `jobrow hist${restorable ? " restorable" : ""}`,
     "data-kind": job.kind,
+    "data-job-id": job.id,
     title: restorable ? "Open this job's page with the settings it ran with" : job.title,
     onclick: () => { if (restorable) openJobSettings(job); },
   },
@@ -110,6 +113,8 @@ export function jobHistoryRow(job) {
     el("div", { class: "jr-body" },
       el("div", { class: "jr-t" }, job.title),
       el("div", { class: "jr-cmd" }, displayCmd(job.cmd, job.kind) || ""),
+      summary ? el("div", { class: job.status === "fail" || job.postprocess_outcome === "needs_attention" ? "small warn" : "small" }, summary) : null,
+      postprocessSkipDetails(job, el),
     ),
     el("div", { class: "jr-meta" },
       el("div", { class: `statusdot ${job.status}` }, job.status),
@@ -149,9 +154,15 @@ function section(title, jobs, emptyText) {
 export function renderJobHistory(slot) {
   if (!slot) return;
   const jobs = S.jobs || [];
+  const expanded = new Set([...slot.querySelectorAll("[data-job-id]")]
+    .filter(row => row.querySelector("details")?.open).map(row => row.dataset.jobId));
   slot.innerHTML = "";
   const running = jobs.filter(j => j.status === "running");
   const done = jobs.filter(j => j.status !== "running");
   if (running.length) slot.append(section("Running now", running, "Nothing is running."));
   slot.append(section("Finished", done, "Finished jobs will be listed here."));
+  for (const row of slot.querySelectorAll("[data-job-id]")) {
+    const details = row.querySelector("details");
+    if (details && expanded.has(row.dataset.jobId)) details.open = true;
+  }
 }

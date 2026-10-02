@@ -92,7 +92,7 @@ def main() -> int:
         'cannot safely sandbox arbitrary Python',
         'doRun("postprocess_dependencies"',
         'doRun("postprocess_images"',
-        'Original images were not changed',
+        'jobNoticeProgress(running).text',
         'COMMAND_PREVIEW_EVENT',
         'state.imageScope = first(detail.args?.scope) || "both"',
         'if (state.imageScope !== scope) state.imageCount = null',
@@ -133,7 +133,12 @@ def main() -> int:
         'state.installStartError = { processorId: p.id, at: Date.now(), message }',
         'postprocessors.removeOptional',
         'const result = await jobs.kill(state.installJob.id)',
-        'JPEG and PNG output is always set to 1200 DPI; the source DPI is not multiplied.',
+        'Enlarges images for sharp printing, up to 1200 PPI.',
+        'Uses standard MTG card size when resolution information is missing.',
+        'Images already large enough are left unchanged.',
+        ': selected.bundled ? SIMPLE_UPSCALER_HELP',
+        'el("p", { class: "small faint pp-simple-policy" }, SIMPLE_UPSCALER_HELP)',
+        'postprocessSkipDetails(running, el)',
         'Built-in processors are read-only',
         'Duplicate Advanced Upscaler source?',
         "It does not inherit Workbench's installed AI model or libraries.",
@@ -485,7 +490,8 @@ const calls = [], toasts = [], notices = [];
 const S = { jobs: [{ id: "job-one", kind: "postprocess_images", status: "running", progress: { current: 1, total: 3 } }] };
 const el = (tag, attrs = {}, ...children) => ({
   tag, className: attrs.class || "", hidden: !!attrs.hidden, disabled: !!attrs.disabled,
-  onclick: attrs.onclick, children,
+  onclick: attrs.onclick, open: !!attrs.open, children: children.filter(child => child != null),
+  set innerHTML(_value) { fail("processing status inserted HTML instead of plain text"); },
   append(...items) { this.children.push(...items); },
   replaceChildren(...items) { this.children = items; },
 });
@@ -510,7 +516,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = jobs => globalThis.__cancelTest.notices.push(jobs.map(job => job.status));`,
-  "../job-notice-progress.js": `export const jobNoticeProgress = job => ({fraction: job.progress?.current / job.progress?.total || 0, text: "Processing", warning: ""});`,
+  "../job-notice-progress.js": fs.readFileSync(process.argv[3], "utf8"),
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle = `from "${path}"`;
@@ -537,8 +543,8 @@ await pending;
 S.jobs[0].status = "killed";
 await tick();
 if (notices.at(-1)?.[0] !== "killed") fail("processor completion left the sidebar notice running");
-if (buttons(root).length || !root.children[0].children[0].children[0].children[0].includes("Original images were not changed."))
-  fail("terminal processor job still offers cancellation or lost its safe-outcome message");
+if (buttons(root).length || root.children[0].children[0].children[0].children[0] !== "Processing stopped.")
+  fail("terminal unknown-outcome job still offers cancellation or claims originals unchanged");
 mode = "advanced";
 S.jobs = [{ id: "job-two", kind: "postprocess_images", status: "running" }];
 await tick();
@@ -550,10 +556,93 @@ cancel = buttons(root);
 await cancel[0].onclick();
 if (buttons(root)[0].disabled || !toasts.some(([kind, text]) => kind === "err" && text === "transport failed"))
   fail("failed cancellation did not restore the action and report the error");
+// Both modes render the authoritative bounded reason as a DOM text child,
+// after (never instead of) the safe-outcome or rollback warning.
+const text = node => typeof node === "string" ? node : (node.children || []).map(text).join(" ");
+const reason = "Not enough memory for AI upscaling. Try the Simple Upscaler or smaller images. <img src=x onerror=alert(1)>";
+for (const candidateMode of ["simple", "advanced"]) {
+  mode = candidateMode;
+  S.jobs[0].status = "fail";
+  S.jobs[0].postprocess_outcome = "unchanged";
+  S.jobs[0].postprocess_error = reason;
+  await tick();
+  let rendered = text(root);
+  if (!rendered.includes(reason) || !rendered.includes("originals unchanged"))
+    fail(`${mode} mode hid the memory reason or safe outcome`);
+  const panel = root.children[0].children[0];
+  if (!panel.children[0]?.children[0]?.includes(reason))
+    fail(`${mode} mode did not insert failure details as plain DOM text`);
+  S.jobs[0].postprocess_outcome = "needs_attention";
+  await tick();
+  rendered = text(root);
+  if (!rendered.includes(reason) || rendered.indexOf("Rollback could not be verified") > rendered.indexOf(reason) ||
+      rendered.includes("originals unchanged"))
+    fail(`${mode} mode lost rollback warning precedence`);
+  for (const invalid of [null, 42, true, {}, [reason], "", "   ", "x".repeat(2049), "é".repeat(1025), "bad\u0000error"]) {
+    S.jobs[0].postprocess_error = invalid;
+    await tick();
+    if (root.children[0].children[0].children.some(child => child.className.includes("pp-failure-reason")))
+      fail(`${mode} mode rendered malformed or unbounded failure details`);
+  }
+  S.jobs[0].postprocess_error = reason;
+  for (const status of ["killed", "ok", "running"]) {
+    S.jobs[0].status = status;
+    S.jobs[0].postprocess_outcome = "unchanged";
+    await tick();
+    if (text(root).includes(reason)) fail(`${mode} mode displayed stale failure details for ${status}`);
+  }
+}
+// Successful mixed and all-skipped batches, and interrupted batches, retain
+// bounded skip explanations in both modes without overriding safety warnings.
+const skipItem = {name: "Cárd  A.png", role: "front", reason: "Already at 1200 PPI <img src=x onerror=alert(1)>"};
+const skipSummary = {count: 1, total: 2, reasons: [skipItem]};
+const descendants = node => typeof node === "object" && node ? [node, ...(node.children || []).flatMap(descendants)] : [];
+const visibleText = node => typeof node === "string" ? node :
+  (node.tag === "details" && !node.open ? node.children.slice(0, 1) : node.children || []).map(visibleText).join(" ");
+for (const candidateMode of ["simple", "advanced"]) {
+  mode = candidateMode;
+  for (const [status, outcome] of [["ok", "committed"], ["ok", "unchanged"], ["running", undefined],
+                                  ["fail", "unchanged"], ["fail", "needs_attention"], ["killed", "unchanged"], ["ok", undefined], ["killed", undefined]]) {
+    S.jobs[0] = {id: "job-two", kind: "postprocess_images", status, postprocess_outcome: outcome,
+      progress: {current: 1, total: 2}, postprocess_skips: skipSummary, postprocess_error: reason};
+    await tick();
+    const disclosure = descendants(root).find(node => node.tag === "details");
+    if (!disclosure || disclosure.open || visibleText(root).includes(skipItem.name) || visibleText(root).includes(skipItem.reason))
+      fail(`${mode} skip details are not collapsed by default`);
+    if (status === "fail" && !visibleText(root).includes(reason)) fail(`${mode} hid an actionable failure`);
+    if (outcome === "needs_attention" && !visibleText(root).includes("Rollback could not be verified"))
+      fail(`${mode} hid the rollback warning`);
+    if ((status === "fail" || status === "killed" || !outcome) && /resized|saved/.test(visibleText(root)))
+      fail(`${mode} unverified outcome claimed resized results`);
+    let stopped = false;
+    disclosure.onclick({stopPropagation() { stopped = true; }});
+    disclosure.open = true;
+    if (!stopped || !visibleText(root).includes(skipItem.name) || !visibleText(root).includes(skipItem.reason))
+      fail(`${mode} skip details are not safely accessible`);
+    const rendered = text(root);
+    if (!rendered.includes("left unchanged") || !rendered.includes("game/front/Cárd  A.png") || !rendered.includes(skipItem.reason))
+      fail(`${mode} ${status} processing page lost named skip explanations`);
+    if (status === "ok" && outcome === "committed" && !rendered.includes("Finished: 1 image resized, 1 left unchanged."))
+      fail(`${mode} mixed result implies every image was saved`);
+    if (outcome === "needs_attention" && (!rendered.includes("Rollback could not be verified") ||
+        rendered.indexOf("Rollback could not be verified") > rendered.indexOf(skipItem.reason)))
+      fail(`${mode} skip explanation replaced the rollback warning`);
+    if (status === "fail" && !rendered.includes(reason)) fail(`${mode} skip explanation hid the failure reason`);
+  }
+  S.jobs[0] = {id: "job-two", kind: "postprocess_images", status: "ok", postprocess_outcome: "unchanged",
+    postprocess_skips: {count: 2, total: 2, reasons: [skipItem]}};
+  await tick();
+  if (!text(root).includes("Finished: 2 images left unchanged.") || !text(root).includes("left unchanged") || text(root).includes("saved"))
+    fail(`${mode} all-skipped job was described as saved`);
+  if (!text(root).includes("1 more skip reason in the job log")) fail(`${mode} omitted skip reasons are not explained`);
+  S.jobs[0].postprocess_skips = {...skipSummary, reasons: [{...skipItem, reason: "é".repeat(129)}]};
+  await tick();
+  if (text(root).includes("Details")) fail(`${mode} page exposed unbounded skip metadata`);
+}
 root.__dispose();
 '''
     result = subprocess.run(
-        [node, "--input-type=module", "-e", cancel_script, str(PAGE), str(INSTALL_STATE)],
+        [node, "--input-type=module", "-e", cancel_script, str(PAGE), str(INSTALL_STATE), str(UI / "job-notice-progress.js")],
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:
@@ -601,7 +690,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = () => {};`,
-  "../job-notice-progress.js": `export const jobNoticeProgress = () => ({fraction: 0, text: "Processing", warning: ""});`,
+  "../job-notice-progress.js": `export const jobNoticeProgress = () => ({fraction: 0, text: "Processing", warning: ""}); export const postprocessFailureReason = () => ""; export const postprocessSkipDetails = () => null;`,
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle = `from "${path}"`;
@@ -633,7 +722,7 @@ if (!toasts.some(([kind, text]) => kind === "ok" && text.includes("Configure its
         stderr = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<postprocess-page>", result.stderr)
         sys.stderr.write(stderr[-3000:])
         return fail("Advanced Upscaler source-only duplication contract failed")
-    if ('import { jobNoticeProgress } from "../job-notice-progress.js";' not in page or
+    if ('import { jobNoticeProgress, postprocessSkipDetails } from "../job-notice-progress.js";' not in page or
             'const progress = jobNoticeProgress(running);' not in page or
             'progress.fraction ?? 0' not in page or 'progress.text' not in page or
             'syncJobNotices(S.jobs)' not in page or
@@ -658,13 +747,13 @@ const job = {kind:"postprocess_images", status:"running", postprocess_cpu_warnin
     phase:"tile",provider:"CPUExecutionProvider",tile:3,tiles:12}}};
 let result = view(job);
 if (result.fraction !== 0 || !result.text.includes("CUDA 12.x and cuDNN 9") ||
-    !result.text.includes("First.png on CPU, tile 3 / 12"))
+    !result.text.includes("image on CPU, tile 3 / 12") || result.text.includes("First.png"))
   throw new Error("CPU fallback/tile status missing before first completed image");
 job.progress.current = 1;
 job.progress.activity = {index:2,total:2,name:"Second.png",role:"back",
   phase:"initializing",provider:"CUDAExecutionProvider",tile:0,tiles:0};
 result = view(job);
-if (result.fraction !== 0.5 || !result.text.includes("Initializing Second.png on CUDA"))
+if (result.fraction !== 0.5 || !result.text.includes("Initializing image on CUDA") || result.text.includes("Second.png"))
   throw new Error("second image initialization lost monotonic image progress");
 job.progress.activity = {index:1,total:2,name:"stale",phase:"tile",provider:"CPUExecutionProvider",tile:12,tiles:12};
 if (view(job).text.includes("stale")) throw new Error("stale activity displayed");
@@ -720,7 +809,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone=()=>{};`,
   "../job-notices.js": `export const syncJobNotices=()=>{};`,
-  "../job-notice-progress.js": `export const jobNoticeProgress=()=>({});`,
+  "../job-notice-progress.js": `export const jobNoticeProgress=()=>({}); export const postprocessFailureReason=()=>""; export const postprocessSkipDetails=()=>null;`,
 };
 for (const [path, stub] of Object.entries(modules)) {
   const needle=`from "${path}"`;
@@ -769,7 +858,7 @@ for (const candidateMode of ["simple", "advanced"]) {
             'Current installed profile:' not in page or
             'cuda_profile: cudaProfile' not in page or
             'Matching system CUDA, cuDNN 9' not in page or
-            'running.postprocess_cpu_reason === "missing_cudnn"' not in page):
+            'jobNoticeProgress(running).text' not in page):
         return fail("both modes must offer backend-driven CUDA profiles with an explicit resolved switch")
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
