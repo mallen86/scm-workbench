@@ -94,8 +94,12 @@ class PreviewIpcTests(unittest.TestCase):
             native = self.call(params)
             self.assertEqual(http, native["result"])
             self.assertEqual(build.call_args.args, (params["kind"], params["args"]))
-        for body in (b"[]", b'{"kind":"x","args":[]}', b"x" * (512 * 1024 + 1)):
-            request = urllib.request.Request(self.base + "/api/preview", data=body)
+        # The server rejects an oversized declared body before reading it.
+        # Do not race Linux's early close by transmitting half a MiB after
+        # rejection; that can legitimately raise BrokenPipe before HTTPError.
+        for body, headers in ((b"[]", {}), (b'{"kind":"x","args":[]}', {}),
+                              (b"{}", {"Content-Length": str(512 * 1024 + 1)})):
+            request = urllib.request.Request(self.base + "/api/preview", data=body, headers=headers)
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(request, timeout=5)
             self.assertEqual(caught.exception.code, 400)
