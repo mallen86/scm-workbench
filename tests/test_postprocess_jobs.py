@@ -360,6 +360,65 @@ class PostprocessJobTests(unittest.TestCase):
         args["scope"] = "both"
         self.assertEqual(server.build_preview("postprocess_images", args)["image_count"], 3)
 
+    def test_manual_selection_preview_run_and_history_in_both_modes(self):
+        selected = ["game/front/Card, One.png", "game/double_sided/Card Two.png", "game/back/Card.png"]
+        untouched = self.repo / "game/front/Leave me.png"
+        untouched.write_bytes(PNG)
+        # An unselected broken image must not prevent processing selected files.
+        (self.repo / "game/front/Broken.png").write_bytes(b"bad")
+        item = self.save_and_trust("def process_image(image_path, context):\n    with image_path.open('ab') as f:\n        f.write(b'\\n')\n")
+        args = {"processor_id": item["id"], "revision_hash": item["revision"],
+                "scope": "selected", "selected_images": selected}
+        for mode in ("simple", "advanced"):
+            self.settings["ui_mode"] = mode
+            server.invalidate_manifest_cache()
+            for name in selected:
+                (self.repo / name).write_bytes(PNG)
+            preview = server.build_preview("postprocess_images", args)
+            self.assertEqual(preview["errors"], [])
+            self.assertEqual(preview["image_count"], 3)
+            job, errors = server.start_job("postprocess_images", args)
+            self.assertEqual(errors, [])
+            self.wait(job)
+            self.assertEqual(job["status"], "ok", job["log_lines"])
+            for name in selected:
+                self.assertEqual((self.repo / name).read_bytes(), PNG + b"\n")
+            self.assertEqual(untouched.read_bytes(), PNG)
+            self.assertEqual(job["args"]["selected_images"], selected)
+            row = next(row for row in server.list_jobs()["jobs"] if row["id"] == job["id"])
+            self.assertEqual(row["args"]["selected_images"], selected)
+
+    def test_manual_selection_fails_closed_for_stale_hostile_or_empty_choices(self):
+        from scm_workbench import postprocessing as pp
+        item = self.save_and_trust("def process_image(image_path, context):\n    return None\n")
+        image = self.repo / "game/front/card.png"
+        image.write_bytes(PNG)
+        args = {"processor_id": item["id"], "revision_hash": item["revision"], "scope": "selected"}
+        bad_values = [[], "game/front/card.png", [None], ["../card.png"], ["game/front/../card.png"],
+                      ["game/front/card.png:stream"], ["game/front/a\\\\b.png"], ["game/front/a\x00.png"],
+                      ["game/front/missing.png"], ["game/front/card.png"] * 2,
+                      ["game/front/" + "a" * 256 + ".png"], ["game/front/card.png"] * 1025]
+        for value in bad_values:
+            with self.subTest(value=str(value)[:80]):
+                preview = server.build_preview("postprocess_images", {**args, "selected_images": value})
+                self.assertTrue(preview["errors"])
+                job, errors = server.start_job("postprocess_images", {**args, "selected_images": value})
+                self.assertIsNone(job)
+                self.assertTrue(errors)
+        good = ["game/front/card.png"]
+        self.assertEqual(pp.count_images(self.repo, "selected", selected=good), 1)
+        image.unlink()
+        for action in (pp.count_images, pp.discover_images):
+            with self.assertRaises(pp.ValidationError):
+                action(self.repo, "selected", selected=good)
+        target = self.root / "outside.png"
+        target.write_bytes(PNG)
+        image.symlink_to(target)
+        for action in (pp.count_images, pp.discover_images):
+            with self.assertRaises(pp.ValidationError):
+                action(self.repo, "selected", selected=good)
+        self.assertEqual(target.read_bytes(), PNG)
+
     def test_back_only_preview_and_job_in_simple_and_advanced_modes(self):
         front = self.repo / "game/front/front.png"
         double = self.repo / "game/double_sided/double.png"

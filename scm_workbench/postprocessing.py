@@ -596,10 +596,42 @@ def _scope_roles(scope: str) -> tuple[str, ...]:
     return (scope,)
 
 
-def count_images(scm_root: str | Path, scope: str = "both") -> int:
+def validate_image_selection(value: Any) -> tuple[str, ...]:
+    """Exact portable relative identities, never arbitrary client paths."""
+    if not isinstance(value, list) or not 1 <= len(value) <= IMAGE_MAX_COUNT:
+        raise ValidationError("Choose between 1 and 1024 images")
+    result = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValidationError("invalid selected image")
+        parts = item.split("/")
+        if len(parts) != 3 or parts[0] != "game" or parts[1] not in _IMAGE_ROLES:
+            raise ValidationError("invalid selected image path")
+        name = parts[2]
+        _utf8(name, "selected image name", NAME_MAX_FILE_BYTES)
+        if (not name or name in (".", "..") or "\\" in name or ":" in name or
+                any(unicodedata.category(char).startswith("C") for char in name)):
+            raise ValidationError("invalid selected image name")
+        if Path(name).suffix.lower() not in _EXT_FORMAT:
+            raise ValidationError("selected file is not a supported image")
+        result.append(item)
+    if len(set(result)) != len(result):
+        raise ValidationError("duplicate selected image")
+    return tuple(result)
+
+
+def _selection(scope: str, selected: Any) -> tuple[tuple[str, ...], set[str] | None]:
+    if scope != "selected":
+        return _scope_roles(scope), None
+    wanted = set(validate_image_selection(selected))
+    return tuple(role for role in ("front", "double_sided", "back")
+                 if any(item.startswith(f"game/{role}/") for item in wanted)), wanted
+
+
+def count_images(scm_root: str | Path, scope: str = "both", *, selected: Any = None) -> int:
     """Return a fast bounded inventory count for previews; execution revalidates fully."""
     root = Path(scm_root).resolve()
-    roles = _scope_roles(scope)
+    roles, wanted = _selection(scope, selected)
     count = total = 0
     for role in roles:
         directory = root / "game" / role
@@ -609,6 +641,8 @@ def count_images(scm_root: str | Path, scope: str = "both") -> int:
         except FileNotFoundError: continue
         except IntegrityError as exc: raise ValidationError("image directory has too many entries") from exc
         for path in entries:
+            if wanted is not None and f"game/{role}/{path.name}" not in wanted:
+                continue
             try:
                 observed = os.lstat(path)
                 if _is_link_or_reparse(observed) or not stat.S_ISREG(observed.st_mode):
@@ -639,6 +673,8 @@ def count_images(scm_root: str | Path, scope: str = "both") -> int:
             count += 1; total += observed.st_size
             if count > IMAGE_MAX_COUNT or total > IMAGE_TOTAL_MAX_BYTES:
                 raise ValidationError("image batch exceeds its limit")
+    if wanted is not None and count != len(wanted):
+        raise ValidationError("Some selected images are missing or unavailable. Refresh the card selection.")
     return count
 
 
@@ -647,9 +683,10 @@ def _natural_name_key(value: str) -> tuple:
                  else (0, part.casefold(), part) for part in re.split(r"(\d+)", value))
 
 
-def discover_images(scm_root: str | Path, scope: str = "both", *, cancelled: Callable[[], bool] | None = None) -> tuple[ImageRecord, ...]:
+def discover_images(scm_root: str | Path, scope: str = "both", *, cancelled: Callable[[], bool] | None = None,
+                    selected: Any = None) -> tuple[ImageRecord, ...]:
     root = Path(scm_root).resolve()
-    roles = _scope_roles(scope)
+    roles, wanted = _selection(scope, selected)
     output: list[ImageRecord] = []
     total = 0
     for role in roles:
@@ -661,11 +698,15 @@ def discover_images(scm_root: str | Path, scope: str = "both", *, cancelled: Cal
         except IntegrityError as exc: raise ValidationError("image directory has too many entries") from exc
         for path in entries:
             if cancelled and cancelled(): raise CancelledError("post-processing was cancelled")
+            if wanted is not None and f"game/{role}/{path.name}" not in wanted:
+                continue
             if path.is_symlink(): continue
             record = _stable_image(path, root, role, cancelled=cancelled)
             if record:
                 output.append(record); total += record.size
                 if len(output) > IMAGE_MAX_COUNT or total > IMAGE_TOTAL_MAX_BYTES: raise ValidationError("image batch exceeds its limit")
+    if wanted is not None and len(output) != len(wanted):
+        raise ValidationError("Some selected images are missing or unavailable. Refresh the card selection.")
     output.sort(key=lambda item: (0 if item.role == "front" else 1,
                                   _natural_name_key(item.name), item.relative_path))
     return tuple(output)

@@ -94,7 +94,7 @@ def main() -> int:
         'doRun("postprocess_images"',
         'jobNoticeProgress(running).text',
         'COMMAND_PREVIEW_EVENT',
-        'state.imageScope = first(detail.args?.scope) || "both"',
+        'state.imageScope = selectionKey(detail.args)',
         'if (state.imageScope !== scope) state.imageCount = null',
         'image_count',
         'recognized image',
@@ -503,7 +503,7 @@ globalThis.clearInterval = () => {};
 globalThis.__cancelTest = { S, el, calls, toasts, notices, mode: () => mode, kill: id => { calls.push(id); return killResult(id); } };
 const modules = {
   "../core.js": `const x = globalThis.__cancelTest; export const PAGES = {}; export const S = x.S;
-    export const $ = (_selector, root) => root; export const el = x.el;
+    export const $ = (selector, root) => selector === ".form-card" ? null : root; export const el = x.el;
     export const toast = (...args) => x.toasts.push(args);
     export const confirmModal = () => {}; export const ico = () => ""; export const pageHead = () => {};`,
   "../forms.js": `export const afterFormChange = () => {}; export const COMMAND_PREVIEW_EVENT = "preview";
@@ -516,6 +516,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = jobs => globalThis.__cancelTest.notices.push(jobs.map(job => job.status));`,
+  "../postprocess-selection.js": `export const selectionKey = args => JSON.stringify([args?.scope || "both", args?.selected_images || []]); export const createImageSelection = () => ({root:{},sync(){},dispose(){}});`,
   "../job-notice-progress.js": fs.readFileSync(process.argv[3], "utf8"),
 };
 for (const [path, stub] of Object.entries(modules)) {
@@ -690,6 +691,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone = () => {};`,
   "../job-notices.js": `export const syncJobNotices = () => {};`,
+  "../postprocess-selection.js": `export const selectionKey = args => JSON.stringify([args?.scope || "both", args?.selected_images || []]); export const createImageSelection = () => ({root:{},sync(){},dispose(){}});`,
   "../job-notice-progress.js": `export const jobNoticeProgress = () => ({fraction: 0, text: "Processing", warning: ""}); export const postprocessFailureReason = () => ""; export const postprocessSkipDetails = () => null;`,
 };
 for (const [path, stub] of Object.entries(modules)) {
@@ -809,6 +811,7 @@ const modules = {
   "../postprocess-install-state.js": fs.readFileSync(process.argv[2], "utf8"),
   "./utilities.js": `export const watchJobDone=()=>{};`,
   "../job-notices.js": `export const syncJobNotices=()=>{};`,
+  "../postprocess-selection.js": `export const selectionKey = args => JSON.stringify([args?.scope || "both", args?.selected_images || []]); export const createImageSelection = () => ({root:{},sync(){},dispose(){}});`,
   "../job-notice-progress.js": `export const jobNoticeProgress=()=>({}); export const postprocessFailureReason=()=>""; export const postprocessSkipDetails=()=>null;`,
 };
 for (const [path, stub] of Object.entries(modules)) {
@@ -860,6 +863,11 @@ for (const candidateMode of ["simple", "advanced"]) {
             'Matching system CUDA, cuDNN 9' not in page or
             'jobNoticeProgress(running).text' not in page):
         return fail("both modes must offer backend-driven CUDA profiles with an explicit resolved switch")
+    picker = subprocess.run([node, str(ROOT / "tests/ui_postprocess_selection.mjs"),
+                             str(UI / "postprocess-selection.js")], capture_output=True, text=True)
+    if picker.returncode:
+        return fail("Manual card picker contract: " + re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<module>", picker.stderr)[-3000:])
+    print(picker.stdout.strip())
     print("OK: Simple and Advanced image post-processing UI and transport contracts are intact")
     return 0
 

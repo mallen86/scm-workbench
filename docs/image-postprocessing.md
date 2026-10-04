@@ -2,6 +2,12 @@
 
 Image post-processing runs an approved Python callback against selected card images before Create PDF. Simple mode offers the ready, no-download **Simple Upscaler (1200 PPI)** and a one-time **Install model & libraries** action for the app-owned **Advanced Upscaler (AI 4×)**. It can also run other processors already trusted and installed in Advanced mode, but cannot install arbitrary libraries or edit/trust custom code. Advanced mode provides the Processor library for creating, editing, reviewing, and installing optional libraries. The **Guide** button opens this document bundled with the running Workbench version.
 
+## Choosing individual cards
+
+Select **Choose cards** beside the image-scope options in either mode. Search by card name, check the images you want, and use **Next** / **Previous** to browse 12 images at a time. **Select all matches** includes every search result, not just the current page; **Selected only** reviews your choices and **Clear selection** starts over. Front, double-sided, and back images have separate labels and checkboxes.
+
+Selections survive changing scope or interface mode and can be restored from Job history. **Refresh** reloads the folder list without silently changing your selection. If a selected image has disappeared, clear the selection and choose again. Only checked images are staged and processed; preview and run both reject missing or unsafe selections. No selection is made by default.
+
 ## Trust and safety
 
 Processors and installed libraries run as your desktop user account. Workbench runs them in a separate bounded process, gives the callback private staged image copies, validates every result, and publishes the batch only after every image succeeds. Those protections prevent ordinary failures from leaving a partially changed image set, but they do **not** make arbitrary Python safe. Only trust code and packages you have reviewed.

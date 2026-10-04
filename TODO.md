@@ -1,4 +1,5 @@
 # Bugs
+- [x] Add compact manual card selection for image processing in both modes, with search, paging, selection counts, and exact preview/run validation.
 - [x] Keep Simple Upscaler copy and completion/sidebar counts concise, with collapsed named skip reasons on the processing page and in Job history in both modes, without hiding failures or batch safety outcomes.
 - [x] Make Simple Upscaler honor valid embedded PPI, use an aspect-preserving standard-MTG 63 × 88 mm fallback at approximately 1200 PPI for missing/unusable metadata, and preserve images at/above their target with named diagnostics.
 - [x] Remove cumulative image-processing CPU quotas, add bounded adaptive Windows upscaler memory with system-pressure protection, and surface actionable failure reasons without changing originals.

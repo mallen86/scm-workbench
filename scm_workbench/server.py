@@ -1526,7 +1526,8 @@ def build_manifest(info: dict) -> dict:
         "groups": [{"title": "Image scope", "options": [
             _opt("processor_id", "Processor", "select", choices=[["", "— choose a processor —"]] + processor_choices, default="", hidden=True),
             _opt("revision_hash", "Revision", "text", default="", hidden=True),
-            _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"], ["back", "Back only"]], default="both"),
+            _opt("scope", "Scope", "segment", choices=[["both", "Front and double-sided"], ["front", "Front only"], ["double_sided", "Double-sided only"], ["back", "Back only"], ["selected", "Choose cards"]], default="both"),
+            _opt("selected_images", "Selected cards", "chips", default=[], hidden=True, image_selection=True),
         ]}],
     }
     kinds["postprocess_dependencies"] = {
@@ -5734,7 +5735,7 @@ def build_command(kind: str, args: dict, settings: dict, info: dict, write_deck:
                 errors.append("processor revision is not trusted for its dependency environment")
             if not meta.get("ready"):
                 errors.append("processor libraries are not ready")
-            image_count = postprocessing.count_images(cwd, scope)
+            image_count = postprocessing.count_images(cwd, scope, selected=args.get("selected_images"))
             env["SCM_WORKBENCH_IMAGE_COUNT"] = str(image_count)
             if not image_count:
                 errors.append("no recognized images were found in the selected scope")
@@ -6550,7 +6551,17 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
                 if key in raw and not _unavailable_value_matches(o, v):
                     errors.append(f"{o['label']}: {o.get('unavailable_reason') or 'this option is unavailable.'}")
                 continue
-            if o.get("int_list"):
+            if o.get("image_selection"):
+                # Names can contain commas; never split or coerce them.
+                if v in (None, []):
+                    args[key] = []
+                else:
+                    try:
+                        args[key] = list(postprocessing.validate_image_selection(v))
+                    except postprocessing.PostProcessingError as exc:
+                        errors.append(str(exc))
+                        args[key] = []
+            elif o.get("int_list"):
                 if isinstance(v, str):
                     v = [x for x in re.split(r"[\s,]+", v.strip()) if x]
                 v = v if isinstance(v, list) else []
@@ -8224,7 +8235,8 @@ def _prepare_image_postprocess_job(job: dict, args: dict) -> Tuple[List[str], Pa
         site_path = Path(status_now["environment"]["path"]) / "site-packages"
         if not advanced_model.verify_model(site_path / advanced_model.MODEL_NAME):
             raise postprocessing.IntegrityError("the installed Advanced Upscaler model changed")
-    records = postprocessing.discover_images(scm_cwd, args.get("scope", "both"), cancelled=cancelled)
+    records = postprocessing.discover_images(scm_cwd, args.get("scope", "both"), cancelled=cancelled,
+                                                  selected=args.get("selected_images"))
     if not records:
         raise postprocessing.ValidationError("no recognized images were found in the selected scope")
     run_dir = Path(job["postprocess_run"])
@@ -12024,6 +12036,18 @@ class Handler(BaseHTTPRequestHandler):
                     result = postprocessor_duplicate(m.group(1), body) if m.group(2) == "duplicate" else postprocessor_trust(m.group(1), body)
                     return self._json(result, 200)
                 except Exception as exc: return self._json(_postprocessor_error(exc), 400)
+            if path == "/api/preview":
+                if _IPC_MODE:
+                    return self._json({"error": "not available in native mode"}, 403)
+                body = self._body(strict=True, max_bytes=512 * 1024)
+                if (not isinstance(body, dict) or set(body) != {"kind", "args"} or
+                        not isinstance(body.get("kind"), str) or not body["kind"] or
+                        len(body["kind"].encode("utf-8")) > 128 or not isinstance(body.get("args"), dict)):
+                    return self._json({"error": "preview requires kind and args"}, 400)
+                try:
+                    return self._json(build_preview(body["kind"], body["args"]))
+                except PreviewError as exc:
+                    return self._json({"error": exc.message}, 400)
             if path == "/api/jobs":
                 body = self._body()
                 job, errors = start_job(str(body.get("kind", "")), body.get("args") or {})

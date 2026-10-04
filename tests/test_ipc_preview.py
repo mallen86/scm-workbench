@@ -80,6 +80,26 @@ class PreviewIpcTests(unittest.TestCase):
     def call(params):
         return ipc.dispatch({"id": "preview-test", "method": "preview", "params": params})
 
+    def test_bounded_post_preview_matches_native_for_large_manual_selection(self):
+        params = {"kind": "postprocess_images", "args": {"scope": "selected", "selected_images": [
+            f"game/front/{i}-" + "é" * 80 + ".png" for i in range(400)]}}
+        raw = json.dumps(params, ensure_ascii=False).encode("utf-8")
+        self.assertGreater(len(raw), 65536)
+        expected = {"image_count": 400, "errors": [], "warnings": [], "cmd": "processor"}
+        with mock.patch.object(server, "build_preview", return_value=expected) as build:
+            request = urllib.request.Request(self.base + "/api/preview", data=raw,
+                                             headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                http = json.loads(response.read())
+            native = self.call(params)
+            self.assertEqual(http, native["result"])
+            self.assertEqual(build.call_args.args, (params["kind"], params["args"]))
+        for body in (b"[]", b'{"kind":"x","args":[]}', b"x" * (512 * 1024 + 1)):
+            request = urllib.request.Request(self.base + "/api/preview", data=body)
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(caught.exception.code, 400)
+
     def test_fixture_http_and_native_preview_results_match(self):
         args = {"deck_file": "example.txt", "format": "simple"}
         status, http_result = self.request(args)

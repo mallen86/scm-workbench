@@ -9,6 +9,7 @@ import { latestInstallJob, optionalInstallStatus } from "../postprocess-install-
 import { watchJobDone } from "./utilities.js";
 import { syncJobNotices } from "../job-notices.js";
 import { jobNoticeProgress, postprocessSkipDetails } from "../job-notice-progress.js";
+import { createImageSelection, selectionKey } from "../postprocess-selection.js";
 
 const TEMPLATE = `from pathlib import Path\n\n\ndef process_image(image_path: Path, context: dict) -> None:\n    """Modify the private working copy in place."""\n    # Open image_path, transform it, and save it back to image_path.\n    return None\n`;
 
@@ -583,10 +584,10 @@ async function installLibraries() {
 
 function paintRunGate() {
   const scope = first(formArgs("postprocess_images")?.scope) || "both";
-  const countKnown = state.imageScope === scope && Number.isInteger(state.imageCount);
+  const countKnown = state.imageScope === selectionKey(formArgs("postprocess_images")) && Number.isInteger(state.imageCount);
   const p = selectedProcessor();
   const running = state.job && (S.jobs || []).some(job => job.id === state.job.id && job.status === "running");
-  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? "No recognized images in this scope" : "Ready to run";
+  const gate = running ? "Processor job is running" : !p ? "Choose a processor" : state.loadError ? "Could not verify the selected revision" : S.info && !S.info.scm?.found ? "Connect an SCM checkout before processing images" : !isReady(p) ? (p.optional_model ? "Install the model and libraries first" : isStale(p) ? "Reinstall libraries for this Python first" : "Install or update libraries first") : !isTrusted(p) ? "Trust this exact revision first" : scope === "selected" && !(formArgs("postprocess_images").selected_images || []).length ? "Choose at least one card" : !countKnown ? "Checking image inventory…" : state.imageCount === 0 ? (scope === "selected" ? "Choose at least one card" : "No recognized images in this scope") : "Ready to run";
   const run = document.querySelector(".pp-run");
   if (run) { run.disabled = gate !== "Ready to run"; run.title = gate; }
   const note = document.querySelector(".pp-run-note");
@@ -603,7 +604,7 @@ function patchRunForm() {
   args.processor_id = state.selected || "";
   args.revision_hash = revision(selectedProcessor());
   const scope = first(args.scope) || "both";
-  if (state.imageScope !== scope) state.imageCount = null;
+  if (state.imageScope !== selectionKey(args)) state.imageCount = null;
   afterFormChange(kind, args);
   paintRunGate();
 }
@@ -612,6 +613,17 @@ function attachRunStatus(root) {
   const status = el("div", { class: "pp-run-status", "aria-live": "polite", hidden: true });
   const host = $(".pp-run-card", root) || root;
   host.append(status);
+  const picker = createImageSelection({ args: () => formArgs("postprocess_images"),
+    changed: () => afterFormChange("postprocess_images", formArgs("postprocess_images")) });
+  const form = $(".form-card", host);
+  if (form) form.after(picker.root);
+  const formListener = event => {
+    if (event.detail?.kind !== "postprocess_images") return;
+    if (state.imageScope !== selectionKey(event.detail.args)) state.imageCount = null;
+    picker.sync(); paintRunGate();
+  };
+  document.addEventListener("wb:form-change", formListener);
+  picker.sync();
   let stoppingId = null;
   const requestCancel = async jobId => {
     if (stoppingId === jobId) return;
@@ -655,7 +667,8 @@ function attachRunStatus(root) {
   const previewListener = event => {
     const detail = event.detail || {};
     if (detail.kind !== "postprocess_images") return;
-    state.imageScope = first(detail.args?.scope) || "both";
+    if (selectionKey(detail.args) !== selectionKey(formArgs("postprocess_images"))) return;
+    state.imageScope = selectionKey(detail.args);
     state.imageCount = Number.isInteger(detail.result?.image_count) ? detail.result.image_count : null;
     paintRunGate();
   };
@@ -682,7 +695,7 @@ function attachRunStatus(root) {
     paintRunGate();
   } catch {} };
   state.timer = setInterval(tick, 700); tick();
-  root.__dispose = () => { clearInterval(state.timer); document.removeEventListener(COMMAND_PREVIEW_EVENT, previewListener); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
+  root.__dispose = () => { picker.dispose(); document.removeEventListener("wb:form-change", formListener); clearInterval(state.timer); document.removeEventListener(COMMAND_PREVIEW_EVENT, previewListener); if (state.sub) state.sub.close(); state.sub = null; state.timer = null; if (S.pageGuard === root.__guard) S.pageGuard = null; };
 }
 
 function renderSimplePostprocess() {

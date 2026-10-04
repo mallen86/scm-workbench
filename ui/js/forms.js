@@ -178,6 +178,8 @@ export function afterFormChange(kind, args) {
   if (args && S.forms[kind] !== args) S.forms[kind] = args;
   clearTimer(kind);
   S.timers[kind] = setTimeout(() => updatePreview(kind), 250);
+  if (typeof document?.dispatchEvent === "function" && typeof globalThis.CustomEvent === "function")
+    document.dispatchEvent(new CustomEvent("wb:form-change", { detail: { kind, args } }));
 }
 
 

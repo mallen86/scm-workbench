@@ -153,6 +153,19 @@ settings and the next `settings.get` agree. It never writes repos state or the
 offset state. Offset mutations use their own serialized, atomic
 state/projection transaction described below:
 
+Manual image processing uses existing `file.list` metadata reads for the three
+fixed SCM image folders; no raw-image or new native picker capability is added.
+`postprocess_images` accepts manifest scope `selected` with `selected_images`, a
+list of 1–1024 unique `game/{front,double_sided,back}/<filename>` identities.
+Names are limited to 255 UTF-8 bytes; separators, traversal, control characters,
+ADS names and unsupported extensions are rejected. Both preview and execution
+require every selected image to remain available and pass existing image/path
+checks. Unselected images are never staged. Job arguments retain the selection
+for history restoration. Browser manual-selection previews use bounded
+`POST /api/preview` (`{kind,args}`, at most 512 KiB) to avoid URL-length limits;
+other browser previews retain GET, and native previews always use RPC with no
+HTTP retry. The POST route is unavailable in IPC mode.
+
 * `preview`: params `{"kind":"<string>","args":{...}}` (exactly those two
   keys). `kind` is at most 128 UTF-8 bytes. The JSON encoding of the `args`
   object is at most 512 KiB. The result is the same object as `GET

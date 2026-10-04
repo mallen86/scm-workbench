@@ -114,6 +114,13 @@ if (JSON.stringify(browserResult) !== JSON.stringify({ cmd: "browser" }) || requ
     requests[0].url !== expectedUrl || requests[0].options !== undefined)
   fail("browser preview URL or GET behavior changed");
 
+const manual = {scope:"selected", selected_images:["game/front/Card, One.png"]};
+await preview("postprocess_images", manual);
+const manualRequest = requests.at(-1);
+if (manualRequest.url !== "/api/preview" || manualRequest.options?.method !== "POST" ||
+    JSON.stringify(JSON.parse(manualRequest.options.body)) !== JSON.stringify({kind:"postprocess_images",args:manual}))
+  fail("manual selection preview must use bounded POST, preserving filenames");
+
 globalThis.fetch = async () => ({ ok: false, status: 422, json: async () => ({ error: "bad preview" }) });
 let browserError = null;
 try { await preview(kind, args); } catch (error) { browserError = error; }
