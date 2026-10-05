@@ -194,6 +194,17 @@ globalThis.fetch = () => { fetches++; return Promise.reject(new Error("HTTP fall
 const a = updates.checkUpdates(false), b = updates.checkUpdates(false);
 if (a !== b) fail("concurrent native checks were not memoized");
 if (!(await a).state || polls !== 2 || fetches) fail("native check polling or HTTP isolation failed");
+const restartCalls = [];
+const originalInvoke = internals.invoke;
+internals.invoke = (method, args) => { restartCalls.push({ method, args }); return Promise.resolve(); };
+await updates.restartAfterUpdate();
+if (restartCalls.length !== 1 || restartCalls[0].method !== "wb_restart" || Object.keys(restartCalls[0].args).length || fetches)
+  fail("package restart did not use the fixed native no-argument boundary");
+internals.invoke = () => Promise.reject(new Error("restart failed"));
+let restartFailed = false;
+try { await updates.restartAfterUpdate(); } catch { restartFailed = true; }
+if (!restartFailed || fetches) fail("native restart failure retried HTTP");
+internals.invoke = originalInvoke;
 const notes = await updates.getUpdateNotes("v2");
 if (!notes.ok || !calls.some(x => x.rpc.method === "updates.poll" && x.rpc.params.id === "notes-id")) fail("native notes polling failed");
 if (!(await updates.getUpdates()).packaged || !(await updates.startUpdate()).ok) fail("native synchronous methods failed");
@@ -293,6 +304,10 @@ const updaterUpdates = dataUrl(`
     return { ok: true, tag, published: "January 2, 2026", body: "<p>Shared release notes</p>" };
   };
   export const startUpdate = async () => globalThis.__startUpdateRequest();
+  export const restartAfterUpdate = async () => {
+    globalThis.__packageRestartCalls = (globalThis.__packageRestartCalls || 0) + 1;
+    if (globalThis.__packageRestartFail) throw new Error("restart failed");
+  };
 `);
 const loadedUpdaterSource = updaterSource
   .replace('from "./core.js"', `from "${updaterCore}"`)
@@ -441,6 +456,45 @@ const unsupportedButton = descendants(unsupportedNotice).find(node =>
 if (!elementText(unsupportedNotice).includes("does not have a supported update package") ||
     !unsupportedButton?.disabled || unsupportedButton?.onclick)
   fail("malformed Linux package metadata did not disable the manual action");
+
+// Installed Linux packages confirm elevation, expose the same action in both
+// modes, and restart only after a confirmed successful package transaction.
+updaterUi.stopUpdateStrip();
+globalThis.__updateState = { install_mode: "package", package_format: "arch", state: {
+  status: "update-available", latest: "v5.4", channel: "stable", prerelease: false,
+  release_url: "https://github.com/mallen86/scm-workbench/releases/tag/v5.4",
+} };
+for (const mode of ["simple", "advanced"]) {
+  globalThis.__updateSharedState.info.settings.ui_mode = mode;
+  await updaterUi.refreshUpdateNotice();
+  const packageNotice = globalThis.__updateNodes.get("#updatenotice");
+  if (!elementText(packageNotice).includes("Administrator approval required") ||
+      !descendants(packageNotice).some(node => node.tag === "button" && elementText(node).includes("Update now")))
+    fail("Linux package installation was not available in " + mode);
+}
+globalThis.__updateConfirmResult = false;
+const packageStartsBefore = downgradeStarts;
+const packageCancelled = await updaterUi.startUpdateInstall();
+if (!packageCancelled.cancelled || downgradeStarts !== packageStartsBefore)
+  fail("cancelled Linux install confirmation reached the transport");
+globalThis.__updateConfirmResult = true;
+await updaterUi.startUpdateInstall();
+if (downgradeStarts !== packageStartsBefore + 1 || !globalThis.__updateConfirms.at(-1).text.includes("administrator approval"))
+  fail("confirmed Linux install did not explain and request package-manager approval");
+listedJob = { id: "package-ok", kind: "update", status: "ok", progress: { stage: "relaunch", restart_required: true } };
+updaterUi.startUpdateStrip("package-ok");
+await new Promise(resolve => realTimeout(resolve, 0));
+if (globalThis.__packageRestartCalls !== 1) fail("successful Linux install did not restart the native shell");
+listedJob = { ...listedJob, id: "package-fail", status: "fail", progress: { stage: "authorize" } };
+updaterUi.startUpdateStrip("package-fail");
+await new Promise(resolve => realTimeout(resolve, 0));
+if (globalThis.__packageRestartCalls !== 1) fail("failed Linux install restarted the shell");
+globalThis.__packageRestartFail = true;
+listedJob = { id: "package-restart-fail", kind: "update", status: "ok", progress: { stage: "relaunch", restart_required: true } };
+updaterUi.startUpdateStrip(listedJob.id);
+await new Promise(resolve => realTimeout(resolve, 0));
+if (!elementText(globalThis.__insertedUpdateStrip).includes("Quit and reopen"))
+  fail("installed package with native restart failure lost the manual recovery action");
 
 // Packaged startup forces a fresh check before painting its result. Its daily
 // timer repeats that flow without allowing duplicate scheduler installation.

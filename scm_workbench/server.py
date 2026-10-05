@@ -2171,8 +2171,8 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
                 st["asset"].get("tag") != st.get("latest")):
             return None, ["No installable update is available from the current checked state."]
         latest = st["latest"]
-        if updater.install_mode() != "automatic":
-            return None, ["Linux updates must be installed manually with the operating system package."]
+        if updater.install_mode() not in ("automatic", "package"):
+            return None, ["Linux updates must be installed manually until a system-installed app and pkexec are available."]
         if any(j.get("kind") == "update" and j.get("status") == "running"
                for j in JOBS.values()):
             return None, ["an update is already running; try again later"]
@@ -2228,8 +2228,18 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
             "work": DATA_DIR / "update",
         }
 
+        def begin_package_install():
+            global _UPDATE_QUIESCING
+            with JOBS_LOCK:
+                if any(other.get("status") == "running" and other.get("id") != job_id
+                       for other in JOBS.values()):
+                    raise updater.UpdateError("Finish other jobs before installing the update, then try again.")
+                _UPDATE_QUIESCING = True
+                job["package_install_quiesced"] = True
+        plan["begin_package_install"] = begin_package_install
+
         def worker():
-            global _UPDATE_ADMISSION, _UPDATE_ADMISSION_JOB
+            global _UPDATE_ADMISSION, _UPDATE_ADMISSION_JOB, _UPDATE_QUIESCING
             try:
                 updater.run_job(job, plan, log_f)
             except Exception as exc:
@@ -2265,6 +2275,9 @@ def start_update_job(*_ignored, **_ignored_kwargs) -> Tuple[Optional[dict], List
                 # Release only after updater.run_job, failure handling, log
                 # close, and persistence have all completed.
                 with JOBS_LOCK:
+                    if job.get("package_install_quiesced") and not (
+                            job.get("status") == "ok" and job.get("progress", {}).get("restart_required")):
+                        _UPDATE_QUIESCING = False
                     if _UPDATE_ADMISSION_JOB == job_id:
                         _UPDATE_ADMISSION = False
                         _UPDATE_ADMISSION_JOB = None

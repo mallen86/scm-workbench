@@ -4,8 +4,8 @@ updater.py — check for, and install, newer versions of the SCM Workbench app.
 
 The app is packaged as a Tauri bundle and shipped as GitHub release assets
 (macOS: a drag-to-Applications DMG; Windows: a flat portable ZIP; Linux:
-Debian and Arch-family packages installed manually through the operating
-system). This module
+Debian and Arch-family packages installed through the operating system
+with administrator approval). This module
 talks to the releases of the Workbench's own repository:
 
   * fetch the newest stable release by default, or the highest published
@@ -18,8 +18,9 @@ talks to the releases of the Workbench's own repository:
     a validated app candidate; Windows ZIPs use the bounded extractor. The
     candidate is then handed to the native helper through a durable
     journal/request protocol. Linux resolves its local distribution and CPU,
-    exposes only the exact matching package, and leaves installation to the
-    package manager rather than writing into /usr.
+    downloads the exact checksum-bound package, and uses a protected helper
+    and OS administrator prompt to let apt/pacman install it. The app itself
+    never writes into /usr.
 
 The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
@@ -71,7 +72,7 @@ ARCHIVE_COMPRESSION_RATIO_MAX = 200
 
 # macOS uses its standard DMG for both manual and in-app installation.
 # Windows remains a portable ZIP application. Linux publishes exact Debian and
-# Arch packages, but installation stays package-manager-owned rather than
+# Arch packages; OS-approved installation stays package-manager-owned rather than
 # self-updating /usr.
 MACOS_DMG_ASSET = "scm-workbench-macos.dmg"
 WINDOWS_ASSET = "scm-workbench-windows.zip"
@@ -674,14 +675,17 @@ def package_format(platform: str = None, *, os_release: dict | None = None,
 
 
 def install_mode(platform: str = None) -> str:
-    """Return whether this platform may replace its own installed payload."""
+    """Return automatic bundle handoff, OS-approved package install, or manual."""
     platform = platform or (sys.platform if os.name != "nt" else "win32")
     linux = isinstance(platform, str) and (
         platform.startswith("linux") or platform in {
             "debian", "ubuntu", "arch", "archlinux", "manjaro",
         }
     )
-    return "manual" if linux else "automatic"
+    if linux:
+        from . import linux_update
+        return "package" if linux_update.available() else "manual"
+    return "automatic"
 
 
 def pick_asset(release: dict, platform: str = None) -> dict:
@@ -2111,8 +2115,9 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         # never reads as "nothing is happening".
         job["progress"] = {"stage": "fetch", "done": 0, "total": 0}
         emit(f"Update to {plan.get('latest') or 'the latest release'} — repo {plan.get('repo')}")
-        if install_mode() != "automatic":
-            raise UpdateError("Linux updates must be installed manually with the operating system package")
+        mode = install_mode()
+        if mode not in ("automatic", "package"):
+            raise UpdateError("In-app Linux updates require a system-installed package and pkexec. Install the release package manually first.")
         # 1) re-verify (the state that started the job can be a few minutes old)
         channel = plan.get("channel", "stable")
         if channel not in ("stable", "beta"):
@@ -2150,6 +2155,8 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         except (KeyError, TypeError, UpdateError) as exc:
             fail(f"no unambiguous installable asset is attached to the newest release ({exc})")
             return
+        if mode == "package" and not asset.get("digest"):
+            raise UpdateError("The Linux release package has no verified checksum; use the release page for manual installation.")
         size_mb = asset.get("size", 0) / 1e6
         emit(f"Downloading {asset['name']} ({size_mb:.0f} MB) from the release …")
         # 3) download (progress line, throttled to ~1/s)
@@ -2169,6 +2176,25 @@ def run_job(job: dict, plan: dict, log_f) -> None:
                 emit(f"    ↓ {done / 1e6:.1f} / {total / 1e6:.1f} MB")
         download(asset["url"], dest, progress=progress, expected_asset=asset)
         emit(f"    downloaded {dest.stat().st_size / 1e6:.1f} MB")
+        if mode == "package":
+            from . import linux_update
+            if Path(plan.get("bundle") or "").resolve() != linux_update.ROOT.resolve():
+                raise UpdateError("Linux updates require the package-manager-owned app in /usr/lib/scm-workbench.")
+            begin = plan.get("begin_package_install")
+            if not callable(begin):
+                raise UpdateError("Linux installation could not acquire the application job gate.")
+            begin()
+            job["progress"] = {"stage": "authorize", "done": 0, "total": 0}
+            emit("Approve the system administrator prompt to install the verified package.")
+            try:
+                linux_update.install(dest.resolve(), asset["digest"].split(":", 1)[1].lower(),
+                                     rel["tag"], package_format(), downgrade=stable_downgrade)
+            except linux_update.InstallError as error:
+                raise UpdateError(str(error)) from error
+            job["progress"] = {"stage": "relaunch", "done": 0, "total": 0,
+                               "restart_required": True}
+            finish(True, "The package manager installed the update. Restarting Workbench; app data was preserved.")
+            return
         bundle = plan.get("bundle")
         if not bundle or not _is_install_bundle(Path(bundle)):
             fail("automatic updates require a complete packaged app; development checkouts are not installable")

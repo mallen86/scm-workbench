@@ -148,8 +148,9 @@ recognition.
 
 ## Updates
 
-Linux app files are package-manager-owned, so Workbench deliberately does not
-attempt an in-place self-update. It reads bounded `/etc/os-release` metadata,
+Linux app files remain package-manager-owned. An installed Workbench can
+now download and install updates through the operating system, rather than
+replacing its own files. It reads bounded `/etc/os-release` metadata,
 requires x86_64, and resolves exactly one supported package family:
 
 - Debian/Ubuntu selects `scm-workbench-linux-amd64.deb`;
@@ -159,8 +160,51 @@ requires x86_64, and resolves exactly one supported package family:
 Release metadata must contain one unambiguous exact asset for the resolved
 target. Cached update state is revalidated against that target, so moving an
 XDG data directory between distributions cannot retain authority for the wrong
-package. The Settings page and standing update notice open only the validated,
-tag-bound GitHub release page and give package-manager-specific instructions.
+package. Both interface modes offer the same download/install action from
+Settings and the standing update notice.
 
-This preserves bounded release discovery without granting the app authority to
-replace `/usr` files. Data under the XDG data directory is not touched.
+The installed packages depend on Polkit (`policykit-1` on Debian/Ubuntu,
+`polkit` on Arch/Manjaro) and system CA certificates. A desktop authentication
+agent must be running to display the administrator prompt. Source checkouts,
+missing `pkexec`, unprotected installations, and unsupported distributions keep
+the validated release-page/manual-install flow. Older Workbench Linux releases
+must be upgraded manually once to obtain this installer.
+
+## Linux update boundary
+
+1. Re-verify the selected release and download the exact asset with its required
+   GitHub SHA-256 digest. Downloads retain the existing origin and size limits.
+2. Require other jobs in this worker to finish, then fence new job admission.
+   Existing jobs are never forcibly stopped to perform an update.
+3. Request OS administrator approval with `pkexec`, invoking only the fixed,
+   root-owned bundled interpreter and standalone `linux_update.py` helper.
+   Writable helper/interpreter paths are rejected; no shell or caller-supplied
+   command is accepted.
+4. The elevated helper independently fetches bounded public metadata from the
+   immutable official GitHub release origin, with system TLS verification and
+   no redirects or environment proxies. It checks the tag, published status,
+   unique asset, size, and digest. A forged local hash cannot authorize a package
+   from another publisher. Custom update repositories require manual installation.
+5. Copy the bounded, regular, single-link caller-owned package into private
+   root-owned `/var/tmp` storage and verify its frozen size/hash again. Concurrent
+   changes to the original download cannot change the package being installed.
+6. Inspect the package name (`scm-workbench`), version, and architecture with
+   bounded system tools, then invoke apt or pacman with fixed arguments and a
+   clean environment. Explicit beta-to-stable downgrades remain supported.
+7. Verify the package manager's installed version before reporting success.
+   The native restart action closes IPC and reaps the old worker before launching
+   the new app. It uses the shell's frozen startup path, not `/proc/self/exe`,
+   which points to a deleted ELF after package replacement. A restart failure keeps an explicit quit/reopen action visible.
+
+Metadata inspection has 30-second, 64 KiB, memory, and CPU bounds. Installation
+has a 30-minute bound and bounded retained diagnostics; Debian lock contention
+waits at most two minutes. Authentication refusal does not install anything.
+Package-manager failures are surfaced in both modes without claiming rollback:
+if a transaction is interrupted or the OS reports partial configuration, repair
+it with apt/pacman before retrying. Closing Workbench is not a cancellation of
+an already-authorized system package transaction.
+
+The app never receives general root authority and never directly replaces
+`/usr` files. Its private root staging directory is cleaned on normal completion
+or failure; package ownership and OS dependency handling remain authoritative.
+Data under the XDG data directory is not touched.

@@ -120,7 +120,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Michael Allen <mtallen@outlook.com>
 Installed-Size: {size}
-Depends: libwebkit2gtk-4.1-0, libgtk-3-0, xdg-utils
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0, xdg-utils, policykit-1, ca-certificates
 Homepage: https://github.com/mallen86/scm-workbench
 Description: Desktop workbench for Silhouette Card Maker
  Fetch card art, manage card backs, create print-and-cut PDFs, and run the

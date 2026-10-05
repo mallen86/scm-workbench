@@ -7,11 +7,12 @@
    works identically in simple and advanced mode (the console has no
    place to live in simple mode — which is exactly where this is
    needed), and it follows the user if they navigate away mid-update. */
-import { $, S, confirmModal, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, getUpdateNotes, startUpdate as startUpdateRequest } from "./updates-transport.js";const UPDATE_STAGES = {
+import { $, S, confirmModal, el, ico, openUrl } from "./core.js";import { jobs } from "./jobs.js";import { checkUpdates, getUpdates, getUpdateNotes, startUpdate as startUpdateRequest, restartAfterUpdate } from "./updates-transport.js";const UPDATE_STAGES = {
   fetch: "fetching the release",
   download: "downloading the new version",
   extract: "unpacking the new build",
-  install: "swapping it into place",
+  authorize: "waiting for administrator approval and package installation",
+  install: "installing the update",
   relaunch: "reopening the new version",
 };
 let _updStrip = null;
@@ -20,6 +21,7 @@ let _updLastDone = null;
 let _updLastAt = null;
 let _updRequestPending = false;
 let _updJobStatus = null;
+let _packageRestartAttempted = false;
 let _automaticCheckTimer = null;
 let _automaticCheckPending = null;
 const UPDATE_ACTIVE_STATUSES = new Set(["running", "handoff"]);
@@ -49,6 +51,7 @@ export function stopUpdateStrip() {
   if (_updStrip) { _updStrip.remove(); _updStrip = null; }
   _updLastDone = null; _updLastAt = null;
   _updJobStatus = null;
+  _packageRestartAttempted = false;
 }
 
 function updateStrip(job) {
@@ -113,6 +116,15 @@ async function finishUpdateStrip(job) {
     head.textContent = "SCM Workbench update complete"
     label.textContent = "Update finished"
     meta.textContent = "The new version is ready."
+    if (job.progress?.restart_required === true) {
+      label.textContent = "Restarting SCM Workbench";
+      meta.textContent = "The package manager installed the update. Your app data is unchanged.";
+      if (!_packageRestartAttempted) {
+        _packageRestartAttempted = true;
+        try { await restartAfterUpdate(); }
+        catch { meta.textContent = "Update installed. Quit and reopen SCM Workbench to use the new version."; }
+      }
+    }
     return;
   }
   head.textContent = failed ? "SCM Workbench update failed" : "SCM Workbench update stopped"
@@ -230,8 +242,8 @@ export async function startUpdateInstall() {
   }
   _updRequestPending = true;
   try {
-    let state;
-    try { state = (await getUpdates())?.state || {}; }
+    let state, view;
+    try { view = await getUpdates(); state = view?.state || {}; }
     catch { return { ok: false, errors: ["The checked update state is unavailable."] }; }
     if (state.downgrade === true) {
       const approved = await confirmModal({
@@ -239,6 +251,14 @@ export async function startUpdateInstall() {
         text: `This beta is newer than the latest stable release. Workbench will install ${displayTag(state.latest)} and preserve your settings, decklists, images, and job history.`,
         okLabel: "Install stable version",
         danger: true,
+      });
+      if (!approved) return { ok: false, cancelled: true, errors: [] };
+    }
+    if (view?.install_mode === "package") {
+      const approved = await confirmModal({
+        title: "Install Linux update?",
+        text: "Workbench will download and verify the package, request administrator approval, and install it with your system package manager. Finish other jobs first. The app then restarts; your data is preserved.",
+        okLabel: "Download and install",
       });
       if (!approved) return { ok: false, cancelled: true, errors: [] };
     }
@@ -319,6 +339,7 @@ function renderUpdateNotice(tag, state) {
       // startUpdateInstall replaces this notice with the shared progress strip.
     };
   }
+  if (state.install_mode === "package") meta.textContent = "Administrator approval required. Installs with your package manager, then restarts; app data is preserved.";
   actions.append(whatsNew, install);
   const notice = el("div", { class: "repoprog sidebar-note", id: "updatenotice" }, head, row, actions);
   foot.before(notice);

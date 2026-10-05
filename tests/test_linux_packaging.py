@@ -125,7 +125,7 @@ class LinuxPackagingTests(unittest.TestCase):
             self.assertIn("pkgver=0.9.0beta.1", pkgbuild)
             self.assertIn("arch=('x86_64')", pkgbuild)
             self.assertIn("license=('MIT')", pkgbuild)
-            self.assertIn("depends=('webkit2gtk-4.1' 'gtk3' 'xdg-utils')", pkgbuild)
+            self.assertIn("depends=('webkit2gtk-4.1' 'gtk3' 'xdg-utils' 'polkit' 'ca-certificates')", pkgbuild)
             self.assertIn("options=('!strip' '!debug')", pkgbuild)
             self.assertNotIn(build_linux_arch.PKGBUILD_VERSION_TOKEN, pkgbuild)
             self.assertEqual(

@@ -895,6 +895,21 @@ Native errors never retry through HTTP. Browser routes remain compatibility
 endpoints and support an optional encoded `tag` query parameter; omitting it
 binds the current checked release.
 
+`updates.get.install_mode` is `automatic` for bundle handoff, `package` for a
+protected system-installed Linux app with `pkexec`, or `manual` otherwise.
+Linux uses the same argument-free `updates.start` admission and job/log transport.
+After the checksum-bound download, installation fences new jobs and requires
+other jobs to finish. The OS-approved helper independently verifies official
+release metadata, copies into root-private staging, and invokes only apt/pacman;
+no elevated paths or commands are accepted through public RPC. Successful jobs
+publish `progress.restart_required: true` only after installed-version verification.
+The update facade then invokes the existing fixed, no-argument `wb_restart`
+action, which now shuts down/reaps the old worker before restarting. No browser
+restart fallback is attempted. Failure to restart explicitly asks the user to
+quit/reopen; package/authentication failures never trigger restart. See
+[Linux packaging](linux-packaging.md#linux-update-boundary) for authority and
+transaction limits.
+
 The deletion facade is one public `fs.delete_images` call. Rust starts and
 polls private `fs.delete_images_start`/`fs.delete_images_poll` operations so
 filesystem work never occupies the worker's serialized request while running.

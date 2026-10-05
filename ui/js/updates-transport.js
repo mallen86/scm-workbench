@@ -146,4 +146,20 @@ export function startUpdate() {
   return browserStartRequest();
 }
 
+// Reuse the native shell's fixed self-restart action; it accepts no paths or
+// commands. A selected native failure must never fall back to browser HTTP.
+export async function restartAfterUpdate() {
+  const invoke = getTauriInvoke();
+  if (!invoke) throw new Error("Quit and reopen SCM Workbench to use the installed update.");
+  let timer;
+  try {
+    await Promise.race([
+      invoke("wb_restart", {}),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Quit and reopen SCM Workbench to use the installed update.")), 10000);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 export { OPERATION_TIMEOUT_MS };

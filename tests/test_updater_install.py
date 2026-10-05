@@ -756,6 +756,39 @@ class UpdateStartAdmissionTests(unittest.TestCase):
         self.assertEqual(observed["current"], "2.0.0-beta.1")
         self.assertEqual(observed["latest"], tag)
 
+    def test_linux_package_install_fences_jobs_and_releases_only_failed_installs(self):
+        old_quiescing = server._UPDATE_QUIESCING
+        try:
+            for busy, successful in ((True, False), (False, False), (False, True)):
+                with self.subTest(busy=busy, successful=successful):
+                    server.JOBS.clear()
+                    server._UPDATE_QUIESCING = False
+                    if busy:
+                        server.JOBS["processing"] = {"id": "processing", "kind": "postprocess", "status": "running"}
+                    server.save_update_state(self.state())
+                    def run(job, plan, log):
+                        plan["begin_package_install"]()
+                        self.assertTrue(server._UPDATE_QUIESCING)
+                        job["status"] = "ok" if successful else "fail"
+                        job["progress"] = {"restart_required": successful}
+                    class ImmediateThread:
+                        def __init__(self, target, **kwargs):
+                            self.target = target
+                        def start(self):
+                            self.target()
+                    with patch.object(updater, "install_mode", return_value="package"), \
+                         patch.object(updater, "run_job", side_effect=run), \
+                         patch.object(server.threading, "Thread", ImmediateThread):
+                        job, errors = server.start_update_job()
+                    self.assertEqual(errors, [])
+                    self.assertEqual(job["status"], "ok" if successful else "fail")
+                    self.assertEqual(server._UPDATE_QUIESCING, successful)
+                    if busy:
+                        self.assertEqual(server.JOBS["processing"]["status"], "running")
+                        self.assertIn("Finish other jobs", " ".join(job["log_lines"]))
+        finally:
+            server._UPDATE_QUIESCING = old_quiescing
+
     def test_linux_manual_packages_cannot_enter_self_update_worker(self):
         for name in (updater.LINUX_DEB_ASSET, updater.LINUX_ARCH_ASSET):
             with self.subTest(asset=name), \

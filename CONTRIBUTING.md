@@ -167,7 +167,10 @@ Intel/universal macOS artifact, ARM Windows artifact, or Linux ARM64 artifact.
 The macOS workflow wraps the ad-hoc-signed app in a drag-to-Applications DMG,
 which is also the sole macOS in-app updater payload. Windows publishes a
 portable ZIP. Linux publishes package-manager-owned `.deb` and `.pkg.tar.zst`
-artifacts and intentionally uses manual update installation.
+artifacts and uses an OS administrator prompt to install verified updates with
+apt or pacman. The privileged helper independently verifies the official release
+checksum before installation; it never changes per-user data. Source checkouts
+and unsupported setups retain manual installation.
 The DMG is not notarized, and current Windows artifacts are unsigned. Those
 signing tradeoffs, including the expected macOS **Open Anyway** and Windows
 SmartScreen prompts, are explicitly accepted for the current first slice. Do

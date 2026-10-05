@@ -75,6 +75,9 @@ fn kill_worker_tree(child: &Child) {
 /// Type shared with the watchdog thread: the live worker child, if any.
 type WorkerSlot = Arc<Mutex<Option<Child>>>;
 
+#[cfg(target_os = "linux")]
+struct RestartTarget(PathBuf);
+
 /// Reap the worker whenever application state is dropped during normal
 /// unwinding. A hard shell kill cannot run Rust destructors; kernel closure of
 /// protocol stdin is the independent worker-side backstop for that path.
@@ -573,6 +576,11 @@ fn main() {
         .manage(WorkerRpc::default())
         .setup(|app| {
             let exe = std::env::current_exe().expect("current_exe");
+            // Linux reports a replaced ELF as `/path/to/app (deleted)` via
+            // /proc/self/exe. Freeze our own launch path before package updates
+            // rather than asking Tauri to rediscover it after replacement.
+            #[cfg(target_os = "linux")]
+            app.manage(RestartTarget(exe.clone()));
             let requested_data = data_dir();
             // The per-user data area is created at launch, exactly as the old
             // bootstrap did: on a fresh machine the first thing the app ever
@@ -1530,9 +1538,85 @@ fn fail_window(window: &WebviewWindow, data: &Path, body: &str, detail: &str) {
 /// "Try again" on the startup-failure page: restart the whole app. The data
 /// area is durable, so running setup() again re-spawns the worker and the
 /// window comes back as the live app.
+#[cfg(any(target_os = "linux", test))]
+fn cached_restart_target(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() && path.is_file() {
+        Ok(path.to_path_buf())
+    } else {
+        Err("The installed app could not be found. Quit and reopen Workbench.".into())
+    }
+}
+
 #[tauri::command]
-fn wb_restart(app: AppHandle) {
-    app.restart();
+async fn wb_restart(app: AppHandle) -> Result<(), String> {
+    // A package update must not start a second worker over the same user data
+    // while the old one is still persisting its final job. The diagnostic
+    // retry action shares this same fixed, no-argument restart boundary.
+    static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RESTARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    let target = match app
+        .try_state::<RestartTarget>()
+        .ok_or_else(|| "The startup executable path is unavailable.".to_string())
+        .and_then(|target| cached_restart_target(&target.inner().0))
+    {
+        Ok(target) => target,
+        Err(error) => {
+            RESTARTING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<WorkerRpc>().shutdown();
+        if let Some(mut child) = app
+            .state::<WorkerSlot>()
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+        {
+            let deadline = Instant::now() + Duration::from_secs(6);
+            let mut exited = false;
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        exited = true;
+                        break;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+            if !exited {
+                kill_worker_tree(&child);
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // The target and argv come only from this shell's startup state,
+            // never from WebView parameters or mutable worker/update files.
+            match Command::new(target)
+                .args(app.env().args_os.iter().skip(1))
+                .spawn()
+            {
+                Ok(_) => {
+                    app.exit(0);
+                    Ok(())
+                }
+                Err(_) => {
+                    RESTARTING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    Err("Update installed, but restart failed. Quit and reopen Workbench.".into())
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        app.restart()
+    })
+    .await
+    .map_err(|_| "The native restart could not complete. Quit and reopen Workbench.".to_string())?
 }
 
 fn json_string(s: &str) -> String {
@@ -1548,6 +1632,27 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod restart_notice_tests {
     use super::*;
+
+    #[test]
+    fn cached_restart_path_survives_package_binary_replacement() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("scm-restart-{}-{nonce}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let target = root.join("scm-workbench");
+        fs::write(&target, b"old binary").unwrap();
+        let captured = cached_restart_target(&target).unwrap();
+        fs::rename(&target, root.join("old-unlinked-image")).unwrap();
+        fs::write(&target, b"new binary").unwrap();
+        assert_eq!(cached_restart_target(&captured).unwrap(), target);
+        assert_eq!(fs::read(&captured).unwrap(), b"new binary");
+        assert!(cached_restart_target(Path::new("relative-binary")).is_err());
+        fs::remove_file(&target).unwrap();
+        assert!(cached_restart_target(&captured).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn update_restart_notice_wait_is_bounded_and_nonzero() {

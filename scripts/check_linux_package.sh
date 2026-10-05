@@ -111,6 +111,10 @@ assert_worker_stopped() {
 "$runtime" -B "$(dirname "$0")/check_pdf_preview_helper.py" \
     "$(dirname "$app")/app/scm_workbench/pdf_preview_helper.py"
 
+# Prove installed updater availability without elevation or release-network IO.
+"$runtime" -I -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from scm_workbench import linux_update, updater; linux_update.context(); assert updater.install_mode() == "package"; print("linux smoke: protected package updater entrypoints pass")' \
+    "$(dirname "$app")/app"
+
 # Native close: WM_DELETE_WINDOW must exercise Tauri's CloseRequested path.
 data="$work/soft-data"
 log="$work/soft-shell.log"

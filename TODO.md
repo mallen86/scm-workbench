@@ -89,6 +89,7 @@
 - [x] Fix the advanced mode input to be clearer you need to hit enter or hit , to actually save the number. It might make more sense to just leave it as a text input.
 
 # Features
+- [x] Add in-app Debian/Ubuntu and Arch/Manjaro updates with official-release checksum verification, OS administrator approval, package-manager installation, busy-job fencing, and a worker-safe native restart.
 - [x] Add a Custom Fetch Card Art game with front/double-sided image drop zones, per-folder open buttons, safe native/browser imports, and the existing deck cleanup section.
 - [x] Add a single-image card-back zone to Custom Fetch Card Art, replacing the shared back transactionally while retaining two-column front/double-sided layout and stacked narrow layout.
 - [x] Use clickable built-in processor blocks in Simple mode, plus a Custom Processor block that reveals a ready-only dropdown when selected.
