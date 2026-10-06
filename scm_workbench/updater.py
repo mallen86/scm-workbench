@@ -37,7 +37,6 @@ import plistlib
 import posixpath
 import re
 import secrets
-import shlex
 import signal
 import struct
 import shutil
@@ -556,85 +555,31 @@ def latest_release(timeout: int = 25, *, include_prereleases: bool = False) -> d
 
 
 def _parse_os_release(text: str) -> dict[str, str]:
-    """Parse one bounded os-release document without executing shell syntax."""
-    if not isinstance(text, str):
-        raise UpdateError("Linux distribution metadata is invalid")
+    from . import linux_update
     try:
-        encoded_size = len(text.encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        raise UpdateError("Linux distribution metadata is invalid") from exc
-    if encoded_size > OS_RELEASE_MAX_BYTES:
-        raise UpdateError("Linux distribution metadata is invalid")
-    lines = text.splitlines()
-    if len(lines) > OS_RELEASE_MAX_LINES:
-        raise UpdateError("Linux distribution metadata is invalid")
-    values = {}
-    assignment = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = assignment.fullmatch(line)
-        if not match:
-            raise UpdateError("Linux distribution metadata is invalid")
-        key, encoded = match.group("key"), match.group("value")
-        if key in values:
-            raise UpdateError("Linux distribution metadata is ambiguous")
-        try:
-            decoded = [""] if encoded == "" else shlex.split(encoded, comments=False, posix=True)
-        except ValueError as exc:
-            raise UpdateError("Linux distribution metadata is invalid") from exc
-        try:
-            decoded_size = len(decoded[0].encode("utf-8")) if len(decoded) == 1 else 0
-        except UnicodeEncodeError as exc:
-            raise UpdateError("Linux distribution metadata is invalid") from exc
-        if len(decoded) != 1 or decoded_size > 4096 or any(
-                ord(char) < 0x20 or ord(char) == 0x7f for char in decoded[0]):
-            raise UpdateError("Linux distribution metadata is invalid")
-        values[key] = decoded[0]
-    return values
+        return linux_update.parse_os_release(text)
+    except linux_update.InstallError as error:
+        raise UpdateError(str(error)) from error
 
 
 def _read_os_release(path: Path | None = None) -> dict[str, str]:
-    candidates = (Path(path),) if path is not None else (
-        Path("/etc/os-release"), Path("/usr/lib/os-release"),
-    )
-    for candidate in candidates:
-        try:
-            with open(candidate, "rb") as source:
-                raw = source.read(OS_RELEASE_MAX_BYTES + 1)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise UpdateError("Linux distribution metadata is unavailable") from exc
-        if len(raw) > OS_RELEASE_MAX_BYTES:
-            raise UpdateError("Linux distribution metadata is too large")
-        try:
-            return _parse_os_release(raw.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise UpdateError("Linux distribution metadata is invalid") from exc
-    raise UpdateError("Linux distribution metadata is unavailable")
+    from . import linux_update
+    try:
+        return linux_update.read_os_release(path)
+    except linux_update.InstallError as error:
+        raise UpdateError(str(error)) from error
 
 
 def linux_package_format(*, os_release: dict | None = None,
                          machine: str | None = None) -> str:
-    """Resolve one supported Linux package family, or fail closed."""
+    """Use the same lineage/CPU resolver as the isolated privileged helper."""
+    from . import linux_update
     machine = platform_module.machine() if machine is None else machine
-    if not isinstance(machine, str) or machine.strip().lower() not in ("x86_64", "amd64"):
-        raise UpdateError("the release has no Linux package for this CPU architecture")
     values = _read_os_release() if os_release is None else os_release
-    if not isinstance(values, dict):
-        raise UpdateError("Linux distribution metadata is invalid")
-    distro = values.get("ID", "")
-    like = values.get("ID_LIKE", "")
-    if not isinstance(distro, str) or not isinstance(like, str):
-        raise UpdateError("Linux distribution metadata is invalid")
-    distro = distro.strip().lower()
-    if distro in ("debian", "ubuntu"):
-        return "deb"
-    if distro in ("arch", "manjaro"):
-        return "arch"
-    raise UpdateError(f"the release has no package for Linux distribution {distro or 'unknown'}")
+    try:
+        return linux_update.resolve_package_format(values, machine)
+    except linux_update.InstallError as error:
+        raise UpdateError(str(error)) from error
 
 
 def expected_asset_name(platform: str = None, *, os_release: dict | None = None,

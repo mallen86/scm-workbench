@@ -5,6 +5,13 @@ SCM Workbench supports x86_64 Linux desktops through two package formats:
 - `scm-workbench-linux-amd64.deb` for Ubuntu 22.04 or newer and Debian 12 or newer;
 - `scm-workbench-linux-arch-x86_64.pkg.tar.zst` for current Arch Linux and Manjaro.
 
+Compatible derivatives use the package format of their base distribution:
+Linux Mint 21+ (Ubuntu-based), LMDE 6+ (Debian-based), and suitable Pop!_OS/Zorin
+versions select the Debian package; Arch-based derivatives such as EndeavourOS
+and Garuda select the Arch package. Derivatives must still satisfy the base
+version and runtime dependency requirements above; recognizing a family is not
+a guarantee of binary compatibility on older distributions.
+
 There is no Linux ARM64 package. Both packages contain the same native shell,
 application code, UI, and pinned private Python 3.13 runtime.
 
@@ -153,9 +160,18 @@ now download and install updates through the operating system, rather than
 replacing its own files. It reads bounded `/etc/os-release` metadata,
 requires x86_64, and resolves exactly one supported package family:
 
-- Debian/Ubuntu selects `scm-workbench-linux-amd64.deb`;
-- Arch/Manjaro selects `scm-workbench-linux-arch-x86_64.pkg.tar.zst`;
-- an unknown distribution or CPU fails closed.
+- Debian/Ubuntu and derivatives declaring `ubuntu`/`debian` in `ID_LIKE` select
+  `scm-workbench-linux-amd64.deb`;
+- Arch/Manjaro and derivatives declaring `arch` in `ID_LIKE` select
+  `scm-workbench-linux-arch-x86_64.pkg.tar.zst`;
+- unknown lineage, conflicting families, malformed metadata, or unsupported
+  CPU architectures fail closed.
+
+Release selection and the isolated privileged installer use the same strict
+metadata parser and family resolver. `ID_LIKE` is a bounded list of exact tokens,
+not a substring/name guess or a probe for whichever package manager is present.
+CPU architecture is checked separately: `x86_64`/`amd64` are supported;
+ARM64, 32-bit x86, and RISC-V must never receive these packages.
 
 Release metadata must contain one unambiguous exact asset for the resolved
 target. Cached update state is revalidated against that target, so moving an

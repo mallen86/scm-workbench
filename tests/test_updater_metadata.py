@@ -328,6 +328,12 @@ class UpdaterMetadataTests(unittest.TestCase):
             ({"ID": "ubuntu", "ID_LIKE": "debian"}, "deb"),
             ({"ID": "arch", "ID_LIKE": ""}, "arch"),
             ({"ID": "manjaro", "ID_LIKE": "arch"}, "arch"),
+            ({"ID": "linuxmint", "ID_LIKE": "ubuntu debian"}, "deb"),
+            ({"ID": "linuxmint", "ID_LIKE": "debian"}, "deb"),
+            ({"ID": "pop", "ID_LIKE": "ubuntu debian"}, "deb"),
+            ({"ID": "zorin", "ID_LIKE": "ubuntu"}, "deb"),
+            ({"ID": "endeavouros", "ID_LIKE": "arch"}, "arch"),
+            ({"ID": "garuda", "ID_LIKE": "arch"}, "arch"),
         ):
             with self.subTest(release=release):
                 self.assertEqual(updater.linux_package_format(
@@ -335,7 +341,7 @@ class UpdaterMetadataTests(unittest.TestCase):
         for machine in ("aarch64", "arm64", "i686", ""):
             with self.subTest(machine=machine), self.assertRaises(updater.UpdateError):
                 updater.linux_package_format(os_release={"ID": "arch"}, machine=machine)
-        for release in ({"ID": "fedora"}, {"ID": "endeavouros", "ID_LIKE": "arch"}):
+        for release in ({"ID": "fedora"}, {"ID": "custom", "ID_LIKE": "fedora rhel"}):
             with self.subTest(release=release), self.assertRaisesRegex(
                     updater.UpdateError, "no package for Linux distribution"):
                 updater.linux_package_format(os_release=release, machine="amd64")

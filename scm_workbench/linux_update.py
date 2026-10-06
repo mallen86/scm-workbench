@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import selectors
 import ssl
@@ -56,23 +57,91 @@ def trusted(path: Path, *, under: Path | None = None) -> Path:
     return resolved
 
 
-def family() -> str:
-    if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
-        raise InstallError("Linux updates require a supported x86_64 desktop.")
-    with open("/etc/os-release", "rb") as stream:
-        raw = stream.read(65537)
-    if len(raw) > 65536:
-        raise InstallError("Linux distribution information is too large.")
+OS_RELEASE_MAX_BYTES = 64 * 1024
+OS_RELEASE_MAX_LINES = 1024
+
+
+def parse_os_release(text: str) -> dict[str, str]:
+    """Parse bounded OS metadata without interpreting shell expansions."""
+    if not isinstance(text, str):
+        raise InstallError("Linux distribution metadata is invalid")
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise InstallError("Linux distribution metadata is invalid") from error
+    if size > OS_RELEASE_MAX_BYTES or len(text.splitlines()) > OS_RELEASE_MAX_LINES:
+        raise InstallError("Linux distribution metadata is invalid")
     values = {}
-    for line in raw.decode("utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator:
-            values[key] = value.strip().strip('"').strip("'")
-    if values.get("ID") in ("debian", "ubuntu"):
-        return "deb"
-    if values.get("ID") in ("arch", "manjaro"):
-        return "arch"
-    raise InstallError("This Linux distribution has no supported update package.")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(.*)", line)
+        if not match:
+            raise InstallError("Linux distribution metadata is invalid")
+        key, encoded = match.groups()
+        if key in values:
+            raise InstallError("Linux distribution metadata is ambiguous")
+        try:
+            decoded = [""] if encoded == "" else shlex.split(encoded, comments=False, posix=True)
+            if (len(decoded) != 1 or len(decoded[0].encode("utf-8")) > 4096 or
+                    any(ord(c) < 32 or ord(c) == 127 for c in decoded[0])):
+                raise InstallError("Linux distribution metadata is invalid")
+        except (ValueError, UnicodeEncodeError) as error:
+            raise InstallError("Linux distribution metadata is invalid") from error
+        values[key] = decoded[0]
+    return values
+
+
+def read_os_release(path: Path | None = None) -> dict[str, str]:
+    candidates = (Path(path),) if path is not None else (
+        Path("/etc/os-release"), Path("/usr/lib/os-release"),
+    )
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as source:
+                raw = source.read(OS_RELEASE_MAX_BYTES + 1)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise InstallError("Linux distribution metadata is unavailable") from error
+        if len(raw) > OS_RELEASE_MAX_BYTES:
+            raise InstallError("Linux distribution metadata is too large")
+        try:
+            return parse_os_release(raw.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise InstallError("Linux distribution metadata is invalid") from error
+    raise InstallError("Linux distribution metadata is unavailable")
+
+
+def resolve_package_format(values: dict, machine: str) -> str:
+    """Resolve compatible packaging lineage independently of CPU architecture."""
+    if not isinstance(machine, str) or machine.strip().lower() not in ("x86_64", "amd64"):
+        raise InstallError("the release has no Linux package for this CPU architecture")
+    if not isinstance(values, dict):
+        raise InstallError("Linux distribution metadata is invalid")
+    distro, like = values.get("ID", ""), values.get("ID_LIKE", "")
+    if not isinstance(distro, str) or not isinstance(like, str) or len(like) > 4096:
+        raise InstallError("Linux distribution metadata is invalid")
+    distro = distro.strip().lower()
+    lineage = like.lower().split()
+    identifier = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+    if (not identifier.fullmatch(distro) or len(lineage) > 64 or
+            any(not identifier.fullmatch(token) for token in lineage)):
+        raise InstallError("Linux distribution metadata is invalid")
+    families = {"debian": "deb", "ubuntu": "deb", "arch": "arch", "manjaro": "arch"}
+    matches = {families[token] for token in (distro, *lineage) if token in families}
+    if len(matches) > 1:
+        raise InstallError("Linux distribution metadata has conflicting package families")
+    if not matches:
+        raise InstallError(f"the release has no package for Linux distribution {distro}")
+    return matches.pop()
+
+
+def family() -> str:
+    if not sys.platform.startswith("linux"):
+        raise InstallError("Linux updates require a supported x86_64 desktop.")
+    return resolve_package_format(read_os_release(), os.uname().machine)
 
 
 def context() -> tuple[Path, Path, Path, str]:

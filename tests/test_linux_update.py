@@ -16,6 +16,66 @@ from scm_workbench import linux_update as linux, updater
 
 
 class LinuxUpdateTests(unittest.TestCase):
+    def test_derivatives_have_matching_download_and_installer_targets(self):
+        from types import SimpleNamespace
+        releases = (
+            ({"ID": "linuxmint", "ID_LIKE": "ubuntu debian"}, "deb"),
+            ({"ID": "linuxmint", "ID_LIKE": "debian"}, "deb"),
+            ({"ID": "pop", "ID_LIKE": "ubuntu debian"}, "deb"),
+            ({"ID": "zorin", "ID_LIKE": "ubuntu"}, "deb"),
+            ({"ID": "endeavouros", "ID_LIKE": "arch"}, "arch"),
+            ({"ID": "garuda", "ID_LIKE": "arch"}, "arch"),
+        )
+        for release, expected in releases:
+            for machine in ("x86_64", "amd64"):
+                with self.subTest(release=release, machine=machine):
+                    asset = updater.expected_asset_name("linux", os_release=release, machine=machine)
+                    self.assertEqual(asset, linux.ASSETS[expected])
+                    with patch.object(linux.sys, "platform", "linux"), \
+                         patch.object(linux.os, "uname", return_value=SimpleNamespace(machine=machine), create=True), \
+                         patch.object(linux, "read_os_release", return_value=release):
+                        self.assertEqual(linux.family(), expected)
+            for machine in ("aarch64", "arm64", "i686", "riscv64", ""):
+                with self.subTest(release=release, machine=machine):
+                    with self.assertRaises(updater.UpdateError):
+                        updater.expected_asset_name("linux", os_release=release, machine=machine)
+                    with self.assertRaises(linux.InstallError):
+                        linux.resolve_package_format(release, machine)
+
+    def test_lineage_requires_unambiguous_exact_tokens(self):
+        for release in (
+            {"ID": "custom", "ID_LIKE": "ubuntu arch"},
+            {"ID": "ubuntu", "ID_LIKE": "arch"},
+            {"ID": "custom", "ID_LIKE": "notdebian superarch"},
+            {"ID": "custom", "ID_LIKE": "fedora rhel"},
+            {"ID": "custom", "ID_LIKE": ["debian"]},
+            {"ID": "custom", "ID_LIKE": "debian;touch /tmp/evil"},
+            {"ID": "custom", "ID_LIKE": "debian " * 65},
+            {"ID": "", "ID_LIKE": "debian"},
+        ):
+            with self.subTest(release=release):
+                with self.assertRaises(linux.InstallError):
+                    linux.resolve_package_format(release, "x86_64")
+                with self.assertRaises(updater.UpdateError):
+                    updater.linux_package_format(os_release=release, machine="x86_64")
+
+    def test_isolated_helper_uses_shared_strict_parser_and_family_resolver(self):
+        code = '''import runpy, sys
+ns = runpy.run_path(sys.argv[1], run_name="isolated_test")
+values = ns["parse_os_release"]('ID=linuxmint\\nID_LIKE="ubuntu debian"\\n')
+assert ns["resolve_package_format"](values, "x86_64") == "deb"
+assert ns["resolve_package_format"]({"ID": "endeavouros", "ID_LIKE": "arch"}, "amd64") == "arch"
+try:
+    ns["parse_os_release"]("ID=linuxmint\\nID=fedora\\n")
+except ns["InstallError"]:
+    pass
+else:
+    raise AssertionError("duplicate metadata accepted")
+'''
+        result = subprocess.run([sys.executable, "-I", "-c", code, str(Path(linux.__file__).resolve())],
+                                capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+
     def test_package_versions_match_builders(self):
         from scripts.build_linux_arch import arch_version
         from scripts.build_linux_deb import debian_version
