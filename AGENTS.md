@@ -6,10 +6,9 @@ This file is the fast-start guide for coding agents working on SCM Workbench. Re
 
 1. Run `git status --short --branch` and preserve all existing user changes.
 2. Check whether the branch is behind its remote before planning work. Never reset, overwrite, or rebase a dirty checkout without explicit approval.
-3. Read `TODO.md` for the active request. Mark an item `[x]` only after its implementation and regression coverage pass.
-4. Read `CONTRIBUTING.md` for setup, verification, packaging, and release details.
-5. For native/transport work, read `docs/native-ipc.md` before editing.
-6. For macOS first-run or packaging behavior, also read `docs/macos-first-run.md` and `.github/workflows/package.yml`.
+3. Read `CONTRIBUTING.md` for setup, verification, packaging, and release details.
+4. For native/transport work, read `docs/native-ipc.md` before editing.
+5. For macOS first-run or packaging behavior, also read `docs/macos-first-run.md` and `.github/workflows/package.yml`.
 
 ## What this repository is
 
@@ -192,7 +191,7 @@ Always compare local verification with the current steps in `.github/workflows/p
 ## Change discipline
 
 - Keep changes narrow and preserve unrelated local modifications.
-- Add regression coverage for every bug fix, especially if a TODO item was previously marked complete incorrectly.
+- Add regression coverage for every bug fix, especially if the bug was previously reported as fixed.
 - Prefer root-cause fixes over timing-only or display-only workarounds.
 - Do not commit runtime state or build products from `data/`, `logs/`, `.venv/`, Cargo targets, caches, mounted DMGs, or generated app bundles.
 - Update `README.md`, `CONTRIBUTING.md`, or `docs/` when behavior or architecture changes—not for implementation details that are already obvious from code.
