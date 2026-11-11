@@ -57,6 +57,8 @@ import unicodedata
 import uuid
 from pathlib import Path, PurePosixPath
 
+from . import tls
+
 USER_AGENT = "scm-workbench/1.1"
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
@@ -1420,7 +1422,7 @@ def gh_json(path: str, params: dict = None):
         "X-GitHub-Api-Version": "2022-11-28",
     })
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=30, **tls.urlopen_kwargs()) as r:
             _validate_https_host(_response_url(r, url), {_GH_API_HOST})
             length = r.headers.get("Content-Length")
             if length is not None:
@@ -1478,7 +1480,7 @@ def gh_get_bytes(url: str, timeout: int = 120, progress_cb=None,
         allowed_final.add(_GH_CODELOAD_HOST)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        r = urllib.request.urlopen(req, timeout=timeout)
+        r = urllib.request.urlopen(req, timeout=timeout, **tls.urlopen_kwargs())
     except Exception as e:
         raise RepoError(f"download failed: {_brief(e)}")
     try:
@@ -1535,7 +1537,7 @@ def gh_download_to(url: str, dest: Path, timeout: int = 120,
         allowed.add(_GH_CODELOAD_HOST)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        response = urllib.request.urlopen(req, timeout=timeout)
+        response = urllib.request.urlopen(req, timeout=timeout, **tls.urlopen_kwargs())
     except Exception as exc:
         raise RepoError(f"download failed: {_brief(exc)}")
     tmp = None

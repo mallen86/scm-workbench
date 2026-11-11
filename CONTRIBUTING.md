@@ -71,7 +71,7 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 * `--no-browser` — don't auto-open a tab.
 * The server always binds to **loopback only** (except on WSL2, where it binds the VM's interfaces so the Windows host can reach it) — it is local tooling, never a network service. File access is sandboxed to the two repos + the Workbench's own data dir.
 
-**No extra dependencies** on the Workbench itself: it's pure Python standard library (3.10+). The *base repos'* `requirements.txt` is what does the heavy lifting (Pillow, ezdxf, pypdfium2, the plugins' fetchers, …) — install it once into the interpreter you run the Workbench with, and both the scripts and the UI work.
+**No extra dependencies for source development:** the Workbench uses the Python standard library (3.10+). The *base repos'* `requirements.txt` is what does the heavy lifting (Pillow, ezdxf, pypdfium2, the plugins' fetchers, …) — install it once into the interpreter you run the Workbench with, and both the scripts and the UI work.
 
 ### Other entry points
 
@@ -171,6 +171,25 @@ artifacts and uses an OS administrator prompt to install verified updates with
 apt or pacman. The privileged helper independently verifies the official release
 checksum before installation; it never changes per-user data. Source checkouts
 and unsupported setups retain manual installation.
+
+Windows bundles also carry version- and hash-pinned `truststore` for **Windows 10 only**.
+The packaged worker uses a request-local native Windows certificate verifier
+for repository downloads, app-update checks/downloads, and optional model
+downloads. Windows can retrieve missing certificate-chain material using its
+own trust infrastructure; Workbench does not add a bundled CA list or modify
+the Windows certificate store itself. Certificate and hostname verification
+remain required, and verification failures are never retried with a weaker
+verifier. Windows 11 (build 22000 and later), Windows Server, macOS, Linux, and
+source development retain their existing HTTPS behavior. The Windows runtime
+bake installs this dependency even when the builder runs a newer Windows
+version. The bundle smoke exercises the native context explicitly; a Windows 10
+machine is still needed to verify missing-root retrieval end to end. OS policy
+or network restrictions can prevent Windows from retrieving certificates.
+The optional processor-library wheel resolver/downloader runs in pip, not this
+request helper. The bundled pip already uses its own native truststore
+integration by default; no additional pip feature flag or global injection is
+needed.
+
 The DMG is not notarized, and current Windows artifacts are unsigned. Those
 signing tradeoffs, including the expected macOS **Open Anyway** and Windows
 SmartScreen prompts, are explicitly accepted for the current first slice. Do

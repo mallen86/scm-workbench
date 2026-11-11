@@ -478,6 +478,10 @@ jobs:
           try {
             & $runtimePython -B -c "from scm_workbench import server; result = server.postprocessor_guide(); assert result.get('ok') and '<h1>Image post-processing</h1>' in result.get('body', ''); print('smoke: bundled post-processing guide renders')"
             if ($LASTEXITCODE) { throw "packaged post-processing guide smoke failed" }
+            & $runtimePython -B -c "import truststore; from scm_workbench import tls; assert tls._is_windows_bundle(); print('smoke: Windows TLS dependency is bundled')"
+            if ($LASTEXITCODE) { throw "packaged Windows TLS dependency is missing" }
+            & $runtimePython -B -m unittest discover -s (Join-Path $ws "tests") -p test_tls.py -v
+            if ($LASTEXITCODE) { throw "packaged Windows TLS smoke failed" }
           } finally { Pop-Location }
           & $runtimePython (Join-Path $ws "scripts\check_pdf_preview_helper.py") (Join-Path $bundle "app\scm_workbench\pdf_preview_helper.py")
           if ($LASTEXITCODE) { throw "packaged PDF preview helper smoke failed" }

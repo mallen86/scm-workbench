@@ -13,6 +13,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import tls
+
 # Exact roots *and* transitive dependencies; the installer additionally locks
 # each platform-specific wheel by SHA-256 before the offline installation.
 # Linux variants include the CPU provider and require matching system CUDA
@@ -112,7 +114,11 @@ def download_model(destination: Path) -> None:
     """Stream the fixed model into a private install stage, bounded and verified."""
     if not _approved_url(MODEL_URL):
         raise ValueError("model source is not approved")
-    opener = urllib.request.build_opener(_PinnedRedirects())
+    handlers = [_PinnedRedirects()]
+    tls_options = tls.urlopen_kwargs()
+    if tls_options:
+        handlers.append(urllib.request.HTTPSHandler(**tls_options))
+    opener = urllib.request.build_opener(*handlers)
     request = urllib.request.Request(MODEL_URL, headers={"User-Agent": "SCM-Workbench/model-installer"})
     with opener.open(request, timeout=20) as response:
         if not _approved_url(response.geturl()):

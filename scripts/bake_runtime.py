@@ -160,6 +160,25 @@ def bake_deps(py: Path, bundle: Path) -> None:
               "the release pipeline removes it before zipping too")
 
 
+def bake_workbench_deps(py: Path) -> None:
+    """App-owned compatibility dependency, carried by Windows bundles only.
+
+    Install on every Windows builder (including Windows 11 CI); the worker
+    decides whether to use it on the user's Windows 10 machine.
+    """
+    if sys.platform != "win32":
+        return
+    result = subprocess.run(
+        [str(py), "-m", "pip", "install", "--disable-pip-version-check",
+         "--only-binary=:all:", "--require-hashes",
+         "-r", str(ROOT / "packaging" / "windows-runtime-requirements.txt")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=0x08000000)
+    if result.returncode != 0:
+        tail = " ".join((result.stderr or result.stdout or "").strip().split())[-400:]
+        raise SystemExit(f"bake_runtime: Windows TLS dependency install failed:\n{tail}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bundle", required=True, help="the bundle dir containing (or receiving) runtime/")
@@ -170,6 +189,7 @@ def main() -> None:
     bundle.mkdir(parents=True, exist_ok=True)
     py = fetch_runtime(bundle, args.pbs_archive, args.skip_fetch)
     bake_deps(py, bundle)
+    bake_workbench_deps(py)
     print("bake_runtime: done — the bundled runtime is self-contained.")
 
 

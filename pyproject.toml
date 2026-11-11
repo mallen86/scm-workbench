@@ -1,7 +1,8 @@
 # ============================================================================
 # SCM Workbench — project & packaging metadata.
 #
-# The Workbench itself is stdlib-only; the app bundle exists mainly to carry
+# Source development is stdlib-only; Windows bundles also carry truststore
+# for request-local Windows 10 TLS. The app bundle exists mainly to carry
 # (a) a full CPython + the sister repos' pinned dependencies, and (b) the
 # first-launch bootstrap in launcher.py.
 #
@@ -45,7 +46,7 @@ description = "Print, cut and play: a local console for the Silhouette Card Make
 document_home_page = "https://github.com/Alan-Cha/silhouette-card-maker"
 entry_point = "scm_workbench"
 sources = ["scm_workbench", "ui"]
-# The app's own code needs nothing beyond the standard library. The support
+# Source development needs nothing beyond the standard library. The support
 # venv, however, is where the *managed repo copies* run, so it carries the
 # pinned dependencies from silhouette-card-maker's requirements.txt
 # (see the per-platform sections below).
@@ -100,6 +101,8 @@ requires = [
 # no extension here either - briefcase appends the target's own suffix
 icon = "assets/AppIcon"
 requires = [
+    # Legacy packaging metadata; Tauri installs the same pin in bake_runtime.py.
+    "truststore==0.10.5",
     "click==8.4.2",
     "cloudscraper==1.2.71",
     "ezdxf==1.4.4",

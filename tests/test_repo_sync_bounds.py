@@ -118,6 +118,42 @@ class RepoSyncBoundsTests(unittest.TestCase):
         repo_sync.save_state({"extras": {"source": "../escape"}})
         self.assert_repo_error(repo_sync.load_source, "extras")
 
+    def test_all_download_paths_pass_the_selected_tls_context(self):
+        context = object()
+        destination = Path(self.temp.name) / "download"
+        calls = (
+            (lambda: repo_sync.gh_json("/repos/example"), b"{}"),
+            (lambda: repo_sync.gh_get_bytes("https://raw.githubusercontent.com/o/r/main/a"), b"data"),
+            (lambda: repo_sync.gh_download_to(
+                "https://api.github.com/repos/o/r/tarball/main", destination), b"data"),
+        )
+        for operation, body in calls:
+            with self.subTest(operation=operation), \
+                 patch.object(repo_sync.tls, "urlopen_kwargs", return_value={"context": context}), \
+                 patch.object(repo_sync.urllib.request, "urlopen",
+                              return_value=FakeResponse(body)) as urlopen:
+                operation()
+                self.assertIs(urlopen.call_args.kwargs["context"], context)
+                urlopen.assert_called_once()
+
+    def test_tls_verification_errors_are_not_retried(self):
+        import ssl
+        import urllib.error
+        failure = urllib.error.URLError(ssl.SSLCertVerificationError("untrusted certificate"))
+        operations = (
+            lambda: repo_sync.gh_json("/repos/example"),
+            lambda: repo_sync.gh_get_bytes("https://raw.githubusercontent.com/o/r/main/a"),
+            lambda: repo_sync.gh_download_to(
+                "https://api.github.com/repos/o/r/tarball/main", Path(self.temp.name) / "failed"),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), \
+                 patch.object(repo_sync.tls, "urlopen_kwargs", return_value={"context": object()}), \
+                 patch.object(repo_sync.urllib.request, "urlopen", side_effect=failure) as urlopen:
+                with self.assertRaises(repo_sync.RepoError):
+                    operation()
+                urlopen.assert_called_once()
+
     def test_gh_json_enforces_declared_and_streamed_caps(self):
         response = FakeResponse(b'{"ok": true}', {"Content-Length": "12"})
         with patch.object(repo_sync.urllib.request, "urlopen", return_value=response):

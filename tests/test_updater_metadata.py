@@ -93,6 +93,20 @@ class UpdaterMetadataTests(unittest.TestCase):
             return_value=(status, {}, json.dumps(raw).encode("utf-8")),
         )
 
+    def test_release_check_passes_native_tls_context_without_retry(self):
+        import ssl
+        context = object()
+        with patch.object(updater.tls, "urlopen_kwargs", return_value={"context": context}), \
+             patch("urllib.request.urlopen", return_value=FakeResponse(b"{}")) as urlopen:
+            self.assertEqual(updater.gh_request("/releases/latest")[2], b"{}")
+            self.assertIs(urlopen.call_args.kwargs["context"], context)
+        failure = urllib.error.URLError(ssl.SSLCertVerificationError("untrusted certificate"))
+        with patch.object(updater.tls, "urlopen_kwargs", return_value={"context": context}), \
+             patch("urllib.request.urlopen", side_effect=failure) as urlopen:
+            with self.assertRaises(updater.UpdateError):
+                updater.gh_request("/releases/latest")
+            urlopen.assert_called_once()
+
     def test_configured_repo_and_api_are_validated_before_network(self):
         for bad_repo in ("owner", "owner/a/b", "/workbench", "owner/../x", "owner/a\\b"):
             with self.subTest(repo=bad_repo), patch.object(updater, "UPDATE_REPO", bad_repo), \
@@ -462,6 +476,22 @@ class UpdaterDownloadTests(unittest.TestCase):
 
     def assert_no_partial(self, dest):
         self.assertEqual(list(dest.parent.glob(f".{dest.name}.*.part")), [])
+
+    def test_asset_download_passes_native_tls_context_without_retry(self):
+        import ssl
+        context = object()
+        with patch.object(updater.tls, "urlopen_kwargs", return_value={"context": context}), \
+             patch("urllib.request.urlopen", return_value=self.response()) as urlopen:
+            self.assertEqual(updater.download(self.asset()["url"], self.dest(),
+                                             expected_asset=self.asset()), 3)
+            self.assertIs(urlopen.call_args.kwargs["context"], context)
+        failure = urllib.error.URLError(ssl.SSLCertVerificationError("untrusted certificate"))
+        with patch.object(updater.tls, "urlopen_kwargs", return_value={"context": context}), \
+             patch("urllib.request.urlopen", side_effect=failure) as urlopen:
+            with self.assertRaises(updater.UpdateError):
+                updater.download(self.asset()["url"], self.dest(), expected_asset=self.asset())
+            urlopen.assert_called_once()
+        self.assert_no_partial(self.dest())
 
     def test_download_requires_validated_asset_and_initial_binding(self):
         dest = self.dest()

@@ -26,7 +26,7 @@ The swap only touches the *app* folder; the data area (settings, job
 history, managed repo copies, the private runtime) lives elsewhere and is
 never part of the swap, so an update can never lose user data.
 
-Standard library only — same rule as the rest of the Workbench.
+Standard library except for request-local native TLS on packaged Windows 10.
 """
 
 import hashlib
@@ -52,6 +52,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
+
+from . import tls
 
 USER_AGENT = "scm-workbench-updater/0.1"
 METADATA_MAX_BYTES = 2 * 1024 * 1024
@@ -371,7 +373,7 @@ def gh_request(path: str, method: str = "GET", timeout: int = 30,
     deadline = time.monotonic() + min(max(float(timeout), 0.0), TOTAL_DEADLINE_SECONDS)
     try:
         remaining = max(0.001, deadline - time.monotonic())
-        r = urllib.request.urlopen(req, timeout=remaining)
+        r = urllib.request.urlopen(req, timeout=remaining, **tls.urlopen_kwargs())
     except urllib.error.HTTPError as e:
         final_error_url = getattr(e, "geturl", lambda: url)()
         if not _same_origin(final_error_url, expected_origin):
@@ -734,7 +736,7 @@ def download(url, dest: Path, progress=None, timeout: int = 60, *, expected_asse
     r = None
     try:
         try:
-            r = urllib.request.urlopen(req, timeout=idle_timeout)
+            r = urllib.request.urlopen(req, timeout=idle_timeout, **tls.urlopen_kwargs())
         except urllib.error.HTTPError as e:
             try:
                 e.close()

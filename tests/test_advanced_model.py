@@ -55,6 +55,27 @@ class AdvancedModelTests(unittest.TestCase):
         self.assertEqual(advanced_model.REQUIREMENTS,
                          advanced_model.requirements_for_platform(advanced_model.sys.platform))
 
+    def test_native_tls_handler_preserves_pinned_redirects(self):
+        context = object()
+        handler = object()
+        with mock.patch.object(advanced_model.tls, "urlopen_kwargs",
+                               return_value={"context": context}), \
+             mock.patch.object(advanced_model.urllib.request, "HTTPSHandler",
+                               return_value=handler) as https_handler, \
+             self.opener(Response(self.body)) as build_opener:
+            advanced_model.download_model(self.destination)
+        https_handler.assert_called_once_with(context=context)
+        handlers = build_opener.call_args.args
+        self.assertIsInstance(handlers[0], advanced_model._PinnedRedirects)
+        self.assertIs(handlers[1], handler)
+
+    def test_default_tls_does_not_add_a_custom_handler(self):
+        with mock.patch.object(advanced_model.tls, "urlopen_kwargs", return_value={}), \
+             self.opener(Response(self.body)) as build_opener:
+            advanced_model.download_model(self.destination)
+        self.assertEqual(len(build_opener.call_args.args), 1)
+        self.assertIsInstance(build_opener.call_args.args[0], advanced_model._PinnedRedirects)
+
     def test_verified_download_and_modified_asset_rejected(self):
         with self.opener(Response(self.body, declared=str(len(self.body)))):
             advanced_model.download_model(self.destination)
