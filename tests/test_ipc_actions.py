@@ -165,10 +165,12 @@ class NativeActionTests(unittest.TestCase):
 
     def _http_request(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
+        # Mirror the browser UI, which marks side-effecting GET actions.
+        headers = {server.ACTION_REQUEST_HEADER: "1"}
+        if data:
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
-            self.http_base + path, data=data,
-            headers={"Content-Type": "application/json"} if data else {},
-            method=method,
+            self.http_base + path, data=data, headers=headers, method=method,
         )
         try:
             with urllib.request.urlopen(request, timeout=5) as response:

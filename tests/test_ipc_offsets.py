@@ -200,7 +200,8 @@ class OffsetTests(unittest.TestCase):
             def __init__(self):
                 self.release = threading.Event()
 
-            def readline(self):
+            # The job pump drains stdout in bounded read1() chunks.
+            def read1(self, _size=-1):
                 self.release.wait(5)
                 return b""
 
@@ -603,7 +604,8 @@ class OffsetTests(unittest.TestCase):
             def __init__(self):
                 self.released = threading.Event()
 
-            def readline(self):
+            # The job pump drains stdout in bounded read1() chunks.
+            def read1(self, _size=-1):
                 self.released.wait(5)
                 return b""
 

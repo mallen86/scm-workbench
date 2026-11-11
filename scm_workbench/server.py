@@ -80,6 +80,9 @@ _IPC_PROCESS_GROUP_READY = False
 # separate retained-byte cap so arbitrary local code cannot fill the volume.
 JOB_LINE_MAX_BYTES = 64 * 1024
 JOB_LOG_MAX_LINES = 4096
+# On-disk transcript budget for ordinary jobs; the live view keeps its own
+# bounded ring of JOB_LOG_MAX_LINES lines.
+JOB_LOG_FILE_MAX_BYTES = 64 * 1024 * 1024
 SSE_QUEUE_SIZE = 128
 POSTPROCESS_RUN_TIMEOUT_SECONDS = 60 * 60
 POSTPROCESS_RUN_IDLE_TIMEOUT_SECONDS = 15 * 60
@@ -3920,8 +3923,16 @@ def _append_job_line(job: dict, line: Any, *, log_f=None) -> int:
                 log_f.flush()
                 job["log_limit_reported"] = True
         else:
-            log_f.write(text + "\n")
-            log_f.flush()
+            line_bytes = len((text + "\n").encode("utf-8", "replace"))
+            used = int(job.get("log_bytes", 0) or 0)
+            if used + line_bytes <= JOB_LOG_FILE_MAX_BYTES:
+                log_f.write(text + "\n")
+                log_f.flush()
+                job["log_bytes"] = used + line_bytes
+            elif not job.get("log_limit_reported"):
+                log_f.write("(further output omitted from this log file: size limit reached)\n")
+                log_f.flush()
+                job["log_limit_reported"] = True
     with JOBS_LOCK:
         _record_fetch_image_warning(job, text)
         if job.get("kind") == "postprocess_images":
@@ -4277,8 +4288,7 @@ def get_job_log(job_id: str, after: int = 0, max_lines: int = JOB_LOG_MAX_LINES,
     lines = list(job.get("log_lines") or [])
     if not lines and job.get("log_file"):
         try:
-            with open(job["log_file"], encoding="utf-8", errors="replace") as f:
-                lines = [line.rstrip("\r\n") for line in f]
+            first, lines = _read_log_tail(job["log_file"], JOB_LOG_MAX_LINES)
         except OSError:
             pass
     available_next = first + len(lines)
@@ -4315,6 +4325,38 @@ def get_job_log(job_id: str, after: int = 0, max_lines: int = JOB_LOG_MAX_LINES,
             "truncated": bool(truncated or clipped or len(wire) < len(selected)),
             "gap": bool(requested < first),
             "line_truncated": bool(clipped)}
+
+
+def _read_log_tail(path: str, max_lines: int) -> Tuple[int, List[str]]:
+    """Return (index of first kept line, last max_lines lines) of a log file.
+
+    Persisted transcripts can be large. Stream them with bounded line reads so
+    neither a huge file nor one enormous line is ever held in memory; the
+    returned index keeps cursors identical to a full read.
+    """
+    from collections import deque
+    tail: "deque[str]" = deque(maxlen=max_lines)
+    total = 0
+    limit = JOB_LINE_MAX_BYTES
+    with open(path, encoding="utf-8", errors="replace") as f:
+        while True:
+            line = f.readline(limit)
+            if not line:
+                break
+            clipped = False
+            if len(line) >= limit and not line.endswith("\n"):
+                # Drain the remainder of an over-long line.
+                while True:
+                    rest = f.readline(limit)
+                    if not rest:
+                        break
+                    clipped = clipped or bool(rest.rstrip("\r\n"))
+                    if rest.endswith("\n"):
+                        break
+            line = line.rstrip("\r\n")
+            tail.append(line + "… [line truncated]" if clipped else line)
+            total += 1
+    return total - len(tail), list(tail)
 
 
 def poll_jobs(cursors: list, max_events: int) -> dict:
@@ -6616,18 +6658,24 @@ def normalize_args(spec: dict, raw: dict) -> Tuple[dict, List[str], List[str]]:
                 else:
                     try:
                         f = float(v)
+                        # inf/nan parse as floats but are not numbers a
+                        # script can use; int(inf) would raise OverflowError.
+                        if not math.isfinite(f):
+                            raise ValueError("non-finite number")
                         args[key] = int(f) if (o.get("step") in (None, 1) or f == int(f)) else round(f, 2)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         errors.append(f"{o['label']}: “{v}” is not a number.")
                         args[key] = o.get("default")
             elif t == "range":
                 try:
                     f = float(v)
+                    if not math.isfinite(f):
+                        raise ValueError("non-finite number")
                     lo, hi = o.get("min", -1e9), o.get("max", 1e9)
                     if not (lo <= f <= hi):
                         warns.append(f"{o['label']} {int(round(f)) if (o.get('step') or 1) >= 1 else f} is outside the slider range ({lo:g}–{hi:g}) — the slider shows the nearest value, but the number you typed is used.")
                     args[key] = int(round(f)) if (o.get("step") or 1) >= 1 else round(f, 2)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     args[key] = o.get("default")
             elif t in ("select", "segment"):
                 sv = "" if v is None else str(v).strip()
@@ -9035,7 +9083,8 @@ def _bounded_process_lines(stream, *, max_bytes: int = JOB_LINE_MAX_BYTES):
     """Drain a byte stream while bounding even a line that never terminates."""
     current = bytearray()
     clipped = False
-    read = getattr(stream, "read1", stream.read)
+    # Do not evaluate stream.read eagerly: a stream may provide only read1.
+    read = getattr(stream, "read1", None) or stream.read
     while True:
         chunk = read(8192)
         if not chunk:
@@ -9161,9 +9210,10 @@ def _pump(job: dict, proc: subprocess.Popen, log_f) -> None:
         if str(job.get("kind") or "").startswith("postprocess"):
             rc = _drain_postprocess_process(job, proc, log_f)
         else:
-            output_lines = (line.decode("utf-8", "replace").rstrip("\r\n")
-                            for line in iter(proc.stdout.readline, b""))
-            for line in output_lines:
+            # Bound every line even when a child never writes a newline (for
+            # example carriage-return progress bars); readline() would buffer
+            # the entire output in memory.
+            for line in _bounded_process_lines(proc.stdout):
                 _append_job_line(job, line, log_f=log_f)
             rc = _wait_job_process(job, proc)
         with JOBS_LOCK:
@@ -11811,12 +11861,142 @@ def postprocessor_import_selected(source_path: str) -> dict:
         return _postprocessor_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# Browser-compatibility request guard
+#
+# The standalone server is reachable by any web page the user visits, because
+# browsers will send requests to 127.0.0.1. Nothing here authenticates a
+# caller, so every request must provably come from this server's own pages:
+#
+#   * Host must name loopback or an IP literal. A DNS-rebinding page addresses
+#     the server through an attacker-controlled *domain name*, so refusing
+#     names other than ``localhost`` gives it nothing to read or write.
+#   * Origin, when sent, must be this exact origin. Browsers send Origin on
+#     every cross-origin request that is not a plain GET/HEAD, including
+#     "simple" text/plain POSTs that skip CORS preflight.
+#   * Sec-Fetch-Site, when sent, must be same-origin (or none for a typed URL).
+#   * GET routes with side effects additionally require a custom header that
+#     a cross-origin page cannot add without a (refused) CORS preflight.
+# Non-browser clients (tests, curl) send neither Origin nor Sec-Fetch-Site.
+# ---------------------------------------------------------------------------
+
+ACTION_REQUEST_HEADER = "X-SCM-Workbench-Action"
+
+
+def _http_host_parts(value: str) -> Optional[Tuple[str, int]]:
+    """Return the (hostname, port) a Host header names, or None if malformed."""
+    try:
+        parsed = urlsplit("//" + value.strip())
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not hostname or parsed.username is not None or parsed.password is not None or parsed.path:
+        return None
+    return hostname.lower(), port or 80
+
+
+def _trusted_host_name(hostname: str) -> bool:
+    """Only loopback by name, or an IP literal, can address the server."""
+    import ipaddress
+    if hostname == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def _same_http_origin(value: str, host: Tuple[str, int]) -> bool:
+    try:
+        parsed = urlsplit(value.strip())
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port or 80
+    except ValueError:
+        return False
+    return (parsed.scheme.lower() == "http" and parsed.username is None and
+            parsed.password is None and (hostname, port) == host)
+
+
+def http_request_rejection(method: str, path: str, headers) -> Optional[str]:
+    """Return why a browser-compatibility request must be refused, if it must."""
+    raw_host = headers.get("Host")
+    host = None
+    if raw_host is not None:
+        host = _http_host_parts(raw_host)
+        if host is None:
+            return "invalid Host header"
+        if not _trusted_host_name(host[0]):
+            return "address the Workbench as localhost or by IP address"
+    state_changing = method not in ("GET", "HEAD")
+    # Static pages remain reachable by ordinary navigation (including a link
+    # from another site); they carry no data and change nothing.
+    if not state_changing and not path.startswith("/api/"):
+        return None
+    origin = headers.get("Origin")
+    if origin is not None and (host is None or not _same_http_origin(origin, host)):
+        return "cross-origin requests are not allowed"
+    site = headers.get("Sec-Fetch-Site")
+    if site is not None and site.strip().lower() not in ("same-origin", "none"):
+        return "cross-site requests are not allowed"
+    if state_changing and origin is None:
+        referer = headers.get("Referer")
+        # Only scheme, host, and port are compared; the path is irrelevant.
+        if referer and (host is None or not _same_http_origin(referer, host)):
+            return "cross-origin requests are not allowed"
+    return None
+
+
+def _wsl_gateway_ip() -> Optional[str]:
+    """The Windows host's address on the WSL2 NAT network (the default route)."""
+    import ipaddress
+    import socket
+    import struct
+    try:
+        with open("/proc/net/route", "r", encoding="ascii", errors="ignore") as routes:
+            next(routes, None)
+            for line in routes:
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "00000000":
+                    address = socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+                    ipaddress.ip_address(address)
+                    return address
+    except (OSError, ValueError, struct.error):
+        pass
+    return None
+
+
+def http_client_allowed(address: str, extra: frozenset = frozenset()) -> bool:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or str(ip) in extra
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"SCMWorkbench/{SERVER_VERSION}"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[workbench] %s\n" % (fmt % args))
+
+    def _guard(self) -> bool:
+        """Refuse a request which did not come from this server's own pages."""
+        reason = http_request_rejection(self.command, urlparse(self.path).path, self.headers)
+        if reason is None:
+            return True
+        self.close_connection = True
+        self._json({"ok": False, "error": reason, "errors": [reason]}, 403)
+        return False
+
+    def _action_request(self) -> bool:
+        """Side-effecting GET routes also require the app's custom header."""
+        return self.headers.get(ACTION_REQUEST_HEADER) == "1"
 
     # ---- plumbing ----
 
@@ -11851,6 +12031,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- GET ----
 
     def do_GET(self):
+        if not self._guard():
+            return
         url = urlparse(self.path)
         path = url.path
         q = parse_qs(url.query)
@@ -11978,6 +12160,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST ----
 
     def do_POST(self):
+        if not self._guard():
+            return
         url = urlparse(self.path)
         path = url.path
         try:
@@ -12315,6 +12499,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_DELETE(self):
+        if not self._guard():
+            return
         url = urlparse(self.path)
         m = re.fullmatch(r"/api/postprocessors/([0-9a-f]{32})", url.path)
         if not m:
@@ -12361,6 +12547,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "errors": [
                 "native file access is required in packaged mode"]}, 403)
         url = (q.get("url") or [""])[0]
+        if (url or (q.get("open") or ["0"])[0] == "1" or (q.get("reveal") or ["0"])[0] == "1") \
+                and not self._action_request():
+            # A cross-site <img> or link can issue a GET without any CORS
+            # check; launching applications needs proof of a same-origin call.
+            return self._json({"ok": False, "errors": [
+                f"this action requires the {ACTION_REQUEST_HEADER} header"]}, 403)
         if url:
             # Same open semantics as open=1, aimed at a link: the server
             # opens it in the default browser. Validation is shared with the
@@ -12569,6 +12761,18 @@ def _open_browser(url: str) -> None:
 
 class WorkbenchHTTPServer(ThreadingHTTPServer):
     """HTTP server that owns the same upstream children as the IPC server."""
+    # Peers allowed besides loopback. WSL binds every VM interface so the
+    # Windows host can connect; only that host (the VM's default gateway in NAT
+    # mode) may, never another machine on the network.
+    extra_clients: frozenset = frozenset()
+
+    def verify_request(self, request, client_address):
+        host = client_address[0] if isinstance(client_address, tuple) else ""
+        if http_client_allowed(str(host), self.extra_clients):
+            return True
+        _diag(f"[workbench] refused a connection from {host}", error=True)
+        return False
+
     def server_close(self):
         stop_all_jobs()
         super().server_close()
@@ -12594,6 +12798,9 @@ def start_http(host: str, port: int) -> ThreadingHTTPServer:
         )
         sys.exit(1)
     srv.daemon_threads = True
+    if host not in ("127.0.0.1", "localhost", "::1") and _in_wsl():
+        gateway = _wsl_gateway_ip()
+        srv.extra_clients = frozenset((gateway,)) if gateway else frozenset()
     return srv
 
 
@@ -12603,7 +12810,8 @@ def main():
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default=None,
                     help="Address to bind (default: 127.0.0.1; on WSL all interfaces of the VM, "
-                         "so the Windows host can also reach the server)")
+                         "so the Windows host can also reach the server). Connections are "
+                         "accepted only from loopback and, on WSL, the Windows host.")
     ap.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
     ap.add_argument("--ipc", action="store_true",
                     help="Run the native newline-delimited JSON child protocol without HTTP")
@@ -12736,8 +12944,8 @@ def main():
         else:
             w("  Windows host:  use the 127.0.0.1 URL above (mirrored networking mode)\n")
     if _in_wsl():
-        w("\n  Binds the WSL VM — reachable from the Windows host "
-          "(and from your LAN only in mirrored networking mode). Ctrl+C to stop.\n")
+        w("\n  Binds the WSL VM — connections are accepted only from this VM and "
+          "the Windows host, never from your LAN. Ctrl+C to stop.\n")
     else:
         w("\n  Local only — not exposed to your network. Ctrl+C to stop.\n")
     _diag(out.getvalue())

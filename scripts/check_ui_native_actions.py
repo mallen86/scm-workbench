@@ -32,6 +32,8 @@ def main() -> int:
         '`/api/file?path=${encodeURIComponent(path)}&open=1`',
         '"/api/reveal"',
         '`/api/file?url=${encodeURIComponent(url)}`',
+        '"X-SCM-Workbench-Action": "1"',
+        'BROWSER_ACTION,',
     )
     for marker in required:
         if marker not in facade:
@@ -172,14 +174,15 @@ globalThis.fetch = async (request, options) => {
 await actions.openFile(path);
 await actions.revealPath(path);
 await actions.openExternalUrl(url);
+const actionHeader = JSON.stringify({ headers: { "X-SCM-Workbench-Action": "1" } });
 if (requests[0].request !== `/api/file?path=${encodeURIComponent(path)}&open=1` ||
-    requests[0].options !== undefined ||
+    JSON.stringify(requests[0].options) !== actionHeader ||
     requests[1].request !== "/api/reveal" ||
     JSON.stringify(requests[1].options) !== JSON.stringify({
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path })
     }) ||
     requests[2].request !== `/api/file?url=${encodeURIComponent(url)}` ||
-    requests[2].options !== undefined) fail("browser action requests are not exact");
+    JSON.stringify(requests[2].options) !== actionHeader) fail("browser action requests are not exact");
 
 const basename = value => value.split(/[\\/]/).pop();
 if (basename(String.raw`C:\\Users\\me\\output.pdf`) !== "output.pdf" || basename("/tmp/output.pdf") !== "output.pdf")

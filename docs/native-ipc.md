@@ -428,8 +428,8 @@ shape and is capped at 512 KiB encoded JSON before entering the cache. Check
 and source-set results retain their HTTP response fields and every repository
 operation result is capped at 1 MiB; errors are bounded to eight sanitized
 messages of at most 256 characters each. `repos.poll` itself is limited to one
-operation ID. The 10-second `WorkerRpc` timeout therefore remains appropriate:
-starts and polls are local, immediate operations; remote work runs in the
+operation ID. The `WorkerRpc` call timeout is therefore never on the critical
+path: starts and polls are local, immediate operations; remote work runs in the
 worker's two-thread background registry rather than occupying the serialized
 request.
 
@@ -739,13 +739,23 @@ stdin and stdout pipes. It:
   the pipe drained;
 * validates response shape and correlation, rejects malformed, mismatched, or
   oversized frames, and maps unknown error codes safely; and
-* applies a 10-second default call timeout. Worker EOF, a broken pipe, or a
-  timeout marks the worker unavailable and wakes pending calls instead of
-  hanging the webview. Startup uses the private `ready` handshake once; a
-  child death or timeout produces the bounded embedded failure page rather
-  than a listener retry or an unbounded wait.
+* applies a 60-second call timeout and a 10-second timeout to the private
+  `ready` handshake. Worker EOF or a broken pipe marks the worker unavailable
+  and wakes pending calls instead of hanging the webview. A call timeout fails
+  only that call: the worker is single-threaded and still owns the request, so
+  the shell records the request id as abandoned (at most 64) and discards its
+  late response frame instead of treating it as desynchronization. A timeout
+  never closes the pipe, because protocol EOF makes the worker stop every
+  running job. Startup uses the private `ready` handshake once; a child death
+  or handshake timeout produces the bounded embedded failure page rather than
+  a listener retry or an unbounded wait.
 
-The webview reaches one narrow Tauri command, `wb_rpc`. The Tauri capability
+The webview reaches one narrow Tauri command, `wb_rpc`. It is an asynchronous
+command whose blocking pipe exchange runs on a blocking worker thread; Tauri
+runs synchronous commands on the UI thread, which would freeze the window for
+the full duration of every worker call. Native commands that call the worker
+after a picker (`wb_decklist_import`, `wb_back_image_import`,
+`wb_postprocessor_import`) do the same. The Tauri capability
 ACL grants `allow-wb-rpc` to the embedded main window; there is no remote
 worker-origin scope. The command itself validates the same method allowlist
 before writing to the child. Python validates it again, including

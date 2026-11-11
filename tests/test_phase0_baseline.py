@@ -203,9 +203,9 @@ class HttpContractTests(unittest.TestCase):
         server._INFO_SNAP.clear()
         server._REPOS_MTIME.clear()
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, headers=None):
         data = None
-        headers = {}
+        headers = dict(headers or {})
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -393,7 +393,9 @@ class HttpContractTests(unittest.TestCase):
         self.assertIn("managed location", body["errors"][0])
 
     def test_url_and_path_rejection_contract(self):
-        status, body = self.request("GET", "/api/file?url=" + urllib.parse.quote("file:///etc/passwd"))
+        action = {"X-SCM-Workbench-Action": "1"}
+        status, body = self.request("GET", "/api/file?url=" + urllib.parse.quote("file:///etc/passwd"),
+                                    headers=action)
         self.assertEqual(status, 400)
         self.assertEqual(body["errors"], ["only http(s) URLs can be opened"])
 
@@ -401,7 +403,8 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(body["error"], "path outside sandbox")
 
-        status, body = self.request("GET", "/api/file?url=" + urllib.parse.quote("javascript:alert(1)"))
+        status, body = self.request("GET", "/api/file?url=" + urllib.parse.quote("javascript:alert(1)"),
+                                    headers=action)
         self.assertEqual(status, 400)
         self.assertIn("http(s)", body["errors"][0])
 

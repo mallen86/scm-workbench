@@ -155,6 +155,7 @@ python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
 python scripts/check_ui_update_security.py
 python scripts/check_ui_fs_delete.py
+python scripts/check_ui_modal.py
 
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 ```

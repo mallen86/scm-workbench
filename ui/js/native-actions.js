@@ -14,6 +14,11 @@ function browserJson(path, options) {
 }
 
 
+// The browser server refuses side-effecting GETs without this header: a
+// cross-origin page cannot add it without a CORS preflight the server rejects.
+const BROWSER_ACTION = Object.freeze({ headers: { "X-SCM-Workbench-Action": "1" } });
+
+
 function nativeOrBrowser(method, params, browserPath, options) {
   const invoke = getTauriInvoke();
   if (invoke) return invoke("wb_rpc", { method, params });
@@ -27,6 +32,7 @@ export function openFile(path) {
     "file.open",
     { path },
     `/api/file?path=${encodeURIComponent(path)}&open=1`,
+    BROWSER_ACTION,
   );
 }
 
@@ -48,6 +54,7 @@ export function openExternalUrl(url) {
     "url.open",
     { url },
     `/api/file?url=${encodeURIComponent(url)}`,
+    BROWSER_ACTION,
   );
 }
 

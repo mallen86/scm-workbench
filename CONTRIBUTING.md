@@ -69,7 +69,8 @@ python -m scm_workbench.server [--port N] [--host 127.0.0.1] [--no-browser]
 
 * `--port` — listen port (default 8037, or whatever you saved in Settings).
 * `--no-browser` — don't auto-open a tab.
-* The server always binds to **loopback only** (except on WSL2, where it binds the VM's interfaces so the Windows host can reach it) — it is local tooling, never a network service. File access is sandboxed to the two repos + the Workbench's own data dir.
+* The server always binds to **loopback only** (except on WSL2, where it binds the VM's interfaces so the Windows host can reach it) — it is local tooling, never a network service. Connections are accepted only from loopback and, on WSL2, the Windows host. File access is sandboxed to the two repos + the Workbench's own data dir.
+* The server has no login, so it refuses requests that did not come from its own pages: the `Host` must be `localhost` or an IP address (defeating DNS rebinding), a sent `Origin` or `Referer` must be this exact origin, and a sent `Sec-Fetch-Site` must be `same-origin` or `none`. GET routes that launch applications (`/api/file?open=1`, `reveal=1`, `url=`) also require the `X-SCM-Workbench-Action: 1` header, which only a same-origin page can send. Scripts calling the API should omit `Origin` or set it to the server's own origin.
 
 **No extra dependencies for source development:** the Workbench uses the Python standard library (3.10+). The *base repos'* `requirements.txt` is what does the heavy lifting (Pillow, ezdxf, pypdfium2, the plugins' fetchers, …) — install it once into the interpreter you run the Workbench with, and both the scripts and the UI work.
 
@@ -139,6 +140,7 @@ python scripts/check_ui_offsets.py
 python scripts/check_ui_updates.py
 python scripts/check_ui_update_security.py
 python scripts/check_ui_fs_delete.py
+python scripts/check_ui_modal.py
 find ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
 (cd tauri && cargo fmt --check)
 (cd tauri && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo test && CARGO_TARGET_DIR="${TMPDIR:-/tmp}/scm-workbench-tauri-target" cargo check --features custom-protocol)

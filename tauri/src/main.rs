@@ -229,7 +229,10 @@ async fn wb_decklist_import(
     if source_path.as_bytes().len() > 4096 {
         return Err("selected path exceeds 4096 UTF-8 bytes".to_string());
     }
-    worker.import_selected_decklist(source_path)
+    let source_path = source_path.to_owned();
+    tauri::async_runtime::spawn_blocking(move || worker.import_selected_decklist(&source_path))
+        .await
+        .map_err(|_| "decklist import failed".to_string())?
 }
 
 /// Native card-back import owns the picker. The worker validates the stable
@@ -275,7 +278,11 @@ async fn wb_back_image_import(
     {
         return Err("selected image path is invalid".to_string());
     }
-    state.inner().import_selected_back_image(source_path)
+    let worker = state.inner().clone();
+    let source_path = source_path.to_owned();
+    tauri::async_runtime::spawn_blocking(move || worker.import_selected_back_image(&source_path))
+        .await
+        .map_err(|_| "card-back import failed".to_string())?
 }
 
 /// Native postprocessor import owns the picker. The selected source is passed
@@ -316,7 +323,11 @@ async fn wb_postprocessor_import(
     {
         return Err("selected processor path is invalid".to_string());
     }
-    state.inner().import_selected_postprocessor(source_path)
+    let worker = state.inner().clone();
+    let source_path = source_path.to_owned();
+    tauri::async_runtime::spawn_blocking(move || worker.import_selected_postprocessor(&source_path))
+        .await
+        .map_err(|_| "Python processor import failed".to_string())?
 }
 
 /// Run a private custom-art start/poll exchange without monopolizing the

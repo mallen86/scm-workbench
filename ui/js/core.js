@@ -189,16 +189,25 @@ export function confirmModal({ title, text, paras = [], list = [], content = nul
     for (const p of paras) m.append(el("p", {}, p));
     if (list.length) m.append(el("div", { class: "m-list" }, ...list.map(x => el("div", {}, x))));
     if (content) m.append(content);
+    // Every way out settles the promise exactly once: callers commonly hold a
+    // busy flag across this await, and an unsettled dialog would strand it.
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      root.hidden = true;
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
     const actions = el("div", { class: "m-actions" },
-      el("button", { class: "btn", onclick: () => { close(); resolve(false); } }, "Cancel"),
-      el("button", { class: `btn ${danger ? "danger" : "primary"}`, onclick: () => { close(); resolve(true); } }, okLabel),
+      el("button", { class: "btn", onclick: () => finish(false) }, "Cancel"),
+      el("button", { class: `btn ${danger ? "danger" : "primary"}`, onclick: () => finish(true) }, okLabel),
     );
     m.append(actions);
     root.hidden = false;
-    function close() { root.hidden = true; document.removeEventListener("keydown", onKey); }
-    function onKey(e) { if (e.key === "Escape") close(); }
+    function onKey(e) { if (e.key === "Escape") finish(false); }
     document.addEventListener("keydown", onKey);
-    $(".modal-backdrop", root).onclick = () => { close(); resolve(false); };
+    $(".modal-backdrop", root).onclick = () => finish(false);
   });
 }
 

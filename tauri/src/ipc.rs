@@ -4,7 +4,7 @@
 //! frames requests, serializes calls, and keeps stdout drained so a worker
 //! cannot deadlock while writing a response.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,13 +18,25 @@ use tauri::State;
 const MAX_REQUEST_BYTES: usize = 1 * 1024 * 1024;
 /// Keep this equal to the Python worker's response limit.
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The private startup handshake must answer quickly; a worker which cannot
+/// is reported on the startup-failure page.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Ordinary calls may legitimately be slow on a loaded machine (cold
+/// capability probes, dependency verification, large folder scans). A call
+/// which exceeds this budget fails on its own; it never tears down the worker
+/// or the user's running jobs.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Request ids whose callers stopped waiting. Their late responses are
+/// discarded instead of being treated as protocol desynchronization.
+const MAX_ABANDONED: usize = 64;
 
 #[derive(Debug)]
 struct Inner {
     stdin: Mutex<Option<ChildStdin>>,
     stdout: Mutex<Option<ChildStdout>>,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>,
+    /// Lock order: `pending` before `abandoned`.
+    abandoned: Mutex<VecDeque<String>>,
     /// Serializes install/shutdown publication so concurrent lifecycle
     /// operations cannot assign one generation to two reader threads.
     lifecycle: Mutex<()>,
@@ -41,7 +53,8 @@ struct Inner {
 #[derive(Clone, Debug)]
 pub struct WorkerRpc {
     inner: Arc<Inner>,
-    timeout: Duration,
+    ready_timeout: Duration,
+    call_timeout: Duration,
 }
 
 impl Default for WorkerRpc {
@@ -52,22 +65,29 @@ impl Default for WorkerRpc {
 
 impl WorkerRpc {
     pub fn new() -> Self {
-        Self::with_timeout(DEFAULT_TIMEOUT)
+        Self::with_timeouts(READY_TIMEOUT, CALL_TIMEOUT)
     }
 
+    #[cfg(test)]
     fn with_timeout(timeout: Duration) -> Self {
+        Self::with_timeouts(timeout, timeout)
+    }
+
+    fn with_timeouts(ready_timeout: Duration, call_timeout: Duration) -> Self {
         Self {
             inner: Arc::new(Inner {
                 stdin: Mutex::new(None),
                 stdout: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
+                abandoned: Mutex::new(VecDeque::new()),
                 lifecycle: Mutex::new(()),
                 call_lock: Mutex::new(()),
                 next_id: AtomicU64::new(1),
                 generation: AtomicU64::new(0),
                 available: AtomicBool::new(false),
             }),
-            timeout,
+            ready_timeout,
+            call_timeout,
         }
     }
 
@@ -134,12 +154,15 @@ impl WorkerRpc {
         if let Ok(mut stdout) = self.inner.stdout.lock() {
             stdout.take();
         }
+        if let Ok(mut abandoned) = self.inner.abandoned.lock() {
+            abandoned.clear();
+        }
     }
 
     /// Complete the private startup handshake.  This is intentionally not in
     /// the public WebView allowlist: only the shell may establish readiness.
     pub(crate) fn ready(&self) -> Result<(), String> {
-        let result = self.call_unchecked("ready", json!({}))?;
+        let result = self.call_with_timeout("ready", json!({}), self.ready_timeout)?;
         let object = result
             .as_object()
             .ok_or_else(|| "malformed worker readiness response".to_string())?;
@@ -538,6 +561,15 @@ impl WorkerRpc {
     }
 
     fn call_unchecked(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_with_timeout(method, params, self.call_timeout)
+    }
+
+    fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         if !params.is_object() {
             return Err("invalid params".to_string());
         }
@@ -597,15 +629,18 @@ impl WorkerRpc {
             return Err(error);
         }
 
-        match receiver.recv_timeout(self.timeout) {
+        match receiver.recv_timeout(timeout) {
             Ok(Ok(response)) => validate_response(&id, response),
             Ok(Err(error)) => {
                 self.remove_pending(&id);
                 Err(error)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.remove_pending(&id);
-                mark_unavailable_inner(&self.inner, generation, "worker timeout");
+                // The worker is single-threaded and still owns this request;
+                // it will answer after its slow handler returns. Fail only
+                // this call and discard that late frame. Closing the pipe
+                // here would make the worker stop every running job.
+                self.abandon_pending(&id);
                 Err("worker timeout".to_string())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -620,12 +655,38 @@ impl WorkerRpc {
             pending.remove(id);
         }
     }
+
+    /// Stop waiting for `id` while remembering it, atomically with respect to
+    /// the reader (both hold `pending`), so its late frame is recognized.
+    fn abandon_pending(&self, id: &str) {
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            if pending.remove(id).is_some() {
+                if let Ok(mut abandoned) = self.inner.abandoned.lock() {
+                    abandoned.push_back(id.to_string());
+                    while abandoned.len() > MAX_ABANDONED {
+                        abandoned.pop_front();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Narrow Tauri surface: no arbitrary Python method or path dispatch.
+///
+/// Asynchronous so the blocking pipe exchange never runs on the UI thread:
+/// synchronous Tauri commands execute on the main thread and would freeze the
+/// window for the full duration of every worker call.
 #[tauri::command]
-pub fn wb_rpc(state: State<'_, WorkerRpc>, method: String, params: Value) -> Result<Value, String> {
-    state.call(&method, params)
+pub async fn wb_rpc(
+    state: State<'_, WorkerRpc>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    let worker = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || worker.call(&method, params))
+        .await
+        .map_err(|_| "worker unavailable".to_string())?
 }
 
 fn valid_operation_id(id: &str) -> bool {
@@ -806,6 +867,8 @@ fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout, generation: u64) {
                     }
                     if let Some(sender) = pending.remove(&id) {
                         let _ = sender.send(Ok(value));
+                    } else if take_abandoned(&inner, &id) {
+                        // A late answer to a call which already timed out.
                     } else if !pending.is_empty() {
                         mismatch = Some(std::mem::take(&mut *pending));
                     }
@@ -821,6 +884,19 @@ fn read_worker_output(inner: Arc<Inner>, stdout: ChildStdout, generation: u64) {
                 return;
             }
         }
+    }
+}
+
+fn take_abandoned(inner: &Inner, id: &str) -> bool {
+    let Ok(mut abandoned) = inner.abandoned.lock() else {
+        return false;
+    };
+    match abandoned.iter().position(|candidate| candidate == id) {
+        Some(index) => {
+            abandoned.remove(index);
+            true
+        }
+        None => false,
     }
 }
 
@@ -1338,8 +1414,50 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(rpc.call("info", json!({})), Err("worker timeout".into()));
         assert!(started.elapsed() < Duration::from_secs(1));
+        // A slow call is not evidence of a dead worker: keep the pipes.
+        assert!(rpc.inner.available.load(Ordering::Acquire));
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn timed_out_call_is_isolated_and_its_late_response_is_discarded() {
+        // The first request answers after the caller gave up; the second is
+        // answered immediately afterwards, exactly like the serial worker.
+        let mut child = python_child(
+            "import json,sys,time\nfirst=True\nfor line in sys.stdin:\n r=json.loads(line)\n if first:\n  time.sleep(.4); first=False\n print(json.dumps({'id':r['id'],'ok':True,'result':{'method':r['method']}}), flush=True)\n",
+        );
+        let rpc = WorkerRpc::with_timeout(Duration::from_millis(100));
+        rpc.install(child.stdin.take().unwrap(), child.stdout.take().unwrap())
+            .unwrap();
+        assert_eq!(
+            rpc.call("manifest", json!({})),
+            Err("worker timeout".into())
+        );
+        assert!(rpc.inner.available.load(Ordering::Acquire));
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            rpc.call("info", json!({})).unwrap()["method"],
+            "info",
+            "the late manifest frame must not be delivered to the next call"
+        );
+        assert!(rpc.inner.abandoned.lock().unwrap().is_empty());
+        rpc.shutdown();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn abandoned_ids_are_bounded() {
+        let rpc = WorkerRpc::with_timeout(Duration::from_millis(10));
+        for index in 0..(MAX_ABANDONED + 10) {
+            let id = format!("rpc-{index}");
+            let (sender, _receiver) = mpsc::channel();
+            rpc.inner.pending.lock().unwrap().insert(id.clone(), sender);
+            rpc.abandon_pending(&id);
+        }
+        assert_eq!(rpc.inner.abandoned.lock().unwrap().len(), MAX_ABANDONED);
+        assert!(rpc.inner.pending.lock().unwrap().is_empty());
     }
 
     #[test]
