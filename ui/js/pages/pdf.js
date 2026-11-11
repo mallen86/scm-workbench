@@ -40,11 +40,15 @@ PAGES.pdf = (root) => {
     // toggle lives in, so the note would point “below” at nothing
     if (uiMode() === "advanced" && (row || g)) {
       const o = row || g;
+      // Paper names come from user-editable layout data: build text nodes,
+      // never HTML, so a crafted name cannot inject markup.
+      const values = ["x ", el("b", {}, String(o.x)), ", y ", el("b", {}, String(o.y)),
+        ", angle ", el("b", {}, `${o.angle}°`)];
       const txt = row
-        ? `A paper specific offset for “${paper}” is saved: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. It is applied when “Apply saved offset” is on.`
-        : `Saved printer offset: x <b>${o.x}</b>, y <b>${o.y}</b>, angle <b>${o.angle}°</b>. Enable “Apply saved offset” to use it.`;
+        ? [`A paper specific offset for “${paper}” is saved: `, ...values, ". It is applied when “Apply saved offset” is on."]
+        : ["Saved printer offset: ", ...values, ". Enable “Apply saved offset” to use it."];
       wrap.append(el("div", { class: "banner ok", style: "margin-top:16px" }, el("span", { class: "b-ico" }, ico("check")),
-        el("span", { class: "grow", html: txt }),
+        el("span", { class: "grow" }, ...txt),
         // the Offset & calibration page is hidden in simple mode — no link to it
         ...(uiMode() === "advanced" ? [el("button", { class: "linkish", onclick: () => go("offset") }, "manage offset →")] : [])));
     }

@@ -577,6 +577,7 @@ class RepoIpcTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch.object(server, "repo_refs_result", return_value=REFS), \
+             mock.patch.object(ipc, "_SERVED_METHODS", set()), \
              mock.patch.object(ipc.sys, "stdout", stdout), \
              mock.patch.object(ipc.sys, "stderr", stderr):
             operation_id = self.native_start("repos.refs", {"repo": "scm"})

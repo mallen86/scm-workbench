@@ -781,8 +781,9 @@ export async function doRun(kind, btn, opts = {}) {
   if (spec?.available === false) {
     return rejectStart(spec.unavailable_reason || "The connected repository does not support this workflow.");
   }
-  if (!S.info || S.manifest[kind]) {
-    for (const need of S.manifest[kind].needs || []) {
+  // Early, friendlier repo-readiness messages; the server re-checks on start.
+  if (S.info && spec) {
+    for (const need of spec.needs || []) {
       if (need === "scm" && !S.info.scm.found) {
         return rejectStart((S.info.server.is_packaged && !repoReady("scm"))
           ? "silhouette-card-maker is still being prepared. The button unlocks when it is done."

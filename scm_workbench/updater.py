@@ -2102,8 +2102,15 @@ def run_job(job: dict, plan: dict, log_f) -> None:
         except (KeyError, TypeError, UpdateError) as exc:
             fail(f"no unambiguous installable asset is attached to the newest release ({exc})")
             return
-        if mode == "package" and not asset.get("digest"):
-            raise UpdateError("The Linux release package has no verified checksum; use the release page for manual installation.")
+        # GitHub publishes a SHA-256 digest for every release asset. Without
+        # one, only TLS and the size bind the download to the release, so no
+        # platform installs it automatically.
+        if not asset.get("digest"):
+            if mode == "package":
+                raise UpdateError("The Linux release package has no verified checksum; use the release page for manual installation.")
+            fail("the release asset has no published SHA-256 checksum, so it cannot be verified; "
+                 "download it from the release page instead")
+            return
         size_mb = asset.get("size", 0) / 1e6
         emit(f"Downloading {asset['name']} ({size_mb:.0f} MB) from the release …")
         # 3) download (progress line, throttled to ~1/s)

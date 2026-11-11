@@ -27,6 +27,11 @@ MAX_RESPONSE_SIZE = 7 * 1024 * 1024
 # value cannot monopolize the native request/response channel.
 MAX_PREVIEW_ARGS_SIZE = 512 * 1024
 MAX_PREVIEW_RESULT_SIZE = 512 * 1024
+# Methods already announced on stderr in this protocol session. Polling calls
+# run several times a second; announcing each method once keeps the packaged
+# worker log bounded by the method table instead of by session length.
+_SERVED_METHODS: set = set()
+_SERVED_LOCK = threading.Lock()
 MAX_PDF_PREVIEW_ARGS_SIZE = 512 * 1024
 MAX_PDF_PREVIEW_RESULT_SIZE = 1024 * 1024
 # Byte-oriented aliases make the unit explicit for callers and tests.
@@ -606,8 +611,12 @@ def dispatch(request: dict) -> dict:
             return _error(request_id, "result_too_large", "preview result exceeds 512 KiB")
     # stdout is exclusively the JSON-lines protocol.  This concise stderr
     # marker lets packaged smoke tests prove the native dispatch path without
-    # corrupting a response frame.
-    print(f"[ipc] served {method}", file=sys.stderr, flush=True)
+    # corrupting a response frame. It is written once per method per session.
+    with _SERVED_LOCK:
+        first = method not in _SERVED_METHODS
+        _SERVED_METHODS.add(method)
+    if first:
+        print(f"[ipc] served {method}", file=sys.stderr, flush=True)
     return _success(request_id, result)
 
 
@@ -701,6 +710,8 @@ def serve_stdio(input_stream: BinaryIO | TextIO = None,
     """Serve requests from stdin until EOF, flushing one response per line."""
     source = input_stream if input_stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
     sink = output_stream if output_stream is not None else getattr(sys.stdout, "buffer", sys.stdout)
+    with _SERVED_LOCK:
+        _SERVED_METHODS.clear()
     while True:
         try:
             line, oversized = _read_physical_line(source, max_line_size)

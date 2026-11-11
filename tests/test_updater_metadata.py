@@ -732,7 +732,7 @@ class UpdaterJobTests(unittest.TestCase):
             "name": name,
             "url": "https://github.com/owner/workbench/releases/download/" + tag + "/" + name,
             "size": 3,
-            "digest": None,
+            "digest": "sha256:" + "0" * 64,
         }
 
     def plan(self, stale_asset):
@@ -812,6 +812,19 @@ class UpdaterJobTests(unittest.TestCase):
         self.assertEqual(job["status"], "fail")
         self.assertIn("stable channel returned a prerelease", "".join(job["log_lines"]))
 
+    def test_run_job_refuses_an_asset_without_a_published_digest_before_download(self):
+        # GitHub publishes a SHA-256 for every release asset; without one the
+        # download cannot be verified, so no platform installs it automatically.
+        unverified = dict(self.asset(), digest=None)
+        job = self.job()
+        with patch.object(updater, "latest_release",
+                          return_value={"tag": "v2.0.0", "assets": [unverified]}), \
+                patch.object(updater, "download") as download:
+            updater.run_job(job, self.plan(unverified), io.StringIO())
+        download.assert_not_called()
+        self.assertEqual(job["status"], "fail")
+        self.assertIn("no published SHA-256 checksum", "".join(job["log_lines"]))
+
     def test_run_job_rejects_reverified_asset_bound_to_wrong_tag_before_download(self):
         mismatched = self.asset("v1.0.0")
         release = {"tag": "v2.0.0", "assets": [mismatched]}
@@ -868,7 +881,7 @@ class UpdateStateTests(unittest.TestCase):
         """A minimal asset the state validator accepts (real owner/repo/name)."""
         name = current_asset_name()
         owner, repo = updater._repo_parts()
-        return {"id": 1, "tag": tag, "name": name, "size": 1, "digest": None,
+        return {"id": 1, "tag": tag, "name": name, "size": 1, "digest": "sha256:" + "0" * 64,
                 "url": f"https://github.com/{owner}/{repo}/releases/download/{tag}/{name}"}
 
     def valid_state(self, **changes):

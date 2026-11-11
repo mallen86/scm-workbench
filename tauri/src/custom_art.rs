@@ -64,8 +64,18 @@ impl DropGrants {
             .lock()
             .map_err(|_| "drop grants unavailable".to_string())?;
         grants.retain(|_, grant| grant.expires > Instant::now());
-        if grants.len() >= MAX_GRANTS {
-            return Err("too many pending file drops".into());
+        // Every native drop issues a grant, including drops that miss a drop
+        // zone and are never consumed. A newer drop therefore supersedes the
+        // oldest pending one instead of being refused until it expires.
+        while grants.len() >= MAX_GRANTS {
+            let Some(oldest) = grants
+                .iter()
+                .min_by_key(|(_, grant)| grant.expires)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            grants.remove(&oldest);
         }
         let mut bytes = [0_u8; 16];
         fill(&mut bytes).map_err(|_| "could not create drop grant".to_string())?;
@@ -292,6 +302,27 @@ mod tests {
         );
         assert_eq!(grants.consume("main", &token).unwrap(), vec![expected]);
         assert!(grants.consume("main", &token).is_err());
+    }
+
+    #[test]
+    fn unconsumed_drops_never_lock_out_a_new_drop() {
+        // Drops outside a drop zone issue grants nobody consumes. A full set
+        // of them must not refuse the next drop; the oldest is superseded.
+        let grants = DropGrants::default();
+        let now = Instant::now();
+        let oldest = "0".repeat(32);
+        grants.insert_for_test(&oldest, "main", now + Duration::from_secs(1));
+        for index in 1..MAX_GRANTS {
+            let token = format!("{index:032x}");
+            grants.insert_for_test(&token, "main", now + Duration::from_secs(10 + index as u64));
+        }
+        let fresh = grants
+            .issue("main", &[std::env::temp_dir().join("front.png")])
+            .expect("a new drop is accepted while stale grants are pending");
+        assert_eq!(grants.grants.lock().unwrap().len(), MAX_GRANTS);
+        assert!(grants.consume("main", &oldest).is_err());
+        assert!(grants.consume("main", &format!("{:032x}", 1)).is_ok());
+        assert!(grants.consume("main", &fresh).is_ok());
     }
 
     #[test]

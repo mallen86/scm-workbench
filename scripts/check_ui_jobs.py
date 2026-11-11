@@ -71,6 +71,11 @@ def main() -> int:
             print(f"FAIL: form runs do not preserve navigation state: {marker}")
             return 1
     started = forms[forms.find("export async function doRun("):]
+    # The readiness pre-check dereferences S.info and the kind's spec; it must
+    # run only when both exist (an inverted guard crashed exactly then).
+    if "if (S.info && spec) {" not in started or "if (!S.info || S.manifest[kind])" in started:
+        print("FAIL: doRun readiness pre-check is not guarded by S.info and the spec")
+        return 1
     if 'opts.onError?.(message)' not in started or 'return rejectStart(error?.message || "Failed to start job")' not in started:
         print("FAIL: a rejected installation start cannot retain its reason in the page")
         return 1

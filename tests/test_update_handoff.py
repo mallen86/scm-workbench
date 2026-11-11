@@ -82,7 +82,7 @@ class HandoffRecordTests(unittest.TestCase):
                 }
                 server.JOBS[job["id"]] = job
                 asset = {"name": "scm-workbench-macos.dmg", "url": "https://example.invalid/a",
-                         "size": 1, "tag": "v2.0.0", "digest": None}
+                         "size": 1, "tag": "v2.0.0", "digest": "sha256:" + "0" * 64}
                 release = {"tag": "v2.0.0", "assets": [asset]}
 
                 def fake_download(_url, destination, **_kwargs):

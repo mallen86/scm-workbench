@@ -45,6 +45,23 @@ class NativeJobsTests(unittest.TestCase):
         self.assertEqual(polled[0]["next_seq"], 2)
         self.assertEqual((polled[1]["status"], polled[1]["complete"]), ("missing", True))
 
+    def test_frame_trimmed_poll_advances_the_cursor_past_delivered_lines(self):
+        # A cursor deep into a transcript whose window is cut by the frame
+        # budget must resume after the last delivered line, not at the cursor
+        # (which would redeliver the same lines forever).
+        # Short lines make the per-event {"i", "s"} wrapper dominate, so the
+        # window read by get_job_log overflows the frame and is trimmed.
+        server.JOBS["a"]["log_lines"] = [f"{index:04d} " + "x" * 40 for index in range(2000)]
+        with mock.patch.object(server, "IPC_POLL_MAX_BYTES", 64 * 1024 + 20_000):
+            row = server.poll_jobs([{"job_id": "a", "after": 500}], 1000)["jobs"][0]
+        delivered = [line["i"] for line in row["lines"]]
+        self.assertTrue(row["truncated"])
+        self.assertTrue(delivered)
+        self.assertEqual(delivered[0], 500)
+        self.assertEqual(delivered, list(range(500, 500 + len(delivered))))
+        self.assertTrue(all(line["s"].startswith(f"{line['i']:04d} ") for line in row["lines"]))
+        self.assertEqual(row["next_seq"], delivered[-1] + 1)
+
     def test_job_history_args_are_exposed_for_live_and_persisted_rows(self):
         # The Job history page rebuilds a job's settings from the args it ran
         # with, so every list_jobs row must carry them: live rows (a UI reload

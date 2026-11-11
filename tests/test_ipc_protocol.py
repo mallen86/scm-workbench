@@ -63,6 +63,18 @@ class IpcProtocolTests(unittest.TestCase):
         self.assertNotIn("[ipc]", output.getvalue().decode())
         self.assertEqual(process_stdout.getvalue(), "")
 
+    def test_served_markers_are_written_once_per_method_per_session(self):
+        # Native polling calls run several times a second for the whole
+        # session; repeating the marker would grow the packaged log unbounded.
+        source = b"".join(b'{"id":"%d","method":"info","params":{}}\n' % i for i in range(50))
+        diagnostics = io.StringIO()
+        for _session in range(2):
+            with mock.patch.object(server, "refresh_info_snapshot", return_value={}), \
+                 mock.patch.object(ipc.sys, "stderr", diagnostics):
+                ipc.serve_stdio(io.BytesIO(source), io.BytesIO())
+        self.assertEqual(diagnostics.getvalue().splitlines(),
+                         ["[ipc] served info", "[ipc] served info"])
+
     def test_malformed_unknown_bad_id_and_non_object_requests_survive(self):
         source = b"not json\n" + b"[]\n" + b'{"id":"u","method":"nope","params":{}}\n' \
             + b'{"id":4,"method":"info","params":{}}\n' \

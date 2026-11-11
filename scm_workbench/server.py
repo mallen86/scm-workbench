@@ -4389,7 +4389,10 @@ def poll_jobs(cursors: list, max_events: int) -> dict:
         # get_job_log returns strings; native batches retain the established
         # SSE indexes and independently advance each cursor.
         first = log["first_seq"]
-        indexed = [{"i": first + max(0, after - first) + i, "s": line}
+        # Index of the first delivered line: the cursor, or the oldest retained
+        # line when the cursor has fallen behind the ring.
+        start = max(after, first)
+        indexed = [{"i": start + i, "s": line}
                    for i, line in enumerate(log["lines"])]
         row = {"job_id": jid, "lines": indexed, "next_seq": log["next_seq"],
                "status": log["status"], "exit_code": log["exit_code"],
@@ -4402,7 +4405,7 @@ def poll_jobs(cursors: list, max_events: int) -> dict:
             indexed.pop()
             row["lines"] = indexed
             row["truncated"] = True
-            row["next_seq"] = max(first + len(indexed), min(after, log["next_seq"]))
+            row["next_seq"] = max(start + len(indexed), min(after, log["next_seq"]))
         result.append(row)
     return {"jobs": result}
 
@@ -8967,9 +8970,22 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
                 _commit_offset_state(state, Path(job["scm_path"]), project=False)
             except Exception:
                 pass
-        log_f.write(f"failed to start: {e}\n")
-        log_f.close()
+        try:
+            log_f.write(f"failed to start: {e}\n")
+        except Exception:
+            pass
+        try:
+            log_f.close()
+        except Exception:
+            pass
+        # Finalize exactly like a pump-completed failure: an exit code-less
+        # record with a duration is persisted, so Job history keeps it after
+        # restart and never shows it as perpetually running.
         job["status"] = "fail"
+        job["exit_code"] = None
+        job["ended"] = time.time()
+        job["duration"] = round(job["ended"] - job.get("started", job["ended"]), 2)
+        job.pop("artifact_snapshots", None)
         job["log_lines"].append(f"failed to start: {e}")
         if offset_lease:
             OFFSET_LEASE.release()
@@ -8995,6 +9011,10 @@ def start_job(kind: str, raw_args: dict) -> Tuple[Optional[dict], List[str]]:
             shutil.rmtree(job["postprocess_run"], ignore_errors=True)
         with JOBS_LOCK:
             JOBS[job_id] = job
+        try:
+            _persist_jobs()
+        except Exception as persist_error:
+            _diag(f"[jobs] could not persist failed start {job_id}: {persist_error}")
     return job, []
 
 
@@ -12522,21 +12542,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         data = p.read_bytes()
         ctype = MIME.get(p.suffix.lower(), "application/octet-stream")
-        if rel == "index.html":
-            # Version the asset URLs (?v=<mtime>): the app window's webview keeps a
-            # persistent URL cache, and bare /ui/... paths can hand a stale
-            # theme.css/app.js to a window long after a redeploy. A new mtime on
-            # deploy = a new URL = a guaranteed cache miss, so any window that
-            # (re)loads after an update is guaranteed to see the new UI.
-            def _v(name: str) -> str:
-                try:
-                    return str(int((UI_DIR / name).stat().st_mtime))
-                except Exception:
-                    return "0"
-            text = data.decode("utf-8")
-            for name in ("theme.css", "js/app.js", "favicon.svg"):
-                text = text.replace(f"/ui/{name}", f"/ui/{name}?v={_v(name)}")
-            data = text.encode("utf-8")
+        # Responses are Cache-Control: no-store, so a redeployed UI is never
+        # served from a stale webview cache.
         self._send(200, data, ctype)
 
     def _file(self, q):

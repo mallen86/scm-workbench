@@ -804,7 +804,8 @@ connections and stalled reads retain a 30-second inactivity timeout. Available-d
 reads allow continuously progressing transfers to finish on slow connections.
 Release metadata lookup deadlines remain unchanged. Downloads retain a 1 GiB
 ceiling, exact declared/received-size checks, an exact GitHub release-CDN host allowlist,
-and SHA-256 verification when GitHub supplies a digest. A completed download is
+and SHA-256 verification against GitHub's published asset digest; an asset without
+a digest is refused on every platform. A completed download is
 published from a unique temporary file only after validation. On macOS the updater
 requires exactly one `scm-workbench-macos.dmg`; Windows requires its exact portable
 ZIP. Linux release discovery reads bounded OS metadata, requires x86_64, and selects

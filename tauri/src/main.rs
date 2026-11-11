@@ -909,7 +909,6 @@ fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
                     })
                     .unwrap_or(false);
                 if prepared {
-                    let attempt_started = std::time::SystemTime::now();
                     attempted = Some((request.token.clone(), Instant::now() + RETRY_COOLDOWN));
                     if let Err(error) = update_helper::remove_ack(&data) {
                         record(
@@ -931,11 +930,10 @@ fn watch_update_requests(app: AppHandle, data: PathBuf, current_exe: PathBuf) {
                                 .map(|_| ())
                             });
                     if handoff.is_ok()
-                        && update_helper::wait_for_ack_since(
+                        && update_helper::wait_for_ack(
                             &data,
                             &request.token,
                             Duration::from_secs(10),
-                            attempt_started,
                         )
                     {
                         // The ACK is durable evidence that the external helper
@@ -1097,6 +1095,7 @@ fn spawn_worker(
     py: &Path,
     worker: &Worker,
 ) -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
+    rotate_worker_log(log_path);
     let mut cmd = Command::new(py);
     cmd.current_dir(root)
         .env("SCM_WORKBENCH_DATA", data)
@@ -1470,14 +1469,61 @@ fn record(path: &Path, line: &str) {
 
 /// Replace the window contents with a plain, loud error page. Must be called
 /// on the main thread.
-/// The last `n` lines of the worker's log ("" if there is none yet).
+/// Worker log size above which the next worker launch starts a fresh file.
+const WORKER_LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+/// Bytes read from the end of the worker log for the failure page.
+const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
+
+/// Keep one previous generation of the worker log. Runs only before a worker
+/// is spawned, when no worker holds the file open; failure is harmless.
+fn rotate_worker_log(path: &Path) {
+    rotate_worker_log_at(path, WORKER_LOG_ROTATE_BYTES);
+}
+
+fn rotate_worker_log_at(path: &Path, limit: u64) {
+    let too_large = fs::symlink_metadata(path)
+        .map(|meta| meta.is_file() && meta.len() > limit)
+        .unwrap_or(false);
+    if !too_large {
+        return;
+    }
+    let mut previous = path.as_os_str().to_owned();
+    previous.push(".1");
+    let previous = PathBuf::from(previous);
+    let _ = fs::remove_file(&previous);
+    let _ = fs::rename(path, &previous);
+}
+
+/// The last `n` lines of the worker's log ("" if there is none yet). Reads
+/// only the end of the file, so a large log never stalls the failure page.
 fn log_tail(data: &Path, n: usize) -> String {
-    let Ok(s) = fs::read_to_string(data.join("server-tauri.log")) else {
+    log_tail_of(&data.join("server-tauri.log"), n, LOG_TAIL_MAX_BYTES)
+}
+
+fn log_tail_of(path: &Path, n: usize, max_bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else {
         return String::new();
     };
-    let all: Vec<&str> = s.lines().collect();
-    let start = all.len().saturating_sub(n);
-    all[start..].join("\n")
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return String::new();
+    };
+    let start = len.saturating_sub(max_bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.take(max_bytes).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        // The window began mid-line; drop the fragment.
+        lines.remove(0);
+    }
+    let first = lines.len().saturating_sub(n);
+    lines[first..].join("\n")
 }
 
 /// Show the window's startup-failure page: the app's own voice about what
@@ -1638,6 +1684,59 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod worker_log_tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "scm-worker-log-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn log_tail_reads_only_the_end_and_drops_a_partial_first_line() {
+        let root = temp_root("tail");
+        let path = root.join("server-tauri.log");
+        let mut body = "x".repeat(10_000);
+        for index in 0..50 {
+            body.push_str(&format!("\nline {index}"));
+        }
+        body.push('\n');
+        fs::write(&path, &body).unwrap();
+        assert_eq!(log_tail_of(&path, 2, 256), "line 48\nline 49");
+        // The 10 KB first line is never returned in pieces.
+        let window = log_tail_of(&path, 1_000, 256);
+        assert!(!window.contains('x'), "{window}");
+        assert!(window.ends_with("line 49"));
+        assert_eq!(log_tail_of(&root.join("missing.log"), 5, 256), "");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_log_rotation_keeps_one_previous_generation() {
+        let root = temp_root("rotate");
+        let path = root.join("server-tauri.log");
+        let previous = root.join("server-tauri.log.1");
+        fs::write(&path, b"small").unwrap();
+        rotate_worker_log_at(&path, 10);
+        assert!(path.exists() && !previous.exists());
+        fs::write(&previous, b"oldest").unwrap();
+        fs::write(&path, b"larger than ten bytes").unwrap();
+        rotate_worker_log_at(&path, 10);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&previous).unwrap(), b"larger than ten bytes");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]

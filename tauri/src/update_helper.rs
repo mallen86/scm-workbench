@@ -843,38 +843,33 @@ pub(crate) fn remove_ack(data: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-#[allow(dead_code)]
+/// Wait for the helper's ACK of `token`.
+///
+/// The caller removes any previous ACK (`remove_ack`) before launching the
+/// helper, and only the helper writes it, so an ACK present here was written
+/// for this attempt. Freshness is therefore established by that removal plus
+/// the exact token match, never by file timestamps: filesystems with one- or
+/// two-second mtime resolution round an immediate ACK to before the attempt.
 pub(crate) fn wait_for_ack(data: &Path, token: &str, timeout: Duration) -> bool {
-    wait_for_ack_since(data, token, timeout, SystemTime::now())
-}
-
-pub(crate) fn wait_for_ack_since(
-    data: &Path,
-    token: &str,
-    timeout: Duration,
-    attempt_started: SystemTime,
-) -> bool {
     if !valid_token(token) {
         return false;
     }
     let end = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < end {
+    loop {
         let path = data.join(ACK);
         if let Ok(meta) = fs::symlink_metadata(&path) {
-            let fresh = meta
-                .modified()
-                .ok()
-                .map(|mtime| mtime >= attempt_started)
-                .unwrap_or(false);
-            if meta.file_type().is_file() && meta.len() == TOKEN_LEN as u64 && fresh {
-                if fs::read(&path).ok().as_deref() == Some(token.as_bytes()) {
-                    return true;
-                }
+            if meta.file_type().is_file()
+                && meta.len() == TOKEN_LEN as u64
+                && fs::read(&path).ok().as_deref() == Some(token.as_bytes())
+            {
+                return true;
             }
+        }
+        if std::time::Instant::now() >= end {
+            return false;
         }
         thread::sleep(POLL);
     }
-    false
 }
 
 /// Only stale, token-shaped regular files are eligible.  In particular a
@@ -2290,6 +2285,36 @@ mod tests {
         assert!(!valid_token(&"A".repeat(64)));
         assert!(!valid_token(&"a".repeat(63)));
         assert!(!valid_token(&format!("{}z", "a".repeat(63))));
+    }
+
+    #[test]
+    fn ack_is_recognized_by_token_regardless_of_coarse_timestamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "scm-ack-{}-{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        remove_ack(&dir).unwrap();
+        assert!(!wait_for_ack(&dir, &token(), Duration::from_millis(1)));
+        // A filesystem with coarse mtime resolution can record an immediate
+        // ACK as older than the attempt that requested it.
+        ack(&dir, &token()).unwrap();
+        let stale = SystemTime::now() - Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(dir.join(ACK))
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        assert!(wait_for_ack(&dir, &token(), Duration::from_millis(1)));
+        let other = "f".repeat(TOKEN_LEN);
+        assert!(!wait_for_ack(&dir, &other, Duration::from_millis(1)));
+        assert!(!wait_for_ack(&dir, "not-a-token", Duration::from_millis(1)));
+        remove_ack(&dir).unwrap();
+        assert!(!wait_for_ack(&dir, &token(), Duration::from_millis(1)));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

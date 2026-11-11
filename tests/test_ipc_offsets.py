@@ -636,6 +636,11 @@ class OffsetTests(unittest.TestCase):
             })
         self.assertFalse(errors)
         self.assertEqual(job["status"], "fail")
+        self.assertIsNotNone(job["duration"])
+        # The failed start is a finished record: persisted for Job history.
+        persisted = server._persisted_record(job["id"])
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted["status"], "fail")
         self.assertFalse(server.OFFSET_LEASE.locked())
         self.assertTrue(server.OFFSET_LEASE.acquire(blocking=False))
         server.OFFSET_LEASE.release()

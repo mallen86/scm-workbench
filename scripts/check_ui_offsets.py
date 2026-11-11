@@ -27,6 +27,12 @@ def main() -> int:
     page = PAGE.read_text(encoding="utf-8")
     manifest = (ROOT / "scm_workbench" / "server.py").read_text(encoding="utf-8")
     forms = (UI / "forms.js").read_text(encoding="utf-8")
+    pdf_page = (UI / "pages" / "pdf.js").read_text(encoding="utf-8")
+    banner = pdf_page[pdf_page.find("offset banner"):pdf_page.find("jobStrip(\"create_pdf\"")]
+    # Paper names are user-editable layout keys: the saved-offset banner must
+    # build text nodes, never parse HTML.
+    if not banner or "html:" in banner or "<b>" in banner or 'el("b", {}, String(o.x))' not in banner:
+        return fail("Create PDF offset banner must render the paper name and values as text")
     nav = (UI / "nav.js").read_text(encoding="utf-8")
     index = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
     for required in (

@@ -2465,33 +2465,6 @@ def restore_user_data(saved: list, repo: Path, log=print) -> None:
         log(f"[repos] restored {len(saved)} user file(s) into the new tree")
 
 
-def verify_deployed(key: str) -> bool:
-    """Cheap offline spot check: does the deployed tree still match the
-    recorded state (same sha in state/manifest, probed file hashes intact)?
-    The launcher uses this to decide when a managed copy needs a safe
-    re-deploy; the update flow itself repairs drift, so this mostly catches
-    interrupted work."""
-    st = load_state().get(key) or {}
-    deployed = st.get("deployed") or {}
-    if not deployed.get("sha"):
-        return False
-    man = load_manifest(key)
-    files = man.get("files") or {}
-    if not files:
-        return False
-    if man.get("sha") and man["sha"] != deployed["sha"]:
-        return False
-    repo = repo_dir(key)
-    probe = sorted(files)[0]
-    p = safe_path(repo, probe)
-    if not p.is_file():
-        return False
-    try:
-        return sha256_file(p) == files[probe]
-    except Exception:
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Transactional deployment
 # ---------------------------------------------------------------------------
