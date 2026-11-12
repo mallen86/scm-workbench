@@ -17,13 +17,13 @@ jobs:
       # bounded ui/ tree, never repository source or build artifacts.
       CARGO_TARGET_DIR: ${{ github.workspace }}/../scm-workbench-tauri-target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Record build revision
         id: build_meta
         run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
       - name: Assert the release architecture
         run: test "$(uname -m)" = "arm64"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Python and UI transport checks
@@ -363,7 +363,7 @@ jobs:
           trap - EXIT
           echo "the DMG carries the sealed arm64 app"
       - name: Upload macOS installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scm-workbench-macos-${{ steps.build_meta.outputs.short_sha }}
           path: build/macos/scm-workbench-macos.dmg
@@ -380,7 +380,7 @@ jobs:
       # Windows ANSI code page. The packaged worker also runs in UTF-8 mode.
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Record build revision
         id: build_meta
         shell: pwsh
@@ -390,7 +390,7 @@ jobs:
         shell: pwsh
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { throw "Windows package requires AMD64, got $env:PROCESSOR_ARCHITECTURE" }
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Python and UI transport checks
@@ -605,7 +605,7 @@ jobs:
           $app = Join-Path (Resolve-Path .).Path "build\windows"
           Compress-Archive -Path (Join-Path $app "*") -DestinationPath "$app\scm-workbench-windows.zip"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scm-workbench-windows-${{ steps.build_meta.outputs.short_sha }}
           path: build/windows/scm-workbench-windows.zip
@@ -623,7 +623,7 @@ jobs:
       ARCH_CONTAINER: archlinux:base-devel@sha256:4894f5a268c696fad671966f383175a13faf433c9d9c88cdd4e32eaa2d18838b
       MANJARO_CONTAINER: manjarolinux/base@sha256:bbf1f1d746f28e138eea610e140d2f28cbb5b7c5da2fbff034b883527aa604e9
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Record build revision
         id: build_meta
         run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
@@ -636,7 +636,7 @@ jobs:
             clang zstd pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf \
             xdg-utils xvfb xauth xdotool dbus-x11
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Python and UI transport checks
@@ -744,7 +744,7 @@ jobs:
             /workspace/scripts/check_arch_package.sh \
             /workspace/build/linux/scm-workbench-linux-arch-x86_64.pkg.tar.zst
       - name: Upload Linux packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scm-workbench-linux-${{ steps.build_meta.outputs.short_sha }}
           path: |
@@ -755,12 +755,14 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [macos, windows, linux]
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest so the label's image migrations never
+    # change the release job unannounced. It only needs bash and gh.
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       actions: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Attach the built artifacts to the release
