@@ -183,6 +183,18 @@
           "markdownDescription": "Enables the wb_back_image_import command without any pre-configured scope."
         },
         {
+          "description": "Enables the wb_custom_art_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-custom-art-import",
+          "markdownDescription": "Enables the wb_custom_art_import command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the wb_custom_art_pick command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-wb-custom-art-pick",
+          "markdownDescription": "Enables the wb_custom_art_pick command without any pre-configured scope."
+        },
+        {
           "description": "Enables the wb_decklist_import command without any pre-configured scope.",
           "type": "string",
           "const": "allow-wb-decklist-import",
@@ -223,6 +235,18 @@
           "type": "string",
           "const": "deny-wb-back-image-import",
           "markdownDescription": "Denies the wb_back_image_import command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_custom_art_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-custom-art-import",
+          "markdownDescription": "Denies the wb_custom_art_import command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the wb_custom_art_pick command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-wb-custom-art-pick",
+          "markdownDescription": "Denies the wb_custom_art_pick command without any pre-configured scope."
         },
         {
           "description": "Denies the wb_decklist_import command without any pre-configured scope.",
@@ -295,6 +319,12 @@
           "type": "string",
           "const": "core:app:allow-default-window-icon",
           "markdownDescription": "Enables the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:allow-exit",
+          "markdownDescription": "Enables the exit command without any pre-configured scope."
         },
         {
           "description": "Enables the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -385,6 +415,12 @@
           "type": "string",
           "const": "core:app:deny-default-window-icon",
           "markdownDescription": "Denies the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:deny-exit",
+          "markdownDescription": "Denies the exit command without any pre-configured scope."
         },
         {
           "description": "Denies the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -1647,6 +1683,12 @@
           "markdownDescription": "Enables the set_fullscreen command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:allow-set-fullscreen-on-monitor",
+          "markdownDescription": "Enables the set_fullscreen_on_monitor command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_icon command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:allow-set-icon",
@@ -2113,6 +2155,12 @@
           "type": "string",
           "const": "core:window:deny-set-fullscreen",
           "markdownDescription": "Denies the set_fullscreen command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:deny-set-fullscreen-on-monitor",
+          "markdownDescription": "Denies the set_fullscreen_on_monitor command without any pre-configured scope."
         },
         {
           "description": "Denies the set_icon command without any pre-configured scope.",
