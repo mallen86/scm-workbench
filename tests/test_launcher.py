@@ -11,7 +11,7 @@ class RuntimeDownloadTests(unittest.TestCase):
             return launcher._runtime_download_name()
 
     def test_linux_runtime_names_are_explicit_gnu_archives(self):
-        release = "20260814"
+        release = "20261110"
         version = launcher.RUNTIME_VERSION
         self.assertEqual(
             self.runtime_name("linux", "x86_64"),
@@ -31,7 +31,7 @@ class RuntimeDownloadTests(unittest.TestCase):
             self.runtime_name("linux", "riscv64")
 
     def test_existing_macos_and_windows_runtime_names_remain_pinned(self):
-        release = "20260814"
+        release = "20261110"
         version = launcher.RUNTIME_VERSION
         self.assertEqual(
             self.runtime_name("darwin", "arm64"),

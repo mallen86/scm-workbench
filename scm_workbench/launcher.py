@@ -47,7 +47,7 @@ def default_data_dir() -> Path:
 # bundle's runtime because job scripts also import the bundle's own
 # app_packages (cp3xx wheels); a mismatched interpreter can't load their
 # compiled extensions (PIL dies with "cannot import name '_imaging'").
-RUNTIME_VERSION = "3.13.15"
+RUNTIME_VERSION = "3.13.18"
 
 
 def _runtime_download_name() -> str:
@@ -57,7 +57,7 @@ def _runtime_download_name() -> str:
     provisioning can never fetch different runtimes.
     """
     import platform as _plat
-    release = "20260814"  # pinned pbs build carrying RUNTIME_VERSION; bump deliberately
+    release = "20261110"  # pinned pbs build carrying RUNTIME_VERSION; bump deliberately
     machine = _plat.machine().lower()
     if sys.platform == "win32":
         arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
@@ -103,7 +103,7 @@ def provision_runtime(data: Path, log) -> str:
             f"({Path(have).name or '?'}, needs python{minor}) — re-provisioning …")
         shutil.rmtree(rt, ignore_errors=True)
     name = _runtime_download_name()
-    release = "20260814"  # keep in sync with _runtime_download_name
+    release = "20261110"  # keep in sync with _runtime_download_name
     url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{name}"
     log(f"\n[launcher] provisioning a private CPython {RUNTIME_VERSION} runtime (~60 MB download, one-time) …")
     t0 = time.time()

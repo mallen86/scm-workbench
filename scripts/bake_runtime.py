@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RELEASE = "20260814"  # keep in sync with scm_workbench/launcher.py
+RELEASE = "20261110"  # keep in sync with scm_workbench/launcher.py
 GITHUB = "https://github.com"
 
 
