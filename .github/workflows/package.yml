@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   macos:
-    runs-on: macos-14  # arm64 runner; Intel is intentionally not a release target
+    runs-on: macos-15  # arm64 runner; Intel is intentionally not a release target
     env:
       # Keep Cargo outputs outside the checkout; frontendDist embeds only the
       # bounded ui/ tree, never repository source or build artifacts.

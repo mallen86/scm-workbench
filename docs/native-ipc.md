@@ -1036,7 +1036,7 @@ current Arch, and current Manjaro. See
 
 The supported release matrix is deliberately narrow:
 
-* **macOS ARM64 only** (`macos-14`, `uname -m` must be `arm64`). There is no
+* **macOS ARM64 only** (`macos-15`, `uname -m` must be `arm64`). There is no
   Intel or universal macOS artifact.
 * **Windows x64 only** (`AMD64`/MSVC). There is no ARM Windows artifact.
 * **Linux x86_64 only**: Ubuntu 22.04+, Debian 12+, and current Arch/Manjaro.
