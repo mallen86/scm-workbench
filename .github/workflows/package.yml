@@ -620,7 +620,7 @@ jobs:
       PIP_FIND_LINKS: file://${{ github.workspace }}/ciwheels
       # Pin the official x86_64 Arch build environment. pacman -Syu in the
       # install smoke refreshes its rolling userspace before package testing.
-      ARCH_CONTAINER: archlinux:base-devel@sha256:4894f5a268c696fad671966f383175a13faf433c9d9c88cdd4e32eaa2d18838b
+      ARCH_CONTAINER: archlinux:base-devel@sha256:fa2d4ce3310ddd90a4208e5168be8ad367da5129af1245f38fd2d803bcbe3239
       MANJARO_CONTAINER: manjarolinux/base@sha256:bbf1f1d746f28e138eea610e140d2f28cbb5b7c5da2fbff034b883527aa604e9
     steps:
       - uses: actions/checkout@v7
